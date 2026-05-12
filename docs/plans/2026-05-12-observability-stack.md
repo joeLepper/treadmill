@@ -1,6 +1,6 @@
 ---
 status: active
-trigger: ADR-0020 phase 2 implemented + RAMJAC-precedent reframe 2026-05-12; operator approval 2026-05-12
+trigger: ADR-0020 phase 2 implemented + RAMJAC-precedent reframe 2026-05-12; operator approval 2026-05-12; PR #7 merged but plan-doc trigger race-lost on workflow seed (DB was fresh; seed-starters ran after the trigger) — re-merging now that workflows are seeded
 parent: docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ---
 
