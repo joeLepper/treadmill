@@ -75,6 +75,10 @@ class _FakeSqs:
         # Each call to receive_message pops the next claim batch.
         self._claims = list(claims)
         self.deleted: list[str] = []
+        # ADR-0025: record visibility-extension calls so heartbeat tests
+        # can assert the heartbeat thread fires while a worker is in
+        # flight.
+        self.visibility_changes: list[dict] = []
 
     def receive_message(self, **kwargs) -> dict:
         if not self._claims:
@@ -83,6 +87,15 @@ class _FakeSqs:
 
     def delete_message(self, *, QueueUrl: str, ReceiptHandle: str) -> None:
         self.deleted.append(ReceiptHandle)
+
+    def change_message_visibility(
+        self, *, QueueUrl: str, ReceiptHandle: str, VisibilityTimeout: int,
+    ) -> None:
+        self.visibility_changes.append({
+            "QueueUrl": QueueUrl,
+            "ReceiptHandle": ReceiptHandle,
+            "VisibilityTimeout": VisibilityTimeout,
+        })
 
 
 class _FakeApi:
@@ -189,6 +202,10 @@ def test_runner_publishes_started_then_failed_when_fetch_context_raises(
     enters execution always emits ``started`` before any failure, so
     the consumer's audit trail never has a ``failed`` floating without
     a corresponding ``started``.
+
+    Per ADR-0025 (don't-delete-on-error), the underlying API failure
+    propagates out of ``_handle_step`` and ``run`` — the SQS message is
+    NOT deleted so visibility expiry redelivers / DLQs it.
     """
     class _BoomApi:
         def fetch_step_context(self, step_id: str) -> WorkerContext:
@@ -203,10 +220,11 @@ def test_runner_publishes_started_then_failed_when_fetch_context_raises(
         receipt="rh-1",
     )])
     pub = _FakePublisher()
-    runner.run(
-        settings=_settings(), api=_BoomApi(),
-        sqs_client=sqs, publisher=pub,
-    )
+    with pytest.raises(RuntimeError, match="api down"):
+        runner.run(
+            settings=_settings(), api=_BoomApi(),
+            sqs_client=sqs, publisher=pub,
+        )
 
     names = [name for name, _ in pub.events]
     assert names == ["started", "failed"]
@@ -221,12 +239,19 @@ def test_runner_publishes_started_then_failed_when_fetch_context_raises(
     failed_kwargs = pub.events[1][1]
     assert failed_kwargs["step_id"] == step_id
     assert "api down" in failed_kwargs["error"]
-    assert sqs.deleted == ["rh-1"]
+    # ADR-0025: don't-delete-on-error — message stays in flight for SQS
+    # to redeliver / DLQ.
+    assert sqs.deleted == []
 
 
 def test_runner_publishes_failed_when_execute_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Per ADR-0025: ``_execute`` raising publishes ``step.failed`` for the
+    audit trail and then propagates the exception out of ``run`` — the
+    SQS message is NOT deleted so SQS redelivers (and eventually DLQs)
+    after ``maxReceiveCount`` retries.
+    """
     ctx = _ctx()
 
     def _boom(*args, **kwargs):
@@ -235,15 +260,17 @@ def test_runner_publishes_failed_when_execute_raises(
 
     sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-1")])
     pub = _FakePublisher()
-    runner.run(settings=_settings(), api=_FakeApi(ctx), sqs_client=sqs, publisher=pub)
+    with pytest.raises(RuntimeError, match="git push rejected"):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
 
     names = [name for name, _ in pub.events]
     assert names == ["started", "failed"]
     assert pub.events[1][1]["error"] == "git push rejected"
-    # The claim is still deleted so it doesn't redeliver indefinitely;
-    # a future ADR adds DLQs + retry policy. (Step.failed is in the
-    # audit log so the user can still inspect.)
-    assert sqs.deleted == ["rh-1"]
+    # ADR-0025: don't-delete-on-error — visibility expiry handles retry.
+    assert sqs.deleted == []
 
 
 # ── empty queue ───────────────────────────────────────────────────────────────
@@ -490,23 +517,25 @@ def test_execute_publishes_failed_when_no_changes_authored(
         run_id=ctx.run_id, receipt="rh-1",
     )])
     pub = _FakePublisher()
-    runner.run(
-        settings=_settings(
-            bare_repos_dir=str(bare_repos_dir),
-            workspace_dir=str(workspace_dir),
-        ),
-        api=_FakeApi(ctx),
-        sqs_client=sqs,
-        publisher=pub,
-    )
+    with pytest.raises(Exception, match="(?i)no changes"):
+        runner.run(
+            settings=_settings(
+                bare_repos_dir=str(bare_repos_dir),
+                workspace_dir=str(workspace_dir),
+            ),
+            api=_FakeApi(ctx),
+            sqs_client=sqs,
+            publisher=pub,
+        )
 
     names = [name for name, _ in pub.events]
     assert names == ["started", "failed"]
     error = pub.events[1][1]["error"]
     assert "no changes" in error.lower()
-    # The claim is still consumed; the audit trail in events tells the
-    # operator what went wrong.
-    assert sqs.deleted == ["rh-1"]
+    # ADR-0025: don't-delete-on-error — the message stays in flight so
+    # SQS can redeliver / DLQ. The audit trail in events still tells
+    # the operator what went wrong.
+    assert sqs.deleted == []
 
 
 def test_commit_message_includes_task_and_step_trailers() -> None:
@@ -785,3 +814,165 @@ def test_execute_dry_run_action_role_omits_task_directive(
     )
 
     assert "task_directive" not in output.payload, output.payload
+
+
+# ── ADR-0025: heartbeat thread + don't-delete-on-error ──────────────────────
+
+
+def test_runner_heartbeat_extends_visibility_during_long_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0025: while ``_handle_step`` runs, a daemon heartbeat thread
+    calls ``change_message_visibility`` every
+    ``HEARTBEAT_INTERVAL_SECONDS`` with
+    ``VisibilityTimeout=VISIBILITY_EXTENSION_SECONDS=120``.
+
+    We accelerate the heartbeat cadence by monkey-patching
+    ``HEARTBEAT_INTERVAL_SECONDS`` to a tiny value and have ``_execute``
+    block until at least two visibility extensions have been recorded —
+    that simulates a 60-second work block without actually sleeping for
+    60s.
+    """
+    import threading as _threading
+    from treadmill_agent.events import Artifact, StepOutput
+
+    # Tiny heartbeat interval so the test runs in milliseconds.
+    monkeypatch.setattr(runner, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+
+    ctx = _ctx()
+    fires_recorded = _threading.Event()
+    minimum_fires = 2
+
+    # Wrap _FakeSqs.change_message_visibility so we can signal when
+    # enough heartbeats have fired.
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-hb")])
+    real_change = sqs.change_message_visibility
+
+    def _counting_change(**kwargs):
+        real_change(**kwargs)
+        if len(sqs.visibility_changes) >= minimum_fires:
+            fires_recorded.set()
+
+    sqs.change_message_visibility = _counting_change  # type: ignore[method-assign]
+
+    def _slow_execute(c, s):
+        # Block until the heartbeat has fired at least minimum_fires
+        # times, then return successfully. ``timeout`` is a backstop so
+        # a regression (heartbeat never fires) fails fast rather than
+        # hanging.
+        if not fires_recorded.wait(timeout=5.0):
+            raise AssertionError(
+                "heartbeat did not fire while _execute was running; "
+                f"visibility_changes={sqs.visibility_changes!r}"
+            )
+        return StepOutput(
+            summary="ok", decision="pushed", commit_sha="abc",
+            artifacts=[Artifact(kind="branch", value="task/x")],
+        )
+
+    monkeypatch.setattr(runner, "_execute", _slow_execute)
+
+    pub = _FakePublisher()
+    runner.run(
+        settings=_settings(), api=_FakeApi(ctx),
+        sqs_client=sqs, publisher=pub,
+    )
+
+    # At least minimum_fires visibility extensions were recorded; each
+    # used VISIBILITY_EXTENSION_SECONDS=120 against the right handle.
+    assert len(sqs.visibility_changes) >= minimum_fires, sqs.visibility_changes
+    for call in sqs.visibility_changes:
+        assert call["VisibilityTimeout"] == runner.VISIBILITY_EXTENSION_SECONDS
+        assert call["VisibilityTimeout"] == 120
+        assert call["ReceiptHandle"] == "rh-hb"
+    # Happy path → message deleted as usual.
+    assert sqs.deleted == ["rh-hb"]
+
+
+def test_runner_does_not_delete_when_disposition_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0025 don't-delete-on-error: when the dispatch handler raises,
+    the worker publishes ``step.failed`` for the audit trail and lets
+    the exception propagate; ``delete_message`` is NEVER called so SQS
+    redelivers via visibility expiry.
+    """
+    ctx = _ctx()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disposition exploded")
+    monkeypatch.setattr(runner, "_execute", _boom)
+
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-dispo")])
+    pub = _FakePublisher()
+    with pytest.raises(RuntimeError, match="disposition exploded"):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
+
+    # The defining assertion for ADR-0025's don't-delete-on-error:
+    # ``delete_message`` was NEVER called even though the worker
+    # entered, started, and failed the step.
+    assert sqs.deleted == []
+    names = [name for name, _ in pub.events]
+    assert names == ["started", "failed"]
+
+
+def test_runner_stops_heartbeat_in_finally_even_on_disposition_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0025: the ``finally`` block must call ``stop_event.set()`` and
+    join the heartbeat thread even when the disposition raises — otherwise
+    a stuck heartbeat thread would keep extending the visibility on an
+    orphaned message after the worker process exits (and would block
+    process exit in the non-daemon case).
+
+    Spy on ``threading.Thread`` construction so we capture the
+    ``stop_event`` passed to ``_run_heartbeat`` and assert it is set
+    after ``runner.run`` raises.
+    """
+    import threading as _threading
+    ctx = _ctx()
+
+    captured: dict[str, Any] = {}
+    real_thread_cls = _threading.Thread
+
+    class _SpyThread(real_thread_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            # The heartbeat thread is the one whose target is
+            # ``_run_heartbeat``; capture its stop_event for the assert.
+            if kwargs.get("target") is runner._run_heartbeat:
+                # args = (sqs_client, queue_url, receipt_handle, stop_event)
+                captured["stop_event"] = kwargs["args"][3]
+                captured["thread"] = self
+
+    monkeypatch.setattr(_threading, "Thread", _SpyThread)
+    # The runner imports ``threading`` at module level, so patch the
+    # module-level reference too.
+    monkeypatch.setattr(runner.threading, "Thread", _SpyThread)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("kaboom in disposition")
+    monkeypatch.setattr(runner, "_execute", _boom)
+
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-fin")])
+    pub = _FakePublisher()
+    with pytest.raises(RuntimeError, match="kaboom in disposition"):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
+
+    # The ``finally`` block in ``run`` must have fired and set the stop
+    # event — otherwise the heartbeat thread would still be running.
+    assert "stop_event" in captured, "heartbeat thread was never spawned"
+    assert captured["stop_event"].is_set(), (
+        "stop_event was not set in finally — heartbeat thread leaks"
+    )
+    # And the daemon heartbeat thread has cleanly exited (join returned).
+    captured["thread"].join(timeout=2.0)
+    assert not captured["thread"].is_alive(), (
+        "heartbeat thread did not exit after stop_event.set()"
+    )

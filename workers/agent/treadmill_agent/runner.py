@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -44,6 +45,49 @@ from treadmill_agent.runner_dispositions import (
 from treadmill_agent.runner_dispositions._context import DispositionContext
 
 logger = logging.getLogger("treadmill.agent.runner")
+
+
+# ADR-0025: per-message daemon heartbeat thread keeps the SQS visibility
+# lease alive while the worker is processing. Treadmill cribs RAMJAC's
+# `vllm_server/rpc_server.py` values verbatim — 30s interval, 120s
+# extension. The base queue visibility is intentionally short (60s) so
+# that a worker that *dies* (segfault, OOM, container exit) stops
+# heartbeating; SQS expires the lease ~60s later; a fresh worker picks
+# the message up. The heartbeat thread and the main thread share
+# ``receipt_handle`` + ``sqs_client`` + ``queue_url`` — all read-only
+# after creation; no concurrent mutation.
+HEARTBEAT_INTERVAL_SECONDS = 30
+VISIBILITY_EXTENSION_SECONDS = 120
+
+
+def _run_heartbeat(
+    sqs_client: Any,
+    queue_url: str,
+    receipt_handle: str,
+    stop_event: threading.Event,
+) -> None:
+    """Extend message visibility every ``HEARTBEAT_INTERVAL_SECONDS`` until
+    ``stop_event`` is set.
+
+    RAMJAC pattern (line-for-line per ADR-0025): wait first so a fast
+    worker that finishes inside the base visibility window never makes a
+    visibility-extension API call. On AWS error, log a warning and keep
+    looping — a panic-and-die would lose work-in-progress for transient
+    hiccups; the lease will eventually expire and SQS will redeliver if
+    the failures persist long enough.
+    """
+    while not stop_event.wait(HEARTBEAT_INTERVAL_SECONDS):
+        try:
+            sqs_client.change_message_visibility(
+                QueueUrl=queue_url,
+                ReceiptHandle=receipt_handle,
+                VisibilityTimeout=VISIBILITY_EXTENSION_SECONDS,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to extend message visibility timeout",
+                exc_info=True,
+            )
 
 
 # Per ADR-0022 — dispatch table keyed by ``role.output_kind``. The
@@ -106,12 +150,41 @@ def run(
         if claim is None:
             logger.info("queue empty after long-poll; exiting")
             return processed
+        # ADR-0025: spawn a daemon heartbeat thread per in-flight message
+        # (RAMJAC ``_process_message`` pattern). On success the main
+        # thread deletes the SQS message in the try block. On worker
+        # failure we deliberately do NOT delete — the lease expires, SQS
+        # redelivers, and after ``maxReceiveCount`` the message DLQs.
+        # The ``finally`` block always stops the heartbeat thread.
+        stop_event = threading.Event()
+        heartbeat = threading.Thread(
+            target=_run_heartbeat,
+            args=(
+                sqs_client,
+                settings.work_queue_url,
+                claim.receipt_handle,
+                stop_event,
+            ),
+            daemon=True,
+        )
+        heartbeat.start()
         try:
             _handle_step(claim, settings, api, publisher)
-        except Exception:
-            logger.exception("unhandled error processing step %s", claim.step_id)
-        finally:
             _delete(sqs_client, settings.work_queue_url, claim.receipt_handle)
+        except Exception:
+            # Do NOT delete — leave the message in flight so SQS expires
+            # the lease (~60s) and redelivers; after maxReceiveCount=5
+            # the message lands in the DLQ for operator inspection.
+            logger.error(
+                "unhandled error processing step %s; leaving message "
+                "in flight for SQS redelivery / DLQ",
+                claim.step_id,
+                exc_info=True,
+            )
+            raise
+        finally:
+            stop_event.set()
+            heartbeat.join(timeout=5)
         processed += 1
         if settings.exit_after_step:
             logger.info("processed %d step(s); exiting per EXIT_AFTER_STEP", processed)
@@ -162,8 +235,11 @@ def _handle_step(
     ``step.started`` is published *before* fetching the WorkerContext.
     The dispatcher already gave us all four IDs in the claim body, so a
     transient API outage no longer hides the fact that a step entered
-    execution. If ``fetch_step_context`` raises, we publish
-    ``step.failed`` with the error and bail.
+    execution. If ``fetch_step_context`` or ``_execute`` raises, we
+    publish ``step.failed`` for the audit trail and then re-raise so the
+    runner's caller leaves the SQS message in flight (ADR-0025's
+    don't-delete-on-error semantics) — visibility expiry then redelivers
+    or DLQs the message.
     """
     publisher.publish_step_started(
         task_id=claim.task_id, plan_id=claim.plan_id,
@@ -178,7 +254,7 @@ def _handle_step(
             run_id=claim.run_id, step_id=claim.step_id,
             error=str(exc),
         )
-        return
+        raise
     logger.info(
         "fetched context: step=%s task=%s repo=%s role=%s model=%s",
         ctx.step_id, ctx.task_id, ctx.repo, ctx.role.id, ctx.role.model,
@@ -192,7 +268,7 @@ def _handle_step(
             run_id=ctx.run_id, step_id=ctx.step_id,
             error=str(exc),
         )
-        return
+        raise
     publisher.publish_step_completed(
         task_id=ctx.task_id, plan_id=ctx.plan_id,
         run_id=ctx.run_id, step_id=ctx.step_id,

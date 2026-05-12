@@ -22,6 +22,7 @@ from treadmill_api.models.workflow import (
     WorkflowVersion,
     WorkflowVersionStep,
 )
+from treadmill_api.models.workflow_dispatch_dedup import WorkflowDispatchDedup
 
 __all__ = [
     "Event",
@@ -38,6 +39,7 @@ __all__ = [
     "TaskPR",
     "TaskValidation",
     "Workflow",
+    "WorkflowDispatchDedup",
     "WorkflowRun",
     "WorkflowRunStep",
     "WorkflowVersion",

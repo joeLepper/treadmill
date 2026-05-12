@@ -78,6 +78,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.events.step import StepReady
 from treadmill_api.models import (
     EventTrigger,
@@ -204,6 +205,12 @@ async def evaluate_triggers(
         return []
 
     # ── Dispatch each candidate ──────────────────────────────────────────
+    # Each dispatch is gated by ADR-0026's dedup table: workflows with a
+    # deterministic dedup key (wf-review, wf-feedback, wf-ci-fix,
+    # wf-conflict) skip the second-and-onward dispatch on identical
+    # content. Workflows that opt out (wf-author, wf-plan) or events
+    # missing the discriminator field fall through to unconditional
+    # dispatch via the helper's None-key short-circuit.
     created_run_ids: list[uuid.UUID] = []
     for workflow_id in candidate_workflow_ids:
         # Cap policy gate. Capped workflows that hit the limit log a
@@ -216,12 +223,23 @@ async def evaluate_triggers(
             )
             continue
 
-        run_id = await _create_and_publish_run(
+        # Bind loop variables to avoid the late-binding closure pitfall.
+        _workflow_id = workflow_id
+
+        async def _dispatch() -> uuid.UUID | None:
+            return await _create_and_publish_run(
+                session,
+                dispatcher,
+                task=task,
+                workflow_id=_workflow_id,
+                trigger_event=event_type,
+            )
+
+        run_id = await maybe_dispatch_with_dedup(
             session,
-            dispatcher,
-            task=task,
             workflow_id=workflow_id,
-            trigger_event=event_type,
+            payload=payload,
+            dispatch_fn=_dispatch,
         )
         if run_id is not None:
             created_run_ids.append(run_id)
