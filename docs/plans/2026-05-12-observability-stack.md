@@ -174,7 +174,7 @@ sequence_of_work:
     title: TreadmillObservabilityStack — one stack per deployment, deployed identically
     workflow: wf-author
     depends_on:
-      - otel-sdk-foundation
+      - task.otel-sdk-foundation.pr_merged
     intent: |
       Per ADR-0020 §"One observability stack per deployment, deployed
       identically" and Q20.f: build a new CDK construct
@@ -279,7 +279,7 @@ sequence_of_work:
     title: treadmill observe CLI subcommand — access-layer to Grafana
     workflow: wf-author
     depends_on:
-      - observability-cdk-construct
+      - task.observability-cdk-construct.pr_merged
     intent: |
       Per ADR-0020 §"CLI as the access layer: `treadmill observe`",
       add a new CLI subcommand group to ``cli/treadmill_cli/``:
@@ -333,7 +333,7 @@ sequence_of_work:
     title: Propagate trace context across the SQS hop
     workflow: wf-author
     depends_on:
-      - otel-sdk-foundation
+      - task.otel-sdk-foundation.pr_merged
     intent: |
       OTel's W3C-traceparent propagator carries the trace ID + parent
       span ID across hops. SQS supports message attributes; the
@@ -381,7 +381,7 @@ sequence_of_work:
     title: Capture Claude Code token usage as OTel metrics
     workflow: wf-author
     depends_on:
-      - otel-sdk-foundation
+      - task.otel-sdk-foundation.pr_merged
     intent: |
       Audit the ``claude`` CLI for ``--output-format json`` support
       at the version pinned in the worker Dockerfile. Run
