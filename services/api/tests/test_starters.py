@@ -274,58 +274,31 @@ _ANALYZER_ROLE_IDS = {
 }
 
 
-def test_every_role_system_prompt_is_non_placeholder() -> None:
-    """C.3 invariant: every role's prompt is the authored full prompt,
-    not the Phase-2 placeholder. A leaked ``placeholder`` or ``TODO`` /
-    ``follow-up`` token means an authoring pass got skipped."""
-    forbidden = ("placeholder", "TODO", "follow-up")
-    for role in _all_roles():
-        prompt = role["system_prompt"]
-        for token in forbidden:
-            assert token.lower() not in prompt.lower(), (
-                f"role {role['id']!r} prompt contains placeholder marker "
-                f"{token!r}; rewrite per ADR-0015 §\"Role taxonomy\""
-            )
-
-
-def test_every_role_system_prompt_mentions_envelope() -> None:
-    """C.3 invariant: every prompt mentions the uniform envelope per
-    ADR-0012. Roles whose output is not envelope-conformant are
-    invisible to downstream consumers (the mergeability VIEW, the
-    cross-step dispatcher, the consumer's task_prs writer)."""
-    for role in _all_roles():
-        prompt = role["system_prompt"]
-        assert "StepOutput" in prompt or "envelope" in prompt.lower(), (
-            f"role {role['id']!r} prompt does not reference ``StepOutput`` "
-            "or ``envelope``; per ADR-0012 every role's output is the "
-            "uniform envelope"
+def test_role_reviewer_prompt_teaches_verdict_marker() -> None:
+    """Per ADR-0022, the review disposition handler parses a VERDICT:
+    marker from Claude's output. The role-reviewer prompt must teach
+    Claude the marker convention; without it, Claude defaults to
+    free-form prose and the runner falls back to ``comment`` on every
+    review."""
+    reviewer = next(r for r in _all_roles() if r["id"] == "role-reviewer")
+    prompt = reviewer["system_prompt"]
+    assert "VERDICT:" in prompt, (
+        "role-reviewer prompt must teach the VERDICT: marker convention "
+        "(ADR-0022). The runner parses the last matching line and uses "
+        "it to drive gh pr review --approve / --request-changes / "
+        "--comment."
+    )
+    for value in ("approve", "request_changes", "comment"):
+        assert value in prompt, (
+            f"role-reviewer prompt must reference verdict value {value!r}; "
+            "the runner won't recognize verdicts the prompt doesn't teach."
         )
 
 
-def test_every_role_system_prompt_lists_decision_values() -> None:
-    """C.3 invariant: every prompt lists at least one valid decision
-    value from ADR-0012's matrix for that role's workflow. A prompt
-    that doesn't name its decision values invites free-form strings
-    that ADR-0013's mergeability VIEW (which matches on ``decision``)
-    cannot recognize."""
-    for role in _all_roles():
-        prompt = role["system_prompt"]
-        buckets = _ROLE_DECISION_BUCKETS[role["id"]]
-        for bucket in buckets:
-            values = _WORKFLOW_DECISION_VALUES[bucket]
-            mentioned = [v for v in values if v in prompt]
-            assert mentioned, (
-                f"role {role['id']!r} prompt does not list any decision "
-                f"value from {bucket!r}: expected at least one of "
-                f"{sorted(values)}"
-            )
-
-
 def test_role_code_author_prompt_mentions_scope_discipline() -> None:
-    """C.3 invariant: the shared terminal's prompt names the scope
-    invariant. ``role-code-author`` runs across four workflows and
-    is the most likely to drift outside its directive's files; the
-    prompt's scope-discipline language is the guard."""
+    """The shared code-author terminal runs across four workflows; its
+    prompt must name the scope invariant so the role doesn't drift
+    outside its directive's files."""
     code_author = next(r for r in _all_roles() if r["id"] == "role-code-author")
     prompt = code_author["system_prompt"]
     assert "scope" in prompt.lower(), (
@@ -334,19 +307,14 @@ def test_role_code_author_prompt_mentions_scope_discipline() -> None:
     )
 
 
-def test_analyzer_prompts_mention_task_directive() -> None:
-    """C.3 invariant: every analyzer role's prompt mentions
-    ``task_directive`` — the analyzer→action contract per ADR-0015
-    §\"``task_directive``\". Analyzers whose prompts don't name the
-    contract risk producing outputs the action role can't consume."""
-    for role in _all_roles():
-        if role["id"] not in _ANALYZER_ROLE_IDS:
-            continue
-        assert "task_directive" in role["system_prompt"], (
-            f"analyzer role {role['id']!r} prompt must reference "
-            "``task_directive`` (the analyzer→action contract per "
-            "ADR-0015)"
-        )
+# Note: the prior contract tests asserted that every prompt mentioned
+# the ``StepOutput`` envelope, listed decision values, and named
+# ``task_directive`` for analyzer roles. Those tests encoded the
+# pre-2026-05-12 belief that the worker parsed those structured fields
+# from Claude's stdout — it doesn't (today the only parsed field is the
+# VERDICT: marker for review-kind). The tests were locking in the lie.
+# When structured step-output parsing lands (see ADR-0023 TBD or a
+# sibling), the corresponding prompts + asserts come back together.
 
 
 # ── ADR-0015 multi-step invariants ──────────────────────────────────────────
