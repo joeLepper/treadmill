@@ -1,0 +1,87 @@
+name: features-ship-with-tests
+description: >
+  Production code changes ship in the same session as tests that exercise their
+  primary success criteria. Spike code that intentionally elides tests must
+  declare so explicitly in its plan.
+
+status: active
+created: 2026-05-07
+
+crystallized_from:
+  - 2026-05-07-features-ship-with-tests
+
+# applies_to omitted — defaults to all Treadmill-managed projects.
+
+checks:
+  - id: test-files-changed
+    type: deterministic
+    description: >
+      Production code under infra/, tools/, workers/, or services/ changed but
+      no test files were added or updated.
+    script: tools/rule-checks/features-ship-with-tests/test-files-changed.sh
+    severity: blocking
+
+  - id: tests-exercise-success-criteria
+    type: llm-judge
+    description: >
+      The tests added or updated in this change actually exercise the primary
+      success criteria of the production-code changes — i.e. they are not
+      cosmetic, redundant with existing coverage, or testing the wrong surface.
+    severity: warning
+    prompt: |
+      You are evaluating whether a code change satisfies the rule
+      "features-ship-with-tests": new or changed production code must be
+      accompanied by tests that actually exercise its primary success criteria.
+
+      Inputs you receive:
+        DIFF — the full unified diff of the change.
+        ADRS — any ADRs referenced by the change's plan or description.
+
+      Decide one of three outcomes:
+        pass        — the tests cover the change's primary success criteria.
+        fail        — production code changed and the tests do not exercise it,
+                       or test only trivial paths, or test the wrong surface.
+        uncertain   — coverage is partial or the change is ambiguous; flag for
+                       human review without blocking.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"result": "pass" | "fail" | "uncertain",
+         "rationale": "<one to three sentences explaining your judgment, citing
+                       specific file paths and behaviors>"}
+
+      Be terse and concrete. Cite at least one production file and one test
+      file in the rationale.
+
+remediations:
+  - on: test-files-changed:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR adds or updates production code under infra/, tools/, workers/,
+      or services/ but does not add or update any test files. Per
+      rule:features-ship-with-tests (crystallized from
+      docs/learnings/2026-05-07-features-ship-with-tests.md), changes ship
+      with tests in the same session. Either add tests, or — if this is
+      intentional spike-mode — declare the elision in the plan.
+
+  - on: tests-exercise-success-criteria:fail
+    action: comment-on-pr
+    target: pr-author
+    message: >
+      The deterministic check found test files in this PR, but the LLM judge
+      believes those tests do not exercise the primary success criteria of
+      the change. See the judge's rationale on the PR. Adjust tests or
+      respond with reasoning if the judge is wrong.
+
+  - on: tests-exercise-success-criteria:uncertain
+    action: warn
+    target: pr-author
+    message: >
+      The LLM judge could not confidently determine whether the tests in
+      this PR exercise the primary success criteria. Human review encouraged
+      before merge.
+
+references:
+  - ADR-0001                                               # opinion #6: learnings crystallize into rules
+  - ADR-0006                                               # rules + remediations primitive
+  - 2026-05-07-features-ship-with-tests                    # source learning

@@ -1,0 +1,403 @@
+"""Deployment-config helpers for ``treadmill-local init``.
+
+Reads CloudFormation outputs from a deployed ``TreadmillCloudLite`` stack
+and writes the per-deployment YAML config file at
+``~/.treadmill/<deployment_id>.yaml`` per the schema in ADR-0016
+§"Per-deployment config at ``~/.treadmill/<deployment_id>.yaml``".
+
+The init command's purpose: bridge the gap between "CDK deployed
+something to AWS" and "the local-adapter knows what got deployed." It's
+idempotent (re-running overwrites the YAML from current stack state) so
+it doubles as the operator's regenerate-from-stack lever after a
+``cdk deploy`` that changes ARNs.
+
+CDK appends an 8-char hash to ``CfnOutput`` logical ids (e.g.
+``WebhookReceiverWebhookApiUrl51C59AB0``), so the matching against
+output keys here uses a **suffix match on the documented contract name**
+(``WebhookApiUrl``, ``EventsTopicArn``, etc.) rather than an exact-match
+lookup. This is the right shape because the operator contract is the
+named portion of the output id; the hash is a CDK implementation detail.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import boto3
+import yaml
+
+
+# ── Contract: the set of CFN output suffixes the init command requires ────────
+#
+# Each (yaml_path, output_suffix) entry pairs:
+#   * the YAML schema field this output populates (dotted path inside the
+#     emitted document)
+#   * the named portion of the CFN output's logical id, matched by suffix
+#     so CDK's 8-char hash doesn't break us
+#
+# The order here matches the order keys appear in ADR-0016's documented
+# YAML schema so a reviewer can scan the contract top-to-bottom.
+
+_AWS_OUTPUTS: tuple[tuple[str, str], ...] = (
+    ("events_topic_arn", "EventsTopicArn"),
+    ("events_queue_url", "EventsQueueUrl"),
+    ("work_queue_url", "WorkQueueUrl"),
+    ("webhook_inbox_queue_url", "WebhookInboxQueueUrl"),
+    ("webhook_inbox_dlq_url", "WebhookInboxDlqUrl"),
+    ("webhook_api_url", "WebhookApiUrl"),
+)
+"""``aws.*`` block — resource ARNs/URLs from messaging + webhook receiver."""
+
+_SECRETS_OUTPUTS: tuple[tuple[str, str], ...] = (
+    ("github_webhook_secret_name", "GithubWebhookSecretName"),
+    ("github_pat_secret_name", "GithubPatSecretName"),
+    ("worker_aws_credentials_secret_name", "WorkerAwsCredentialsSecretName"),
+)
+"""``secrets.*`` block — Secrets Manager names from the secrets construct."""
+
+
+# ── Local-side defaults (compute lives on the laptop) ────────────────────────
+#
+# ADR-0016 commits dev-local to running Postgres + Redis + API as
+# containers on the laptop. These URLs are the canonical host-side
+# spellings; the local-adapter's ``up`` command boots the containers
+# such that these URLs resolve. They are NOT discovered from CFN — they
+# are local-runtime constants, included in the YAML so the API + worker
+# containers can read one config file for both AWS-side and local-side
+# wiring.
+
+_LOCAL_DEFAULTS: dict[str, str] = {
+    "database_url": "postgresql://treadmill:treadmill@localhost:5432/treadmill",
+    "redis_url": "redis://localhost:6379/0",
+    "api_url": "http://localhost:8000",
+}
+
+
+# ── boto3 + CloudFormation ────────────────────────────────────────────────────
+
+
+def read_stack_outputs(
+    stack_name: str,
+    *,
+    profile: str | None,
+    region: str | None,
+) -> dict[str, str]:
+    """Return ``{OutputKey: OutputValue}`` for the named CloudFormation stack.
+
+    Uses ``boto3.Session(profile_name=...)`` so the operator's AWS profile
+    (typically ``treadmill-<deployment_id>``) resolves the credentials.
+
+    Raises:
+        ValueError: if the stack does not exist (ClientError
+            ``ValidationError`` is unwrapped into a clear message naming
+            the missing stack).
+    """
+    session = boto3.Session(profile_name=profile, region_name=region)
+    cfn = session.client("cloudformation")
+    try:
+        response = cfn.describe_stacks(StackName=stack_name)
+    except cfn.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        message = exc.response.get("Error", {}).get("Message", str(exc))
+        if "does not exist" in message or code == "ValidationError":
+            raise ValueError(
+                f"CloudFormation stack {stack_name!r} not found in "
+                f"region {region!r} for profile {profile!r}: {message}"
+            ) from exc
+        raise
+
+    stacks = response.get("Stacks", [])
+    if not stacks:
+        raise ValueError(
+            f"CloudFormation stack {stack_name!r} returned no stack record"
+        )
+    outputs = stacks[0].get("Outputs", []) or []
+    return {o["OutputKey"]: o["OutputValue"] for o in outputs}
+
+
+# ── Building the YAML-shape dict ──────────────────────────────────────────────
+
+
+def _find_output(outputs: dict[str, str], suffix: str) -> str:
+    """Return the value of the output whose key endswith *suffix*.
+
+    Suffix matching tolerates CDK's 8-char hash appended to the logical
+    id (e.g. ``WebhookReceiverWebhookApiUrl51C59AB0`` ends with
+    ``WebhookApiUrl`` only if we use a wider match — see below).
+
+    The match is "key contains the suffix as a sub-token" via
+    ``endswith`` after stripping a trailing hex hash. CDK's hash is
+    8 hex chars, but we can't always strip exactly 8 because the user
+    might rename the construct logical id. So we use the more robust
+    rule: a match is an output key that either *ends with* the suffix
+    OR ends with the suffix followed by 1–12 alphanumerics (the hash).
+
+    Raises:
+        KeyError: if no output key matches the suffix.
+    """
+    # Direct endswith first — covers operator-renamed outputs.
+    direct = [k for k in outputs if k.endswith(suffix)]
+    if direct:
+        return outputs[direct[0]]
+
+    # Hash-tolerant: the suffix appears followed by a CDK hash.
+    # CDK hashes are 8 chars but we tolerate 1-12 to be defensive against
+    # any future CDK change to the hash length.
+    for k in outputs:
+        idx = k.rfind(suffix)
+        if idx < 0:
+            continue
+        tail = k[idx + len(suffix):]
+        if tail and all(c.isalnum() for c in tail) and len(tail) <= 12:
+            return outputs[k]
+
+    raise KeyError(
+        f"CloudFormation output ending in {suffix!r} not found; "
+        f"available keys: {sorted(outputs.keys())}"
+    )
+
+
+def build_deployment_config(
+    deployment_id: str,
+    *,
+    aws_profile: str,
+    aws_region: str,
+    aws_account_id: str,
+    outputs: dict[str, str],
+) -> dict[str, Any]:
+    """Produce the YAML-shape dict that ``write_deployment_yaml`` serializes.
+
+    The shape follows ADR-0016 §"Per-deployment config at
+    ``~/.treadmill/<deployment_id>.yaml``" verbatim. Top-level keys:
+
+    - ``deployment_id``      — operator-supplied slug
+    - ``deployment_mode``    — always ``dev_local`` (this command's contract)
+    - ``aws_profile``        — the AWS profile that owns the stack
+    - ``aws_region``         — region the stack was deployed to
+    - ``aws_account_id``     — preflight-assertion value (str, quoted on write)
+    - ``aws``                — sub-dict of CFN-resolved ARNs/URLs
+    - ``secrets``            — sub-dict of Secrets Manager names
+    - ``local``              — sub-dict of local-runtime URLs (constants)
+
+    Raises:
+        KeyError: if a required CFN output suffix is absent from
+            ``outputs``, naming the missing suffix.
+    """
+    aws_block = {
+        yaml_key: _find_output(outputs, suffix)
+        for yaml_key, suffix in _AWS_OUTPUTS
+    }
+    secrets_block = {
+        yaml_key: _find_output(outputs, suffix)
+        for yaml_key, suffix in _SECRETS_OUTPUTS
+    }
+
+    return {
+        "deployment_id": deployment_id,
+        "deployment_mode": "dev_local",
+        "aws_profile": aws_profile,
+        "aws_region": aws_region,
+        # str() coerces ints (account ids are 12 digits, sometimes
+        # mis-passed as int by accident); PyYAML's str representer quotes
+        # all-digit strings only with explicit style, so we set the
+        # default_flow_style + default_style in ``write_deployment_yaml``
+        # to ensure the account id round-trips as a string, never as an
+        # int (Bash leading zeros, etc.).
+        "aws_account_id": str(aws_account_id),
+        "aws": aws_block,
+        "secrets": secrets_block,
+        "local": dict(_LOCAL_DEFAULTS),
+    }
+
+
+# ── YAML write ────────────────────────────────────────────────────────────────
+
+
+def _yaml_dumper() -> type[yaml.SafeDumper]:
+    """Return a YAML SafeDumper that quotes all-digit strings.
+
+    The 12-digit AWS account id is a string, but PyYAML's default
+    SafeDumper emits all-digit strings as bare scalars (``111111111111``)
+    that ``yaml.safe_load`` then deserializes as ``int``. Bash leading-
+    zero accounts (``012345678901``) would also be misinterpreted. We
+    register a string representer on a subclass that forces
+    single-quoted style for any all-digit string, preserving str
+    round-trip for account ids and any future digit-only values.
+
+    Registered on a subclass (not the global SafeDumper) so other
+    ``yaml.safe_dump`` callers in the process aren't affected.
+    """
+
+    class _Dumper(yaml.SafeDumper):
+        pass
+
+    def _str_representer(dumper: yaml.SafeDumper, value: str):
+        if value.isdigit():
+            # Quote any all-digit string so it round-trips as str, not int.
+            return dumper.represent_scalar(
+                "tag:yaml.org,2002:str", value, style="'",
+            )
+        return dumper.represent_scalar("tag:yaml.org,2002:str", value)
+
+    _Dumper.add_representer(str, _str_representer)
+    return _Dumper
+
+
+# ── YAML read (for ``treadmill-local up --deployment <id>``) ─────────────────
+
+
+# Top-level keys that ``load_deployment_yaml`` requires. Mirrors the schema
+# emitted by ``build_deployment_config`` + ADR-0016. We keep this as a single
+# canonical tuple so the read-side and write-side don't drift; if a new key
+# is added in C.4-extension or elsewhere, this tuple is the regression net.
+_REQUIRED_TOP_LEVEL_KEYS: tuple[str, ...] = (
+    "deployment_id",
+    "deployment_mode",
+    "aws_profile",
+    "aws_region",
+    "aws_account_id",
+    "aws",
+    "secrets",
+    "local",
+)
+
+_REQUIRED_AWS_KEYS: tuple[str, ...] = tuple(k for k, _ in _AWS_OUTPUTS)
+_REQUIRED_SECRETS_KEYS: tuple[str, ...] = tuple(k for k, _ in _SECRETS_OUTPUTS)
+_REQUIRED_LOCAL_KEYS: tuple[str, ...] = tuple(_LOCAL_DEFAULTS.keys())
+
+
+def load_deployment_yaml(
+    deployment_id: str,
+    *,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Read ``~/.treadmill/<deployment_id>.yaml`` and return the parsed dict.
+
+    Used by ``treadmill-local up --deployment <id>`` (and any sibling
+    subcommand that takes ``--deployment``) to load the per-deployment
+    config the ``init`` subcommand produced.
+
+    Validates the top-level shape against ADR-0016's schema: the required
+    top-level keys are all present, the ``aws`` / ``secrets`` / ``local``
+    sub-dicts are dicts with the expected inner keys, and
+    ``deployment_mode`` is the literal ``"dev_local"`` (the only mode
+    this loader currently serves — fully-remote will eventually share
+    the loader but isn't wired through to local-adapter callers yet).
+
+    Args:
+        deployment_id: The slug used to derive the default path
+            (``~/.treadmill/<deployment_id>.yaml``).
+        path: Optional override path. Mostly for tests.
+
+    Returns:
+        The parsed dict, structurally validated.
+
+    Raises:
+        FileNotFoundError: if the YAML file does not exist. The error
+            message names the path and suggests ``treadmill-local init``
+            as the remediation.
+        ValueError: if the YAML is malformed (PyYAML parse error) or
+            missing required top-level keys / inner-block keys. The
+            message names exactly what's missing so the operator can
+            fix the file (or re-run ``init``).
+    """
+    if path is None:
+        path = Path.home() / ".treadmill" / f"{deployment_id}.yaml"
+    path = Path(path).expanduser()
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"deployment config not found at {path}; run "
+            f"`treadmill-local init {deployment_id} --profile <profile>` "
+            f"to create it."
+        )
+
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"deployment config at {path} is not valid YAML: {exc}"
+        ) from exc
+
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"deployment config at {path} must be a YAML mapping at the "
+            f"top level (got {type(raw).__name__})."
+        )
+
+    missing_top = [k for k in _REQUIRED_TOP_LEVEL_KEYS if k not in raw]
+    if missing_top:
+        raise ValueError(
+            f"deployment config at {path} is missing required top-level "
+            f"keys: {missing_top}. Re-run `treadmill-local init "
+            f"{deployment_id}` to regenerate."
+        )
+
+    # The deployment-id field in the file must match the requested slug —
+    # otherwise the operator is reading the wrong file (typo in the CLI
+    # arg, or a stale symlink). Cheap to catch here.
+    if raw["deployment_id"] != deployment_id:
+        raise ValueError(
+            f"deployment config at {path} has deployment_id "
+            f"{raw['deployment_id']!r}, but was loaded for {deployment_id!r}. "
+            f"Check the path or re-run `treadmill-local init`."
+        )
+
+    if raw["deployment_mode"] != "dev_local":
+        raise ValueError(
+            f"deployment config at {path} has deployment_mode "
+            f"{raw['deployment_mode']!r}; only 'dev_local' is supported "
+            f"by the local-adapter."
+        )
+
+    for block_key, required in (
+        ("aws", _REQUIRED_AWS_KEYS),
+        ("secrets", _REQUIRED_SECRETS_KEYS),
+        ("local", _REQUIRED_LOCAL_KEYS),
+    ):
+        block = raw[block_key]
+        if not isinstance(block, dict):
+            raise ValueError(
+                f"deployment config at {path} has '{block_key}' that is "
+                f"not a mapping (got {type(block).__name__})."
+            )
+        missing = [k for k in required if k not in block]
+        if missing:
+            raise ValueError(
+                f"deployment config at {path} is missing required "
+                f"{block_key!r} keys: {missing}."
+            )
+
+    return raw
+
+
+def write_deployment_yaml(
+    deployment_id: str,
+    config: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> Path:
+    """Write *config* to ``~/.treadmill/<deployment_id>.yaml`` (or *path*).
+
+    Creates the parent directory (mkdir -p) if needed. Overwrites any
+    existing file at the path — the init command is the operator's
+    "regenerate from current stack state" lever, so idempotency on
+    re-run is part of the contract.
+
+    Returns the resolved path actually written to.
+    """
+    if path is None:
+        path = Path.home() / ".treadmill" / f"{deployment_id}.yaml"
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    text = yaml.dump(
+        config,
+        Dumper=_yaml_dumper(),
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    path.write_text(text)
+    return path

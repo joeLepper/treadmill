@@ -1,0 +1,592 @@
+"""Content tests for the starter-workflow seed module.
+
+Per ADR-0015 §"``starters.py`` rewrite", every install ships with the
+canonical eight roles + seven workflows. Four workflows are single-step;
+three plus one (``wf-plan``, ``wf-feedback``, ``wf-ci-fix``,
+``wf-conflict``) are two-step analyzer-then-action shapes. These tests
+enforce the content invariants of the static ``STARTERS`` list — every
+step references a defined role, no slug appears twice, two-step shapes
+follow the analyzer-then-action pattern, ``role-code-author`` is reused
+by exactly four workflows. The integration test
+(``cli/tests/test_integration_cli_seed.py``) exercises seeding against
+a live API.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from treadmill_api.starters import (
+    PLANNER_MODEL,
+    STARTERS,
+    WORKER_MODEL,
+    _all_roles,
+)
+
+
+# Expected workflow id-set + role id-set per ADR-0015 §"Role taxonomy"
+# and §"Per-workflow shape matrix". Kept as module-level constants so
+# the assertions below read declaratively.
+
+_EXPECTED_WORKFLOW_IDS = {
+    "wf-author",
+    "wf-plan",
+    "wf-review",
+    "wf-validate",
+    "wf-feedback",
+    "wf-ci-fix",
+    "wf-conflict",
+}
+
+_EXPECTED_ROLE_IDS = {
+    "role-planner",
+    "role-doc-author",
+    "role-code-author",
+    "role-reviewer",
+    "role-validator",
+    "role-feedback-analyzer",
+    "role-ci-analyzer",
+    "role-conflict-analyzer",
+}
+
+# The two action-role ids that may appear as step 2 of a 2-step
+# workflow. Per ADR-0015, the analyzer-then-action shape always
+# terminates in one of these.
+_ACTION_ROLE_IDS = {"role-code-author", "role-doc-author"}
+
+
+# ── Coverage ─────────────────────────────────────────────────────────────────
+
+
+def test_starters_has_seven_canonical_workflows() -> None:
+    """The canonical seven, exactly. Future starters extend this list;
+    the count is asserted as a tripwire so additions are intentional."""
+    ids = {wf["id"] for wf in STARTERS}
+    assert ids == _EXPECTED_WORKFLOW_IDS
+
+
+def test_starters_declares_eight_canonical_roles() -> None:
+    """Per ADR-0015 §"Role taxonomy" — eight roles, exactly."""
+    ids = {role["id"] for role in _all_roles()}
+    assert ids == _EXPECTED_ROLE_IDS
+
+
+# ── Shape ────────────────────────────────────────────────────────────────────
+
+
+def test_every_starter_has_required_fields() -> None:
+    """Each starter dict has id, description, roles, steps. Required by
+    the seed() function's POSTs."""
+    for wf in STARTERS:
+        assert wf["id"], f"starter missing id: {wf}"
+        assert wf["description"], f"starter {wf['id']!r} missing description"
+        assert wf["roles"], f"starter {wf['id']!r} has no roles declared"
+        assert wf["steps"], f"starter {wf['id']!r} has no steps declared"
+
+
+def test_every_step_role_resolves_to_a_declared_role() -> None:
+    """A step's role_id must reference a role defined in the same workflow's
+    roles list. The seed function POSTs roles before workflows, so an
+    unresolved reference would 400 on POST /api/v1/workflows/{id}/versions."""
+    for wf in STARTERS:
+        declared_role_ids = {r["id"] for r in wf["roles"]}
+        for step in wf["steps"]:
+            assert step["role_id"] in declared_role_ids, (
+                f"starter {wf['id']!r} step {step['name']!r} references "
+                f"undefined role {step['role_id']!r}; declared: {declared_role_ids}"
+            )
+
+
+def test_every_step_role_is_defined_in_the_global_roles_list() -> None:
+    """Beyond the per-workflow ``roles`` declaration, every step's
+    role_id must also resolve to a role in the global roles list
+    (``_all_roles()``). This is what gets POSTed to /api/v1/roles."""
+    defined_ids = {role["id"] for role in _all_roles()}
+    for wf in STARTERS:
+        for step in wf["steps"]:
+            assert step["role_id"] in defined_ids, (
+                f"step {wf['id']!r}.{step['name']!r} references "
+                f"role {step['role_id']!r} which is not defined globally; "
+                f"defined: {sorted(defined_ids)}"
+            )
+
+
+# ── Uniqueness ───────────────────────────────────────────────────────────────
+
+
+def test_no_duplicate_workflow_ids() -> None:
+    ids = [wf["id"] for wf in STARTERS]
+    assert len(ids) == len(set(ids)), f"duplicate workflow ids: {ids}"
+
+
+def test_no_duplicate_role_ids() -> None:
+    """The same role may be referenced by multiple workflows (and
+    ``role-code-author`` very much is — see the four-workflow invariant
+    below) but its definition is single-source-of-truth in ``_ROLES``.
+    Asserting via ``_all_roles()`` confirms the dedup is honest."""
+    ids = [role["id"] for role in _all_roles()]
+    assert len(ids) == len(set(ids)), f"duplicate role ids: {ids}"
+
+
+# ── Required role fields ─────────────────────────────────────────────────────
+
+
+def test_every_role_has_required_fields() -> None:
+    """Per ADR-0015 — every role carries id, model, system_prompt. The
+    CRUD endpoints require all three; an empty value would 422 the seed."""
+    for role in _all_roles():
+        assert role.get("id"), f"role missing id: {role}"
+        assert role.get("model"), f"role {role['id']!r} missing model"
+        assert role.get("system_prompt"), (
+            f"role {role['id']!r} missing system_prompt"
+        )
+
+
+def test_planner_uses_opus_other_roles_use_haiku() -> None:
+    """Cost discipline — the planner is the only role on the expensive
+    model. Every other role (including the analyzers) shares the cheap
+    haiku tier."""
+    roles_by_id = {r["id"]: r for r in _all_roles()}
+    assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL
+    for role_id, role in roles_by_id.items():
+        if role_id == "role-planner":
+            continue
+        assert role["model"] == WORKER_MODEL, (
+            f"role {role_id!r} should be on {WORKER_MODEL!r}, got {role['model']!r}"
+        )
+
+
+def test_all_roles_have_substantive_system_prompts() -> None:
+    """Every role's system_prompt is at least a one-paragraph posture
+    statement. The placeholder bound is ~100 chars; the C.3 follow-up
+    elaborates each to the full role prompt. Below 50 chars is a
+    smoke test — clearly broken if a role's prompt is shorter than a
+    tweet."""
+    for role in _all_roles():
+        assert role["system_prompt"], f"role {role['id']!r} has empty prompt"
+        assert len(role["system_prompt"]) >= 50, (
+            f"role {role['id']!r} prompt is too short to be useful "
+            f"({len(role['system_prompt'])} chars)"
+        )
+
+
+# ── C.3: full-prompt content invariants ─────────────────────────────────────
+
+
+# The per-workflow decision values per ADR-0012 §"Decision-string
+# value-sets per workflow". Every role's prompt must list at least one
+# of these for the workflow(s) it serves.
+_WORKFLOW_DECISION_VALUES: dict[str, set[str]] = {
+    "wf-author": {"pushed", "blocked", "no-changes"},
+    "wf-plan-analyzer": {"plan-ready", "blocked"},
+    "wf-plan-action": {"plan-doc-pushed", "blocked"},
+    "wf-review": {"approved", "changes_requested", "needs-more-info"},
+    "wf-validate": {"pass", "fail", "error"},
+    "wf-feedback-analyzer": {"plan-ready", "no-action-needed", "blocked"},
+    "wf-feedback-action": {
+        "code-change-dispatched", "responded-without-change", "blocked",
+    },
+    "wf-ci-fix-analyzer": {"plan-ready", "not-our-bug", "blocked"},
+    "wf-ci-fix-action": {"fix-pushed", "gave-up", "not-our-bug"},
+    "wf-conflict-analyzer": {"plan-ready", "blocked"},
+    "wf-conflict-action": {"resolved", "gave-up"},
+}
+
+# Per-role decision-value buckets the prompt must reference. The
+# ``role-code-author`` is the shared terminal across four workflows,
+# so its prompt must reference values from all four.
+_ROLE_DECISION_BUCKETS: dict[str, list[str]] = {
+    "role-planner": ["wf-plan-analyzer"],
+    "role-doc-author": ["wf-plan-action"],
+    "role-code-author": [
+        "wf-author",
+        "wf-feedback-action",
+        "wf-ci-fix-action",
+        "wf-conflict-action",
+    ],
+    "role-reviewer": ["wf-review"],
+    "role-validator": ["wf-validate"],
+    "role-feedback-analyzer": ["wf-feedback-analyzer"],
+    "role-ci-analyzer": ["wf-ci-fix-analyzer"],
+    "role-conflict-analyzer": ["wf-conflict-analyzer"],
+}
+
+# Analyzer roles per ADR-0015. Each must reference ``task_directive``
+# in its prompt — that's the analyzer→action contract.
+_ANALYZER_ROLE_IDS = {
+    "role-planner",
+    "role-feedback-analyzer",
+    "role-ci-analyzer",
+    "role-conflict-analyzer",
+}
+
+
+def test_every_role_system_prompt_is_non_placeholder() -> None:
+    """C.3 invariant: every role's prompt is the authored full prompt,
+    not the Phase-2 placeholder. A leaked ``placeholder`` or ``TODO`` /
+    ``follow-up`` token means an authoring pass got skipped."""
+    forbidden = ("placeholder", "TODO", "follow-up")
+    for role in _all_roles():
+        prompt = role["system_prompt"]
+        for token in forbidden:
+            assert token.lower() not in prompt.lower(), (
+                f"role {role['id']!r} prompt contains placeholder marker "
+                f"{token!r}; rewrite per ADR-0015 §\"Role taxonomy\""
+            )
+
+
+def test_every_role_system_prompt_mentions_envelope() -> None:
+    """C.3 invariant: every prompt mentions the uniform envelope per
+    ADR-0012. Roles whose output is not envelope-conformant are
+    invisible to downstream consumers (the mergeability VIEW, the
+    cross-step dispatcher, the consumer's task_prs writer)."""
+    for role in _all_roles():
+        prompt = role["system_prompt"]
+        assert "StepOutput" in prompt or "envelope" in prompt.lower(), (
+            f"role {role['id']!r} prompt does not reference ``StepOutput`` "
+            "or ``envelope``; per ADR-0012 every role's output is the "
+            "uniform envelope"
+        )
+
+
+def test_every_role_system_prompt_lists_decision_values() -> None:
+    """C.3 invariant: every prompt lists at least one valid decision
+    value from ADR-0012's matrix for that role's workflow. A prompt
+    that doesn't name its decision values invites free-form strings
+    that ADR-0013's mergeability VIEW (which matches on ``decision``)
+    cannot recognize."""
+    for role in _all_roles():
+        prompt = role["system_prompt"]
+        buckets = _ROLE_DECISION_BUCKETS[role["id"]]
+        for bucket in buckets:
+            values = _WORKFLOW_DECISION_VALUES[bucket]
+            mentioned = [v for v in values if v in prompt]
+            assert mentioned, (
+                f"role {role['id']!r} prompt does not list any decision "
+                f"value from {bucket!r}: expected at least one of "
+                f"{sorted(values)}"
+            )
+
+
+def test_role_code_author_prompt_mentions_scope_discipline() -> None:
+    """C.3 invariant: the shared terminal's prompt names the scope
+    invariant. ``role-code-author`` runs across four workflows and
+    is the most likely to drift outside its directive's files; the
+    prompt's scope-discipline language is the guard."""
+    code_author = next(r for r in _all_roles() if r["id"] == "role-code-author")
+    prompt = code_author["system_prompt"]
+    assert "scope" in prompt.lower(), (
+        "role-code-author prompt must reference ``scope`` (the "
+        "scope-discipline invariant per ADR-0015)"
+    )
+
+
+def test_analyzer_prompts_mention_task_directive() -> None:
+    """C.3 invariant: every analyzer role's prompt mentions
+    ``task_directive`` — the analyzer→action contract per ADR-0015
+    §\"``task_directive``\". Analyzers whose prompts don't name the
+    contract risk producing outputs the action role can't consume."""
+    for role in _all_roles():
+        if role["id"] not in _ANALYZER_ROLE_IDS:
+            continue
+        assert "task_directive" in role["system_prompt"], (
+            f"analyzer role {role['id']!r} prompt must reference "
+            "``task_directive`` (the analyzer→action contract per "
+            "ADR-0015)"
+        )
+
+
+# ── ADR-0015 multi-step invariants ──────────────────────────────────────────
+
+
+def _two_step_workflows() -> list[dict]:
+    """Helper — every workflow with exactly two steps. Per ADR-0015's
+    matrix this is ``wf-plan``, ``wf-feedback``, ``wf-ci-fix``,
+    ``wf-conflict``."""
+    return [wf for wf in STARTERS if len(wf["steps"]) == 2]
+
+
+def test_two_step_workflows_match_adr_0015_matrix() -> None:
+    """Tripwire — exactly four workflows are 2-step, per ADR-0015's
+    matrix. If this changes, the matrix moved and the test should
+    update intentionally."""
+    ids = {wf["id"] for wf in _two_step_workflows()}
+    assert ids == {"wf-plan", "wf-feedback", "wf-ci-fix", "wf-conflict"}
+
+
+def test_two_step_workflows_step_1_is_an_analyzer_class_role() -> None:
+    """Per ADR-0015 — every 2-step workflow's step 1 is an analyzer-class
+    role: either a ``-analyzer`` suffix (feedback / ci / conflict) or
+    ``role-planner`` (the wf-plan exception). This is the analyzer-then-
+    action shape's structural guarantee."""
+    for wf in _two_step_workflows():
+        step_1_role = wf["steps"][0]["role_id"]
+        analyzer_class = (
+            step_1_role.endswith("-analyzer") or step_1_role == "role-planner"
+        )
+        assert analyzer_class, (
+            f"workflow {wf['id']!r} step 1 role {step_1_role!r} is not "
+            "analyzer-class (must end in '-analyzer' or be 'role-planner')"
+        )
+
+
+def test_two_step_workflows_step_2_is_an_action_role() -> None:
+    """Per ADR-0015 — every 2-step workflow's step 2 is one of the two
+    action roles (``role-code-author`` for the resolution workflows;
+    ``role-doc-author`` for wf-plan)."""
+    for wf in _two_step_workflows():
+        step_2_role = wf["steps"][1]["role_id"]
+        assert step_2_role in _ACTION_ROLE_IDS, (
+            f"workflow {wf['id']!r} step 2 role {step_2_role!r} is not "
+            f"an action role (must be one of {sorted(_ACTION_ROLE_IDS)})"
+        )
+
+
+def test_role_code_author_is_the_shared_terminal() -> None:
+    """Per ADR-0015 §"Role taxonomy" — ``role-code-author`` is referenced
+    by exactly four workflows: wf-author (single-step), wf-feedback,
+    wf-ci-fix, wf-conflict (each as the step-2 action). This is the
+    bunkhouse-correcting reuse; if the count drifts, the consolidation
+    has regressed."""
+    workflows_using_code_author = {
+        wf["id"]
+        for wf in STARTERS
+        for step in wf["steps"]
+        if step["role_id"] == "role-code-author"
+    }
+    assert workflows_using_code_author == {
+        "wf-author", "wf-feedback", "wf-ci-fix", "wf-conflict",
+    }, (
+        f"role-code-author should terminate exactly four workflows; "
+        f"got {sorted(workflows_using_code_author)}"
+    )
+
+
+def test_every_role_is_referenced_by_at_least_one_workflow() -> None:
+    """No orphan roles — every role defined in ``_ROLES`` must be used
+    by at least one workflow's step. Catches dead-role drift if a future
+    edit removes a workflow without also pruning its analyzer."""
+    referenced_role_ids = {
+        step["role_id"] for wf in STARTERS for step in wf["steps"]
+    }
+    defined_role_ids = {role["id"] for role in _all_roles()}
+    orphans = defined_role_ids - referenced_role_ids
+    assert not orphans, f"orphan roles (defined but unused): {sorted(orphans)}"
+
+
+def test_single_step_workflows_match_adr_0015_matrix() -> None:
+    """Tripwire — the three single-step workflows are wf-author,
+    wf-review, wf-validate. ``wf-author`` deliberately stays single-step
+    per ADR-0015 §"Why ``wf-author`` stays single-step" — its input is
+    already structured."""
+    ids = {wf["id"] for wf in STARTERS if len(wf["steps"]) == 1}
+    assert ids == {"wf-author", "wf-review", "wf-validate"}
+
+
+# ── seed() behavior ──────────────────────────────────────────────────────────
+
+
+class _StubApiClient:
+    """In-memory stand-in for ``ApiClient._request``.
+
+    Models the API's behavior closely enough for ``seed()`` to be tested
+    without a live server:
+
+      * ``POST /api/v1/roles`` and ``POST /api/v1/workflows`` 201 the first
+        time a given slug is seen, 409 thereafter.
+      * ``GET /api/v1/workflows/{id}`` returns ``latest_version`` (None
+        until at least one version POSTs).
+      * ``POST /api/v1/workflows/{id}/versions`` 201s every call and
+        increments the recorded latest_version.
+      * ``POST /api/v1/event-triggers`` 201 the first time a given
+        ``(repo, event_type)`` pair is seen, 409 thereafter — mirrors
+        the unique constraint at the schema level.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+        self._roles: set[str] = set()
+        self._workflows: dict[str, dict] = {}  # id → {latest_version: int|None}
+        self._triggers: set[tuple[str | None, str]] = set()  # (repo, event_type)
+
+    def _request(self, method: str, path: str, **kwargs):
+        from treadmill_cli.api_client import ApiError
+
+        body = kwargs.get("json", {})
+        self.calls.append((method, path, body))
+
+        if method == "POST" and path == "/api/v1/roles":
+            role_id = body.get("id")
+            if role_id in self._roles:
+                raise ApiError(409, f"role {role_id!r} exists")
+            self._roles.add(role_id)
+            return {"id": role_id}
+
+        if method == "POST" and path == "/api/v1/workflows":
+            wf_id = body.get("id")
+            if wf_id in self._workflows:
+                raise ApiError(409, f"workflow {wf_id!r} exists")
+            self._workflows[wf_id] = {"latest_version": None}
+            return {"id": wf_id, "latest_version": None}
+
+        if method == "GET" and path.startswith("/api/v1/workflows/"):
+            wf_id = path.rsplit("/", 1)[-1]
+            data = self._workflows.get(wf_id)
+            if data is None:
+                raise ApiError(404, f"{wf_id!r} not found")
+            return {"id": wf_id, **data}
+
+        if (
+            method == "POST"
+            and path.startswith("/api/v1/workflows/")
+            and path.endswith("/versions")
+        ):
+            wf_id = path.split("/")[-2]
+            data = self._workflows.setdefault(wf_id, {"latest_version": None})
+            next_v = (data["latest_version"] or 0) + 1
+            data["latest_version"] = next_v
+            return {"id": "v", "version": next_v}
+
+        if method == "POST" and path == "/api/v1/event-triggers":
+            key = (body.get("repo"), body.get("event_type"))
+            if key in self._triggers:
+                raise ApiError(
+                    409, f"trigger for {key!r} exists",
+                )
+            self._triggers.add(key)
+            return {"id": "t", **body}
+
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+
+def test_seed_posts_every_role_and_workflow_on_clean_install() -> None:
+    """First-time seed POSTs every role, workflow, and v1 version."""
+    from treadmill_api.starters import seed
+
+    client = _StubApiClient()
+    created = seed(client)
+
+    # Every workflow was freshly created.
+    assert created == len(STARTERS)
+
+    # Roles POSTed first — exactly one per declared role (the de-dup
+    # collapses the four references to ``role-code-author`` into one
+    # POST).
+    role_posts = [
+        c for c in client.calls
+        if c[0] == "POST" and c[1] == "/api/v1/roles"
+    ]
+    assert len(role_posts) == len(_all_roles())
+
+    # Each workflow POSTed once.
+    wf_posts = [
+        c for c in client.calls
+        if c[0] == "POST" and c[1] == "/api/v1/workflows"
+    ]
+    assert len(wf_posts) == len(STARTERS)
+
+    # Each workflow got exactly one v1 version POSTed.
+    version_posts = [
+        c for c in client.calls
+        if c[0] == "POST" and c[1].endswith("/versions")
+    ]
+    assert len(version_posts) == len(STARTERS)
+
+
+def test_seed_is_idempotent_on_re_run() -> None:
+    """A re-run against an already-seeded install: returns ``0`` newly-
+    created workflows, does NOT create new versions (versions auto-
+    increment, so a non-checking re-run would inflate the count)."""
+    from treadmill_api.starters import seed
+
+    client = _StubApiClient()
+    seed(client)  # first run primes everything
+    pre_second_run_versions = {
+        wf_id: data["latest_version"]
+        for wf_id, data in client._workflows.items()
+    }
+
+    created = seed(client)
+
+    # No workflows created on the second run.
+    assert created == 0
+    # No new versions either — the GET-before-POST guard kicked in.
+    for wf in STARTERS:
+        assert client._workflows[wf["id"]]["latest_version"] == pre_second_run_versions[wf["id"]]
+
+
+def test_seed_creates_v1_when_workflow_exists_without_versions() -> None:
+    """Edge case: a half-seeded install (workflow row present, no version
+    yet) gets its v1 created on a re-run, but the workflow is NOT counted
+    as freshly created."""
+    from treadmill_api.starters import seed
+
+    client = _StubApiClient()
+    # Pre-seed just one workflow row, no version.
+    client._workflows["wf-author"] = {"latest_version": None}
+
+    created = seed(client)
+    # wf-author was already there → not counted as fresh; the other six are.
+    assert created == len(STARTERS) - 1
+    # And the half-seeded one received its v1.
+    assert client._workflows["wf-author"]["latest_version"] == 1
+
+
+def test_seed_posts_role_code_author_only_once() -> None:
+    """Per ADR-0015 — ``role-code-author`` is referenced by four
+    workflows; ``_all_roles()`` de-duplicates so ``seed()`` POSTs it
+    exactly once. Verifies the dedup is honest at the network layer."""
+    from treadmill_api.starters import seed
+
+    client = _StubApiClient()
+    seed(client)
+    code_author_posts = [
+        c for c in client.calls
+        if c[0] == "POST"
+        and c[1] == "/api/v1/roles"
+        and c[2].get("id") == "role-code-author"
+    ]
+    assert len(code_author_posts) == 1
+
+
+def test_seed_posts_default_event_triggers() -> None:
+    """Per Week-3 plan §C.2, ``seed()`` ensures the five default
+    catch-all ``event_triggers`` rows exist (in addition to alembic
+    migration 0007 which does the same on schema upgrade). Idempotent:
+    a re-run produces zero extra POSTs against the trigger endpoint."""
+    from treadmill_api.starters import _DEFAULT_EVENT_TRIGGERS, seed
+
+    client = _StubApiClient()
+    seed(client)
+    trigger_posts = [
+        c for c in client.calls
+        if c[0] == "POST" and c[1] == "/api/v1/event-triggers"
+    ]
+    # One POST per default trigger.
+    assert len(trigger_posts) == len(_DEFAULT_EVENT_TRIGGERS)
+    # Each maps to one of the expected (event_type, workflow_id) pairs.
+    posted_pairs = {(c[2]["event_type"], c[2]["workflow_id"]) for c in trigger_posts}
+    assert posted_pairs == set(_DEFAULT_EVENT_TRIGGERS)
+
+    # Re-run: existing triggers 409 silently; no fresh POSTs land in
+    # the recorded state (the 409 still counts as a call, so we check
+    # the underlying set rather than the call log).
+    pre_second_run = set(client._triggers)
+    seed(client)
+    assert client._triggers == pre_second_run
+
+
+def test_seed_default_event_triggers_match_week3_plan() -> None:
+    """The exact (event_type → workflow_id) mappings per Week-3 plan
+    §C.2. Tripwire — keeps the seed in sync with the table in the plan
+    and with ``coordination/triggers.py`` cap policies."""
+    from treadmill_api.starters import _DEFAULT_EVENT_TRIGGERS
+
+    expected = [
+        ("pr_opened", "wf-review"),
+        ("pr_synchronize", "wf-review"),
+        ("pr_review_submitted", "wf-feedback"),
+        ("check_run_completed", "wf-ci-fix"),
+        ("pr_conflict", "wf-conflict"),
+    ]
+    assert _DEFAULT_EVENT_TRIGGERS == expected

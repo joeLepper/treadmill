@@ -1,0 +1,355 @@
+"""Treadmill CLI entrypoint.
+
+Per ADR-0010, the CLI is the orchestrator's interface to the API. It wraps
+HTTP calls to the Treadmill API and presents results via Rich tables for
+human consumption.
+
+Command groups:
+
+  treadmill plan submit  --doc PATH | --intent TEXT  [--repo REPO]
+  treadmill plan show    PLAN_ID
+  treadmill plan list    [--repo REPO]
+  treadmill submit       INTENT  [--repo REPO]   # auto-implicit one-task plan
+  treadmill task show    TASK_ID
+  treadmill task list    [--repo REPO] [--plan PLAN_ID] [--status STATUS]
+  treadmill status       # API + dependencies
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from treadmill_cli.api_client import ApiClient, ApiError
+from treadmill_cli.config import load_config
+
+
+app = typer.Typer(
+    name="treadmill",
+    help="Treadmill CLI — submit plans, inspect tasks, manage runs.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+plan_app = typer.Typer(name="plan", help="Plan operations.", no_args_is_help=True)
+task_app = typer.Typer(name="task", help="Task operations.", no_args_is_help=True)
+workflows_app = typer.Typer(
+    name="workflows", help="Workflow operations.", no_args_is_help=True,
+)
+app.add_typer(plan_app)
+app.add_typer(task_app)
+app.add_typer(workflows_app)
+
+console = Console()
+err_console = Console(stderr=True)
+
+
+def _client() -> ApiClient:
+    return ApiClient(load_config())
+
+
+def _handle_api_error(exc: ApiError) -> None:
+    err_console.print(f"[red]error {exc.status_code}: {exc.detail}[/red]")
+    raise typer.Exit(code=2)
+
+
+# ── plan submit ──────────────────────────────────────────────────────────────
+
+
+@plan_app.command("submit")
+def plan_submit(
+    repo: Annotated[str, typer.Option("--repo", "-r", help="org/repo slug.")],
+    doc: Annotated[Path | None, typer.Option(
+        "--doc", "-d", help="Path to a plan markdown doc (Scenario 1).",
+    )] = None,
+    intent: Annotated[str | None, typer.Option(
+        "--intent", "-i", help="Free-text intent (Scenario 2).",
+    )] = None,
+    created_by: Annotated[str | None, typer.Option(
+        "--created-by", help="Identifier of the human or agent submitting.",
+    )] = None,
+    dev: Annotated[bool, typer.Option(
+        "--dev",
+        help=(
+            "Local-only fast-path: when running against TREADMILL_LOCAL=true, "
+            "an intent-only submission skips the wf-plan PR-merge gate and "
+            "spawns an implicit one-task wf-author run immediately. Ignored "
+            "in non-local environments."
+        ),
+    )] = False,
+) -> None:
+    """Submit a plan. Either ``--doc`` (Scenario 1) or ``--intent`` (Scenario 2)."""
+    if doc is None and intent is None:
+        err_console.print("[red]either --doc or --intent is required[/red]")
+        raise typer.Exit(code=2)
+    if doc is not None and intent is not None:
+        err_console.print("[red]use only one of --doc or --intent[/red]")
+        raise typer.Exit(code=2)
+
+    doc_path: str | None = None
+    doc_content: str | None = None
+    if doc is not None:
+        if not doc.exists():
+            err_console.print(f"[red]doc file not found: {doc}[/red]")
+            raise typer.Exit(code=2)
+        doc_content = doc.read_text(encoding="utf-8")
+        doc_path = str(doc)
+
+    try:
+        with _client() as client:
+            plan = client.create_plan(
+                repo=repo,
+                intent=intent,
+                doc_path=doc_path,
+                doc_content=doc_content,
+                created_by=created_by,
+                dev=dev,
+            )
+            console.print(f"[green]plan created:[/green] [bold]{plan['id']}[/bold]")
+            if plan.get("intent"):
+                console.print(f"  intent: {plan['intent']}")
+            if plan.get("doc_path"):
+                console.print(f"  doc:    {plan['doc_path']}")
+            console.print(f"  repo:   {plan['repo']}")
+
+            # Doc submissions always list spawned tasks; the --dev fast-path
+            # also spawns an implicit task, so list those too.
+            if doc_content is not None or (dev and intent is not None):
+                tasks = client.list_plan_tasks(plan["id"])
+                if tasks:
+                    console.print(f"  tasks:  {len(tasks)} spawned")
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+
+# ── plan show ────────────────────────────────────────────────────────────────
+
+
+@plan_app.command("show")
+def plan_show(plan_id: str) -> None:
+    """Show a plan and its tasks."""
+    try:
+        with _client() as client:
+            plan = client.get_plan(plan_id)
+            tasks = client.list_plan_tasks(plan_id)
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+    console.print(f"[bold]Plan {plan['id']}[/bold]")
+    console.print(f"  repo:       {plan['repo']}")
+    console.print(f"  intent:     {plan.get('intent') or '(none)'}")
+    console.print(f"  doc_path:   {plan.get('doc_path') or '(none)'}")
+    console.print(f"  created_by: {plan.get('created_by') or '(none)'}")
+    console.print(f"  created_at: {plan.get('created_at') or '(none)'}")
+
+    if not tasks:
+        console.print("\n[dim]no tasks under this plan[/dim]")
+        return
+    table = Table(title=f"Tasks ({len(tasks)})")
+    table.add_column("ID", style="dim")
+    table.add_column("Title")
+    table.add_column("Status")
+    for task in tasks:
+        table.add_row(
+            str(task["id"])[:8],
+            task["title"],
+            task.get("derived_status") or "—",
+        )
+    console.print(table)
+
+
+# ── plan list ────────────────────────────────────────────────────────────────
+
+
+@plan_app.command("list")
+def plan_list(
+    repo: Annotated[str | None, typer.Option("--repo", "-r")] = None,
+) -> None:
+    """List recent plans (filtered by repo if --repo given).
+
+    Note: at v0 the API does not yet have a list-plans endpoint; this is a
+    follow-up. The command currently informs the user."""
+    err_console.print(
+        "[yellow]'plan list' is not yet implemented "
+        "(API list-plans endpoint is a v0 follow-up).[/yellow]"
+    )
+    raise typer.Exit(code=1)
+
+
+# ── submit (intent shorthand; auto-creates implicit one-task plan) ───────────
+
+
+@app.command("submit")
+def submit(
+    intent: Annotated[str, typer.Argument(help="Free-text intent of the work.")],
+    repo: Annotated[str, typer.Option("--repo", "-r", help="org/repo slug.")],
+    workflow: Annotated[str, typer.Option(
+        "--workflow", "-w", help="Workflow slug for the spawned task.",
+    )] = "wf-author",
+    created_by: Annotated[str | None, typer.Option("--created-by")] = None,
+    dev: Annotated[bool, typer.Option(
+        "--dev",
+        help=(
+            "Local-only fast-path: in TREADMILL_LOCAL=true environments, "
+            "skips the wf-plan PR-merge gate and lets the API spawn the "
+            "implicit wf-author task in the same transaction as the plan. "
+            "Ignored in non-local environments."
+        ),
+    )] = False,
+) -> None:
+    """Submit a small change as an intent: creates an implicit one-task Plan
+    plus a single Task under it. Per ADR-0010, every Task has a Plan; this
+    command spares the user from authoring a plan doc for trivial work.
+
+    With ``--dev`` (D.10), the API spawns the implicit one-task wf-author
+    run itself in local mode — no follow-up POST /tasks is needed.
+    """
+    try:
+        with _client() as client:
+            plan = client.create_plan(
+                repo=repo, intent=intent, created_by=created_by, dev=dev,
+            )
+            if dev:
+                # API spawned the task implicitly; list to report it.
+                tasks = client.list_plan_tasks(plan["id"])
+                task = tasks[0] if tasks else None
+            else:
+                task = client.create_task(
+                    plan_id=plan["id"], title=intent[:200],
+                    workflow=workflow, description=intent,
+                    created_by=created_by,
+                )
+            if task is not None:
+                console.print(
+                    f"[green]submitted:[/green] plan=[bold]{plan['id']}[/bold] "
+                    f"task=[bold]{task['id']}[/bold]"
+                )
+                console.print(f"  status: {task.get('derived_status') or '—'}")
+            else:
+                console.print(
+                    f"[green]submitted:[/green] plan=[bold]{plan['id']}[/bold]"
+                )
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+
+# ── task show ────────────────────────────────────────────────────────────────
+
+
+@task_app.command("show")
+def task_show(task_id: str) -> None:
+    try:
+        with _client() as client:
+            task = client.get_task(task_id)
+    except ApiError as exc:
+        _handle_api_error(exc)
+    console.print(f"[bold]Task {task['id']}[/bold]")
+    console.print(f"  plan_id:    {task['plan_id']}")
+    console.print(f"  repo:       {task['repo']}")
+    console.print(f"  title:      {task['title']}")
+    console.print(f"  status:     {task.get('derived_status') or '—'}")
+    console.print(f"  created_at: {task.get('created_at')}")
+    if task.get("description"):
+        console.print(f"\n  description:\n{task['description']}")
+
+
+# ── task list ────────────────────────────────────────────────────────────────
+
+
+@task_app.command("list")
+def task_list(
+    repo: Annotated[str | None, typer.Option("--repo", "-r")] = None,
+    plan: Annotated[str | None, typer.Option("--plan", help="Plan ID filter.")] = None,
+    status: Annotated[str | None, typer.Option("--status", help="derived_status filter.")] = None,
+) -> None:
+    try:
+        with _client() as client:
+            tasks = client.list_tasks(
+                repo=repo, plan_id=plan, derived_status=status,
+            )
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+    if not tasks:
+        console.print("[dim]no tasks match the filters[/dim]")
+        return
+    table = Table(title=f"Tasks ({len(tasks)})")
+    table.add_column("ID", style="dim")
+    table.add_column("Repo")
+    table.add_column("Title")
+    table.add_column("Status")
+    for task in tasks:
+        table.add_row(
+            str(task["id"])[:8],
+            task["repo"],
+            task["title"][:60],
+            task.get("derived_status") or "—",
+        )
+    console.print(table)
+
+
+# ── status ───────────────────────────────────────────────────────────────────
+
+
+@app.command("status")
+def status() -> None:
+    """Check the API liveness + readiness."""
+    try:
+        with _client() as client:
+            health = client.health()
+            ready = client.ready()
+    except ApiError as exc:
+        _handle_api_error(exc)
+    except Exception as exc:
+        err_console.print(f"[red]could not reach API: {exc}[/red]")
+        raise typer.Exit(code=2)
+
+    console.print(f"[bold]Treadmill API[/bold]")
+    console.print(f"  liveness:  [green]{health['status']}[/green] "
+                  f"({health.get('service')} v{health.get('version')})")
+    console.print(f"  readiness: [{'green' if ready['status'] == 'ok' else 'red'}]{ready['status']}[/]")
+    checks = ready.get("checks") or {}
+    if checks:
+        for name, info in checks.items():
+            color = "green" if info["status"] == "ok" else (
+                "yellow" if info["status"] == "not_configured" else "red"
+            )
+            detail = f" ({info.get('detail')})" if info.get("detail") else ""
+            console.print(f"    {name:<10} [{color}]{info['status']}[/]{detail}")
+
+
+# ── workflows seed-starters ──────────────────────────────────────────────────
+
+
+@workflows_app.command("seed-starters")
+def workflows_seed_starters() -> None:
+    """Seed the canonical seven starter workflows + their roles.
+
+    Idempotent — a 409 on any role / workflow / version is treated as
+    already-seeded and silently skipped, so re-running this command on
+    a partially-seeded install heals the gap. Per decision #16 in the
+    2026-05-11 closure plan.
+    """
+    from treadmill_api.starters import STARTERS, StarterSeedError, seed
+
+    try:
+        with _client() as client:
+            created = seed(client)
+    except StarterSeedError as exc:
+        err_console.print(f"[red]starter seed failed: {exc}[/red]")
+        raise typer.Exit(code=2)
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+    total = len(STARTERS)
+    console.print(
+        f"[green]seeded:[/green] {created} new of {total} starter workflows "
+        f"({total - created} already existed)"
+    )
+
+
+if __name__ == "__main__":
+    app()

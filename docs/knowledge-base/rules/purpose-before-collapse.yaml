@@ -1,0 +1,80 @@
+name: purpose-before-collapse
+description: >
+  Before proposing the removal of a structural separator (directory, layer,
+  parallel artifact sequence, distinct artifact type, infrastructure
+  specialization, etc.), the orchestrator must explicitly research and
+  articulate what purpose the separator served. "This seems redundant" is
+  not justification.
+
+status: active
+created: 2026-05-08
+
+crystallized_from:
+  - 2026-05-07-collapse-then-restore
+  - 2026-05-08-per-role-images-collapse-attempt
+
+# applies_to omitted — defaults to all Treadmill-managed projects.
+
+checks:
+  - id: purpose-articulated-in-collapse-proposal
+    type: llm-judge
+    description: >
+      The proposing artifact (ADR amendment, plan section, conversation
+      message authored by the orchestrator) names the purpose the structural
+      complexity served, before recommending its removal.
+    severity: warning
+    prompt: |
+      You are evaluating an artifact (ADR draft, plan, or message) that
+      proposes to remove or collapse a structural element of the system.
+      Examples of "structural elements": a directory, a layer, a parallel
+      artifact sequence (like docs/ vs docs/knowledge-base/), a distinct
+      artifact type, an infrastructure specialization (per-role container
+      images, separate deployment pipelines), a configuration boundary.
+
+      Decide one of three outcomes:
+        pass        — the artifact names the purpose the structure served
+                       AND argues that the purpose has dissolved or moved
+                       elsewhere. The reasoning need not be exhaustive but
+                       must be specific (cite the audience, workload,
+                       lifecycle, or constraint the structure protected).
+        fail        — the artifact proposes removal on grounds of "this
+                       seems redundant" or equivalent, without naming what
+                       the structure was for. Or it asserts a purpose
+                       hand-wavily without evidence.
+        uncertain   — the artifact gestures at purpose but is incomplete;
+                       human review is encouraged.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"result": "pass" | "fail" | "uncertain",
+         "rationale": "<one to three sentences citing specific lines from the
+                       artifact and the structure it proposes to remove>"}
+
+      Be terse and concrete. Quote at least one line from the artifact in the
+      rationale.
+
+remediations:
+  - on: purpose-articulated-in-collapse-proposal:fail
+    action: comment-on-pr
+    target: pr-author
+    message: >
+      This change proposes removing a structural element without articulating
+      what purpose it served. Per rule:purpose-before-collapse (crystallized
+      from docs/learnings/2026-05-07-collapse-then-restore.md and
+      docs/learnings/2026-05-08-per-role-images-collapse-attempt.md), the
+      orchestrator must research the structure's purpose, document it, and
+      confirm that the purpose has dissolved before proposing removal. Either
+      add the analysis, or revise the proposal.
+
+  - on: purpose-articulated-in-collapse-proposal:uncertain
+    action: warn
+    target: pr-author
+    message: >
+      The LLM judge could not confidently determine whether this collapse
+      proposal articulates the purpose served by the structure being removed.
+      Human review encouraged before merge.
+
+references:
+  - ADR-0001                                                  # opinion #6: learnings crystallize into rules
+  - ADR-0006                                                  # rules + remediations primitive
+  - 2026-05-07-collapse-then-restore                          # source learning #1
+  - 2026-05-08-per-role-images-collapse-attempt               # source learning #2

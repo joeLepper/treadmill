@@ -1,0 +1,109 @@
+"""Event-type registry + parse / encode helpers.
+
+Maps every (entity_type, action) pair to its Pydantic payload class. The
+registry is the single seam between the polymorphic ``events.payload``
+JSONB column and typed access in application code; raw ``dict[str, Any]``
+access of the column is forbidden by ADR-0011.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from treadmill_api.events.base import EventPayload
+from treadmill_api.events.github import (
+    GithubCheckRunCompleted,
+    GithubPrConflict,
+    GithubPrMerged,
+    GithubPrOpened,
+    GithubPrReviewSubmitted,
+    GithubPrSynchronize,
+)
+from treadmill_api.events.internal import (
+    DispatchPublishFailed,
+    DispatchPublishReplayed,
+)
+from treadmill_api.events.plan import (
+    PlanAbandoned,
+    PlanActivated,
+    PlanCompleted,
+    PlanPlanningStarted,
+    PlanRegistered,
+)
+from treadmill_api.events.step import (
+    StepCancelled,
+    StepCompleted,
+    StepFailed,
+    StepReady,
+    StepStarted,
+)
+from treadmill_api.events.task import TaskCancelled, TaskReady, TaskRegistered
+
+
+# Single registry of all known event payload classes. Keep this list
+# exhaustive — every event type the API emits or consumes appears here.
+_REGISTRY_CLASSES: list[type[EventPayload]] = [
+    # Task events
+    TaskRegistered,
+    TaskReady,
+    TaskCancelled,
+    # Plan events
+    PlanRegistered,
+    PlanPlanningStarted,
+    PlanActivated,
+    PlanCompleted,
+    PlanAbandoned,
+    # Step events
+    StepReady,
+    StepStarted,
+    StepCompleted,
+    StepFailed,
+    StepCancelled,
+    # GitHub events
+    GithubPrOpened,
+    GithubPrSynchronize,
+    GithubPrMerged,
+    GithubPrReviewSubmitted,
+    GithubCheckRunCompleted,
+    GithubPrConflict,
+    # Internal control-plane events
+    DispatchPublishFailed,
+    DispatchPublishReplayed,
+]
+
+
+EVENT_REGISTRY: dict[tuple[str, str], type[EventPayload]] = {
+    (cls.ENTITY_TYPE, cls.ACTION): cls for cls in _REGISTRY_CLASSES
+}
+
+
+class UnknownEventTypeError(KeyError):
+    """Raised when an Event row's (entity_type, action) doesn't appear in
+    the registry. Add the type to ``_REGISTRY_CLASSES`` to fix."""
+
+    def __init__(self, entity_type: str, action: str) -> None:
+        super().__init__(f"unknown event type: ({entity_type!r}, {action!r})")
+        self.entity_type = entity_type
+        self.action = action
+
+
+def parse_payload(
+    entity_type: str, action: str, payload: dict[str, Any] | None
+) -> EventPayload:
+    """Validate a raw payload dict against its registered Pydantic model.
+
+    Raises ``UnknownEventTypeError`` if the (entity_type, action) pair is
+    not registered, and ``pydantic.ValidationError`` if the payload doesn't
+    conform to the schema.
+    """
+    cls = EVENT_REGISTRY.get((entity_type, action))
+    if cls is None:
+        raise UnknownEventTypeError(entity_type, action)
+    return cls.model_validate(payload or {})
+
+
+def encode_payload(payload: EventPayload) -> dict[str, Any]:
+    """Serialize a typed payload to a JSON-compatible dict for storage in
+    the JSONB ``events.payload`` column. UUIDs become strings; datetimes
+    become ISO-8601 strings."""
+    return payload.model_dump(mode="json")

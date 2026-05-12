@@ -1,0 +1,24 @@
+[project]
+name = "treadmill-infra"
+version = "0.0.0"
+description = "Treadmill CDK app — single source of truth for local and AWS topology"
+requires-python = ">=3.12"
+dependencies = [
+    "aws-cdk-lib>=2.170.0",
+    "constructs>=10.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["treadmill_infra"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

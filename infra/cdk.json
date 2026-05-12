@@ -1,0 +1,18 @@
+{
+  "app": "uv run --package treadmill-infra python -m treadmill_infra.app",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "**/__pycache__/**",
+      ".venv/**",
+      "cdk.out/**"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:target-partitions": ["aws", "aws-cn"]
+  }
+}
