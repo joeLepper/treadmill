@@ -194,6 +194,7 @@ class LocalRuntime:
         # build container env (``up`` or ``start_worker_once``).
         self._worker_aws_env: dict[str, str] | None = None
         self._operator_aws_env: dict[str, str] | None = None
+        self._github_token: str | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -277,6 +278,8 @@ class LocalRuntime:
             self._operator_aws_env = self._fetch_operator_sso_credentials(cfg)
         if self._worker_aws_env is None:
             self._worker_aws_env = self._fetch_worker_credentials(cfg)
+        if self._github_token is None:
+            self._github_token = self._fetch_github_pat(cfg)
 
     @staticmethod
     def _fetch_operator_sso_credentials(cfg: dict[str, Any]) -> dict[str, str]:
@@ -413,6 +416,46 @@ class LocalRuntime:
             "AWS_SECRET_ACCESS_KEY": secret_key,
         }
 
+    @staticmethod
+    def _fetch_github_pat(cfg: dict[str, Any]) -> str:
+        """Fetch the GitHub PAT from Secrets Manager.
+
+        The API container needs ``GITHUB_TOKEN`` set so the
+        ``github_client`` httpx.AsyncClient is constructed at startup
+        (per ``treadmill_api.app``). Without it, ADR-0021's plan-doc
+        trigger silently no-ops because it can't fetch plan-doc content
+        from GitHub. Same host-side-fetch pattern as the worker IAM
+        keys (ADR-0019).
+        """
+        profile = cfg["aws_profile"]
+        region = cfg["aws_region"]
+        secret_name = cfg["secrets"]["github_pat_secret_name"]
+
+        session = boto3.Session(profile_name=profile, region_name=region)
+        secrets = session.client("secretsmanager")
+        try:
+            resp = secrets.get_secret_value(SecretId=secret_name)
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"ExpiredToken", "ExpiredTokenException"}:
+                console.print(
+                    f"[red]AWS credentials for profile {profile!r} have expired "
+                    f"mid-fetch of {secret_name!r}.[/red]"
+                )
+                console.print(
+                    f"[red]→ Run `aws sso login --profile {profile}` and re-run "
+                    f"`treadmill-local up`.[/red]"
+                )
+                raise SystemExit(1) from exc
+            raise
+
+        pat = resp.get("SecretString")
+        if not pat:
+            raise RuntimeError(
+                f"GitHub PAT secret {secret_name!r} has no SecretString"
+            )
+        return pat.strip()
+
     def _build_dev_local_service_specs(
         self,
         cfg: dict[str, Any],
@@ -547,6 +590,13 @@ class LocalRuntime:
         # env-var dict carries the credential keys the container's
         # boto3 will pick up via the standard env-var resolver.
         env.update(self._operator_aws_env)
+        # GITHUB_TOKEN: the API constructs an httpx.AsyncClient against
+        # the GitHub API for ADR-0013's conflict-detection sweep AND
+        # ADR-0021's plan-doc trigger handler. Without it the handler
+        # silently no-ops on pr_merged events. The token comes from the
+        # same Secrets Manager entry the worker uses for git operations.
+        assert self._github_token is not None
+        env["GITHUB_TOKEN"] = self._github_token
         return env
 
     def _dev_local_worker_env(self, cfg: dict[str, Any]) -> dict[str, str]:

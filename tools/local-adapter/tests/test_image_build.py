@@ -316,6 +316,7 @@ def test_up_dev_local_calls_ensure_images_built_before_starting_services(
         "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
         "AWS_SESSION_TOKEN": "z",
     }
+    rt._github_token = "ghp_test"
 
     rt.up()
     assert order == ["network", "build", "services"]
@@ -367,6 +368,7 @@ def test_start_worker_once_calls_ensure_images_built(
         "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
         "AWS_SESSION_TOKEN": "z",
     }
+    rt._github_token = "ghp_test"
 
     # Short-circuit the rest of ``start_worker_once`` so the test stays
     # focused on the build wiring.

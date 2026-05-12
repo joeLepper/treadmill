@@ -255,6 +255,7 @@ def _runtime_with_injected_creds(
         "AWS_SECRET_ACCESS_KEY": "operator-secret-test",
         "AWS_SESSION_TOKEN": "operator-session-token-test",
     }
+    rt._github_token = "ghp_test_token_placeholder"
     return rt
 
 
@@ -681,6 +682,7 @@ def test_up_dev_local_skips_moto_and_synth(
         "AWS_SECRET_ACCESS_KEY": "y",
         "AWS_SESSION_TOKEN": "z",
     }
+    rt._github_token = "ghp_test_token_placeholder"
 
     rt.up()
 
@@ -920,6 +922,7 @@ def test_up_dev_local_with_no_autoscaler_flag_skips_spawn(
         "AWS_SECRET_ACCESS_KEY": "y",
         "AWS_SESSION_TOKEN": "z",
     }
+    rt._github_token = "ghp_test_token_placeholder"
 
     spawn_calls: list[Any] = []
     monkeypatch.setattr(
