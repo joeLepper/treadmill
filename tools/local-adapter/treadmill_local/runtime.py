@@ -147,6 +147,7 @@ class LocalRuntime:
         *,
         deployment_config: dict[str, Any] | None = None,
         build_images: bool = True,
+        start_autoscaler: bool = True,
     ) -> None:
         """Construct a LocalRuntime.
 
@@ -172,12 +173,19 @@ class LocalRuntime:
                 (via ``--no-build``) when the operator deliberately
                 wants to use an already-built image (e.g., debugging
                 with a known-good build).
+            start_autoscaler: When True (default), ``up`` spawns the
+                autoscaler subprocess after services are up (per
+                ADR-0018). Set to False (via ``--no-autoscaler``) to
+                run a stack without on-demand worker spawning — useful
+                for debugging a specific worker failure in isolation
+                with manual ``run-worker`` control.
         """
         self.infra_dir = infra_dir.resolve()
         self.docker = docker.from_env()
         self.state = RuntimeState()
         self.deployment_config = deployment_config
         self.build_images = build_images
+        self.start_autoscaler = start_autoscaler
         # Per ADR-0019: dev-local credentials are fetched on the host and
         # injected into containers as env vars. The fetched values live in
         # memory on the runtime for the lifetime of the up-process; we
@@ -200,7 +208,12 @@ class LocalRuntime:
         self._wait_for_moto()
         self._ensure_provisioned()
         self._start_services()
-        self._start_autoscaler()
+        if self.start_autoscaler:
+            self._start_autoscaler()
+        else:
+            console.print(
+                "[yellow]• Autoscaler suppressed (--no-autoscaler).[/yellow]"
+            )
         self._report_up()
 
     # ── Dev-local mode (ADR-0016) ─────────────────────────────────────────────
@@ -242,6 +255,12 @@ class LocalRuntime:
             self._build_dev_local_agent_spec(cfg),
         ]
         self._start_services()
+        if self.start_autoscaler:
+            self._start_autoscaler_dev_local()
+        else:
+            console.print(
+                "[yellow]• Autoscaler suppressed (--no-autoscaler).[/yellow]"
+            )
         self._report_up_dev_local(cfg)
 
     def _ensure_dev_local_credentials(self) -> None:
@@ -1113,6 +1132,92 @@ class LocalRuntime:
         console.print(
             f"• Autoscaler started (pid={proc.pid}, family={family}, "
             f"min={min_count}, max={max_count})."
+        )
+
+    def _start_autoscaler_dev_local(self) -> None:
+        """Spawn the autoscaler subprocess for dev-local mode (ADR-0018).
+
+        Mirrors ``_start_autoscaler`` (the fully-local equivalent) but
+        sources its config from the deployment YAML rather than the
+        synthesized CDK template — dev-local has no CDK compute stack to
+        introspect. The PID file + log file path is the same as
+        fully-local (single-deployment v0; multi-deployment will need
+        deployment-suffixed paths — flagged here as the obvious upgrade
+        point).
+
+        Env-vars passed to the subprocess:
+          * ``TREADMILL_INFRA_DIR`` — infra dir (for legacy parity).
+          * ``TREADMILL_AUTOSCALER_FAMILY`` — always ``treadmill-agent`` at v0.
+          * ``TREADMILL_AUTOSCALER_QUEUE_URL`` — from ``aws.work_queue_url``.
+          * ``TREADMILL_AUTOSCALER_MIN`` / ``_MAX`` / ``_TICK_SECONDS`` — YAML.
+          * ``TREADMILL_AUTOSCALER_DEPLOYMENT_ID`` — the deployment slug;
+            the subprocess uses this to construct a ``LocalRuntime`` with
+            the right ``deployment_config`` (so ``start_worker_once``
+            triggers the host-side credential fetch per ADR-0019).
+          * ``AWS_PROFILE`` — inherited from parent or from YAML.
+          * ``AWS_DEFAULT_REGION`` — from YAML.
+          * NOTABLY ABSENT: ``AWS_ENDPOINT_URL`` (that's the moto override;
+            dev-local talks to real AWS).
+        """
+        assert self.deployment_config is not None
+        cfg = self.deployment_config
+
+        if self._autoscaler_pid_alive():
+            console.print("• Autoscaler already running.")
+            return
+
+        autoscaler_cfg = cfg["autoscaler"]
+        queue_url = cfg["aws"]["work_queue_url"]
+        family = AGENT_FAMILY  # v0: one family in dev-local (ADR-0018).
+        deployment_id = cfg["deployment_id"]
+
+        STATE_DIR.mkdir(exist_ok=True)
+        # Single-deployment v0: PID and log files are NOT suffixed by
+        # deployment_id. When multi-deployment lands (operator running
+        # personal + employer concurrently), these need
+        # deployment-suffixed paths so the two scalers don't collide.
+        log_handle = open(AUTOSCALER_LOG_FILE, "ab")
+        env = {
+            **os.environ,
+            "TREADMILL_INFRA_DIR": str(self.infra_dir),
+            "TREADMILL_AUTOSCALER_FAMILY": family,
+            "TREADMILL_AUTOSCALER_QUEUE_URL": queue_url,
+            "TREADMILL_AUTOSCALER_MIN": str(autoscaler_cfg["min"]),
+            "TREADMILL_AUTOSCALER_MAX": str(autoscaler_cfg["max"]),
+            "TREADMILL_AUTOSCALER_TICK_SECONDS": str(
+                autoscaler_cfg["tick_seconds"]
+            ),
+            # The subprocess entrypoint branches on this env var: when set
+            # it constructs ``LocalRuntime(deployment_config=cfg)`` so
+            # ``start_worker_once`` runs the dev-local credential-injection
+            # path (ADR-0019); when unset the legacy moto path runs.
+            "TREADMILL_AUTOSCALER_DEPLOYMENT_ID": deployment_id,
+            # AWS routing — real AWS, no moto override. ``AWS_PROFILE``
+            # is inherited from the parent shell (operator's SSO);
+            # ``AWS_DEFAULT_REGION`` is set explicitly from the YAML so
+            # boto3 in the subprocess doesn't fall back to the operator's
+            # shell default.
+            "AWS_DEFAULT_REGION": cfg["aws_region"],
+            "AWS_PROFILE": os.environ.get("AWS_PROFILE", cfg["aws_profile"]),
+        }
+        # Defensive: drop the moto endpoint override if it somehow leaked
+        # into the parent env. dev-local must talk to real AWS.
+        env.pop("AWS_ENDPOINT_URL", None)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "treadmill_local.autoscaler"],
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(Path.cwd()),
+        )
+        AUTOSCALER_PID_FILE.write_text(str(proc.pid))
+        console.print(
+            f"• Autoscaler started (pid={proc.pid}, family={family}, "
+            f"min={autoscaler_cfg['min']}, max={autoscaler_cfg['max']}, "
+            f"tick={autoscaler_cfg['tick_seconds']}s, "
+            f"deployment={deployment_id})."
         )
 
     def _stop_autoscaler(self) -> None:

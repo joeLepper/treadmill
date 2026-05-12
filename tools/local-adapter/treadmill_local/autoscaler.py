@@ -131,7 +131,21 @@ def parse_scalable_target_bounds(properties: dict[str, Any]) -> tuple[int, int]:
 
 
 def main() -> int:
-    """Production entrypoint: instantiate LocalRuntime, wire real callables, run."""
+    """Production entrypoint: instantiate LocalRuntime, wire real callables, run.
+
+    Branches on ``TREADMILL_AUTOSCALER_DEPLOYMENT_ID``:
+
+      * **Set** — dev-local mode (ADR-0018). Loads the deployment YAML
+        and constructs ``LocalRuntime(deployment_config=cfg)`` so each
+        ``start_worker_once`` call triggers the host-side credential
+        fetch + env-var injection per ADR-0019. AWS endpoints are real
+        AWS (no moto override); credentials resolve via the inherited
+        ``AWS_PROFILE`` from the parent's env.
+      * **Unset** — fully-local mode (legacy). Constructs
+        ``LocalRuntime(infra_dir=infra_dir)`` against the moto endpoint
+        the parent injected as ``AWS_ENDPOINT_URL`` with the standard
+        moto dummy credentials.
+    """
     # Imports are local to keep `Autoscaler` itself dependency-free for tests.
     import boto3
     import docker
@@ -149,15 +163,28 @@ def main() -> int:
     min_count = int(os.environ.get("TREADMILL_AUTOSCALER_MIN", "0"))
     max_count = int(os.environ.get("TREADMILL_AUTOSCALER_MAX", "1"))
     tick = float(os.environ.get("TREADMILL_AUTOSCALER_TICK_SECONDS", "2"))
+    deployment_id = os.environ.get("TREADMILL_AUTOSCALER_DEPLOYMENT_ID")
 
-    # The subprocess inherits AWS_ENDPOINT_URL pointing at the host-mapped moto
-    # port (set by the runtime when it spawns us). boto3 uses it directly.
+    # The subprocess inherits AWS endpoint config from the parent process.
+    # Fully-local: ``AWS_ENDPOINT_URL`` points at the host-mapped moto port.
+    # Dev-local: no endpoint override; boto3 talks to real AWS via
+    # ``AWS_PROFILE`` + ``AWS_DEFAULT_REGION``.
     sqs = boto3.client(
         "sqs",
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
     )
     docker_client = docker.from_env()
-    runtime = LocalRuntime(infra_dir=infra_dir)
+
+    if deployment_id is not None:
+        # Dev-local: build LocalRuntime with the deployment_config so
+        # ``start_worker_once`` calls into the dev-local credential
+        # injection path (ADR-0019). The YAML is loaded fresh here (the
+        # parent's in-memory state doesn't cross the subprocess boundary).
+        from treadmill_local.deployment_config import load_deployment_yaml
+        cfg = load_deployment_yaml(deployment_id)
+        runtime = LocalRuntime(infra_dir=infra_dir, deployment_config=cfg)
+    else:
+        runtime = LocalRuntime(infra_dir=infra_dir)
 
     def get_depth() -> int:
         attrs = sqs.get_queue_attributes(

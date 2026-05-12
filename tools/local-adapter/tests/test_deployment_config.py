@@ -452,6 +452,9 @@ def test_write_deployment_yaml_top_level_key_order_matches_adr_0016(
         "aws",
         "secrets",
         "local",
+        # ADR-0018: autoscaler block stamped at the end of the file by
+        # ``treadmill-local init`` so operators see the defaults.
+        "autoscaler",
     ]
     assert lines == expected
 

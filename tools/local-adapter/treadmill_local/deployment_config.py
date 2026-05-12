@@ -74,6 +74,23 @@ _LOCAL_DEFAULTS: dict[str, str] = {
 }
 
 
+# ── Autoscaler defaults (ADR-0018) ───────────────────────────────────────────
+#
+# When the YAML's ``autoscaler:`` block is absent, ``load_deployment_yaml``
+# fills these defaults so callers can read ``cfg["autoscaler"]`` without a
+# nullable check. Values per ADR-0018 §"Config source: deployment YAML":
+# ``min=0`` is "no idle workers" (scale to zero when queue is empty),
+# ``max=1`` is "one worker at a time" (safe default; operators bump
+# explicitly for parallelism), ``tick_seconds=5`` trades a little extra
+# latency vs fully-local's 2s for lower real-AWS SQS API call volume.
+
+_AUTOSCALER_DEFAULTS: dict[str, int] = {
+    "min": 0,
+    "max": 1,
+    "tick_seconds": 5,
+}
+
+
 # ── boto3 + CloudFormation ────────────────────────────────────────────────────
 
 
@@ -208,6 +225,9 @@ def build_deployment_config(
         "aws": aws_block,
         "secrets": secrets_block,
         "local": dict(_LOCAL_DEFAULTS),
+        # ADR-0018: stamp the autoscaler defaults at init time so the
+        # operator sees them in the file and can edit by hand.
+        "autoscaler": dict(_AUTOSCALER_DEFAULTS),
     }
 
 
@@ -368,6 +388,48 @@ def load_deployment_yaml(
                 f"deployment config at {path} is missing required "
                 f"{block_key!r} keys: {missing}."
             )
+
+    # ADR-0018: optional ``autoscaler:`` block. Defaults fill in when
+    # absent, so downstream callers can always read
+    # ``cfg["autoscaler"]["min" | "max" | "tick_seconds"]`` without a
+    # nullable check. Validate ``0 <= min <= max`` and ``tick_seconds > 0``.
+    autoscaler = raw.get("autoscaler")
+    if autoscaler is None:
+        raw["autoscaler"] = dict(_AUTOSCALER_DEFAULTS)
+    else:
+        if not isinstance(autoscaler, dict):
+            raise ValueError(
+                f"deployment config at {path} has 'autoscaler' that is "
+                f"not a mapping (got {type(autoscaler).__name__})."
+            )
+        merged = dict(_AUTOSCALER_DEFAULTS)
+        merged.update(autoscaler)
+        # Validate types + bounds. Booleans are ints in Python; reject
+        # them explicitly so an operator who wrote ``min: true`` doesn't
+        # silently get min=1.
+        for key in ("min", "max", "tick_seconds"):
+            value = merged[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"deployment config at {path} has autoscaler.{key} = "
+                    f"{value!r}; expected an int."
+                )
+        if merged["min"] < 0:
+            raise ValueError(
+                f"deployment config at {path} has autoscaler.min = "
+                f"{merged['min']}; expected >= 0."
+            )
+        if merged["max"] < merged["min"]:
+            raise ValueError(
+                f"deployment config at {path} has autoscaler.max "
+                f"({merged['max']}) < autoscaler.min ({merged['min']})."
+            )
+        if merged["tick_seconds"] <= 0:
+            raise ValueError(
+                f"deployment config at {path} has autoscaler.tick_seconds "
+                f"= {merged['tick_seconds']}; expected > 0."
+            )
+        raw["autoscaler"] = merged
 
     return raw
 

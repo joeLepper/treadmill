@@ -91,6 +91,14 @@ def _valid_yaml_dict(deployment_id: str = "personal") -> dict[str, Any]:
             "redis_url": "redis://localhost:6379/0",
             "api_url": "http://localhost:8000",
         },
+        # ADR-0018: optional autoscaler block. Including the explicit
+        # defaults here so fixtures exercise the post-load shape
+        # (every consumer reads cfg["autoscaler"] without a nullable check).
+        "autoscaler": {
+            "min": 0,
+            "max": 1,
+            "tick_seconds": 5,
+        },
     }
 
 
@@ -657,6 +665,14 @@ def test_up_dev_local_skips_moto_and_synth(
     # ``_ensure_images_built`` would shell out to ``docker build`` —
     # stub it; image-rebuild behavior is exercised in its own tests.
     monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    # Per ADR-0018: dev-local ``up`` also spawns the autoscaler. Stub it
+    # so this test only exercises the moto/synth bypass; the
+    # autoscaler-subprocess wiring has its own focused tests below.
+    autoscaler_started: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_start_autoscaler_dev_local",
+        lambda: autoscaler_started.append(1),
+    )
     # Per ADR-0019: ``up`` fetches AWS credentials on the host. Stub
     # the fetch so we don't hit real boto3/Secrets Manager in unit tests.
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
@@ -671,6 +687,7 @@ def test_up_dev_local_skips_moto_and_synth(
     assert start_moto_called == [], "moto must NOT start in dev-local mode"
     assert synth_called == [], "cdk synth must NOT run in dev-local mode"
     assert started == [1], "services must be started"
+    assert autoscaler_started == [1], "autoscaler must start in dev-local mode"
 
     # Container specs populated for ``start_worker_once`` to find the agent.
     assert rt.state.container_specs is not None
@@ -786,3 +803,431 @@ def test_cli_up_fully_local_still_requires_cdk_json(
     )
     assert result.exit_code == 2
     assert "cdk.json" in result.output
+
+
+# ── Autoscaler in dev-local (ADR-0018) ────────────────────────────────────────
+
+
+def test_start_autoscaler_dev_local_spawns_subprocess_with_expected_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``_start_autoscaler_dev_local`` invokes ``subprocess.Popen`` with
+    ``python -m treadmill_local.autoscaler`` and an env carrying the
+    YAML-derived autoscaler config + the deployment id (so the
+    subprocess entrypoint can rebuild a dev-local LocalRuntime per
+    ADR-0019).
+
+    Notably the env does NOT carry ``AWS_ENDPOINT_URL`` — that's the
+    moto override; dev-local talks to real AWS endpoints.
+    """
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {"min": 0, "max": 3, "tick_seconds": 7}
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    # No PID file present → autoscaler spawns.
+    monkeypatch.chdir(tmp_path)
+    # Clear any inherited endpoint override so the assertion below
+    # exercises the runtime's explicit pop, not the bare absence.
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "http://example.local:5001")
+    monkeypatch.setenv("AWS_PROFILE", "treadmill-from-env")
+
+    popen_calls: list[dict[str, Any]] = []
+
+    class _FakeProc:
+        pid = 4242
+
+    def _fake_popen(*args: Any, **kwargs: Any) -> _FakeProc:
+        popen_calls.append({"args": args, "kwargs": kwargs})
+        return _FakeProc()
+
+    monkeypatch.setattr(runtime_module.subprocess, "Popen", _fake_popen)
+
+    rt._start_autoscaler_dev_local()
+
+    assert len(popen_calls) == 1
+    call = popen_calls[0]
+    # Subprocess command: python -m treadmill_local.autoscaler.
+    cmd = call["args"][0]
+    assert cmd[1:] == ["-m", "treadmill_local.autoscaler"]
+
+    env = call["kwargs"]["env"]
+    # Per ADR-0018: autoscaler config flows from the YAML.
+    assert env["TREADMILL_AUTOSCALER_FAMILY"] == "treadmill-agent"
+    assert env["TREADMILL_AUTOSCALER_QUEUE_URL"] == cfg["aws"]["work_queue_url"]
+    assert env["TREADMILL_AUTOSCALER_MIN"] == "0"
+    assert env["TREADMILL_AUTOSCALER_MAX"] == "3"
+    assert env["TREADMILL_AUTOSCALER_TICK_SECONDS"] == "7"
+    # The deployment id is the load-bearing new env var: subprocess
+    # branches on it to construct a dev-local LocalRuntime.
+    assert env["TREADMILL_AUTOSCALER_DEPLOYMENT_ID"] == cfg["deployment_id"]
+    # AWS routing — region from YAML, profile inherited from parent env.
+    assert env["AWS_DEFAULT_REGION"] == cfg["aws_region"]
+    assert env["AWS_PROFILE"] == "treadmill-from-env"
+    # Moto override MUST NOT leak through — dev-local hits real AWS.
+    assert "AWS_ENDPOINT_URL" not in env
+
+    # PID file written for later teardown.
+    assert (tmp_path / ".treadmill-local" / "autoscaler.pid").read_text().strip() == "4242"
+
+
+def test_start_autoscaler_dev_local_uses_yaml_profile_when_env_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When ``AWS_PROFILE`` is not in the parent env, the runtime falls
+    back to ``cfg['aws_profile']`` so the subprocess still has a
+    profile-resolvable session."""
+    cfg = _valid_yaml_dict()
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    captured: dict[str, Any] = {}
+
+    class _FakeProc:
+        pid = 5151
+
+    def _fake_popen(*args: Any, **kwargs: Any) -> _FakeProc:
+        captured["env"] = kwargs["env"]
+        return _FakeProc()
+
+    monkeypatch.setattr(runtime_module.subprocess, "Popen", _fake_popen)
+    rt._start_autoscaler_dev_local()
+    assert captured["env"]["AWS_PROFILE"] == cfg["aws_profile"]
+
+
+def test_up_dev_local_with_no_autoscaler_flag_skips_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When ``start_autoscaler=False`` (the ``--no-autoscaler`` CLI flag),
+    ``_up_dev_local`` does NOT spawn the subprocess."""
+    rt = LocalRuntime(
+        tmp_path,
+        deployment_config=_valid_yaml_dict(),
+        start_autoscaler=False,
+    )
+
+    monkeypatch.setattr(rt, "_ensure_network", lambda: None)
+    monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    monkeypatch.setattr(rt, "_start_services", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._operator_aws_env = {
+        "AWS_ACCESS_KEY_ID": "x",
+        "AWS_SECRET_ACCESS_KEY": "y",
+        "AWS_SESSION_TOKEN": "z",
+    }
+
+    spawn_calls: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_start_autoscaler_dev_local",
+        lambda: spawn_calls.append(1),
+    )
+
+    rt.up()
+    assert spawn_calls == [], "autoscaler must NOT spawn when --no-autoscaler is set"
+
+
+def test_cli_up_no_autoscaler_flag_propagates_to_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-autoscaler`` on ``up`` translates to ``start_autoscaler=False``
+    on the runtime constructor."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".treadmill").mkdir()
+    (tmp_path / ".treadmill" / "personal.yaml").write_text(
+        yaml.safe_dump(_valid_yaml_dict())
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+        self.deployment_config = kwargs.get("deployment_config")
+
+    with patch.object(LocalRuntime, "up", lambda self: None), \
+         patch.object(LocalRuntime, "__init__", _fake_init):
+        result = runner.invoke(
+            app,
+            [
+                "up", "--deployment", "personal",
+                "--infra", str(tmp_path),
+                "--no-autoscaler",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert captured["start_autoscaler"] is False
+
+
+def test_stop_autoscaler_sigterms_pid_and_cleans_up_pid_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``_stop_autoscaler`` (shared between fully-local and dev-local)
+    SIGTERMs the PID stored in the PID file and removes the file."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+    state_dir = tmp_path / ".treadmill-local"
+    state_dir.mkdir()
+    pid_file = state_dir / "autoscaler.pid"
+    pid_file.write_text("9999")
+
+    # Simulate "alive then dead": first poll returns alive (so we send
+    # SIGTERM), the second returns dead (so we don't escalate to KILL).
+    pid_alive_calls = [True, False]
+    monkeypatch.setattr(
+        LocalRuntime, "_pid_alive",
+        staticmethod(lambda pid: pid_alive_calls.pop(0) if pid_alive_calls else False),
+    )
+
+    kill_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        runtime_module.os, "kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    rt._stop_autoscaler()
+
+    # SIGTERM (signal 15) was sent exactly once.
+    import signal as _signal
+    assert kill_calls == [(9999, _signal.SIGTERM)]
+    # PID file cleaned up.
+    assert not pid_file.exists()
+
+
+def test_stop_autoscaler_no_pid_file_is_noop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When no PID file is present, ``_stop_autoscaler`` is a noop —
+    it does not call ``os.kill`` and does not raise."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+
+    kill_calls: list[Any] = []
+    monkeypatch.setattr(
+        runtime_module.os, "kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    rt._stop_autoscaler()  # Must not raise.
+    assert kill_calls == []
+
+
+# ── YAML loader: autoscaler block (ADR-0018) ──────────────────────────────────
+
+
+def test_load_deployment_yaml_fills_autoscaler_defaults_when_absent(
+    tmp_path: Path,
+) -> None:
+    """An older YAML file without the ``autoscaler:`` block still loads —
+    defaults (min=0, max=1, tick_seconds=5) fill in per ADR-0018."""
+    cfg = _valid_yaml_dict()
+    del cfg["autoscaler"]
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+
+    loaded = load_deployment_yaml("personal", path=path)
+    assert loaded["autoscaler"] == {"min": 0, "max": 1, "tick_seconds": 5}
+
+
+def test_load_deployment_yaml_accepts_partial_autoscaler_block(
+    tmp_path: Path,
+) -> None:
+    """Only ``max`` set → ``min`` + ``tick_seconds`` fill from defaults."""
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {"max": 4}
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+
+    loaded = load_deployment_yaml("personal", path=path)
+    assert loaded["autoscaler"] == {"min": 0, "max": 4, "tick_seconds": 5}
+
+
+def test_load_deployment_yaml_rejects_min_greater_than_max(
+    tmp_path: Path,
+) -> None:
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {"min": 5, "max": 2, "tick_seconds": 1}
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match="autoscaler.max"):
+        load_deployment_yaml("personal", path=path)
+
+
+def test_load_deployment_yaml_rejects_negative_min(tmp_path: Path) -> None:
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {"min": -1, "max": 1, "tick_seconds": 5}
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match="autoscaler.min"):
+        load_deployment_yaml("personal", path=path)
+
+
+def test_load_deployment_yaml_rejects_zero_tick_seconds(tmp_path: Path) -> None:
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {"min": 0, "max": 1, "tick_seconds": 0}
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match="tick_seconds"):
+        load_deployment_yaml("personal", path=path)
+
+
+def test_load_deployment_yaml_rejects_negative_tick_seconds(tmp_path: Path) -> None:
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {"min": 0, "max": 1, "tick_seconds": -3}
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match="tick_seconds"):
+        load_deployment_yaml("personal", path=path)
+
+
+def test_load_deployment_yaml_rejects_non_int_autoscaler_value(
+    tmp_path: Path,
+) -> None:
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {"min": "zero", "max": 1, "tick_seconds": 5}
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match="expected an int"):
+        load_deployment_yaml("personal", path=path)
+
+
+def test_load_deployment_yaml_rejects_non_mapping_autoscaler(
+    tmp_path: Path,
+) -> None:
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = "not a dict"
+    path = tmp_path / "personal.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match="not a mapping"):
+        load_deployment_yaml("personal", path=path)
+
+
+# ── Autoscaler subprocess entrypoint: dev-local branch ────────────────────────
+
+
+def test_autoscaler_main_branches_on_deployment_id_env_var(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``TREADMILL_AUTOSCALER_DEPLOYMENT_ID`` is set, the autoscaler
+    subprocess's ``main()`` constructs ``LocalRuntime`` with the parsed
+    deployment_config (so ``start_worker_once`` triggers the dev-local
+    credential injection per ADR-0019).
+
+    We patch ``LocalRuntime.__init__`` and ``Autoscaler.run`` so the
+    test exercises only the wiring, not the loop or docker."""
+    import treadmill_local.autoscaler as autoscaler_module
+
+    # Set the dev-local env-var signature the entrypoint reads.
+    monkeypatch.setenv("TREADMILL_INFRA_DIR", str(tmp_path))
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_FAMILY", "treadmill-agent")
+    monkeypatch.setenv(
+        "TREADMILL_AUTOSCALER_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/111111111111/treadmill-personal-work.fifo",
+    )
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_MIN", "0")
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_MAX", "2")
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_TICK_SECONDS", "5")
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_DEPLOYMENT_ID", "personal")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
+    # Replace LocalRuntime.__init__ so we don't need a real docker daemon.
+    init_calls: list[dict[str, Any]] = []
+
+    def _fake_runtime_init(self: Any, **kwargs: Any) -> None:
+        init_calls.append(kwargs)
+        self.deployment_config = kwargs.get("deployment_config")
+
+    monkeypatch.setattr(
+        runtime_module.LocalRuntime, "__init__", _fake_runtime_init,
+    )
+
+    # Patch ``Autoscaler.run`` so the loop exits immediately.
+    monkeypatch.setattr(
+        autoscaler_module.Autoscaler, "run", lambda self: None,
+    )
+
+    # Patch ``load_deployment_yaml`` so the entrypoint doesn't try to
+    # read a real YAML from $HOME.
+    from treadmill_local import deployment_config as dc
+    monkeypatch.setattr(
+        dc, "load_deployment_yaml",
+        lambda deployment_id, path=None: _valid_yaml_dict(
+            deployment_id=deployment_id,
+        ),
+    )
+
+    # Stub docker.from_env and boto3.client so the entrypoint's
+    # callable construction doesn't need a real daemon or network.
+    monkeypatch.setattr(
+        autoscaler_module, "main",
+        autoscaler_module.main,  # keep the real main
+    )
+
+    import docker as _docker
+    monkeypatch.setattr(_docker, "from_env", lambda: MagicMock())
+    import boto3 as _boto3
+    monkeypatch.setattr(_boto3, "client", lambda *a, **kw: MagicMock())
+
+    rc = autoscaler_module.main()
+    assert rc == 0
+
+    # LocalRuntime was constructed with the deployment_config parsed
+    # from the YAML — that's the load-bearing branch behavior.
+    assert len(init_calls) == 1
+    assert init_calls[0]["deployment_config"]["deployment_id"] == "personal"
+
+
+def test_autoscaler_main_legacy_path_when_deployment_id_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``TREADMILL_AUTOSCALER_DEPLOYMENT_ID`` is unset, the
+    subprocess falls back to the fully-local path:
+    ``LocalRuntime(infra_dir=infra_dir)`` with no deployment_config
+    (moto endpoint + dummy creds inherited via env).
+    """
+    import treadmill_local.autoscaler as autoscaler_module
+
+    monkeypatch.setenv("TREADMILL_INFRA_DIR", str(tmp_path))
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_FAMILY", "treadmill-agent")
+    monkeypatch.setenv(
+        "TREADMILL_AUTOSCALER_QUEUE_URL",
+        "http://localhost:5001/000000000000/work",
+    )
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_MIN", "0")
+    monkeypatch.setenv("TREADMILL_AUTOSCALER_MAX", "1")
+    monkeypatch.delenv("TREADMILL_AUTOSCALER_DEPLOYMENT_ID", raising=False)
+
+    init_calls: list[dict[str, Any]] = []
+
+    def _fake_runtime_init(self: Any, **kwargs: Any) -> None:
+        init_calls.append(kwargs)
+        self.deployment_config = kwargs.get("deployment_config")
+
+    monkeypatch.setattr(
+        runtime_module.LocalRuntime, "__init__", _fake_runtime_init,
+    )
+    monkeypatch.setattr(
+        autoscaler_module.Autoscaler, "run", lambda self: None,
+    )
+
+    import docker as _docker
+    monkeypatch.setattr(_docker, "from_env", lambda: MagicMock())
+    import boto3 as _boto3
+    monkeypatch.setattr(_boto3, "client", lambda *a, **kw: MagicMock())
+
+    rc = autoscaler_module.main()
+    assert rc == 0
+
+    # Legacy path: no deployment_config passed.
+    assert len(init_calls) == 1
+    assert init_calls[0].get("deployment_config") is None

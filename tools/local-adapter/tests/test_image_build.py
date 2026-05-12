@@ -99,6 +99,9 @@ def _valid_yaml_dict() -> dict[str, Any]:
             "redis_url": "redis://localhost:6379/0",
             "api_url": "http://localhost:8000",
         },
+        # ADR-0018: autoscaler block (defaults — exercised here only for
+        # spec completeness; the image-build tests don't depend on values).
+        "autoscaler": {"min": 0, "max": 1, "tick_seconds": 5},
     }
 
 
@@ -302,6 +305,9 @@ def test_up_dev_local_calls_ensure_images_built_before_starting_services(
     monkeypatch.setattr(rt, "_ensure_images_built", lambda: order.append("build"))
     monkeypatch.setattr(rt, "_start_services", lambda: order.append("services"))
     monkeypatch.setattr(rt, "_report_up_dev_local", lambda cfg: None)
+    # ADR-0018: dev-local ``up`` also spawns the autoscaler. Stub it so
+    # this test only exercises the network → build → services order.
+    monkeypatch.setattr(rt, "_start_autoscaler_dev_local", lambda: None)
     # ADR-0019: ``up`` fetches AWS credentials on the host before building
     # any spec env. Stub the fetch so unit tests don't hit real boto3.
     monkeypatch.setattr(rt, "_ensure_dev_local_credentials", lambda: None)

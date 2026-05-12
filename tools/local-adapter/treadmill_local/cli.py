@@ -65,6 +65,7 @@ def _runtime(
     *,
     deployment_config: dict | None = None,
     build_images: bool = True,
+    start_autoscaler: bool = True,
 ) -> LocalRuntime:
     # Fully-local mode requires cdk.json (it shells out to ``cdk synth``).
     # Dev-local skips synth entirely, so the cdk.json check is also
@@ -77,6 +78,7 @@ def _runtime(
         infra_dir=infra_dir,
         deployment_config=deployment_config,
         build_images=build_images,
+        start_autoscaler=start_autoscaler,
     )
 
 
@@ -103,12 +105,26 @@ def up(
              "changed) to prevent silently running stale code. Use this "
              "flag only when debugging with a known-good image.",
     ),
+    no_autoscaler: bool = typer.Option(
+        False,
+        "--no-autoscaler",
+        help="Skip starting the autoscaler subprocess. Default is to "
+             "always start it (per ADR-0018 / ADR-0019): the autoscaler "
+             "polls the work queue and spawns worker containers on "
+             "demand. Use this flag when debugging a specific worker "
+             "failure in isolation with manual ``run-worker`` control.",
+    ),
 ) -> None:
     """Synth CDK + provision moto + start support containers (fully-local),
     or start Postgres + Redis + API against real AWS (dev-local, with
     ``--deployment``)."""
     cfg = _load_deployment_or_exit(deployment)
-    rt = _runtime(infra, deployment_config=cfg, build_images=not no_build)
+    rt = _runtime(
+        infra,
+        deployment_config=cfg,
+        build_images=not no_build,
+        start_autoscaler=not no_autoscaler,
+    )
     rt.up()
 
 
