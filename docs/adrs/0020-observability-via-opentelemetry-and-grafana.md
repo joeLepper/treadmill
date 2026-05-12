@@ -1,7 +1,7 @@
 # ADR-0020: Observability via OpenTelemetry + Grafana
 
-- **Status:** proposed
-- **Date:** 2026-05-12
+- **Status:** accepted (phase 2 implemented; phases 3-7 plan-tracked)
+- **Date:** 2026-05-12 (phase 2 landed in commit 3f64338; plan for the rest at `docs/plans/2026-05-12-observability-stack.md`)
 - **Related:** ADR-0011, ADR-0016, ADR-0018
 
 ## Context
