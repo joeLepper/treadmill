@@ -133,6 +133,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             publisher=publisher,
             dispatcher=bg_dispatcher,
             github_client=github_client,
+            settings=settings,
         )
         await consumer.start()
         # Replay loop heals dispatch-publish failures (A.8/A.10). Shares

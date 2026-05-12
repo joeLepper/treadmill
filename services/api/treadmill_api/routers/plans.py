@@ -345,6 +345,87 @@ def _to_plan_response(plan: Plan, derived_status: str | None = None) -> PlanResp
     )
 
 
+async def create_plan_from_doc(
+    session: AsyncSession,
+    dispatcher: Dispatcher,
+    *,
+    repo: str,
+    doc_content: str,
+    doc_path: str | None,
+    created_by: str | None,
+    plan_id: uuid.UUID | None = None,
+) -> Plan:
+    """Internal Scenario-1 plan-creation function.
+
+    Used by both ``POST /plans`` (when ``doc_content`` is supplied) and
+    the merge-to-main trigger handler (ADR-0021). Parses the doc, INSERTs
+    the Plan + Task rows, emits ``PlanRegistered`` + ``PlanActivated`` +
+    one ``TaskRegistered`` per task, and dispatches each task.
+
+    ``plan_id`` is optional: when supplied, the Plan row is INSERTed with
+    that id; the caller controls the id so merge-trigger redelivery
+    converges on the same row (ADR-0021's deterministic-id-from-uuid5
+    trick). When ``None``, the DB-side default ``gen_random_uuid()``
+    applies. INSERTing with a duplicate ``plan_id`` raises an
+    ``IntegrityError`` — callers that need idempotency should probe for
+    the existing Plan row before calling.
+
+    The session is **not** committed here. The caller commits (the HTTP
+    route commits at the end of the request; the merge handler commits
+    once per dispatched plan-doc).
+
+    Raises:
+        PlanDocFormatError: the doc has no ``## sequence_of_work`` block
+            or its YAML is malformed.
+        pydantic.ValidationError: the parsed YAML fails the TaskSpec
+            schema (missing fields, extras, etc.).
+        HTTPException: 400 when the workflow slug is unknown or the
+            depends_on grammar is violated. The merge handler catches
+            this; the HTTP route lets FastAPI surface it.
+        DispatchError: a downstream dispatch failure. Same handling as
+            ``HTTPException`` above.
+    """
+    specs = parse_plan_doc(doc_content)
+    validate_unique_task_ids(specs)
+
+    plan_kwargs: dict[str, object] = {
+        "repo": repo,
+        "intent": None,
+        "doc_path": doc_path,
+        "created_by": created_by,
+    }
+    if plan_id is not None:
+        plan_kwargs["id"] = plan_id
+    plan = Plan(**plan_kwargs)
+    session.add(plan)
+    await session.flush()
+
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="plan",
+        action="registered",
+        payload=PlanRegistered(
+            repo=plan.repo,
+            intent=plan.intent,
+            doc_path=plan.doc_path,
+        ),
+        plan_id=plan.id,
+    )
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="plan",
+        action="activated",
+        payload=PlanActivated(doc_path=plan.doc_path),
+        plan_id=plan.id,
+    )
+    tasks = await _spawn_tasks_from_specs(
+        session, dispatcher, plan, specs, created_by,
+    )
+    for task in tasks:
+        await dispatcher.dispatch_task(session, task)
+    return plan
+
+
 async def _read_plan_derived_status(
     session: AsyncSession, plan_id: uuid.UUID,
 ) -> str | None:

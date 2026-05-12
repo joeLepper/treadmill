@@ -30,6 +30,10 @@ from treadmill_api.events.plan import (
     PlanPlanningStarted,
     PlanRegistered,
 )
+from treadmill_api.events.plan_doc import (
+    PlanDocObservedInactive,
+    PlanDocParseFailed,
+)
 from treadmill_api.events.step import (
     StepCancelled,
     StepCompleted,
@@ -53,6 +57,9 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     PlanActivated,
     PlanCompleted,
     PlanAbandoned,
+    # Plan-doc events (ADR-0021)
+    PlanDocObservedInactive,
+    PlanDocParseFailed,
     # Step events
     StepReady,
     StepStarted,

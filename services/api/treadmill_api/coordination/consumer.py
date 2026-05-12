@@ -141,6 +141,7 @@ class CoordinationConsumer:
         publisher: Any | None = None,
         dispatcher: Any | None = None,
         github_client: Any | None = None,
+        settings: Any | None = None,
     ) -> None:
         self.sqs = sqs_client
         self.queue_url = queue_url
@@ -154,11 +155,15 @@ class CoordinationConsumer:
         #     plan.activated (D.6).
         #   * ``github_client`` — conflict-detection sweep on pr_merged
         #     (Week 3 B.3). ``None`` skips the sweep cleanly.
+        #   * ``settings`` — used by the ADR-0021 plan-merge trigger to
+        #     check the per-repo allow-list. ``None`` makes the trigger
+        #     short-circuit cleanly (tests that don't exercise it).
         # Each handler that uses one of these short-circuits when it's None.
         self.redis_client = redis_client
         self.publisher = publisher
         self.dispatcher = dispatcher
         self.github_client = github_client
+        self.settings = settings
         self._stopped = False
         self._task: asyncio.Task[None] | None = None
         self._health_status: HealthStatus = "starting"
@@ -497,6 +502,15 @@ class CoordinationConsumer:
 
             await session.commit()
 
+        # ── Plan-merge trigger (ADR-0021, pr_merged only) ────────────────
+        # Runs *after* the github-event audit + sweep transaction commits
+        # so the plan-doc handler opens its own session(s) for the per-doc
+        # work it does. Per ADR-0021 the trigger handler is a different
+        # path from ``event_triggers``; it directly creates a Plan + spawns
+        # tasks from the parsed doc.
+        if action == "pr_merged":
+            await self._handle_plan_doc_merged(typed)
+
     async def _sweep_after_pr_merged(
         self,
         session: AsyncSession,
@@ -552,6 +566,63 @@ class CoordinationConsumer:
                 "conflict sweep emitted %d pr_conflict event(s) for "
                 "repo=%s (after pr=%s merged)",
                 emitted, typed.repo, typed.pr_number,
+            )
+
+    async def _handle_plan_doc_merged(self, typed: Any) -> None:
+        """Run the ADR-0021 plan-merge trigger after a ``pr_merged`` event.
+
+        Bridges the consumer's per-event projection to the dedicated
+        plan-doc handler. Short-circuits cleanly when its dependencies
+        (``github_client``, ``dispatcher``, ``settings``) aren't wired —
+        narrow tests, log-only deployments, or missing GITHUB_TOKEN at
+        boot. All exceptions are caught and logged so the consumer loop
+        keeps draining; the SQS message has already been processed by
+        the time we get here so we never want a plan-doc failure to
+        cause a retry of the surrounding github audit work.
+        """
+        if self.github_client is None:
+            logger.debug(
+                "plan-merge trigger: github_client unwired; skipping "
+                "(repo=%s pr=%s)",
+                typed.repo, typed.pr_number,
+            )
+            return
+        if self.dispatcher is None:
+            logger.debug(
+                "plan-merge trigger: dispatcher unwired; skipping "
+                "(repo=%s pr=%s)",
+                typed.repo, typed.pr_number,
+            )
+            return
+        if self.settings is None:
+            logger.warning(
+                "plan-merge trigger: settings unwired; skipping "
+                "(repo=%s pr=%s) — plan-merge dispatch requires the "
+                "per-repo allow-list",
+                typed.repo, typed.pr_number,
+            )
+            return
+
+        from treadmill_api.coordination.plan_doc_trigger import (
+            handle_pr_merged,
+        )
+
+        try:
+            await handle_pr_merged(
+                sessionmaker=self.sessionmaker,
+                dispatcher=self.dispatcher,
+                github_client=self.github_client,
+                settings=self.settings,
+                repo=typed.repo,
+                pr_number=typed.pr_number,
+                merge_commit_sha=getattr(typed, "merged_sha", None),
+                sender=getattr(typed, "sender", None),
+            )
+        except Exception:
+            logger.exception(
+                "plan-merge trigger raised for repo=%s pr=%s; "
+                "swallowing so the consumer loop keeps draining",
+                typed.repo, typed.pr_number,
             )
 
     async def _persist_event(

@@ -27,6 +27,10 @@ from treadmill_api.events.plan import (
     PlanPlanningStarted,
     PlanRegistered,
 )
+from treadmill_api.events.plan_doc import (
+    PlanDocObservedInactive,
+    PlanDocParseFailed,
+)
 from treadmill_api.events.registry import (
     EVENT_REGISTRY,
     UnknownEventTypeError,
@@ -70,6 +74,9 @@ __all__ = [
     "PlanActivated",
     "PlanCompleted",
     "PlanAbandoned",
+    # Plan-doc events (ADR-0021)
+    "PlanDocObservedInactive",
+    "PlanDocParseFailed",
     # Step events
     "StepReady",
     "StepStarted",

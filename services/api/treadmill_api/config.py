@@ -148,6 +148,34 @@ class Settings(BaseSettings):
     # sets this via the deployment's secrets layer.
     github_token: str | None = Field(default=None, alias="GITHUB_TOKEN")
 
+    # ── Per-repo allow-list for the plan-merge trigger (ADR-0021) ─────────────
+    # The merge-to-main plan-doc trigger only fires for repos whose slug
+    # appears in this comma-separated allow-list. Empty (the default)
+    # means *all repos allowed* — appropriate for v0 where a single
+    # deployment serves a single repo. Future task #95 (bootstrap
+    # non-Treadmilled repos) replaces this with a per-repo config row.
+    plan_merge_repo_allowlist: str = Field(
+        default="", alias="TREADMILL_PLAN_MERGE_REPO_ALLOWLIST",
+    )
+
+    @property
+    def plan_merge_allowed_repos(self) -> set[str]:
+        """Parsed allow-list. Empty set means "allow all repos"."""
+        return {
+            r.strip()
+            for r in self.plan_merge_repo_allowlist.split(",")
+            if r.strip()
+        }
+
+    def plan_merge_repo_is_allowed(self, repo: str) -> bool:
+        """``True`` iff ``repo`` is allowed to trigger plan-merge dispatch.
+
+        Empty allow-list = all repos allowed (v0 default). Non-empty
+        allow-list = strict membership check.
+        """
+        allowed = self.plan_merge_allowed_repos
+        return not allowed or repo in allowed
+
     # ── Backward-compatibility: TREADMILL_LOCAL → deployment_mode ─────────────
     # Migration path from the binary ``local: bool`` flag. If callers set
     # ``TREADMILL_LOCAL=true`` (and ``TREADMILL_DEPLOYMENT_MODE`` is not
