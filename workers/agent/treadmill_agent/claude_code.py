@@ -22,8 +22,10 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO, Any
 
 from treadmill_agent.api_client import PriorStep, Role
 
@@ -51,6 +53,7 @@ def run_claude_code(
     plan_intent: str | None,
     prior_steps: list[PriorStep] | None = None,
     timeout_seconds: int = 600,
+    log_context: dict[str, Any] | None = None,
 ) -> CodeAuthorResult:
     """Drive Claude Code in ``repo_dir`` and return the captured summary.
 
@@ -64,6 +67,16 @@ def run_claude_code(
     two-step workflows the action role consumes the analyzer's
     ``task_directive`` from ``prior_steps[-1].output.payload``; the
     prompt-composer folds this in automatically.
+
+    ``log_context`` is an optional dict of structured-logging fields the
+    caller wants attached to every line streamed from the subprocess —
+    typically ``task_id`` / ``step_id`` / ``role`` / ``model``. Per
+    ADR-0020's "stream-and-tag, not capture-and-summarize" rule, the
+    subprocess stdout/stderr is read line-by-line on background threads
+    and each line is emitted via the package logger with these fields in
+    ``extra`` (the bare ``message`` stays the raw line so ``docker logs
+    -f`` is legible). The accumulated stdout is still joined and
+    returned as ``CodeAuthorResult.summary`` so callers don't change.
     """
     binary = _find_binary()
     prompt = _compose_prompt(
@@ -88,18 +101,89 @@ def run_claude_code(
         "--append-system-prompt", role.system_prompt,
         prompt,
     ]
-    logger.info("running claude code: model=%s cwd=%s", role.model, repo_dir)
-    result = subprocess.run(
-        cmd, cwd=str(repo_dir),
-        capture_output=True, text=True,
-        timeout=timeout_seconds,
+    base_extra: dict[str, Any] = dict(log_context or {})
+    logger.info(
+        "running claude code: model=%s cwd=%s", role.model, repo_dir,
+        extra=base_extra,
     )
-    if result.returncode != 0:
+
+    # ADR-0020 phase 2: stream stdout/stderr line-by-line instead of
+    # ``capture_output=True``. The reader threads write into
+    # ``stdout_lines`` / ``stderr_lines``; the main thread reads those
+    # lists only after ``thread.join()`` so no lock is needed.
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    proc = subprocess.Popen(
+        cmd, cwd=str(repo_dir),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_thread = threading.Thread(
+        target=_pump_stream,
+        args=(proc.stdout, stdout_lines, logging.INFO, "stdout", base_extra),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_pump_stream,
+        args=(proc.stderr, stderr_lines, logging.WARNING, "stderr", base_extra),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        # Kill the process so the reader threads see EOF and exit; then
+        # join them so any buffered lines land in our accumulators before
+        # the caller observes the failure. Re-raise so the runner can map
+        # this to ``step.failed``.
+        proc.kill()
+        proc.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        raise
+    stdout_thread.join()
+    stderr_thread.join()
+
+    stdout_text = "".join(stdout_lines)
+    stderr_text = "".join(stderr_lines)
+    if returncode != 0:
         raise CodeAuthorError(
-            f"claude exited {result.returncode}\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            f"claude exited {returncode}\n"
+            f"stdout:\n{stdout_text}\nstderr:\n{stderr_text}"
         )
-    return CodeAuthorResult(summary=result.stdout.strip() or "(no summary)")
+    return CodeAuthorResult(summary=stdout_text.strip() or "(no summary)")
+
+
+def _pump_stream(
+    stream: IO[str],
+    accumulator: list[str],
+    level: int,
+    stream_name: str,
+    base_extra: dict[str, Any],
+) -> None:
+    """Drain ``stream`` line-by-line, append each line to ``accumulator``,
+    and emit each line via the package logger with ``stream=<name>`` and
+    the caller's ``base_extra`` fields attached.
+
+    ``bufsize=1`` (line-buffered) on the parent ``Popen`` means each line
+    is delivered as soon as the child flushes. We accumulate the raw
+    line *with* its trailing newline so the joined string round-trips
+    byte-for-byte against the legacy ``result.stdout`` contract; the
+    logged message is ``rstrip``'d so the visible log doesn't end with
+    a redundant blank line. This function is the ``target=`` of a
+    daemon thread — only this thread writes ``accumulator``; the main
+    thread reads it only after ``thread.join()``.
+    """
+    try:
+        for line in stream:
+            accumulator.append(line)
+            extra = dict(base_extra)
+            extra["stream"] = stream_name
+            logger.log(level, line.rstrip("\n"), extra=extra)
+    finally:
+        stream.close()
 
 
 def _find_binary() -> str:

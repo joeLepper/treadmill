@@ -7,7 +7,9 @@ shells out with the right flags.
 
 from __future__ import annotations
 
+import logging
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -274,3 +276,185 @@ def test_find_binary_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(claude_code.shutil, "which", lambda _: None)
     with pytest.raises(claude_code.CodeAuthorError, match="not found in PATH"):
         claude_code._find_binary()
+
+
+# ── ADR-0020 phase 2: stream-and-tag subprocess output ──────────────────────
+
+
+_LOG_CONTEXT = {
+    "task_id": "task-abc",
+    "step_id": "step-xyz",
+    "run_id": "run-1",
+    "plan_id": "plan-1",
+    "role": "role-author",
+    "model": "claude-opus-4-7",
+    "workflow": "wf-author",
+}
+
+
+def _multi_line_stub(stub_path: Path) -> None:
+    """Write a small bash stub that emits several stdout lines with a
+    short delay between them. The delay forces the streaming path to
+    actually read lines as they arrive — if the wrapper still buffers,
+    a sufficiently long total runtime would surface here (the suite is
+    fast enough that we don't need to assert on timing directly)."""
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'line one'\n"
+        "echo 'line two'\n"
+        "echo 'line three'\n"
+    )
+    stub_path.chmod(0o755)
+
+
+def test_run_claude_code_streams_stdout_lines_to_logger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ADR-0020 phase 2: each line of subprocess stdout is emitted via
+    the package logger at INFO with the caller's ``log_context`` fields
+    attached. The accumulated stdout is still returned as the summary."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    _multi_line_stub(stub)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    with caplog.at_level(logging.INFO, logger="treadmill.agent.claude_code"):
+        result = claude_code.run_claude_code(
+            repo_dir=repo_dir, role=_role(),
+            task_title="t", task_description=None, plan_intent=None,
+            log_context=dict(_LOG_CONTEXT),
+        )
+
+    # Joined stdout matches the legacy ``result.stdout.strip()`` contract.
+    assert result.summary == "line one\nline two\nline three"
+
+    stdout_records = [
+        r for r in caplog.records
+        if r.name == "treadmill.agent.claude_code"
+        and getattr(r, "stream", None) == "stdout"
+    ]
+    messages = [r.getMessage() for r in stdout_records]
+    assert messages == ["line one", "line two", "line three"]
+    for record in stdout_records:
+        assert record.levelno == logging.INFO
+        # Every structured field the caller passed lands on the record.
+        for key, value in _LOG_CONTEXT.items():
+            assert getattr(record, key) == value
+
+
+def test_run_claude_code_streams_stderr_at_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """stderr lines from ``claude`` are tagged ``stream=stderr`` and
+    emitted at WARNING so operators can spot them in ``docker logs``."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'progress' >&1\n"
+        "echo 'a warning' >&2\n"
+        "echo 'another warning' >&2\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    with caplog.at_level(logging.DEBUG, logger="treadmill.agent.claude_code"):
+        result = claude_code.run_claude_code(
+            repo_dir=repo_dir, role=_role(),
+            task_title="t", task_description=None, plan_intent=None,
+            log_context=dict(_LOG_CONTEXT),
+        )
+
+    assert result.summary == "progress"
+    stderr_records = [
+        r for r in caplog.records
+        if r.name == "treadmill.agent.claude_code"
+        and getattr(r, "stream", None) == "stderr"
+    ]
+    messages = [r.getMessage() for r in stderr_records]
+    assert messages == ["a warning", "another warning"]
+    for record in stderr_records:
+        assert record.levelno == logging.WARNING
+        assert record.task_id == "task-abc"
+        assert record.step_id == "step-xyz"
+
+
+def test_run_claude_code_nonzero_exit_includes_accumulated_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On non-zero exit the error carries the accumulated stderr so the
+    runner's ``step.failed`` event has something diagnostic to surface."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'doing thing'\n"
+        "echo 'first error' >&2\n"
+        "echo 'second error' >&2\n"
+        "exit 3\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    with pytest.raises(claude_code.CodeAuthorError) as excinfo:
+        claude_code.run_claude_code(
+            repo_dir=repo_dir, role=_role(),
+            task_title="t", task_description=None, plan_intent=None,
+            log_context=dict(_LOG_CONTEXT),
+        )
+    msg = str(excinfo.value)
+    assert "exited 3" in msg
+    assert "first error" in msg
+    assert "second error" in msg
+    assert "doing thing" in msg
+
+
+def test_run_claude_code_timeout_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``claude`` outlasts ``timeout_seconds`` we kill it and let
+    ``subprocess.TimeoutExpired`` propagate — the runner maps this to
+    ``step.failed``. The reader threads must finish before re-raise so
+    no daemon-thread leak survives the test."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'starting'\n"
+        "sleep 10\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        claude_code.run_claude_code(
+            repo_dir=repo_dir, role=_role(),
+            task_title="t", task_description=None, plan_intent=None,
+            timeout_seconds=1,
+            log_context=dict(_LOG_CONTEXT),
+        )
+
+
+def test_run_claude_code_accepts_no_log_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``log_context`` is optional — the legacy single-arg call still
+    works (tests that predate ADR-0020 phase 2 don't have to change)."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    stub.write_text("#!/usr/bin/env bash\necho hi\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    result = claude_code.run_claude_code(
+        repo_dir=repo_dir, role=_role(),
+        task_title="t", task_description=None, plan_intent=None,
+    )
+    assert result.summary == "hi"

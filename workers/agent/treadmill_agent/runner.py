@@ -210,6 +210,21 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
         if dry_run:
             summary = _dry_run_author(repo_dir, ctx)
         else:
+            # ADR-0020 phase 2: tag every streamed line from the Claude
+            # Code subprocess with the step's context so the operator can
+            # filter ``docker logs`` (and, in phase 3+, Loki) by
+            # ``task_id`` / ``step_id`` / ``role``. The fields land in
+            # ``extra`` on each log record; the human-readable format
+            # stays unchanged so ``docker logs -f`` is still legible.
+            log_context = {
+                "task_id": ctx.task_id,
+                "step_id": ctx.step_id,
+                "run_id": ctx.run_id,
+                "plan_id": ctx.plan_id,
+                "role": ctx.role.id,
+                "model": ctx.role.model,
+                "workflow": ctx.workflow_id,
+            }
             summary = claude_code.run_claude_code(
                 repo_dir=repo_dir,
                 role=ctx.role,
@@ -223,6 +238,7 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
                 # prompt when this list is non-empty; single-step
                 # runs pass through with an empty list.
                 prior_steps=ctx.prior_steps,
+                log_context=log_context,
             ).summary
 
         # Stage first, check second, decide-to-abort third. The dry-run
