@@ -22,6 +22,7 @@ Covers:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1234,3 +1235,93 @@ def test_autoscaler_main_legacy_path_when_deployment_id_unset(
     # Legacy path: no deployment_config passed.
     assert len(init_calls) == 1
     assert init_calls[0].get("deployment_config") is None
+
+
+# ── redeploy() ───────────────────────────────────────────────────────────────
+
+
+def test_redeploy_runs_cdk_then_cycles_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``redeploy()`` shells out to ``cdk deploy`` with the right args,
+    then calls ``down`` then ``up`` in order."""
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+
+    # Track call order across cdk/down/up.
+    order: list[str] = []
+    cdk_calls: list[list[str]] = []
+
+    def fake_subprocess_run(cmd, *, cwd, env, check):
+        cdk_calls.append(cmd)
+        order.append("cdk")
+        # Simulate success.
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(rt, "down", lambda: order.append("down"))
+    monkeypatch.setattr(rt, "up", lambda: order.append("up"))
+
+    rt.redeploy()
+
+    assert order == ["cdk", "down", "up"], (
+        f"expected cdk → down → up, got {order!r}"
+    )
+    assert len(cdk_calls) == 1
+    cmd = cdk_calls[0]
+    assert cmd[0:3] == ["cdk", "deploy", "TreadmillPersonalCloudLite"]
+    assert "--context" in cmd and "mode=dev_local" in cmd
+    assert "deployment_id=personal" in cmd
+    assert "--profile" in cmd and "treadmill-personal" in cmd
+    assert "--require-approval" in cmd and "never" in cmd
+
+
+def test_redeploy_no_cdk_skips_deploy_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``redeploy(skip_cdk=True)`` does NOT run cdk; still cycles."""
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+
+    order: list[str] = []
+    cdk_calls: list[Any] = []
+
+    def fake_subprocess_run(cmd, *, cwd, env, check):
+        cdk_calls.append(cmd)
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(rt, "down", lambda: order.append("down"))
+    monkeypatch.setattr(rt, "up", lambda: order.append("up"))
+
+    rt.redeploy(skip_cdk=True)
+
+    assert order == ["down", "up"]
+    assert cdk_calls == [], "cdk deploy must not run when skip_cdk=True"
+
+
+def test_redeploy_aborts_when_cdk_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """If ``cdk deploy`` fails, ``redeploy`` raises SystemExit before
+    touching down/up — the operator gets a half-running stack with a
+    clear error, not a half-cycled one."""
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+
+    order: list[str] = []
+
+    def fake_subprocess_run(cmd, *, cwd, env, check):
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(rt, "down", lambda: order.append("down"))
+    monkeypatch.setattr(rt, "up", lambda: order.append("up"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        rt.redeploy()
+    assert exc_info.value.code == 1
+    assert order == [], "down/up must not run after a cdk failure"

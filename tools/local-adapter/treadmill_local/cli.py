@@ -129,6 +129,78 @@ def up(
 
 
 @app.command()
+def redeploy(
+    deployment: str = typer.Option(
+        ...,
+        "--deployment", "-d",
+        help="Deployment slug (required). Reads ~/.treadmill/<deployment>.yaml "
+             "to find the AWS profile + region + stack name.",
+    ),
+    infra: Path = typer.Option(
+        Path("infra"),
+        "--infra",
+        help="Path to the CDK app directory (containing cdk.json).",
+    ),
+    no_cdk: bool = typer.Option(
+        False,
+        "--no-cdk",
+        help="Skip the ``cdk deploy`` step. Useful when only worker/API "
+             "code changed (the auto-rebuild in ``up`` handles those) and "
+             "no infra/CDK files were modified. Saves ~30-90s of synth + "
+             "no-op deploy time.",
+    ),
+    no_build: bool = typer.Option(
+        False,
+        "--no-build",
+        help="Skip rebuilding treadmill-api:dev / treadmill-agent:dev "
+             "during the up phase. Mirrors ``up --no-build``.",
+    ),
+    no_autoscaler: bool = typer.Option(
+        False,
+        "--no-autoscaler",
+        help="Skip starting the autoscaler subprocess. Mirrors "
+             "``up --no-autoscaler``.",
+    ),
+) -> None:
+    """End-to-end redeploy: cdk deploy → down → up.
+
+    The intended flow after merging a PR that touched infra,
+    services/api, or workers/agent code:
+
+      treadmill-local redeploy --deployment personal
+
+    The ``cdk deploy`` step is idempotent — passing it through every
+    redeploy is cheap if nothing changed (a few seconds of synth +
+    a no-op CloudFormation check). The Postgres alembic upgrade runs
+    automatically inside ``up`` (per the API's CLI entrypoint
+    fix); no separate step needed.
+
+    Fully-local mode (no ``--deployment``) is not a valid use case
+    for this command — the AWS-side step is the value-add. Use
+    ``up`` directly for fully-local.
+
+    The flow fails fast on any step error; subsequent steps are
+    skipped so the operator can investigate without a half-cycled
+    stack.
+    """
+    cfg = _load_deployment_or_exit(deployment)
+    if cfg is None:
+        console.print(
+            "[red]redeploy requires --deployment <slug> "
+            "(fully-local has no AWS to redeploy)[/red]"
+        )
+        raise typer.Exit(code=2)
+
+    rt = _runtime(
+        infra,
+        deployment_config=cfg,
+        build_images=not no_build,
+        start_autoscaler=not no_autoscaler,
+    )
+    rt.redeploy(skip_cdk=no_cdk)
+
+
+@app.command()
 def down(
     infra: Path = typer.Option(
         Path("infra"),

@@ -687,6 +687,102 @@ class LocalRuntime:
         self._remove_network()
         console.print("[green]Down complete.[/green]")
 
+    def redeploy(self, *, skip_cdk: bool = False) -> None:
+        """End-to-end redeploy: cdk deploy → down → up.
+
+        Dev-local only — fully-local has no AWS to redeploy. The
+        caller (CLI) guards this; this method asserts.
+
+        Fail-fast: any step's failure short-circuits the rest so the
+        operator can investigate without a half-cycled stack. The
+        ``cdk deploy`` step is idempotent — passing it through every
+        redeploy costs ~a few seconds of synth + a no-op CFN check
+        if nothing changed.
+        """
+        assert self.deployment_config is not None, (
+            "redeploy requires a deployment config (dev-local only)"
+        )
+        cfg = self.deployment_config
+        deployment_id = cfg["deployment_id"]
+        console.print(
+            f"[bold]Treadmill local — redeploy "
+            f"(deployment={deployment_id})[/bold]"
+        )
+
+        if not skip_cdk:
+            self._cdk_deploy(cfg)
+        else:
+            console.print(
+                "[dim]• --no-cdk: skipping cdk deploy[/dim]"
+            )
+
+        # down before up so the running stack picks up new images +
+        # any container env from the freshly-synthed CDK outputs.
+        # ``down`` is idempotent — safe even if the stack was already
+        # stopped (e.g., operator running redeploy from a clean state).
+        self.down()
+        self.up()
+        console.rule(
+            f"[bold green]Treadmill local — redeploy complete "
+            f"(deployment={deployment_id})[/bold green]"
+        )
+
+    def _cdk_deploy(self, cfg: dict[str, Any]) -> None:
+        """Shell out to ``cdk deploy`` for the dev-local stack.
+
+        Inherits the operator's env (AWS_PROFILE comes from the
+        deployment YAML, prepended onto the parent env). The
+        ``--require-approval never`` flag bypasses the interactive
+        prompt — appropriate for an operator-initiated redeploy
+        (the operator already implicitly approved by running this
+        command).
+        """
+        deployment_id = cfg["deployment_id"]
+        profile = cfg["aws_profile"]
+        region = cfg["aws_region"]
+        stack_name = f"Treadmill{deployment_id.title().replace('_', '')}CloudLite"
+
+        repo_root = find_repo_root()
+        infra_dir = repo_root / "infra"
+
+        console.print(
+            f"[dim]• Running cdk deploy {stack_name} "
+            f"(profile={profile}, region={region})...[/dim]"
+        )
+        env = {
+            **os.environ,
+            "AWS_PROFILE": profile,
+            "AWS_DEFAULT_REGION": region,
+            "AWS_REGION": region,
+            "JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION": "1",
+        }
+        cmd = [
+            "cdk", "deploy", stack_name,
+            "--context", "mode=dev_local",
+            "--context", f"deployment_id={deployment_id}",
+            "--profile", profile,
+            "--require-approval", "never",
+        ]
+        try:
+            subprocess.run(
+                cmd, cwd=str(infra_dir), env=env, check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            console.print(
+                f"[red]cdk deploy failed (exit {exc.returncode}). "
+                f"Aborting redeploy; stack not cycled.[/red]"
+            )
+            console.print(
+                "[red]→ Investigate the cdk output above. Common "
+                "causes: expired SSO token (run "
+                f"`aws sso login --profile {profile}`); CFN drift "
+                "(check the AWS Console); missing context vars.[/red]"
+            )
+            raise SystemExit(1) from exc
+        console.print(
+            f"[green]• cdk deploy {stack_name} complete[/green]"
+        )
+
     def status(self) -> None:
         containers = self._managed_containers()
         autoscaler_alive = self._autoscaler_pid_alive()
