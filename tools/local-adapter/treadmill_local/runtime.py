@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import boto3
+import botocore.exceptions
 import docker
 from rich.console import Console
 from rich.table import Table
@@ -176,6 +178,14 @@ class LocalRuntime:
         self.state = RuntimeState()
         self.deployment_config = deployment_config
         self.build_images = build_images
+        # Per ADR-0019: dev-local credentials are fetched on the host and
+        # injected into containers as env vars. The fetched values live in
+        # memory on the runtime for the lifetime of the up-process; we
+        # never write them to disk. Both attrs are populated lazily by
+        # ``_ensure_dev_local_credentials`` the first time we need to
+        # build container env (``up`` or ``start_worker_once``).
+        self._worker_aws_env: dict[str, str] | None = None
+        self._operator_aws_env: dict[str, str] | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -202,6 +212,13 @@ class LocalRuntime:
         (the resource URLs/ARNs come from ``~/.treadmill/<id>.yaml``,
         produced by C.4's ``init`` subcommand).
 
+        Per ADR-0019, the AWS credentials for both the worker (long-lived
+        IAM-User keys from Secrets Manager) and the API (operator's SSO
+        session, exported as static creds) are fetched on the host before
+        any container starts. The values live in memory on this runtime
+        and are injected as env vars on every container we spawn — no
+        ``~/.aws`` mount, no SSO inside containers.
+
         The agent worker is NOT started here — it's launched on-demand
         by ``start_worker_once`` (same pattern as fully-local mode),
         so this method only stands up the long-running services.
@@ -214,6 +231,9 @@ class LocalRuntime:
         )
         self._ensure_network()
         self._ensure_images_built()
+        # Fetch creds on the host before building specs — the env on each
+        # spec needs them. Fail-fast on SSO-expired with a clear message.
+        self._ensure_dev_local_credentials()
         specs = self._build_dev_local_service_specs(cfg)
         self.state.service_specs = specs
         # Build the agent ContainerSpec too so ``start_worker_once`` can
@@ -223,6 +243,156 @@ class LocalRuntime:
         ]
         self._start_services()
         self._report_up_dev_local(cfg)
+
+    def _ensure_dev_local_credentials(self) -> None:
+        """Populate ``self._worker_aws_env`` + ``self._operator_aws_env``.
+
+        Idempotent — both attributes are only fetched once per runtime
+        instance lifetime. Called from ``_up_dev_local`` (initial fetch)
+        and ``start_worker_once`` (when the worker is launched from a
+        fresh CLI process whose ``LocalRuntime`` has no in-memory state).
+        """
+        assert self.deployment_config is not None
+        cfg = self.deployment_config
+        if self._operator_aws_env is None:
+            self._operator_aws_env = self._fetch_operator_sso_credentials(cfg)
+        if self._worker_aws_env is None:
+            self._worker_aws_env = self._fetch_worker_credentials(cfg)
+
+    @staticmethod
+    def _fetch_operator_sso_credentials(cfg: dict[str, Any]) -> dict[str, str]:
+        """Export the operator's SSO session as static credentials.
+
+        Per ADR-0019 §"The API still uses the operator's SSO profile":
+        rather than mounting ``~/.aws`` into the API container (which
+        breaks on the cache-refresh SSO writeback path), we ask boto3
+        for the *frozen* credentials of the operator's profile here on
+        the host and inject them as env vars on the API container. The
+        container never sees the SSO cache.
+
+        Implementation choice: we call ``boto3.Session(profile_name=...)
+        .get_credentials().get_frozen_credentials()`` rather than shelling
+        out to ``aws configure export-credentials``. Reasons:
+
+          * Avoids a hard dependency on AWS CLI ≥ 2.13 (a wart the ADR
+            flagged as worth flagging on the alternative path).
+          * One fewer subprocess hop; the same SSO token-resolution
+            logic runs in-process.
+          * Error handling is structured (``botocore.exceptions``)
+            instead of stderr-string parsing.
+
+        On ``ExpiredToken`` / ``UnauthorizedSSOTokenError`` we print a
+        clear remediation message and re-raise — see ADR-0019 §"Quirks":
+        proceeding with degraded creds is worse than failing the up.
+        """
+        profile = cfg["aws_profile"]
+        region = cfg["aws_region"]
+        try:
+            session = boto3.Session(profile_name=profile, region_name=region)
+            creds = session.get_credentials()
+            if creds is None:
+                raise RuntimeError(
+                    f"no credentials available for profile {profile!r}; "
+                    f"run `aws sso login --profile {profile}` and re-try."
+                )
+            frozen = creds.get_frozen_credentials()
+        except (
+            botocore.exceptions.SSOTokenLoadError,
+            botocore.exceptions.UnauthorizedSSOTokenError,
+            botocore.exceptions.TokenRetrievalError,
+        ) as exc:
+            console.print(
+                f"[red]SSO token for profile {profile!r} is expired or missing: "
+                f"{exc}[/red]"
+            )
+            console.print(
+                f"[red]→ Run `aws sso login --profile {profile}` and re-run "
+                f"`treadmill-local up`.[/red]"
+            )
+            raise SystemExit(1) from exc
+        except botocore.exceptions.ClientError as exc:
+            # ExpiredToken / TokenRefreshRequired surface as ClientError
+            # when the underlying STS / SSO call fails mid-resolution.
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"ExpiredToken", "ExpiredTokenException", "InvalidToken"}:
+                console.print(
+                    f"[red]AWS credentials for profile {profile!r} have expired.[/red]"
+                )
+                console.print(
+                    f"[red]→ Run `aws sso login --profile {profile}` and re-run "
+                    f"`treadmill-local up`.[/red]"
+                )
+                raise SystemExit(1) from exc
+            raise
+
+        env: dict[str, str] = {
+            "AWS_ACCESS_KEY_ID": frozen.access_key,
+            "AWS_SECRET_ACCESS_KEY": frozen.secret_key,
+        }
+        if frozen.token:
+            # SSO-derived credentials always carry a session token; STS-AssumeRole
+            # too. Long-lived IAM-User keys (which the operator could in
+            # principle use as their default profile) don't — in that case the
+            # API just gets access-key+secret with no session token.
+            env["AWS_SESSION_TOKEN"] = frozen.token
+        return env
+
+    @staticmethod
+    def _fetch_worker_credentials(cfg: dict[str, Any]) -> dict[str, str]:
+        """Fetch the worker's IAM-User keys from Secrets Manager.
+
+        Per ADR-0019: the local-adapter resolves the worker credentials
+        once on the host (using the operator's SSO profile) and injects
+        them as ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` env
+        vars on every worker container. The worker's boto3 reads them
+        via the standard env-var credential resolution — no Secrets
+        Manager call at worker startup, no SSO inside the container.
+
+        The secret name comes from the deployment YAML's
+        ``secrets.worker_aws_credentials_secret_name`` (populated by
+        ``treadmill-local init`` from the ``WorkerAwsCredentialsSecretName``
+        CFN output). The secret payload is JSON of shape
+        ``{"aws_access_key_id": "...", "aws_secret_access_key": "..."}``.
+        """
+        profile = cfg["aws_profile"]
+        region = cfg["aws_region"]
+        secret_name = cfg["secrets"]["worker_aws_credentials_secret_name"]
+
+        session = boto3.Session(profile_name=profile, region_name=region)
+        secrets = session.client("secretsmanager")
+        try:
+            resp = secrets.get_secret_value(SecretId=secret_name)
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"ExpiredToken", "ExpiredTokenException"}:
+                console.print(
+                    f"[red]AWS credentials for profile {profile!r} have expired "
+                    f"mid-fetch of {secret_name!r}.[/red]"
+                )
+                console.print(
+                    f"[red]→ Run `aws sso login --profile {profile}` and re-run "
+                    f"`treadmill-local up`.[/red]"
+                )
+                raise SystemExit(1) from exc
+            raise
+
+        raw = resp.get("SecretString")
+        if not raw:
+            raise RuntimeError(
+                f"worker AWS credentials secret {secret_name!r} has no SecretString"
+            )
+        creds = json.loads(raw)
+        access_key = creds.get("aws_access_key_id")
+        secret_key = creds.get("aws_secret_access_key")
+        if not access_key or not secret_key:
+            raise RuntimeError(
+                f"worker AWS credentials secret {secret_name!r} is missing "
+                f"aws_access_key_id / aws_secret_access_key"
+            )
+        return {
+            "AWS_ACCESS_KEY_ID": access_key,
+            "AWS_SECRET_ACCESS_KEY": secret_key,
+        }
 
     def _build_dev_local_service_specs(
         self,
@@ -303,8 +473,7 @@ class LocalRuntime:
             container_ports=[],
         )
 
-    @staticmethod
-    def _dev_local_api_env(cfg: dict[str, Any]) -> dict[str, str]:
+    def _dev_local_api_env(self, cfg: dict[str, Any]) -> dict[str, str]:
         """Build the API container's env from the deployment YAML.
 
         Env-var spellings match ``services/api/treadmill_api/config.py``:
@@ -317,16 +486,25 @@ class LocalRuntime:
 
         Notably absent: ``AWS_ENDPOINT_URL``. That's the moto override;
         dev-local talks to the real AWS endpoint via the standard boto3
-        resolver. ``AWS_PROFILE`` + the mounted ``~/.aws`` directory
-        is how credentials resolve.
+        resolver.
+
+        Per ADR-0019: ``AWS_PROFILE`` is **not** set; instead the
+        operator's SSO session is exported as ``AWS_ACCESS_KEY_ID`` /
+        ``AWS_SECRET_ACCESS_KEY`` / ``AWS_SESSION_TOKEN`` env vars on
+        the host before the container starts. Boto3's env-var
+        credential resolution picks them up and never touches a profile
+        / SSO cache inside the container.
         """
         aws = cfg["aws"]
         secrets = cfg["secrets"]
-        return {
+        # The injected creds are required — _ensure_dev_local_credentials
+        # populates them before any spec-build call site.
+        self._ensure_dev_local_credentials()
+        assert self._operator_aws_env is not None
+        env: dict[str, str] = {
             # Deployment-mode literal (read by ``Settings.deployment_mode``).
             "TREADMILL_DEPLOYMENT_MODE": "dev_local",
             # AWS routing for boto3 (real AWS endpoint, no moto override).
-            "AWS_PROFILE": cfg["aws_profile"],
             "AWS_DEFAULT_REGION": cfg["aws_region"],
             "AWS_REGION": cfg["aws_region"],
             "AWS_ACCOUNT_ID": cfg["aws_account_id"],
@@ -346,44 +524,49 @@ class LocalRuntime:
             "DATABASE_URL": _API_INTERNAL_DB_URL,
             "REDIS_URL": _API_INTERNAL_REDIS_URL,
         }
+        # Inject the operator's SSO-derived static creds last so the
+        # env-var dict carries the credential keys the container's
+        # boto3 will pick up via the standard env-var resolver.
+        env.update(self._operator_aws_env)
+        return env
 
-    @staticmethod
-    def _dev_local_worker_env(cfg: dict[str, Any]) -> dict[str, str]:
+    def _dev_local_worker_env(self, cfg: dict[str, Any]) -> dict[str, str]:
         """Build the agent worker's env from the deployment YAML.
 
         These spellings reflect ``workers/agent/treadmill_agent/config.py``
-        plus the github-mode additions slated for D.1 + D.3. Per the
-        Phase D.2 brief, if D.1/D.3 haven't fully landed, the names
-        used here are the working contract and flagged in the report.
+        plus the github-mode contract from D.1 + D.3.
 
-        Worker boto3 talks to real AWS — same pattern as the API
-        (``AWS_PROFILE`` + mounted ``~/.aws``). On startup the worker
-        is expected (D.3) to fetch
-        ``WORKER_AWS_CREDENTIALS_SECRET_NAME`` from Secrets Manager and
-        rebind ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY`` from the
-        long-lived IAM-User keys, per ADR-0016 Q16.c. Until D.3 lands,
-        the worker uses the operator's profile directly — acceptable
-        for development.
+        Per ADR-0019: the worker no longer fetches its own AWS keys.
+        The local-adapter resolves the long-lived IAM-User keys from
+        Secrets Manager on the host and injects them here as
+        ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``. The
+        worker's boto3 reads them via the standard env-var chain;
+        ``WORKER_AWS_CREDENTIALS_SECRET_NAME`` is no longer passed to
+        the container (the worker has no need for it).
         """
         aws = cfg["aws"]
         secrets = cfg["secrets"]
-        return {
+        self._ensure_dev_local_credentials()
+        assert self._worker_aws_env is not None
+        env: dict[str, str] = {
             # Treadmill-specific (no env prefix on the worker side; it
             # reads via direct ``os.environ.get`` rather than pydantic).
             "REPO_MODE": "github",
             "WORK_QUEUE_URL": aws["work_queue_url"],
             "EVENTS_TOPIC_ARN": aws["events_topic_arn"],
             "TREADMILL_API_URL": "http://treadmill-api:8088",
-            # github-mode auth (D.3 reads these at startup).
+            # github-mode auth — the worker still fetches its own PAT
+            # at startup using the injected AWS credentials below.
             "GITHUB_PAT_SECRET_NAME": secrets["github_pat_secret_name"],
-            "WORKER_AWS_CREDENTIALS_SECRET_NAME": (
-                secrets["worker_aws_credentials_secret_name"]
-            ),
-            # AWS routing — real AWS, no moto override.
-            "AWS_PROFILE": cfg["aws_profile"],
+            # AWS routing — real AWS, no moto override. No AWS_PROFILE
+            # (per ADR-0019: env-var creds win over profile-based).
             "AWS_DEFAULT_REGION": cfg["aws_region"],
             "AWS_REGION": cfg["aws_region"],
         }
+        # Worker IAM-User keys, fetched once on the host (see
+        # ``_fetch_worker_credentials``) and injected here.
+        env.update(self._worker_aws_env)
+        return env
 
     def _report_up_dev_local(self, cfg: dict[str, Any]) -> None:
         console.rule("[bold green]Treadmill local — ready (dev-local)[/bold green]")
@@ -492,6 +675,10 @@ class LocalRuntime:
         self._ensure_images_built()
         if self.state.container_specs is None:
             if self.deployment_config is not None:
+                # Fresh CLI process (run-worker) — fetch creds on the
+                # host before building the agent spec. ``up`` callers
+                # have already fetched them; this is idempotent.
+                self._ensure_dev_local_credentials()
                 self.state.container_specs = [
                     self._build_dev_local_agent_spec(self.deployment_config),
                 ]
@@ -550,11 +737,13 @@ class LocalRuntime:
           * Local bare-repos directory (read-write) so ``REPO_MODE=local``
             can ``git clone file://...`` and push back.
 
-        Additionally, in dev-local mode (``self.deployment_config`` is
-        set), the API and agent worker families get ``~/.aws`` mounted
-        read-only so ``AWS_PROFILE`` resolves to working credentials.
-        ADR-0016 Q16.b: the worker reads SSO profile (or the IAM-User
-        keys after D.3 lands and rebinds them).
+        Per ADR-0019: dev-local mode does **not** mount ``~/.aws`` into
+        any container. The operator's SSO session (for the API) and the
+        worker's long-lived IAM-User keys are both resolved on the host
+        and injected as env vars — boto3's env-var credential resolution
+        picks them up inside the container. Mounting ``~/.aws`` was the
+        root cause of the SSO-cache-refresh-writeback class of bugs that
+        ADR-0019 retires.
 
         Other families (postgres, redis) ship without volumes —
         their state lives in the container until ``down``.
@@ -573,30 +762,6 @@ class LocalRuntime:
             mounts[str(bare_root)] = {
                 "bind": "/var/treadmill/repos", "mode": "rw",
             }
-
-        # Dev-local-only: API + agent containers need real AWS creds.
-        # The Dockerfiles for both don't set USER, so they run as root —
-        # /root/.aws is where boto3 looks for the profile by default.
-        #
-        # The mount is read-only. Originally we tried ``rw`` so the SSO
-        # token provider could refresh inside the container — and it
-        # worked, but the side-effect was catastrophic: the container's
-        # root-uid writes left root-owned files in the operator's host
-        # ~/.aws/sso/cache, breaking the operator's own ``aws sso login``
-        # until they ``sudo chown`` the cache back. The real fix is to
-        # stop relying on SSO inside containers entirely — fetch the
-        # worker IAM keys on the host and inject as AWS_ACCESS_KEY_ID /
-        # AWS_SECRET_ACCESS_KEY env vars (see plan §"Worker auth
-        # redesign" — task tracked separately). Until then, ``:ro`` is
-        # the lesser of two evils: workers may fail after ~1h when the
-        # operator's SSO token would otherwise refresh, but operator
-        # SSO login keeps working uninterrupted.
-        if self.deployment_config is not None and spec.family in {
-            AGENT_FAMILY, API_FAMILY,
-        }:
-            aws_dir = Path.home() / ".aws"
-            if aws_dir.exists():
-                mounts[str(aws_dir)] = {"bind": "/root/.aws", "mode": "ro"}
 
         return mounts
 

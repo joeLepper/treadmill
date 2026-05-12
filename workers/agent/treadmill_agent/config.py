@@ -57,21 +57,14 @@ class Settings:
     and hand it to ``gh auth login --with-token``. Unset in fully-local
     mode (where ``repo_mode='local'`` is the only path). There is no
     direct ``GITHUB_PAT`` env-var setting: PATs only enter the worker
-    via Secrets Manager."""
+    via Secrets Manager.
 
-    worker_aws_credentials_secret_name: str | None = None
-    """Optional Secrets Manager secret name holding long-lived IAM-User
-    keys for this deployment (ADR-0016 Q16.c). When set, the worker
-    bootstraps a boto3 session from the operator's default credential
-    chain (env / profile / instance role), uses that to fetch the
-    secret, then rebuilds a worker boto3 session from
-    ``{"aws_access_key_id": ..., "aws_secret_access_key": ...}`` for
-    every subsequent AWS call. When unset, the standard credential
-    chain handles the worker's AWS calls directly. Note: ADR-0016 also
-    permits the local-adapter to inject those keys as
-    ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` env vars before
-    the worker container starts; in that path this setting stays unset
-    and the env-var chain handles credential discovery."""
+    Note (ADR-0019): the worker's *AWS* credentials are no longer
+    fetched from Secrets Manager by the worker itself — the local-adapter
+    injects them as env vars at container-spawn time. The PAT fetch
+    above is still the worker's responsibility because that's how
+    ``gh`` ends up with the token in its keyring without the value
+    crossing the host/container env-var boundary."""
 
 
 _TRUE_VALUES = {"true", "1", "yes"}
@@ -118,9 +111,6 @@ def load() -> Settings:
             "/root/.claude/.credentials.json",
         ),
         github_pat_secret_name=os.environ.get("GITHUB_PAT_SECRET_NAME"),
-        worker_aws_credentials_secret_name=os.environ.get(
-            "WORKER_AWS_CREDENTIALS_SECRET_NAME",
-        ),
     )
 
 

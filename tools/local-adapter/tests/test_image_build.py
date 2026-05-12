@@ -302,6 +302,14 @@ def test_up_dev_local_calls_ensure_images_built_before_starting_services(
     monkeypatch.setattr(rt, "_ensure_images_built", lambda: order.append("build"))
     monkeypatch.setattr(rt, "_start_services", lambda: order.append("services"))
     monkeypatch.setattr(rt, "_report_up_dev_local", lambda cfg: None)
+    # ADR-0019: ``up`` fetches AWS credentials on the host before building
+    # any spec env. Stub the fetch so unit tests don't hit real boto3.
+    monkeypatch.setattr(rt, "_ensure_dev_local_credentials", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._operator_aws_env = {
+        "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
+        "AWS_SESSION_TOKEN": "z",
+    }
 
     rt.up()
     assert order == ["network", "build", "services"]
@@ -344,6 +352,15 @@ def test_start_worker_once_calls_ensure_images_built(
 
     build_calls: list[int] = []
     monkeypatch.setattr(rt, "_ensure_images_built", lambda: build_calls.append(1))
+    # ADR-0019: ``start_worker_once`` in a fresh CLI process fetches AWS
+    # credentials on the host before building the agent spec. Stub the
+    # fetch so this test doesn't hit real boto3.
+    monkeypatch.setattr(rt, "_ensure_dev_local_credentials", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._operator_aws_env = {
+        "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
+        "AWS_SESSION_TOKEN": "z",
+    }
 
     # Short-circuit the rest of ``start_worker_once`` so the test stays
     # focused on the build wiring.

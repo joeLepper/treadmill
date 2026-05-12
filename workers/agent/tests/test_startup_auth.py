@@ -1,8 +1,11 @@
-"""Worker startup-auth tests (Week 4 D.3).
+"""Worker startup-auth tests.
 
 Covers ``treadmill_agent.startup_auth``:
 
-  * AWS session resolution — default chain vs. credentials-from-secret.
+  * AWS session resolution — collapsed to a single
+    ``boto3.Session(region_name=...)`` per ADR-0019. The worker no
+    longer fetches its own credentials secret; the local-adapter
+    injects the IAM-User keys as env vars before the worker starts.
   * GitHub PAT fetch from Secrets Manager.
   * Handoff to ``gh auth login --with-token`` + ``gh auth setup-git``.
   * Fail-fast behavior on any failure in the chain.
@@ -42,7 +45,6 @@ def _settings(**overrides: Any) -> Settings:
         poll_wait_seconds=20,
         claude_credentials_path="/root/.claude/.credentials.json",
         github_pat_secret_name="treadmill-test/github-pat",
-        worker_aws_credentials_secret_name=None,
     )
     base.update(overrides)
     return Settings(**base)
@@ -51,13 +53,15 @@ def _settings(**overrides: Any) -> Settings:
 # ── AWS session resolution ──────────────────────────────────────────────────
 
 
-def test_resolve_session_uses_default_chain_when_no_secret_name(
+def test_resolve_session_returns_region_scoped_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When ``worker_aws_credentials_secret_name`` is unset, no Secrets
-    Manager call happens — we return ``boto3.Session(region_name=...)``
-    so the standard env / profile / instance-role chain handles auth."""
-    settings = _settings(worker_aws_credentials_secret_name=None)
+    """Per ADR-0019, ``resolve_worker_aws_session`` collapses to a single
+    ``boto3.Session(region_name=...)``. The injected env vars
+    (``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``) are picked up by
+    boto3's default env-var credential chain — no Secrets Manager call
+    happens inside the worker, ever."""
+    settings = _settings()
     fake_session = object()
 
     class _FakeBoto3Module:
@@ -69,104 +73,36 @@ def test_resolve_session_uses_default_chain_when_no_secret_name(
     monkeypatch.setattr(startup_auth, "boto3", _FakeBoto3Module)
     session = startup_auth.resolve_worker_aws_session(settings)
     assert session is fake_session
+    # Single call, no credentials kwargs — env-var chain is the only
+    # credential source.
     _FakeBoto3Module.Session.assert_called_once_with(region_name="us-east-1")
+    _, kwargs = _FakeBoto3Module.Session.call_args
+    assert "aws_access_key_id" not in kwargs
+    assert "aws_secret_access_key" not in kwargs
 
 
-def test_resolve_session_fetches_secret_when_secret_name_set(
+def test_resolve_session_never_touches_secrets_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the secret name is set, we (1) build a bootstrap session
-    via the default chain, (2) use it to fetch the credentials secret,
-    and (3) build the worker session from the fetched keys. The third
-    Session call is what the worker uses going forward."""
-    settings = _settings(
-        worker_aws_credentials_secret_name="treadmill-test/worker-creds",
-    )
-    creds_payload = {
-        "aws_access_key_id": "AKIAFAKE",
-        "aws_secret_access_key": "secret-key-value",
-    }
-    bootstrap_session = mock.MagicMock()
-    bootstrap_secrets = mock.MagicMock()
-    bootstrap_secrets.get_secret_value.return_value = {
-        "SecretString": json.dumps(creds_payload),
-    }
-    bootstrap_session.client.return_value = bootstrap_secrets
-
-    worker_session = object()
-
-    sessions_returned = [bootstrap_session, worker_session]
+    """Regression for ADR-0019: the worker must NOT call Secrets Manager
+    to fetch its own credentials. If it did, the bootstrap-vs-worker
+    pattern would be back and the SSO-cache failure mode along with it."""
+    settings = _settings()
+    secrets_calls: list[Any] = []
+    fake_session = mock.MagicMock()
+    # Any ``.client(...)`` call records the service name; if Secrets
+    # Manager is ever requested we fail loudly.
+    fake_session.client.side_effect = lambda svc, *a, **kw: secrets_calls.append(svc) or mock.MagicMock()
 
     class _FakeBoto3Module:
         class session:
-            Session = mock.MagicMock(side_effect=lambda *a, **kw: sessions_returned.pop(0))
+            Session = mock.MagicMock(return_value=fake_session)
 
         Session = session.Session
 
     monkeypatch.setattr(startup_auth, "boto3", _FakeBoto3Module)
-    session = startup_auth.resolve_worker_aws_session(settings)
-
-    assert session is worker_session
-    bootstrap_secrets.get_secret_value.assert_called_once_with(
-        SecretId="treadmill-test/worker-creds",
-    )
-    # Worker session built from the fetched keys.
-    _, kwargs = _FakeBoto3Module.session.Session.call_args_list[-1]
-    assert kwargs["aws_access_key_id"] == "AKIAFAKE"
-    assert kwargs["aws_secret_access_key"] == "secret-key-value"
-    assert kwargs["region_name"] == "us-east-1"
-
-
-def test_resolve_session_raises_when_credentials_secret_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = _settings(
-        worker_aws_credentials_secret_name="treadmill-test/missing",
-    )
-    bootstrap_session = mock.MagicMock()
-    bootstrap_secrets = mock.MagicMock()
-    bootstrap_secrets.get_secret_value.side_effect = RuntimeError(
-        "ResourceNotFoundException: secret not found",
-    )
-    bootstrap_session.client.return_value = bootstrap_secrets
-
-    class _FakeBoto3Module:
-        class session:
-            Session = mock.MagicMock(return_value=bootstrap_session)
-
-        Session = session.Session
-
-    monkeypatch.setattr(startup_auth, "boto3", _FakeBoto3Module)
-    with pytest.raises(StartupAuthError, match="failed to fetch worker AWS credentials"):
-        startup_auth.resolve_worker_aws_session(settings)
-
-
-def test_resolve_session_raises_when_credentials_payload_malformed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A secret whose ``SecretString`` is not JSON, or is JSON without
-    both keys, must fail fast — silent fallback to the default chain
-    would let a misconfigured deployment look "working" until the first
-    AWS call 403s."""
-    settings = _settings(
-        worker_aws_credentials_secret_name="treadmill-test/bad",
-    )
-    bootstrap_session = mock.MagicMock()
-    bootstrap_secrets = mock.MagicMock()
-    bootstrap_secrets.get_secret_value.return_value = {
-        "SecretString": "not-json-at-all",
-    }
-    bootstrap_session.client.return_value = bootstrap_secrets
-
-    class _FakeBoto3Module:
-        class session:
-            Session = mock.MagicMock(return_value=bootstrap_session)
-
-        Session = session.Session
-
-    monkeypatch.setattr(startup_auth, "boto3", _FakeBoto3Module)
-    with pytest.raises(StartupAuthError, match="not valid JSON"):
-        startup_auth.resolve_worker_aws_session(settings)
+    startup_auth.resolve_worker_aws_session(settings)
+    assert "secretsmanager" not in secrets_calls
 
 
 # ── GitHub PAT bootstrap ────────────────────────────────────────────────────

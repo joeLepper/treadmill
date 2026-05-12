@@ -1,50 +1,21 @@
-"""GitHub PAT bootstrap for the worker (Week 4 D.3).
+"""GitHub PAT bootstrap for the worker.
 
-When ``REPO_MODE=github``, the worker authenticates against GitHub via
-``gh``'s keyring rather than tokens-in-URLs or ``GH_TOKEN`` envvars.
-The PAT itself comes from AWS Secrets Manager — never from an env var
-the operator has to set on the host, never from a file mounted into
-the container.
+Per ADR-0019, the worker's AWS credentials arrive as
+``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` env vars injected by
+the local-adapter at container-spawn time. The worker never authenticates
+with SSO and never fetches its own credentials secret — its boto3
+session is just ``boto3.Session(region_name=...)``, with the standard
+env-var credential resolution picking up the injected keys.
 
-The flow at worker boot is:
-
-  1. (Optional) Resolve the worker's AWS credentials from a Secrets
-     Manager secret holding ``{"aws_access_key_id":..., "aws_secret_access_key":...}``
-     keyed by ``WORKER_AWS_CREDENTIALS_SECRET_NAME`` (ADR-0016 Q16.c).
-     This step uses a *bootstrap* boto3 session that picks up whatever
-     credentials are already on the host (env / profile / instance role)
-     — those credentials only need ``secretsmanager:GetSecretValue`` on
-     this one secret. We then build a *worker* session from the fetched
-     keys and use it for every subsequent AWS call.
-
-     The chicken-and-egg ("you need credentials to fetch credentials")
-     resolves cleanly: bootstrap = whatever's on the host, worker =
-     what's in the secret. In the dev-local topology the local-adapter
-     usually injects the IAM-User keys as env vars before the worker
-     container starts (then this function sees no secret name set and
-     just returns the default session) — but in the fully-remote
-     topology the worker may run with an instance role that has
-     read-access only to its own credential secret, in which case this
-     branch fires.
-
-  2. Fetch the GitHub PAT from Secrets Manager keyed by
-     ``github_pat_secret_name``. The PAT lives as a local variable in
-     this function for the duration of two subprocess calls and is
-     dereferenced immediately after.
-
-  3. Pipe the PAT into ``gh auth login --with-token`` via stdin (the
-     supported channel; the PAT lives in the kernel pipe buffer for
-     the duration of the call). Then run ``gh auth setup-git`` so
-     plain ``git clone https://github.com/...`` URLs route through
-     ``gh``'s credential helper.
-
-Any failure in any step raises — the worker exits fail-fast rather
-than continuing silently and 404-ing later.
+When ``REPO_MODE=github``, the worker still fetches the GitHub PAT from
+Secrets Manager at startup (using the same env-var-resolved boto3
+session) and hands it to ``gh`` via stdin so subsequent ``git`` /
+``gh`` calls authenticate via ``gh``'s keyring — no PAT in argv, env,
+or git URLs.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 from typing import TYPE_CHECKING
@@ -62,66 +33,21 @@ class StartupAuthError(RuntimeError):
 
 
 def resolve_worker_aws_session(settings: "Settings") -> boto3.session.Session:
-    """Return the boto3 session the worker should use for all AWS calls.
+    """Return the boto3 session the worker uses for every AWS call.
 
-    When ``settings.worker_aws_credentials_secret_name`` is unset, we
-    return ``boto3.Session(region_name=...)`` — boto3's default
-    credential chain (env vars / shared profile / instance role) takes
-    over from there.
+    Per ADR-0019: the local-adapter injects the worker's IAM-User keys
+    into the container as env vars before the worker process starts.
+    Boto3's default credential chain reads them from the environment;
+    this function just returns a region-scoped session and lets that
+    standard resolution happen.
 
-    When it is set, we build a *bootstrap* session (also via the default
-    chain), fetch the credentials secret with it, then build the
-    *worker* session from the fetched keys. The bootstrap session goes
-    out of scope at function return; the fetched secret string is held
-    only as long as needed to parse it.
+    The previous bootstrap-then-worker pattern (fetch a credentials
+    secret from Secrets Manager using a default-chain session, then
+    rebuild a session from the fetched keys) is gone — that path
+    required ``~/.aws`` mounted into the container, which broke on the
+    SSO-cache-refresh writeback path. See ADR-0019 for the full story.
     """
-    region = settings.aws_region
-    secret_name = settings.worker_aws_credentials_secret_name
-    if not secret_name:
-        logger.info(
-            "no WORKER_AWS_CREDENTIALS_SECRET_NAME; using default credential chain"
-        )
-        return boto3.Session(region_name=region)
-
-    logger.info(
-        "fetching worker AWS credentials from Secrets Manager: secret=%s region=%s",
-        secret_name, region,
-    )
-    # Bootstrap session uses whatever the operator's default chain
-    # provides (env / profile / instance role). It only needs
-    # ``secretsmanager:GetSecretValue`` on this single secret.
-    bootstrap_session = boto3.Session(region_name=region)
-    bootstrap_secrets = bootstrap_session.client("secretsmanager")
-    try:
-        resp = bootstrap_secrets.get_secret_value(SecretId=secret_name)
-    except Exception as exc:  # noqa: BLE001 - surface every failure as a clear error
-        raise StartupAuthError(
-            f"failed to fetch worker AWS credentials secret {secret_name!r}: {exc}"
-        ) from exc
-    raw = resp.get("SecretString")
-    if not raw:
-        raise StartupAuthError(
-            f"worker AWS credentials secret {secret_name!r} has no SecretString",
-        )
-    try:
-        creds = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise StartupAuthError(
-            f"worker AWS credentials secret {secret_name!r} is not valid JSON",
-        ) from exc
-    access_key = creds.get("aws_access_key_id")
-    secret_key = creds.get("aws_secret_access_key")
-    if not access_key or not secret_key:
-        raise StartupAuthError(
-            f"worker AWS credentials secret {secret_name!r} is missing "
-            "aws_access_key_id / aws_secret_access_key",
-        )
-    return boto3.Session(
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        aws_session_token=creds.get("aws_session_token"),
-        region_name=region,
-    )
+    return boto3.Session(region_name=settings.aws_region)
 
 
 def bootstrap_github_auth(

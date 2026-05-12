@@ -1,4 +1,4 @@
-"""LocalRuntime dev-local mode tests (Phase D.2).
+"""LocalRuntime dev-local mode tests (Phase D.2 + ADR-0019).
 
 Covers:
 
@@ -6,8 +6,16 @@ Covers:
 - Dev-local container env wiring — API + worker containers get the
   expected ``TREADMILL_*`` / aliased env vars from the YAML; no
   ``AWS_ENDPOINT_URL`` (that's the moto override).
-- ``~/.aws`` mount — wired into API + agent in dev-local; absent in
-  fully-local mode.
+- Host-side credential injection per ADR-0019:
+  * API container env carries operator-SSO-derived
+    ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` + ``AWS_SESSION_TOKEN``
+    (no ``AWS_PROFILE``).
+  * Worker container env carries IAM-User keys
+    ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` fetched from the
+    deployment's worker-aws-credentials secret (no ``AWS_PROFILE``,
+    no ``WORKER_AWS_CREDENTIALS_SECRET_NAME``).
+- ``~/.aws`` mount is gone in dev-local — that mount is the SSO-cache
+  failure mode ADR-0019 retires.
 - Fully-local path unchanged when no ``--deployment`` is passed.
 - Missing-YAML CLI handling — clean error, not a Python traceback.
 """
@@ -212,22 +220,62 @@ def test_load_deployment_yaml_aws_block_must_be_mapping(tmp_path: Path) -> None:
 # ── Dev-local env wiring (unit, no docker) ────────────────────────────────────
 
 
-def test_dev_local_api_env_wires_aws_resources_from_yaml() -> None:
+def _runtime_with_injected_creds(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+    *,
+    cfg: dict[str, Any] | None = None,
+    worker_creds: dict[str, str] | None = None,
+    operator_creds: dict[str, str] | None = None,
+) -> LocalRuntime:
+    """Build a LocalRuntime with pre-populated credential env dicts so
+    the env-builder unit tests don't have to mock boto3 + Secrets Manager.
+
+    Mirrors what ``_ensure_dev_local_credentials`` would do after a real
+    fetch. The helper is in this file (not a shared fixture) because
+    only the env-wiring tests need it; the integration paths exercise
+    the fetch separately."""
+    if cfg is None:
+        cfg = _valid_yaml_dict()
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    rt._worker_aws_env = worker_creds or {
+        "AWS_ACCESS_KEY_ID": "AKIA-WORKER-TEST",
+        "AWS_SECRET_ACCESS_KEY": "worker-secret-test",
+    }
+    rt._operator_aws_env = operator_creds or {
+        "AWS_ACCESS_KEY_ID": "ASIA-OPERATOR-TEST",
+        "AWS_SECRET_ACCESS_KEY": "operator-secret-test",
+        "AWS_SESSION_TOKEN": "operator-session-token-test",
+    }
+    return rt
+
+
+def test_dev_local_api_env_wires_aws_resources_from_yaml(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
     """The API container's env carries every AWS ARN/URL from the YAML
-    under the exact env-var names ``Settings`` reads."""
+    under the exact env-var names ``Settings`` reads, plus the
+    operator-SSO-derived static credentials injected per ADR-0019."""
     cfg = _valid_yaml_dict()
-    env = LocalRuntime._dev_local_api_env(cfg)
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_api_env(cfg)
 
     # Deployment-mode literal — the Settings field uses the TREADMILL_
     # env prefix (no explicit alias).
     assert env["TREADMILL_DEPLOYMENT_MODE"] == "dev_local"
 
     # AWS routing — real AWS, NO moto override.
-    assert env["AWS_PROFILE"] == "treadmill-personal"
+    # AWS_PROFILE is GONE per ADR-0019: env-var creds replace profile.
+    assert "AWS_PROFILE" not in env
     assert env["AWS_REGION"] == "us-east-1"
     assert env["AWS_DEFAULT_REGION"] == "us-east-1"
     assert env["AWS_ACCOUNT_ID"] == "111111111111"
     assert "AWS_ENDPOINT_URL" not in env
+
+    # Operator-SSO-derived static creds (per ADR-0019).
+    assert env["AWS_ACCESS_KEY_ID"] == "ASIA-OPERATOR-TEST"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "operator-secret-test"
+    assert env["AWS_SESSION_TOKEN"] == "operator-session-token-test"
 
     # AWS resources — aliased Settings fields take the unprefixed name.
     assert env["EVENTS_TOPIC_ARN"] == cfg["aws"]["events_topic_arn"]
@@ -246,12 +294,17 @@ def test_dev_local_api_env_wires_aws_resources_from_yaml() -> None:
     assert "treadmill-redis" in env["REDIS_URL"]
 
 
-def test_dev_local_worker_env_wires_github_mode_from_yaml() -> None:
-    """The worker container's env carries the github-mode contract per
-    D.1 + D.3 — repo mode, PAT secret name, AWS-credentials secret name,
-    AWS profile + region. ``AWS_ENDPOINT_URL`` MUST be absent."""
+def test_dev_local_worker_env_wires_github_mode_from_yaml(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """The worker container's env carries the github-mode contract —
+    repo mode, PAT secret name, AWS region — plus the IAM-User keys
+    fetched on the host and injected per ADR-0019.
+    ``AWS_ENDPOINT_URL``, ``AWS_PROFILE``, and
+    ``WORKER_AWS_CREDENTIALS_SECRET_NAME`` MUST all be absent."""
     cfg = _valid_yaml_dict()
-    env = LocalRuntime._dev_local_worker_env(cfg)
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_worker_env(cfg)
 
     # Repo mode flips from local (Week-2 default) to github (Week-4 D.1).
     assert env["REPO_MODE"] == "github"
@@ -262,17 +315,24 @@ def test_dev_local_worker_env_wires_github_mode_from_yaml() -> None:
     # API URL points at the sibling API container by DNS name.
     assert env["TREADMILL_API_URL"] == "http://treadmill-api:8088"
 
-    # Secrets names flow through verbatim (worker fetches the values at
-    # startup per D.3 — local-adapter doesn't fetch).
+    # PAT secret name flows through verbatim (worker still fetches PAT
+    # at startup).
     assert env["GITHUB_PAT_SECRET_NAME"] == cfg["secrets"]["github_pat_secret_name"]
-    assert env["WORKER_AWS_CREDENTIALS_SECRET_NAME"] == (
-        cfg["secrets"]["worker_aws_credentials_secret_name"]
-    )
 
-    # Real-AWS routing.
-    assert env["AWS_PROFILE"] == "treadmill-personal"
+    # Per ADR-0019: worker no longer needs the AWS credentials secret
+    # name (the local-adapter fetched the value and injected the keys).
+    assert "WORKER_AWS_CREDENTIALS_SECRET_NAME" not in env
+
+    # AWS routing — real AWS, no moto override, no profile.
+    assert "AWS_PROFILE" not in env
     assert env["AWS_REGION"] == "us-east-1"
     assert env["AWS_DEFAULT_REGION"] == "us-east-1"
+
+    # Worker IAM-User keys injected from the host fetch.
+    assert env["AWS_ACCESS_KEY_ID"] == "AKIA-WORKER-TEST"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "worker-secret-test"
+    # Worker IAM-User keys are long-lived — no session token.
+    assert "AWS_SESSION_TOKEN" not in env
 
     # Moto override is the smoking gun for "wrong mode" — must not be set.
     assert "AWS_ENDPOINT_URL" not in env
@@ -285,7 +345,7 @@ def test_dev_local_service_specs_includes_postgres_redis_api(
     """``_build_dev_local_service_specs`` returns exactly the three
     long-running services (Postgres + Redis + API). The agent worker
     is NOT a service — it's launched on-demand by ``start_worker_once``."""
-    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
     specs = rt._build_dev_local_service_specs(rt.deployment_config)
     families = {s.family for s in specs}
     assert families == {POSTGRES_FAMILY, REDIS_FAMILY, API_FAMILY}
@@ -302,7 +362,7 @@ def test_dev_local_service_specs_includes_postgres_redis_api(
     assert rd.port_mappings == [(6379, 16379)]
 
 
-# ── ~/.aws mount ──────────────────────────────────────────────────────────────
+# ── ~/.aws mount: gone in dev-local (ADR-0019) ──────────────────────────────
 
 
 def _make_runtime_with_aws_dir(
@@ -313,8 +373,10 @@ def _make_runtime_with_aws_dir(
 ) -> LocalRuntime:
     """Build a LocalRuntime with a fake ``~/.aws/`` on disk + stubbed docker.
 
-    The fake home dir contains an ``.aws/credentials`` so the
-    ``aws_dir.exists()`` check in ``_volumes_for`` finds it.
+    Used to prove the ``~/.aws`` mount is **not** added in dev-local
+    even when the operator has a working SSO profile — per ADR-0019 the
+    mount class of bugs is closed by the host-side env-var injection
+    path, regardless of whether ``~/.aws`` exists.
     """
     fake_home = tmp_path / "home"
     (fake_home / ".aws").mkdir(parents=True)
@@ -328,19 +390,18 @@ def _make_runtime_with_aws_dir(
     return LocalRuntime(tmp_path, deployment_config=deployment_config)
 
 
-def test_volumes_for_api_in_dev_local_mounts_aws_dir(
+def test_no_aws_mount_in_dev_local_for_api(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """API container in dev-local mode gets ``~/.aws`` mounted at
-    ``/root/.aws`` (read-only). Without this, ``AWS_PROFILE`` resolves
-    to "credentials file not found" inside the container.
+    """Per ADR-0019: the API container in dev-local does NOT mount
+    ``~/.aws``. Operator-SSO credentials are exported on the host and
+    injected as ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` +
+    ``AWS_SESSION_TOKEN`` env vars on the container.
 
-    Read-only is load-bearing: a ``rw`` mount lets the container's
-    root-uid SSO-token refresh leave root-owned files in the operator's
-    host cache, breaking the operator's own ``aws sso login`` until they
-    chown back. The proper fix (fetch worker keys on the host, inject as
-    env vars; drop the ~/.aws mount entirely) is tracked separately."""
+    Even when ``~/.aws`` exists on the host (the normal case), the
+    mount must not be added — the mount itself is the failure mode
+    we're retiring."""
     rt = _make_runtime_with_aws_dir(
         tmp_path, monkeypatch, deployment_config=_valid_yaml_dict(),
     )
@@ -349,22 +410,28 @@ def test_volumes_for_api_in_dev_local_mounts_aws_dir(
     api_spec = ContainerSpec(family=API_FAMILY, name="api", image="treadmill-api:dev")
     mounts = rt._volumes_for(api_spec)
 
-    expected_host = str(tmp_path / "home" / ".aws")
-    assert expected_host in mounts
-    assert mounts[expected_host] == {"bind": "/root/.aws", "mode": "ro"}
+    # No ~/.aws mount, no /root/.aws bind, no operator-home references.
+    expected_aws_host = str(tmp_path / "home" / ".aws")
+    assert expected_aws_host not in mounts
+    assert not any(m["bind"] == "/root/.aws" for m in mounts.values())
+    # API has no other dev-local volumes, so mounts is empty.
+    assert mounts == {}
 
 
-def test_volumes_for_agent_in_dev_local_mounts_aws_dir_alongside_claude(
+def test_no_aws_mount_in_dev_local_for_agent_only_claude(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Agent in dev-local gets BOTH the Claude creds mount AND the
-    ``~/.aws`` mount — the worker needs both to clone real repos and
-    talk to real AWS Secrets Manager."""
+    """Per ADR-0019: the agent worker in dev-local does NOT mount
+    ``~/.aws``. The IAM-User keys are fetched on the host and injected
+    as env vars (see worker env-wiring tests). The agent still gets
+    its Claude credentials + bare-repos mounts — those are unrelated
+    to the AWS credential path."""
     rt = _make_runtime_with_aws_dir(
         tmp_path, monkeypatch, deployment_config=_valid_yaml_dict(),
     )
-    # Also seed Claude credentials so we exercise both branches at once.
+    # Seed Claude credentials so we can verify the agent mount survives
+    # while the AWS mount stays gone.
     fake_home = tmp_path / "home"
     (fake_home / ".claude").mkdir()
     (fake_home / ".claude" / ".credentials.json").write_text("{}")
@@ -375,12 +442,12 @@ def test_volumes_for_agent_in_dev_local_mounts_aws_dir_alongside_claude(
     )
     mounts = rt._volumes_for(agent_spec)
 
-    # ~/.aws mount (read-only — see test_volumes_for_api_in_dev_local for why).
+    # ~/.aws mount is gone.
     aws_host = str(fake_home / ".aws")
-    assert aws_host in mounts
-    assert mounts[aws_host] == {"bind": "/root/.aws", "mode": "ro"}
+    assert aws_host not in mounts
+    assert not any(m["bind"] == "/root/.aws" for m in mounts.values())
 
-    # Claude creds mount (preserved from fully-local path).
+    # Claude creds mount survives — the worker still needs Claude.
     creds_host = str(fake_home / ".claude" / ".credentials.json")
     assert creds_host in mounts
     assert mounts[creds_host]["bind"] == "/root/.claude/.credentials.json"
@@ -390,9 +457,9 @@ def test_volumes_for_api_in_fully_local_has_no_aws_mount(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fully-local mode (no deployment_config) MUST NOT mount ``~/.aws``
-    — the API uses moto with fake credentials, not the operator's
-    real AWS profile."""
+    """Fully-local mode (no deployment_config) never had the ``~/.aws``
+    mount — moto uses fake credentials. This test stays as a regression
+    guard so fully-local mode doesn't accidentally pick up the mount."""
     rt = _make_runtime_with_aws_dir(
         tmp_path, monkeypatch, deployment_config=None,
     )
@@ -409,8 +476,8 @@ def test_volumes_for_postgres_in_dev_local_has_no_mounts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Postgres + Redis don't get the AWS mount — they're stock images
-    that don't talk to AWS at all."""
+    """Postgres + Redis ship without volumes — stock images that don't
+    talk to AWS at all."""
     rt = _make_runtime_with_aws_dir(
         tmp_path, monkeypatch, deployment_config=_valid_yaml_dict(),
     )
@@ -418,25 +485,151 @@ def test_volumes_for_postgres_in_dev_local_has_no_mounts(
     assert rt._volumes_for(pg_spec) == {}
 
 
-def test_volumes_for_dev_local_skips_aws_mount_when_dir_absent(
-    tmp_path: Path,
+# ── Host-side credential fetch (ADR-0019) ────────────────────────────────────
+
+
+def test_fetch_worker_credentials_returns_env_var_dict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the operator has no ``~/.aws`` (fresh laptop, SSO not yet
-    configured), the mount is silently skipped rather than failing —
-    the container will fail with a clear boto3 error instead."""
-    fake_home = tmp_path / "home-noaws"
-    fake_home.mkdir()
-    monkeypatch.setattr(runtime_module.Path, "home", classmethod(lambda cls: fake_home))
+    """``_fetch_worker_credentials`` fetches the worker IAM-User keys
+    from Secrets Manager (using the operator's profile) and returns a
+    dict shaped for direct injection as env vars on the worker
+    container — ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY``.
 
-    fake_docker_obj = MagicMock(name="fake_docker")
-    monkeypatch.setattr(
-        runtime_module.docker, "from_env", lambda: fake_docker_obj,
+    The secret name comes from the deployment YAML's
+    ``secrets.worker_aws_credentials_secret_name``; the payload is JSON
+    of shape ``{"aws_access_key_id": ..., "aws_secret_access_key": ...}``
+    (matching what ADR-0016 Q16.c standardizes for the IAM-User keys)."""
+    cfg = _valid_yaml_dict()
+
+    import json
+    fake_secrets_client = MagicMock()
+    fake_secrets_client.get_secret_value.return_value = {
+        "SecretString": json.dumps({
+            "aws_access_key_id": "AKIAFAKEWORKER",
+            "aws_secret_access_key": "worker-secret-from-secrets-manager",
+        }),
+    }
+    fake_session = MagicMock()
+    fake_session.client.return_value = fake_secrets_client
+
+    boto3_session_calls: list[dict[str, Any]] = []
+
+    def _fake_boto3_session(**kwargs: Any) -> Any:
+        boto3_session_calls.append(kwargs)
+        return fake_session
+
+    monkeypatch.setattr(runtime_module.boto3, "Session", _fake_boto3_session)
+
+    env = LocalRuntime._fetch_worker_credentials(cfg)
+
+    # Boto3 session was built using the operator's profile + region.
+    assert boto3_session_calls == [
+        {"profile_name": "treadmill-personal", "region_name": "us-east-1"},
+    ]
+    # Secrets Manager called with the secret name from the YAML.
+    fake_secrets_client.get_secret_value.assert_called_once_with(
+        SecretId="treadmill-personal/worker-aws-credentials",
     )
-    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    # The returned dict carries exactly the AWS env-var keys the
+    # worker's boto3 reads via the standard env chain.
+    assert env == {
+        "AWS_ACCESS_KEY_ID": "AKIAFAKEWORKER",
+        "AWS_SECRET_ACCESS_KEY": "worker-secret-from-secrets-manager",
+    }
 
-    api_spec = ContainerSpec(family=API_FAMILY, name="api", image="treadmill-api:dev")
-    assert rt._volumes_for(api_spec) == {}
+
+def test_fetch_worker_credentials_raises_when_secret_payload_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret whose payload is missing one of the required keys must
+    fail loudly — degraded creds would let the container start with a
+    half-resolved boto3 chain and 403 later."""
+    cfg = _valid_yaml_dict()
+    fake_secrets_client = MagicMock()
+    fake_secrets_client.get_secret_value.return_value = {
+        "SecretString": '{"aws_access_key_id": "AKIAFAKE"}',  # missing secret
+    }
+    fake_session = MagicMock()
+    fake_session.client.return_value = fake_secrets_client
+    monkeypatch.setattr(
+        runtime_module.boto3, "Session", lambda **kw: fake_session,
+    )
+
+    with pytest.raises(RuntimeError, match="missing aws_access_key_id / aws_secret_access_key"):
+        LocalRuntime._fetch_worker_credentials(cfg)
+
+
+def test_fetch_operator_sso_credentials_returns_three_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_fetch_operator_sso_credentials`` calls
+    ``boto3.Session(profile_name=...).get_credentials().get_frozen_credentials()``
+    and returns a dict shaped for direct injection on the API container —
+    ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` + ``AWS_SESSION_TOKEN``.
+
+    The session token is load-bearing for SSO-derived credentials:
+    without it, boto3 inside the container rejects the partial pair."""
+    cfg = _valid_yaml_dict()
+
+    frozen = MagicMock()
+    frozen.access_key = "ASIAFAKEOPERATOR"
+    frozen.secret_key = "operator-secret-from-sso"
+    frozen.token = "operator-sso-session-token"
+
+    creds = MagicMock()
+    creds.get_frozen_credentials.return_value = frozen
+
+    fake_session = MagicMock()
+    fake_session.get_credentials.return_value = creds
+
+    boto3_session_calls: list[dict[str, Any]] = []
+
+    def _fake_boto3_session(**kwargs: Any) -> Any:
+        boto3_session_calls.append(kwargs)
+        return fake_session
+
+    monkeypatch.setattr(runtime_module.boto3, "Session", _fake_boto3_session)
+
+    env = LocalRuntime._fetch_operator_sso_credentials(cfg)
+
+    assert boto3_session_calls == [
+        {"profile_name": "treadmill-personal", "region_name": "us-east-1"},
+    ]
+    # All three env vars present — boto3 rejects an SSO key/secret pair
+    # without the session token, so the test asserts on all three.
+    assert env == {
+        "AWS_ACCESS_KEY_ID": "ASIAFAKEOPERATOR",
+        "AWS_SECRET_ACCESS_KEY": "operator-secret-from-sso",
+        "AWS_SESSION_TOKEN": "operator-sso-session-token",
+    }
+
+
+def test_fetch_operator_sso_credentials_exits_on_expired_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When the operator's SSO token is expired, we print a clear
+    remediation message (``aws sso login --profile <profile>``) and
+    exit non-zero — proceeding with degraded credentials is worse than
+    failing the ``up``. Per ADR-0019 §"Quirks worth flagging"."""
+    import botocore.exceptions
+    cfg = _valid_yaml_dict()
+
+    def _raise_unauthorized(**kwargs: Any) -> Any:
+        session = MagicMock()
+        session.get_credentials.side_effect = (
+            botocore.exceptions.UnauthorizedSSOTokenError()
+        )
+        return session
+
+    monkeypatch.setattr(runtime_module.boto3, "Session", _raise_unauthorized)
+
+    with pytest.raises(SystemExit) as excinfo:
+        LocalRuntime._fetch_operator_sso_credentials(cfg)
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "aws sso login --profile treadmill-personal" in out
 
 
 # ── Dev-local up: skips moto + skips synth ────────────────────────────────────
@@ -464,6 +657,14 @@ def test_up_dev_local_skips_moto_and_synth(
     # ``_ensure_images_built`` would shell out to ``docker build`` —
     # stub it; image-rebuild behavior is exercised in its own tests.
     monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    # Per ADR-0019: ``up`` fetches AWS credentials on the host. Stub
+    # the fetch so we don't hit real boto3/Secrets Manager in unit tests.
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._operator_aws_env = {
+        "AWS_ACCESS_KEY_ID": "x",
+        "AWS_SECRET_ACCESS_KEY": "y",
+        "AWS_SESSION_TOKEN": "z",
+    }
 
     rt.up()
 

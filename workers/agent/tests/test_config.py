@@ -98,10 +98,8 @@ def test_load_github_pat_secret_name_defaults_to_none(
     the github-auth branch."""
     _required_env(monkeypatch)
     monkeypatch.delenv("GITHUB_PAT_SECRET_NAME", raising=False)
-    monkeypatch.delenv("WORKER_AWS_CREDENTIALS_SECRET_NAME", raising=False)
     settings = config.load()
     assert settings.github_pat_secret_name is None
-    assert settings.worker_aws_credentials_secret_name is None
 
 
 def test_load_reads_github_pat_secret_name_from_env(
@@ -118,21 +116,3 @@ def test_load_reads_github_pat_secret_name_from_env(
     )
     settings = config.load()
     assert settings.github_pat_secret_name == "treadmill-personal/github-pat"
-
-
-def test_load_reads_worker_aws_credentials_secret_name_from_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Per ADR-0016 Q16.c: long-lived IAM-User keys come from this
-    secret in fully-remote mode. dev-local typically injects the keys
-    as env vars via the local-adapter and leaves this unset."""
-    _required_env(monkeypatch)
-    monkeypatch.setenv(
-        "WORKER_AWS_CREDENTIALS_SECRET_NAME",
-        "treadmill-personal/worker-aws-credentials",
-    )
-    settings = config.load()
-    assert (
-        settings.worker_aws_credentials_secret_name
-        == "treadmill-personal/worker-aws-credentials"
-    )

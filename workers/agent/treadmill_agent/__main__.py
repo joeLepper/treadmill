@@ -4,8 +4,11 @@ Runs as the ECS task command. Wires boto3 clients, the API client, and
 the event publisher, then hands off to ``runner.run`` for the main loop.
 
 When ``REPO_MODE=github`` the worker also runs the GitHub PAT bootstrap
-sequence at startup — see ``startup_auth.py`` for the rationale and
-the chicken-and-egg around bootstrap-vs-worker AWS credentials.
+sequence at startup — see ``startup_auth.py`` for the rationale.
+
+Per ADR-0019, the worker's AWS credentials are injected as env vars by
+the local-adapter before this process starts; the boto3 session here
+just lets the default env-var resolution pick them up.
 """
 
 from __future__ import annotations
@@ -31,12 +34,9 @@ def main() -> int:
         settings.repo_mode, settings.exit_after_step,
     )
 
-    # Resolve the AWS session the worker uses for every AWS call. When
-    # ``worker_aws_credentials_secret_name`` is set, this fetches the
-    # long-lived IAM-User keys from Secrets Manager (using a bootstrap
-    # session built from the operator's default credential chain) and
-    # returns a session bound to those keys. When unset, the default
-    # chain is used directly.
+    # Boto3 session — credentials come from env vars (injected by the
+    # local-adapter per ADR-0019); the default credential chain reads
+    # them. Region is the only thing we set explicitly.
     aws_session = startup_auth.resolve_worker_aws_session(settings)
 
     # GitHub-mode workers authenticate via ``gh``'s keyring; the PAT is
