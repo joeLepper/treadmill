@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     Boolean,
+    Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
@@ -39,6 +41,30 @@ from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from treadmill_api.database import Base
+
+
+class OutputKind(StrEnum):
+    """Per ADR-0022 — what kind of output a Role produces.
+
+    The runner dispatches its post-Claude-Code disposition on this field:
+
+      * ``CODE`` — diff → commit → push → PR. Empty diff is failure.
+      * ``REVIEW`` — empty diff is success; runner posts ``gh pr review``.
+      * ``ANALYSIS`` — empty diff is success; output flows to downstream step
+        via the existing ADR-0015 step-output composition.
+      * ``PLAN_DOC`` — like ``CODE`` but the diff MUST be confined to
+        ``docs/plans/``.
+
+    Spellings are lowercase snake_case per ADR-0016's canonical-spellings
+    discipline. The Ralph-loop validation pattern reserves the word
+    "validation"; this enum deliberately does not include it (see ADR-0022
+    §"Scope discipline: 'validation' is reserved").
+    """
+
+    CODE = "code"
+    REVIEW = "review"
+    ANALYSIS = "analysis"
+    PLAN_DOC = "plan_doc"
 
 
 class Workflow(Base):
@@ -138,6 +164,19 @@ class Role(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    output_kind: Mapped[OutputKind] = mapped_column(
+        SAEnum(
+            OutputKind,
+            name="output_kind",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            native_enum=False,
+            length=32,
+        ),
+        nullable=False,
+    )
+    """Per ADR-0022 — declares what the worker does with this role's
+    Claude Code output. The runner's per-kind dispatch table reads this
+    field to pick the right disposition handler."""
     # Reserved for the future multi-tier ADR; v0 ships single-tier only (no wire field).
     compute_tier: Mapped[str] = mapped_column(
         String(32),

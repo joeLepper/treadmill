@@ -56,6 +56,7 @@ def _sample_response(
             "id": "role-author",
             "model": "claude-opus-4-7",
             "system_prompt": "be a coder",
+            "output_kind": "code",
             "skills": (
                 [{"id": "skill-author", "name": "authoring", "content": "do good"}]
                 if with_skill else []
@@ -68,6 +69,7 @@ def _sample_response(
                 if with_hook else []
             ),
         },
+        "pr_number": None,
     }
     if prior_steps is not None:
         base["prior_steps"] = prior_steps

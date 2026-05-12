@@ -60,6 +60,9 @@ class Artifact(BaseModel):
         "file_path",
         "doc_path",
         "log_uri",
+        # ADR-0022 per-kind dispatch handler outputs.
+        "analysis",   # text emitted by an ``analysis``-kind role
+        "pr_review",  # the verdict from a ``review``-kind role
     ]
     value: str
     label: str | None = None

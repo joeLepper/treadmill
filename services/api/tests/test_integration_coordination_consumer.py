@@ -168,8 +168,8 @@ def _seed_full_sync(
                 "VALUES ('wf-author', 1) RETURNING id"
             )).scalar()
         conn.execute(sa.text(
-            "INSERT INTO roles (id, model, system_prompt) "
-            "VALUES ('role-author', 'claude-opus-4-7', 'be a coder') "
+            "INSERT INTO roles (id, model, system_prompt, output_kind) "
+            "VALUES ('role-author', 'claude-opus-4-7', 'be a coder', 'code') "
             "ON CONFLICT DO NOTHING"
         ))
         plan_id = conn.execute(sa.text(

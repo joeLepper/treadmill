@@ -200,13 +200,13 @@ def _seed_multistep_run(
         # Two distinct roles so step 1 ≠ step 0 (the multi-step shape
         # from ADR-0015's matrix uses analyzer → action).
         conn.execute(sa.text(
-            "INSERT INTO roles (id, model, system_prompt) "
-            "VALUES ('role-analyzer', 'claude', '') "
+            "INSERT INTO roles (id, model, system_prompt, output_kind) "
+            "VALUES ('role-analyzer', 'claude', '', 'analysis') "
             "ON CONFLICT DO NOTHING"
         ))
         conn.execute(sa.text(
-            "INSERT INTO roles (id, model, system_prompt) "
-            "VALUES ('role-code-author', 'claude', '') "
+            "INSERT INTO roles (id, model, system_prompt, output_kind) "
+            "VALUES ('role-code-author', 'claude', '', 'code') "
             "ON CONFLICT DO NOTHING"
         ))
         for i in range(n_steps):

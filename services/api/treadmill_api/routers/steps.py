@@ -34,12 +34,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.models import (
     Hook,
+    OutputKind,
     Plan,
     Role,
     RoleHook,
     RoleSkill,
     Skill,
     Task,
+    TaskPR,
     Workflow,
     WorkflowRun,
     WorkflowRunStep,
@@ -104,6 +106,9 @@ class _RoleBlock(BaseModel):
     id: str
     model: str
     system_prompt: str
+    output_kind: OutputKind
+    """Per ADR-0022 — the runner reads this to pick its per-kind
+    disposition handler (code / review / analysis / plan_doc)."""
     skills: list[_SkillBlock]
     hooks: list[_HookBlock]
 
@@ -139,6 +144,12 @@ class WorkerContextResponse(BaseModel):
     task: _TaskBlock
     plan: _PlanBlock
     role: _RoleBlock
+    pr_number: int | None = None
+    """Per ADR-0022 — the PR number this step relates to. Derived from
+    ``task_prs`` when a row exists for the task; ``None`` otherwise.
+    Required for review-kind steps (the worker raises
+    ``MissingContextError`` when absent); optional for other kinds.
+    The per-kind handler enforces."""
     prior_steps: list[PriorStepBlock] = []
     """Completed prior steps in the same run, ordered by ``step_index``.
 
@@ -237,6 +248,21 @@ async def get_step_context(
         )
     ).scalars().all()
 
+    # Per ADR-0022 — look up the task's PR number via the ``task_prs``
+    # bridge if one exists. The bridge row is created by the worker when
+    # it opens the PR (or by the webhook ingestion path for externally-
+    # initiated PRs); a task that hasn't opened a PR yet has no row, so
+    # ``pr_number`` stays ``None``. Per-kind handlers enforce per their
+    # contract (review needs it; analysis / code / plan_doc don't).
+    pr_row = (
+        await session.execute(
+            select(TaskPR.pr_number)
+            .where(TaskPR.task_id == task.id)
+            .order_by(TaskPR.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
     # Prior steps for ADR-0015's multi-step workflows. Completed-only:
     # the worker only consumes finished analyzer output (pending /
     # running steps haven't produced anything to consume; failed steps
@@ -276,6 +302,7 @@ async def get_step_context(
         ),
         role=_RoleBlock(
             id=role.id, model=role.model, system_prompt=role.system_prompt,
+            output_kind=role.output_kind,
             skills=[
                 _SkillBlock(id=s.id, name=s.name, content=s.content)
                 for s in skill_rows
@@ -288,6 +315,7 @@ async def get_step_context(
                 for h in hook_rows
             ],
         ),
+        pr_number=pr_row,
         prior_steps=[
             PriorStepBlock(
                 step_index=ps.step_index,

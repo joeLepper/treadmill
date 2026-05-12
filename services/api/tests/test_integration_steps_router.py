@@ -117,6 +117,7 @@ def _seed_full_graph(client: httpx.Client) -> tuple[str, str]:
     client.post("/api/v1/roles", json={
         "id": "role-author", "model": "claude-opus-4-7",
         "system_prompt": "be a coder",
+        "output_kind": "code",
         "skills": ["skill-author"], "hooks": ["hook-pre"],
     })
     client.post("/api/v1/workflows", json={"id": "wf-author"})
@@ -266,11 +267,13 @@ def _seed_two_step_workflow(
     client.post("/api/v1/roles", json={
         "id": "role-analyzer", "model": "claude-haiku-4-5",
         "system_prompt": "be an analyzer",
+        "output_kind": "analysis",
         "skills": [], "hooks": [],
     })
     client.post("/api/v1/roles", json={
         "id": "role-actor", "model": "claude-opus-4-7",
         "system_prompt": "be an actor",
+        "output_kind": "code",
         "skills": [], "hooks": [],
     })
     client.post("/api/v1/workflows", json={"id": "wf-two-step"})
@@ -388,14 +391,17 @@ def test_get_step_prior_steps_ordered_by_step_index(
     # Build a 3-role / 3-step workflow.
     client.post("/api/v1/roles", json={
         "id": "role-r1", "model": "m", "system_prompt": "p",
+        "output_kind": "code",
         "skills": [], "hooks": [],
     })
     client.post("/api/v1/roles", json={
         "id": "role-r2", "model": "m", "system_prompt": "p",
+        "output_kind": "code",
         "skills": [], "hooks": [],
     })
     client.post("/api/v1/roles", json={
         "id": "role-r3", "model": "m", "system_prompt": "p",
+        "output_kind": "code",
         "skills": [], "hooks": [],
     })
     client.post("/api/v1/workflows", json={"id": "wf-three-step"})
@@ -462,6 +468,7 @@ def test_get_step_returns_skills_and_hooks_in_order(
         })
     client.post("/api/v1/roles", json={
         "id": "r-ordered", "model": "claude", "system_prompt": "p",
+        "output_kind": "code",
         "skills": ["s2", "s1", "s3"],  # intentionally out of alphabetical order
     })
     client.post("/api/v1/workflows", json={"id": "wf-ordered"})

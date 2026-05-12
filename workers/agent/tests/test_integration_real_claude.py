@@ -135,9 +135,11 @@ def _ctx(
                 "You are working in a fresh repo. Add exactly one line. "
                 "Be terse — no commentary."
             ),
+            output_kind="code",
             skills=[],
             hooks=[],
         ),
+        pr_number=None,
         prior_steps=[],
     )
 

@@ -71,6 +71,7 @@ async def test_create_role_500s_cleanly_if_load_returns_none(
         id="role-vanished",
         model="claude",
         system_prompt="be a coder",
+        output_kind="code",
     )
     session = _StubSession()
 

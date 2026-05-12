@@ -166,8 +166,8 @@ def _seed_wf_author(engine: Engine) -> uuid.UUID:
             "VALUES ('wf-author', 1) RETURNING id"
         )).scalar()
         conn.execute(sa.text(
-            "INSERT INTO roles (id, model, system_prompt) "
-            "VALUES ('role-author', 'claude', '') ON CONFLICT DO NOTHING"
+            "INSERT INTO roles (id, model, system_prompt, output_kind) "
+            "VALUES ('role-author', 'claude', '', 'code') ON CONFLICT DO NOTHING"
         ))
         conn.execute(sa.text(
             "INSERT INTO workflow_version_steps "

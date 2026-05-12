@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from treadmill_api.models import OutputKind
+
 
 # Model identifiers — kept as a small constant so the test can assert
 # the planner is the expensive model and the others share the cheap one.
@@ -62,6 +64,7 @@ _ROLES: list[dict[str, Any]] = [
     {
         "id": "role-planner",
         "model": PLANNER_MODEL,
+        "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
             "You are the Treadmill planner — analyzer step of "
             "``wf-plan``. Input: a free-text intent plus read-only "
@@ -80,6 +83,7 @@ _ROLES: list[dict[str, Any]] = [
     {
         "id": "role-doc-author",
         "model": WORKER_MODEL,
+        "output_kind": OutputKind.PLAN_DOC,
         "system_prompt": (
             "You are the Treadmill plan-doc author — action step of "
             "``wf-plan``. Input: the planner's ``task_directive`` at "
@@ -100,6 +104,7 @@ _ROLES: list[dict[str, Any]] = [
     {
         "id": "role-code-author",
         "model": WORKER_MODEL,
+        "output_kind": OutputKind.CODE,
         "system_prompt": (
             "You are the Treadmill code author — the shared terminal "
             "for ``wf-author``, ``wf-feedback``, ``wf-ci-fix``, "
@@ -131,6 +136,7 @@ _ROLES: list[dict[str, Any]] = [
     {
         "id": "role-reviewer",
         "model": WORKER_MODEL,
+        "output_kind": OutputKind.REVIEW,
         "system_prompt": (
             "You are the Treadmill reviewer — single step of "
             "``wf-review``. Input: the PR diff (fetch via "
@@ -147,12 +153,28 @@ _ROLES: list[dict[str, Any]] = [
             "feedback; ``commit_sha`` top-level MUST be the PR HEAD "
             "SHA you reviewed — ADR-0013's mergeability VIEW joins on "
             "this field, so a missing/wrong SHA makes the review "
-            "invisible to merge eligibility."
+            "invisible to merge eligibility.\n\n"
+            "When you have completed your review, end your response "
+            "with a line of the form:\n"
+            "  ``VERDICT: approve`` — code is acceptable as-is\n"
+            "  ``VERDICT: request_changes`` — material problems exist; "
+            "the PR should not merge\n"
+            "  ``VERDICT: comment`` — observations only; no merge gate\n"
+            "If you don't include a VERDICT line, your review defaults "
+            "to ``comment``. Per ADR-0022, the worker greps your output "
+            "for the last matching VERDICT line and uses it to drive "
+            "``gh pr review --approve`` / ``--request-changes`` / "
+            "``--comment``."
         ),
     },
     {
         "id": "role-validator",
         "model": WORKER_MODEL,
+        # Per ADR-0022 §"Migration of seeded roles" — classified as
+        # ``analysis`` placeholder at v0. The Ralph-loop validation ADR
+        # (forthcoming) will reclassify this role or move it to a
+        # non-Claude-Code runner path entirely.
+        "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
             "You are the Treadmill validator — single step of "
             "``wf-validate``. Input: the task's ``validation`` entries "
@@ -179,6 +201,7 @@ _ROLES: list[dict[str, Any]] = [
     {
         "id": "role-feedback-analyzer",
         "model": WORKER_MODEL,
+        "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
             "You are the Treadmill feedback analyzer — analyzer step "
             "of ``wf-feedback``. Input: the inbound PR review comments "
@@ -201,6 +224,7 @@ _ROLES: list[dict[str, Any]] = [
     {
         "id": "role-ci-analyzer",
         "model": WORKER_MODEL,
+        "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
             "You are the Treadmill CI-failure analyzer — analyzer step "
             "of ``wf-ci-fix``. Input: the failing check name + URL + "
@@ -222,6 +246,7 @@ _ROLES: list[dict[str, Any]] = [
     {
         "id": "role-conflict-analyzer",
         "model": WORKER_MODEL,
+        "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
             "You are the Treadmill conflict analyzer — analyzer step "
             "of ``wf-conflict``. Input: the conflict tree against "
@@ -383,6 +408,77 @@ _DEFAULT_EVENT_TRIGGERS: list[tuple[str, str]] = [
 ]
 
 
+class WorkflowShapeError(StarterSeedError):
+    """Raised by ``_validate_workflow_shapes`` when a seeded workflow
+    composes its steps in a way that ADR-0022's per-kind dispatch can't
+    serve at run time.
+
+    A best-effort static check at v0 — the run-time worker still raises
+    on misuse (e.g. a review-kind step against a task that hasn't opened
+    a PR yet). Static rejection is the cheaper feedback loop.
+    """
+
+
+def _validate_workflow_shapes() -> None:
+    """Reject mis-composed workflow step lists per ADR-0022.
+
+    Three best-effort rules at v0:
+
+      1. A ``review``-kind step can't be the first step of a workflow
+         that *opens* the PR — wf-author opens the PR in its first
+         step, so it would have nothing to review yet. Equivalent
+         shape: any workflow whose first step is a ``review`` role.
+      2. A ``plan_doc``-kind step only appears in ``wf-plan``. The
+         path-confinement constraint (diff under ``docs/plans/``) is
+         workflow-specific.
+      3. Every step's role exists in the global roles list. The seed
+         function POSTs roles before workflows; an unresolved
+         reference would 400 at POST time but it's better to raise
+         here with a clean error than to wait for the network round-trip.
+
+    Stronger compile-time validation (orphan-analysis detection, full
+    analyzer→action wiring checks) is a future cleanup.
+    """
+    role_kinds: dict[str, OutputKind] = {
+        role["id"]: role["output_kind"] for role in _all_roles()
+    }
+    for wf in STARTERS:
+        steps = wf["steps"]
+        if not steps:
+            continue
+        # Rule 3: every step's role resolves.
+        for step in steps:
+            if step["role_id"] not in role_kinds:
+                raise WorkflowShapeError(
+                    f"workflow {wf['id']!r} step {step['name']!r} references "
+                    f"undefined role {step['role_id']!r}"
+                )
+        # Rule 1: first step can't be a review-kind role (review needs
+        # a PR; if this workflow is the one that opens the PR, the
+        # review has nothing to look at).
+        first_kind = role_kinds[steps[0]["role_id"]]
+        if first_kind is OutputKind.REVIEW and wf["id"] != "wf-review":
+            # ``wf-review`` is fired by ``pr_opened`` (a PR already
+            # exists at trigger time), so a review-first composition
+            # is fine there. Any other workflow that opens with a
+            # review step is the misuse this rule catches.
+            raise WorkflowShapeError(
+                f"workflow {wf['id']!r} starts with a review-kind step "
+                f"({steps[0]['role_id']!r}); a review needs an existing PR, "
+                "so review-first composition is only valid for workflows "
+                "fired by PR-existence events (today, just wf-review)."
+            )
+        # Rule 2: plan_doc only in wf-plan.
+        for step in steps:
+            kind = role_kinds[step["role_id"]]
+            if kind is OutputKind.PLAN_DOC and wf["id"] != "wf-plan":
+                raise WorkflowShapeError(
+                    f"workflow {wf['id']!r} step {step['name']!r} uses a "
+                    f"plan_doc-kind role ({step['role_id']!r}); the "
+                    "docs/plans/ confinement constraint is wf-plan-specific."
+                )
+
+
 def seed(api_client: _SeedClient) -> int:
     """Seed the starter workflows + roles via the API CRUD endpoints.
 
@@ -399,6 +495,11 @@ def seed(api_client: _SeedClient) -> int:
     """
     from treadmill_cli.api_client import ApiError  # local import for protocol decoupling
 
+    # Best-effort static check (ADR-0022): reject mis-composed workflows
+    # before we touch the network. A misuse caught here saves the
+    # operator a partially-seeded install + a retry.
+    _validate_workflow_shapes()
+
     fresh_workflow_count = 0
 
     # Roles first — workflows reference them by id.
@@ -410,6 +511,12 @@ def seed(api_client: _SeedClient) -> int:
                     "id": role["id"],
                     "model": role["model"],
                     "system_prompt": role["system_prompt"],
+                    # Per ADR-0022 — every role declares its output kind
+                    # so the runner's per-kind dispatch can pick the
+                    # right disposition handler. ``OutputKind`` is a
+                    # ``StrEnum`` so its value is wire-safe (lowercase
+                    # snake_case per ADR-0016).
+                    "output_kind": role["output_kind"].value,
                     "skills": [],
                     "hooks": [],
                 },

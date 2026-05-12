@@ -139,8 +139,8 @@ def seed_wf_author(engine: Engine) -> Iterator[None]:
             "VALUES ('wf-author', 1) RETURNING id"
         )).scalar()
         conn.execute(sa.text(
-            "INSERT INTO roles (id, model, system_prompt) "
-            "VALUES ('role-author', 'claude', '')"
+            "INSERT INTO roles (id, model, system_prompt, output_kind) "
+            "VALUES ('role-author', 'claude', '', 'code')"
         ))
         conn.execute(sa.text(
             "INSERT INTO workflow_version_steps "

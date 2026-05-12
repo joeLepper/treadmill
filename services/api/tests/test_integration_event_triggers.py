@@ -192,8 +192,8 @@ def _seed_world(
         # Roles.
         for role_id in {r for _, r in _WORKFLOW_DEFS}:
             conn.execute(sa.text(
-                "INSERT INTO roles (id, model, system_prompt) "
-                "VALUES (:r, 'claude', '') ON CONFLICT DO NOTHING"
+                "INSERT INTO roles (id, model, system_prompt, output_kind) "
+                "VALUES (:r, 'claude', '', 'code') ON CONFLICT DO NOTHING"
             ), {"r": role_id})
 
         # Workflows + v1 versions + one step each.

@@ -166,6 +166,7 @@ class TestRoles:
         client.post("/api/v1/hooks", json={"id": "hook-h1", "name": "n", "event": "x", "command": "c"})
         body = {
             "id": "role-x", "model": "claude", "system_prompt": "be a coder",
+            "output_kind": "code",
             "skills": ["skill-s1", "skill-s2"],
             "hooks": ["hook-h1"],
         }
@@ -180,6 +181,7 @@ class TestRoles:
     ) -> None:
         body = {
             "id": "role-y", "model": "claude", "system_prompt": "x",
+            "output_kind": "code",
             "skills": ["skill-missing"],
         }
         resp = client.post("/api/v1/roles", json=body)
@@ -193,6 +195,7 @@ class TestRoles:
             client.post("/api/v1/skills", json={"id": slug, "name": "n", "content": "c"})
         body = {
             "id": "role-ordered", "model": "claude", "system_prompt": "x",
+            "output_kind": "code",
             "skills": ["skill-c", "skill-a", "skill-b"],
         }
         client.post("/api/v1/roles", json=body)
@@ -207,6 +210,7 @@ class TestWorkflows:
     def _seed_role(self, client: httpx.Client, role_id: str = "role-z") -> None:
         client.post("/api/v1/roles", json={
             "id": role_id, "model": "claude", "system_prompt": "x",
+            "output_kind": "code",
         })
 
     def test_create_workflow(self, client: httpx.Client, truncate: None) -> None:
@@ -271,6 +275,7 @@ class TestTasks:
     def _seed_workflow(self, client: httpx.Client) -> None:
         client.post("/api/v1/roles", json={
             "id": "role-author", "model": "claude", "system_prompt": "x",
+            "output_kind": "code",
         })
         client.post("/api/v1/workflows", json={"id": "wf-author"})
         client.post(

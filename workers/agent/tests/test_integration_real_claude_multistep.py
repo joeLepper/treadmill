@@ -129,9 +129,11 @@ def _multistep_ctx(
                 "line to add. Edit that file, add that line. Touch no "
                 "other file. Be terse — one-line summary."
             ),
+            output_kind="code",
             skills=[],
             hooks=[],
         ),
+        pr_number=None,
         prior_steps=prior_steps,
     )
 

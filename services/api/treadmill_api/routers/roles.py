@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from treadmill_api.dependencies_db import get_session
-from treadmill_api.models import Hook, Role, RoleHook, RoleSkill, Skill
+from treadmill_api.models import Hook, OutputKind, Role, RoleHook, RoleSkill, Skill
 
 
 router = APIRouter(prefix="/api/v1/roles", tags=["roles"])
@@ -30,6 +30,9 @@ class RoleCreateRequest(BaseModel):
     id: str = Field(..., min_length=1, max_length=64)
     model: str = Field(..., min_length=1, max_length=128)
     system_prompt: str
+    output_kind: OutputKind
+    """Per ADR-0022 — required. The runner reads this off the step
+    context to pick the right post-Claude-Code disposition handler."""
     skills: list[str] = Field(default_factory=list)
     hooks: list[str] = Field(default_factory=list)
 
@@ -38,6 +41,7 @@ class RoleResponse(BaseModel):
     id: str
     model: str
     system_prompt: str
+    output_kind: OutputKind
     skills: list[str]
     hooks: list[str]
     created_at: datetime
@@ -65,6 +69,7 @@ async def _load_role_with_refs(session: AsyncSession, role_id: str) -> tuple[Rol
 def _to_response(role: Role, skills: list[str], hooks: list[str]) -> RoleResponse:
     return RoleResponse(
         id=role.id, model=role.model, system_prompt=role.system_prompt,
+        output_kind=role.output_kind,
         skills=skills, hooks=hooks,
         created_at=role.created_at, updated_at=role.updated_at,
     )
@@ -108,6 +113,7 @@ async def create_role(
     await _validate_refs_exist(session, body.skills, body.hooks)
     role = Role(
         id=body.id, model=body.model, system_prompt=body.system_prompt,
+        output_kind=body.output_kind,
     )
     session.add(role)
     for idx, skill_id in enumerate(body.skills):

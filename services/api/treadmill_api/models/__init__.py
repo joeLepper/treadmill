@@ -13,6 +13,7 @@ from treadmill_api.models.task import Task, TaskDependency, TaskPR, TaskValidati
 from treadmill_api.models.workflow import (
     EventTrigger,
     Hook,
+    OutputKind,
     Role,
     RoleHook,
     RoleSkill,
@@ -26,6 +27,7 @@ __all__ = [
     "Event",
     "EventTrigger",
     "Hook",
+    "OutputKind",
     "Plan",
     "Role",
     "RoleHook",

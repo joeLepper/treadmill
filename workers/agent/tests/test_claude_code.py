@@ -22,6 +22,7 @@ def _role(**overrides) -> Role:
     base = dict(
         id="role-author", model="claude-opus-4-7",
         system_prompt="be a coder",
+        output_kind="code",
         skills=[], hooks=[],
     )
     base.update(overrides)

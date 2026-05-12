@@ -187,8 +187,8 @@ class TransitionFixtureBuilder:
     def _ensure_role(self, conn: Connection, role_id: str) -> str:
         conn.execute(
             sa.text(
-                "INSERT INTO roles (id, model, system_prompt) "
-                "VALUES (:id, 'claude', '') ON CONFLICT (id) DO NOTHING"
+                "INSERT INTO roles (id, model, system_prompt, output_kind) "
+                "VALUES (:id, 'claude', '', 'code') ON CONFLICT (id) DO NOTHING"
             ),
             {"id": role_id},
         )

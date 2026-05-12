@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import pytest
 
+from treadmill_api.models import OutputKind
 from treadmill_api.starters import (
     PLANNER_MODEL,
     STARTERS,
     WORKER_MODEL,
+    WorkflowShapeError,
     _all_roles,
+    _validate_workflow_shapes,
 )
 
 
@@ -139,6 +142,56 @@ def test_every_role_has_required_fields() -> None:
         assert role.get("model"), f"role {role['id']!r} missing model"
         assert role.get("system_prompt"), (
             f"role {role['id']!r} missing system_prompt"
+        )
+
+
+# Per ADR-0022 §"Migration of seeded roles" — the canonical mapping of
+# each seeded role to its declared output kind. The runner's dispatch
+# table reads this field; a drift here means the runner can't pick the
+# right disposition handler at run time.
+_EXPECTED_OUTPUT_KINDS: dict[str, OutputKind] = {
+    "role-code-author": OutputKind.CODE,
+    "role-doc-author": OutputKind.PLAN_DOC,
+    "role-planner": OutputKind.ANALYSIS,
+    "role-reviewer": OutputKind.REVIEW,
+    "role-validator": OutputKind.ANALYSIS,  # placeholder per ADR-0022
+    "role-feedback-analyzer": OutputKind.ANALYSIS,
+    "role-ci-analyzer": OutputKind.ANALYSIS,
+    "role-conflict-analyzer": OutputKind.ANALYSIS,
+}
+
+
+def test_every_seeded_role_declares_output_kind() -> None:
+    """ADR-0022 — every seeded role must declare its output kind so
+    the runner's per-kind dispatch table can route it. Missing the
+    field would mean the worker raises ``UnknownOutputKindError`` at
+    run time."""
+    for role in _all_roles():
+        assert "output_kind" in role, (
+            f"role {role['id']!r} is missing output_kind; per ADR-0022 "
+            "every seeded role must declare its kind"
+        )
+        assert isinstance(role["output_kind"], OutputKind), (
+            f"role {role['id']!r} output_kind must be an OutputKind "
+            f"enum value, got {type(role['output_kind']).__name__}"
+        )
+
+
+def test_seeded_roles_output_kinds_match_adr_0022() -> None:
+    """Each seeded role's output_kind matches the ADR-0022 mapping.
+
+    The mapping is the contract between the role's declared intent
+    (its system prompt) and the runner's behavior (the dispatch
+    handler picked at run time). Drift here is a load-bearing bug:
+    a role classified as ``code`` but prompted to do a review would
+    fail with ``CodeAuthorError`` on every run.
+    """
+    by_id = {r["id"]: r for r in _all_roles()}
+    for role_id, expected in _EXPECTED_OUTPUT_KINDS.items():
+        actual = by_id[role_id]["output_kind"]
+        assert actual is expected, (
+            f"role {role_id!r} declares output_kind={actual!r}, "
+            f"ADR-0022 mapping says {expected!r}"
         )
 
 
@@ -574,6 +627,80 @@ def test_seed_posts_default_event_triggers() -> None:
     pre_second_run = set(client._triggers)
     seed(client)
     assert client._triggers == pre_second_run
+
+
+# ── ADR-0022 workflow-shape validator ────────────────────────────────────────
+
+
+def test_validate_workflow_shapes_accepts_canonical_starters() -> None:
+    """The seven canonical starter workflows must pass the static
+    shape check. If this test fails the validator is too strict — the
+    starters define the v0 reference shape per ADR-0015 + ADR-0022."""
+    # Should return without raising. ``_validate_workflow_shapes`` is
+    # called from ``seed()`` at the top so a passing call means the
+    # canonical mix is acceptable.
+    _validate_workflow_shapes()
+
+
+def test_validate_workflow_shapes_rejects_review_first_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow whose first step is a review-kind role (other than
+    wf-review itself) must be rejected — there's no PR yet for the
+    reviewer to look at."""
+    from treadmill_api import starters
+
+    bad = [
+        {
+            "id": "wf-author",  # not wf-review, so review-first is invalid
+            "description": "bad shape",
+            "roles": [{"id": "role-reviewer", "output_kind": OutputKind.REVIEW}],
+            "steps": [{"name": "review", "role_id": "role-reviewer"}],
+        },
+    ]
+    monkeypatch.setattr(starters, "STARTERS", bad)
+    with pytest.raises(WorkflowShapeError, match="review-kind"):
+        _validate_workflow_shapes()
+
+
+def test_validate_workflow_shapes_rejects_plan_doc_outside_wf_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan_doc-kind step in a workflow other than wf-plan is a
+    constraint violation — the docs/plans/ confinement is wf-plan-
+    specific."""
+    from treadmill_api import starters
+
+    bad = [
+        {
+            "id": "wf-author",
+            "description": "bad shape",
+            "roles": [{"id": "role-doc-author", "output_kind": OutputKind.PLAN_DOC}],
+            "steps": [{"name": "author", "role_id": "role-doc-author"}],
+        },
+    ]
+    monkeypatch.setattr(starters, "STARTERS", bad)
+    with pytest.raises(WorkflowShapeError, match="plan_doc"):
+        _validate_workflow_shapes()
+
+
+def test_validate_workflow_shapes_rejects_undefined_role_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step that references a role not in ``_ROLES`` is a wiring bug."""
+    from treadmill_api import starters
+
+    bad = [
+        {
+            "id": "wf-author",
+            "description": "bad shape",
+            "roles": [],
+            "steps": [{"name": "step", "role_id": "role-ghost"}],
+        },
+    ]
+    monkeypatch.setattr(starters, "STARTERS", bad)
+    with pytest.raises(WorkflowShapeError, match="undefined role"):
+        _validate_workflow_shapes()
 
 
 def test_seed_default_event_triggers_match_week3_plan() -> None:

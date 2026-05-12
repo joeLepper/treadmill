@@ -177,8 +177,8 @@ def _seed_two_task_plan_with_dep(
             "VALUES ('wf-author', 1) RETURNING id"
         )).scalar()
         conn.execute(sa.text(
-            "INSERT INTO roles (id, model, system_prompt) "
-            "VALUES ('role-author', 'claude', '') ON CONFLICT DO NOTHING"
+            "INSERT INTO roles (id, model, system_prompt, output_kind) "
+            "VALUES ('role-author', 'claude', '', 'code') ON CONFLICT DO NOTHING"
         ))
         conn.execute(sa.text(
             "INSERT INTO workflow_version_steps "
@@ -220,8 +220,8 @@ def _seed_single_task_plan(engine: Engine) -> dict[str, uuid.UUID]:
             "VALUES ('wf-author', 1) RETURNING id"
         )).scalar()
         conn.execute(sa.text(
-            "INSERT INTO roles (id, model, system_prompt) "
-            "VALUES ('role-author', 'claude', '') ON CONFLICT DO NOTHING"
+            "INSERT INTO roles (id, model, system_prompt, output_kind) "
+            "VALUES ('role-author', 'claude', '', 'code') ON CONFLICT DO NOTHING"
         ))
         conn.execute(sa.text(
             "INSERT INTO workflow_version_steps "

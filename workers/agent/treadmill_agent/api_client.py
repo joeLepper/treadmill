@@ -35,6 +35,13 @@ class Role:
     id: str
     model: str
     system_prompt: str
+    output_kind: str
+    """Per ADR-0022 — one of ``code`` / ``review`` / ``analysis`` /
+    ``plan_doc``. The runner's per-kind dispatch table reads this to
+    pick the right post-Claude-Code disposition handler. Carried as a
+    bare ``str`` rather than an enum so the worker stays decoupled
+    from the API's SQLAlchemy enum machinery — the dispatch table is
+    keyed by string."""
     skills: list[Skill]
     hooks: list[Hook]
     # ``compute_tier`` was dropped from the wire in the Week 2 closure
@@ -87,6 +94,11 @@ class WorkerContext:
     trigger: str
 
     role: Role
+    pr_number: int | None
+    """Per ADR-0022 — the PR number this step relates to, derived
+    server-side from ``task_prs`` when one exists. Required for
+    ``review``-kind steps; the dispatch handler raises
+    ``MissingContextError`` when absent."""
     prior_steps: list[PriorStep]
 
 
@@ -134,6 +146,11 @@ def _decode_context(body: dict[str, Any]) -> WorkerContext:
             id=role_block["id"],
             model=role_block["model"],
             system_prompt=role_block["system_prompt"],
+            # ``output_kind`` is required server-side; default to
+            # ``"code"`` here only so a pre-ADR-0022 API response
+            # (older test fixture mock) still decodes without
+            # crashing. Real workers see the field populated.
+            output_kind=role_block.get("output_kind", "code"),
             skills=[
                 Skill(id=s["id"], name=s["name"], content=s["content"])
                 for s in role_block["skills"]
@@ -146,6 +163,9 @@ def _decode_context(body: dict[str, Any]) -> WorkerContext:
                 for h in role_block["hooks"]
             ],
         ),
+        # ``pr_number`` is null when the task has no PR row yet
+        # (e.g. wf-author hasn't opened one). Per-kind handler enforces.
+        pr_number=body.get("pr_number"),
         # ``prior_steps`` was introduced for the ADR-0015 multi-step
         # workflows; the API defaults it to ``[]`` so older payloads
         # (and single-step runs) decode cleanly. ``.get()`` keeps

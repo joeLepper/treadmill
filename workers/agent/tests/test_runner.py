@@ -43,8 +43,10 @@ def _ctx(**overrides: Any) -> WorkerContext:
         role=Role(
             id="role-author", model="claude-opus-4-7",
             system_prompt="be a coder",
+            output_kind="code",
             skills=[], hooks=[],
         ),
+        pr_number=None,
         prior_steps=[],
     )
     return replace(base, **overrides) if overrides else base
@@ -682,6 +684,7 @@ def test_execute_dry_run_analyzer_emits_task_directive(
         role=Role(
             id="role-ci-analyzer", model="claude-haiku-4-5-20251001",
             system_prompt="be an analyzer",
+            output_kind="analysis",
             skills=[], hooks=[],
         ),
     )
@@ -701,6 +704,57 @@ def test_execute_dry_run_analyzer_emits_task_directive(
     assert isinstance(directive.get("files"), list) and directive["files"]
 
 
+# ── ADR-0022: per-kind dispatch ──────────────────────────────────────────────
+
+
+def test_execute_dispatches_to_handler_for_role_output_kind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The runner reads ``ctx.role.output_kind`` and looks up the handler
+    in ``DISPOSITIONS``. Per ADR-0022, this is the load-bearing
+    routing — without it, every non-``code`` role would hit the
+    diff/commit/push path and fail."""
+    from treadmill_agent.events import Artifact, Metadata, StepOutput
+
+    bare_repos_dir, workspace_dir = _setup_execute_fixture(tmp_path)
+    monkeypatch.setenv("TREADMILL_AGENT_DRY_RUN", "1")
+
+    calls: list[str] = []
+
+    def _fake_handler(disp_ctx) -> StepOutput:
+        calls.append(disp_ctx.ctx.role.output_kind)
+        return StepOutput(
+            summary="dispatched",
+            decision="ok",
+            commit_sha=None,
+            artifacts=[Artifact(kind="analysis", value="seen")],
+            payload={},
+            metadata=Metadata(),
+        )
+
+    monkeypatch.setitem(runner.DISPOSITIONS, "analysis", _fake_handler)
+
+    ctx = _ctx(
+        repo="owner/test-repo",
+        role=Role(
+            id="role-analyzer-test",
+            model="claude-haiku-4-5-20251001",
+            system_prompt="be an analyzer",
+            output_kind="analysis",
+            skills=[], hooks=[],
+        ),
+    )
+    out = runner._execute(
+        ctx,
+        _settings(
+            bare_repos_dir=str(bare_repos_dir),
+            workspace_dir=str(workspace_dir),
+        ),
+    )
+    assert calls == ["analysis"]
+    assert out.decision == "ok"
+
+
 def test_execute_dry_run_action_role_omits_task_directive(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -718,6 +772,7 @@ def test_execute_dry_run_action_role_omits_task_directive(
         role=Role(
             id="role-code-author", model="claude-haiku-4-5-20251001",
             system_prompt="be a coder",
+            output_kind="code",
             skills=[], hooks=[],
         ),
     )

@@ -28,15 +28,42 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from treadmill_agent import claude_code, git, workspace
 from treadmill_agent.api_client import ApiClient, WorkerContext
 from treadmill_agent.config import Settings
-from treadmill_agent.events import Artifact, Metadata, StepOutput
+from treadmill_agent.events import StepOutput
 from treadmill_agent.eventbus import EventPublisher
+from treadmill_agent.runner_dispositions import (
+    handle_analysis,
+    handle_code,
+    handle_plan_doc,
+    handle_review,
+)
+from treadmill_agent.runner_dispositions._context import DispositionContext
 
 logger = logging.getLogger("treadmill.agent.runner")
+
+
+# Per ADR-0022 — dispatch table keyed by ``role.output_kind``. The
+# runner's ``_execute`` runs the shared prefix (clone, checkout, Claude
+# Code) then looks up the handler for the step's role's kind and
+# delegates. Adding a future kind (e.g. when the Ralph-loop validation
+# ADR lands) is a one-line schema change here plus the handler module.
+DISPOSITIONS: dict[str, Callable[[DispositionContext], StepOutput]] = {
+    "code": handle_code,
+    "review": handle_review,
+    "analysis": handle_analysis,
+    "plan_doc": handle_plan_doc,
+}
+
+
+class UnknownOutputKindError(RuntimeError):
+    """Raised when a step's role declares an ``output_kind`` the
+    dispatch table doesn't recognize. A new kind on the API side that
+    the worker hasn't been updated for triggers this — the operator
+    sees a clean step.failed naming the offending kind."""
 
 
 @dataclass
@@ -178,23 +205,21 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
     envelope (ADR-0012) that lands in ``step.output`` via the coordination
     consumer.
 
-    Per ADR-0012's convention map for ``wf-author``:
+    Per ADR-0022 — refactored into a shared prefix (clone, checkout,
+    Claude Code) plus a per-kind dispatch via ``DISPOSITIONS``. The
+    handler for the role's ``output_kind`` decides what to do with the
+    Claude Code result:
 
-    * ``summary``     - claude's headline (or dry-run marker note).
-    * ``decision``    - ``pushed`` when the branch lands successfully.
-                        ``no-changes`` is reserved for the explicit
-                        ``CodeAuthorError`` path, which raises out of this
-                        function and is mapped to ``step.failed`` at the
-                        runner level. We do not emit a ``no-changes``
-                        envelope from a successful path.
-    * ``commit_sha``  - the per-execution anchor at top-level (ADR-0013
-                        VIEW joins on this field).
-    * ``artifacts``   - the branch and (when the PR opened) the PR URL.
-    * ``payload``     - per-workflow extras: ``pr_number`` lives here by
-                        convention (``None`` is encoded by *omitting* the
-                        key for the local-bare-repo flow).
-    * ``metadata``    - tokens / cost / duration left empty for v0; the
-                        worker does not collect them yet.
+      * ``code``     — diff/commit/push/PR (today's behavior)
+      * ``review``   — empty diff is success; post ``gh pr review``
+      * ``analysis`` — empty diff is success; emit artifact for the
+                       downstream step (ADR-0015 composition)
+      * ``plan_doc`` — like code, diff confined to ``docs/plans/``
+
+    The runner's exception layer wraps the entire call so any handler
+    raise (e.g. ``CodeAuthorError`` for empty-diff code-kind,
+    ``MissingContextError`` for review-kind against a no-PR task)
+    becomes a clean ``step.failed`` event.
     """
     branch = _branch_for_step(ctx)
     with workspace.workspace_for_step(settings.workspace_dir, ctx.step_id) as ws:
@@ -241,54 +266,29 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
                 log_context=log_context,
             ).summary
 
-        # Stage first, check second, decide-to-abort third. The dry-run
-        # marker file *is* a staged change, so the no-changes check is
-        # only meaningful for real Claude — otherwise a successful dry
-        # run would always be aborted.
-        git.stage_all(repo_dir)
-        if not dry_run and not git.has_staged_changes(repo_dir):
-            raise claude_code.CodeAuthorError(
-                "Claude Code produced no changes to commit"
-            )
+        # Per ADR-0022 — dispatch on role.output_kind to the right
+        # handler. ``claude_code.CodeAuthorResult`` carries the summary;
+        # we wrap it inline to keep the dispatch context small without
+        # reaching for a Result type the dry-run path doesn't produce.
+        from treadmill_agent.claude_code import CodeAuthorResult  # local import
 
-        commit_message = _commit_message(ctx)
-        commit_sha = git.commit_all(repo_dir, commit_message)
-        git.push_branch(repo_dir, branch)
-        pr_number, pr_url = git.open_pr(
-            repo_dir=repo_dir, branch=branch,
-            title=ctx.title, body=summary or ctx.title,
-            repo=ctx.repo, mode=settings.repo_mode,
+        disposition_ctx = DispositionContext(
+            ctx=ctx,
+            claude_result=CodeAuthorResult(summary=summary),
+            repo_dir=repo_dir,
+            branch=branch,
+            settings=settings,
+            is_dry_run=dry_run,
         )
-
-    artifacts: list[Artifact] = [Artifact(kind="branch", value=branch)]
-    if pr_url:
-        artifacts.append(Artifact(kind="pr_url", value=pr_url))
-    payload: dict[str, Any] = {}
-    if pr_number is not None:
-        payload["pr_number"] = pr_number
-    # Multi-step dry-run support (ADR-0015): when the dry-run path runs an
-    # analyzer step (step 1 of a 2-step workflow), the action step downstream
-    # reads ``prior_steps[-1].output.payload.task_directive``. The real-Claude
-    # path's prompt instructs the analyzer to emit a directive; the dry-run
-    # path bypasses the LLM entirely, so we synthesize a minimal directive
-    # here so the cross-step handoff is exercisable end-to-end.
-    #
-    # We detect "analyzer step" via the role id alone — every analyzer role
-    # in ``starters.py`` ends in ``-analyzer`` (``role-feedback-analyzer``,
-    # ``role-ci-analyzer``, ``role-conflict-analyzer``) or is the planner
-    # (``role-planner``). The action role (``role-code-author`` /
-    # ``role-doc-author``) doesn't match either condition so its payload is
-    # unaffected.
-    if dry_run and _is_analyzer_role(ctx.role.id):
-        payload["task_directive"] = _dry_run_task_directive(ctx)
-    return StepOutput(
-        summary=summary,
-        decision="pushed",
-        commit_sha=commit_sha,
-        artifacts=artifacts,
-        payload=payload,
-        metadata=Metadata(),
-    )
+        try:
+            handler = DISPOSITIONS[ctx.role.output_kind]
+        except KeyError:
+            raise UnknownOutputKindError(
+                f"role {ctx.role.id!r} declares output_kind="
+                f"{ctx.role.output_kind!r} which is not in the worker's "
+                f"dispatch table; known kinds: {sorted(DISPOSITIONS)}"
+            )
+        return handler(disposition_ctx)
 
 
 def _is_dry_run() -> bool:
