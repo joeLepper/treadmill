@@ -1,8 +1,50 @@
 ---
-status: active
+status: completed
 trigger: ADR-0027 drafted 2026-05-12 in response to the PR #10 deathloop. Tourniquet 8ff414c shipped 2026-05-12; this plan implements the durable structured-JSON envelope. Open Qs Q27.a-d resolved 2026-05-13 (see ADR-0027 §"Resolved decisions"); coordinated alongside #108 + ADR-0028 in docs/plans/2026-05-13-in-session-sequencing.md.
 parent: docs/adrs/0027-structured-json-for-review-output.md
+completed_at: 2026-05-13
 ---
+
+## Post-mortem (landed 2026-05-13)
+
+Tasks 1 + 2 landed in commit `fa0f82c` as a single coherent unit
+(parser + prompt are deploy-coupled: prompt-without-parser would
+emit JSON the runner can't parse, parser-without-prompt would log
+drift warnings on every regex-fallback run).
+
+Task 3 (smoke validation, parse-rate measurement against Q27.a's
+10-consecutive-runs bar) is deferred to Phase 4 of the in-session
+sequencing plan. The same end-to-end PR smoke that validates
+#108's `gh pr comment` path also exercises the JSON envelope, so
+combining them is more token-efficient than running two separate
+smokes.
+
+**Operator action items for next deploy:**
+
+The role-reviewer prompt change is INERT against the running
+personal deployment until either:
+
+  1. `treadmill workflows seed-starters --reset-prompts-from-code
+     --yes` is run against the deployed API, OR
+  2. `treadmill role update role-reviewer --prompt-from-file <path>`
+     (preferred per the ADR-0028 operator workflow).
+
+Phase 4 smoke setup will exercise path 2 — proves the role-update
+CLI path works end-to-end against a deployment.
+
+**Coverage:**
+- Worker: 16 new tests in `test_runner_dispositions.py` for the
+  JSON path (extract, strip, parse, log-on-failure, safe-default,
+  handler body-strip, dry-run parse-always). 41/41 dispositions green.
+- API: `test_role_reviewer_prompt_teaches_verdict_marker` renamed
+  to `test_role_reviewer_prompt_teaches_json_envelope` and reframed
+  for the new contract. 32/32 starter tests green.
+- 480/480 API non-integration tests pass.
+
+**Deferred items:**
+- Tourniquet regex deletion (Q27.a 10-consecutive-runs bar). Phase
+  4 collects the parse-rate data; deletion is a follow-up after the
+  bar is met.
 
 # Plan: structured JSON envelope for review-kind output (ADR-0027)
 
