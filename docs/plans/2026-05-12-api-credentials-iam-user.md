@@ -1,6 +1,6 @@
 ---
 status: active
-trigger: ADR-0023 accepted 2026-05-13 (drafted 2026-05-12). Flipped active to dispatch through the plan-merge-to-main trigger now that #108 + ADR-0027 + ADR-0028 have shipped and the API + worker can self-build via wf-author + wf-review.
+trigger: ADR-0023 accepted 2026-05-13 (drafted 2026-05-12). Flipped active 2026-05-13; first dispatch produced PR #20 (task 1, merged manually after wf-feedback's action couldn't recover from an empty-diff response to a hallucinated nit). Re-firing 2026-05-13 after fixing the two surfaced gaps (consumer redispatch on pr_merged + wf-feedback empty-diff softening, commit 8a52c17) so tasks 2-4 dispatch cleanly off task 1's merged PR.
 parent: docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ---
 
