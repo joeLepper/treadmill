@@ -518,6 +518,16 @@ class CoordinationConsumer:
         # tasks from the parsed doc.
         if action == "pr_merged":
             await self._handle_plan_doc_merged(typed)
+            # D.6 (extended 2026-05-13). A ``pr_merged`` event may have
+            # just satisfied a dependent task's ``task.<uuid>.pr_merged``
+            # expression — re-evaluate so dependent tasks dispatch
+            # automatically. The redispatch module's docstring deferred
+            # this from v0 ("Week 3 with the trigger evaluator"); the
+            # ADR-0023 smoke surfaced the gap live (PR #20 merged but
+            # tasks 2-4 of the plan never dispatched because no one
+            # called reevaluate on the merge event). See
+            # docs/handoffs/2026-05-13-adr-0023-smoke-and-validation-holes.md.
+            await self._reevaluate()
 
     async def _sweep_after_pr_merged(
         self,

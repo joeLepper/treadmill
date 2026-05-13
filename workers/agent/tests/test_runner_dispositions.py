@@ -49,6 +49,7 @@ def _ctx(
     output_kind: str = "code",
     pr_number: int | None = None,
     role_id: str = "role-test",
+    workflow_id: str = "wf-test",
 ) -> WorkerContext:
     return WorkerContext(
         step_id=str(uuid.uuid4()),
@@ -63,7 +64,7 @@ def _ctx(
         description=None,
         plan_intent="goal",
         plan_doc_path=None,
-        workflow_id="wf-test",
+        workflow_id=workflow_id,
         workflow_version=1,
         trigger="registered",
         role=Role(
@@ -98,10 +99,16 @@ def _disp_ctx(
     summary: str = "did it",
     pr_number: int | None = None,
     role_id: str = "role-test",
+    workflow_id: str = "wf-test",
     is_dry_run: bool = False,
 ) -> DispositionContext:
     return DispositionContext(
-        ctx=_ctx(output_kind=output_kind, pr_number=pr_number, role_id=role_id),
+        ctx=_ctx(
+            output_kind=output_kind,
+            pr_number=pr_number,
+            role_id=role_id,
+            workflow_id=workflow_id,
+        ),
         claude_result=CodeAuthorResult(summary=summary),
         repo_dir=repo_dir,
         branch="task/x-add-thing",
@@ -161,10 +168,50 @@ def test_code_handler_commits_pushes_and_returns_envelope(tmp_path: Path) -> Non
 
 def test_code_handler_raises_on_empty_diff(tmp_path: Path) -> None:
     """Claude Code produced no changes → ``CodeAuthorError``. This
-    is today's runner behavior preserved into the code handler."""
+    is today's runner behavior preserved into the code handler for
+    ``wf-author`` (the workflow that originates code changes)."""
     _bare, clone = _init_bare_and_clone(tmp_path)
     # No file changes — diff is empty.
-    ctx = _disp_ctx(repo_dir=clone)
+    ctx = _disp_ctx(repo_dir=clone, workflow_id="wf-author")
+    with pytest.raises(claude_code.CodeAuthorError, match="no changes"):
+        handle_code(ctx)
+
+
+def test_code_handler_softens_empty_diff_for_wf_feedback(tmp_path: Path) -> None:
+    """ADR-0012 documents ``responded-without-change`` as wf-feedback
+    action's canonical empty-diff decision. The handler emits that
+    rather than raising — failing would orphan the PR in
+    changes_requested with no path forward (see the ADR-0023 smoke
+    handoff for the live failure that motivated this)."""
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    ctx = _disp_ctx(repo_dir=clone, workflow_id="wf-feedback", pr_number=20)
+    out = handle_code(ctx)
+    assert out.decision == "responded-without-change"
+    assert out.commit_sha is None
+    assert out.artifacts == []
+    assert out.payload == {"pr_number": 20}
+
+
+def test_code_handler_softens_empty_diff_without_pr_number(tmp_path: Path) -> None:
+    """The pr_number is propagated when present (for the downstream
+    consumer / mergeability VIEW) but omitted cleanly when absent —
+    no synthetic placeholder."""
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    ctx = _disp_ctx(repo_dir=clone, workflow_id="wf-feedback", pr_number=None)
+    out = handle_code(ctx)
+    assert out.decision == "responded-without-change"
+    assert out.payload == {}
+
+
+def test_code_handler_still_raises_for_wf_ci_fix_on_empty_diff(
+    tmp_path: Path,
+) -> None:
+    """Empty-diff softening is deliberately limited to wf-feedback at
+    v0 (per the module docstring). wf-ci-fix's empty-diff semantics
+    need explicit role-prompt coupling (not-our-bug vs gave-up); until
+    that lands, the strict raise is the safer default."""
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    ctx = _disp_ctx(repo_dir=clone, workflow_id="wf-ci-fix")
     with pytest.raises(claude_code.CodeAuthorError, match="no changes"):
         handle_code(ctx)
 

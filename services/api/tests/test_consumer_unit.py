@@ -183,6 +183,75 @@ async def test_handle_github_pr_merged_skips_sweep_when_github_client_unwired() 
 
 
 @pytest.mark.asyncio
+async def test_handle_github_pr_merged_runs_reevaluate_for_dependent_tasks() -> None:
+    """Per the ADR-0023 smoke (2026-05-13) — a pr_merged event must
+    trigger the re-evaluation pass so tasks whose
+    ``task.<uuid>.pr_merged`` dependency was just satisfied get
+    dispatched. The redispatch module's docstring originally deferred
+    this; we wire it here in the consumer.
+    """
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    reevaluate_calls: list[int] = []
+
+    async def _stub_reevaluate() -> None:
+        reevaluate_calls.append(1)
+
+    consumer._reevaluate = _stub_reevaluate  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "github",
+        "action": "pr_merged",
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "repo": "x/y",
+            "pr_number": 42,
+            "sender": "alice",
+            "merged_sha": "deadbeef" * 5,
+        },
+    })
+
+    assert reevaluate_calls == [1], (
+        "consumer's pr_merged path must invoke _reevaluate so "
+        "dependent tasks can dispatch when their dep is satisfied"
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_github_pr_opened_does_not_run_reevaluate() -> None:
+    """The reevaluate pass on github events is specific to pr_merged
+    (the verb that can satisfy a task.<uuid>.pr_merged dependency).
+    Other github verbs do not invoke it."""
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    reevaluate_calls: list[int] = []
+
+    async def _stub_reevaluate() -> None:
+        reevaluate_calls.append(1)
+
+    consumer._reevaluate = _stub_reevaluate  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "github",
+        "action": "pr_opened",
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "repo": "x/y",
+            "pr_number": 42,
+            "sender": "alice",
+            "head_sha": "deadbeef" * 5,
+        },
+    })
+
+    assert reevaluate_calls == [], (
+        "non-pr_merged github verbs do not satisfy pr_merged "
+        "dependencies; no reevaluate pass should fire"
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_github_pr_merged_rejects_malformed_payload() -> None:
     """A pr_merged event missing the required ``repo`` field fails the
     Pydantic gate before the handler attempts to open a session or call

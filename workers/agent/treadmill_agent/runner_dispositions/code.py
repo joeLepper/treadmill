@@ -2,13 +2,27 @@
 
 Per ADR-0022, this is the original runner workflow extracted into a
 handler so the dispatch table can route ``role-code-author`` to it.
-Empty diff is a failure (the role was asked to make changes; it
-didn't) — that's the explicit ``CodeAuthorError`` raise.
+
+Empty diff handling is workflow-aware (added 2026-05-13 to address
+the wf-feedback empty-diff failure mode observed in the ADR-0023
+smoke — see docs/handoffs/2026-05-13-adr-0023-smoke-and-validation-holes.md):
+
+  * ``wf-author`` — empty diff is a failure (role was asked to make
+    new code and didn't). Raises ``CodeAuthorError`` →
+    ``step.failed`` via the runner's exception layer.
+  * ``wf-feedback`` — empty diff is a legitimate
+    ``responded-without-change`` decision per ADR-0012's value-set.
+    The reviewer's nit may have been hallucinated, already
+    addressed, or the analyzer may have produced a directive that's
+    a no-op against the live tree. Failing here would orphan the
+    PR in ``changes_requested`` with no path forward.
+  * ``wf-ci-fix`` / ``wf-conflict`` — left strict (still raises).
+    Their semantics for empty diff are murkier (``not-our-bug`` vs
+    ``gave-up``) and need explicit role-prompt coupling before
+    softening. Follow-up to the Ralph-loop ADR.
 
 The decision string is ``pushed`` on success per ADR-0012's
-``wf-author`` convention map. ``no-changes`` is reserved for the
-empty-diff failure path, which raises out of the handler and is
-mapped to ``step.failed`` by the runner's exception layer.
+``wf-author`` convention map.
 """
 
 from __future__ import annotations
@@ -18,6 +32,9 @@ from typing import Any
 from treadmill_agent import claude_code, git
 from treadmill_agent.events import Artifact, Metadata, StepOutput
 from treadmill_agent.runner_dispositions._context import DispositionContext
+
+
+_SOFT_EMPTY_DIFF_WORKFLOWS: frozenset[str] = frozenset({"wf-feedback"})
 
 
 def handle(ctx: DispositionContext) -> StepOutput:
@@ -30,6 +47,18 @@ def handle(ctx: DispositionContext) -> StepOutput:
     """
     git.stage_all(ctx.repo_dir)
     if not ctx.is_dry_run and not git.has_staged_changes(ctx.repo_dir):
+        if ctx.ctx.workflow_id in _SOFT_EMPTY_DIFF_WORKFLOWS:
+            payload: dict[str, Any] = {}
+            if ctx.ctx.pr_number is not None:
+                payload["pr_number"] = ctx.ctx.pr_number
+            return StepOutput(
+                summary=ctx.claude_result.summary,
+                decision="responded-without-change",
+                commit_sha=None,
+                artifacts=[],
+                payload=payload,
+                metadata=Metadata(),
+            )
         raise claude_code.CodeAuthorError(
             "Claude Code produced no changes to commit"
         )
