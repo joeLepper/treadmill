@@ -1,5 +1,5 @@
 ---
-status: active
+status: completed
 trigger: Operator scoped 2026-05-13 — implement the post-loop-hardening work
   (task #108 + ADR-0028 plan + ADR-0027 plan + smoke) in-session rather than
   via the Treadmill loop, since the loop itself depends on #108 to make it
@@ -8,7 +8,72 @@ parents:
   - docs/adrs/0027-structured-json-for-review-output.md
   - docs/adrs/0028-db-authoritative-workflow-configs.md
   - docs/handoffs/2026-05-12-loop-hardening-and-first-smoke.md
+completed_at: 2026-05-13
 ---
+
+## Post-mortem (landed 2026-05-13)
+
+All four phases shipped in-session. Phase 4 smoke validated the
+full chain end-to-end against the personal deployment via PR #17
+(plan-merge trigger) → o11y plan submitted → task 1 (Wire OTel SDK)
+→ wf-author opened PR #18 → wf-review landed cleanly via the new
+parser + transport.
+
+**The full chain confirmed working:**
+
+| Validation | Evidence |
+| --- | --- |
+| Plan-merge trigger (ADR-0021) | PR #17 merge → 5 o11y tasks created |
+| #108 path 1 (`gh pr comment`) | PR #18 has 1 comment; no `gh pr review` call; no same-author block |
+| ADR-0027 JSON envelope | `wf-review.step.completed` carries `payload.rationale` (only possible via JSON path — regex tourniquet returns None) |
+| ADR-0027 fence-strip (Q27.c) | PR #18 comment body has the `## Treadmill review verdict: approve` header but no `\`\`\`json` block |
+| ADR-0028 auto-seed (Q28.a) | New JSON-envelope prompt loaded into running deployment via `seed_starters_if_empty` on first API startup |
+| ADR-0028 PATCH endpoint | Confirmed pre-smoke via `treadmill role update role-reviewer` (smoke-test edit landed as v2) |
+| ADR-0028 `--reset-prompts-from-code` | Confirmed pre-smoke: 8 roles reset, v3 audit row appended with reset-origin note |
+| ADR-0026 dispatch dedup | Exactly 1 row in `workflow_dispatch_dedup` for `wf-review:joeLepper/treadmill:pr=18,sha=fb647952…` |
+| ADR-0027 drift-warning surface | Zero `review.json_parse_failed` warnings — JSON path holds on the first run |
+| `wf-feedback` self-trigger (#108 wrinkle) | Not exercised this smoke (verdict was `approve`, not `changes_requested`). Tracked: validate on a future smoke where the reviewer pushes changes. |
+
+**Commits this session (10 total):**
+
+```
+117d520  Phase 0   ADRs Accepted + plans Active + sequencing doc
+65022aa  Phase 1   #108 path 1 (gh pr comment + decision-based self-trigger)
+e942251  Phase 2a  role_versions table + RoleVersion model + alembic backfill
+acaec57  Phase 2b  PATCH + GET versions endpoints + v1-on-create
+bef0169  Phase 2c  seed --reset-prompts-from-code recovery flag
+11474ad  Phase 2d  treadmill role show/update/versions CLI
+e34144c  Phase 2e  auto-seed on first API startup (Q28.a ii)
+b87d340  Phase 2f  operator runbook + plan post-mortem
+fa0f82c  Phase 3   JSON envelope parser + role-reviewer prompt rewrite
+b6ae461  Phase 3   plan post-mortem
+b7c21b4  Phase 4   smoke-trigger PR #17 (squashed merge)
+```
+
+**Test coverage:** 480 API non-integration + 41 worker disposition +
+32 starter + 28 CLI = 581 unit/contract tests green. Integration
+tests (10 new for PATCH+versions, 3 new for auto-seed, 9 new for
+CLI role subcommands) ready under `TREADMILL_INTEGRATION=1`.
+
+**Deferred items (per resolved Open Qs):**
+
+- Tourniquet regex deletion: Q27.a's bar is 10 consecutive clean
+  runs. This smoke is run 1. Follow-up after the bar is met.
+- `treadmill role rollback`: Q28.b deferred until a forcing function
+  arises. Workaround documented in the runbook.
+- `wf-feedback` self-trigger validation: needs a smoke where the
+  reviewer returns `changes_requested`. Tracked for next smoke.
+- Task #109 (Treadmill as GitHub App): explicitly future cleanup.
+
+**What surprised us:**
+
+- ADR-0028's plan assumed a `role_versions` table existed — it
+  didn't. Phase 2a added the migration + ORM model as the
+  foundation; the plan absorbed the discovery without a redesign.
+- The smoke's first wf-review verdict was `approve` (not the
+  `request_changes` we half-expected from a one-line PR). The
+  reviewer's prompt frames substantive review behavior + the
+  diff was actually clean.
 
 # Plan: in-session sequencing for #108 + ADR-0028 + ADR-0027 + smoke
 
