@@ -1,8 +1,49 @@
 ---
-status: active
+status: completed
 trigger: ADR-0028 drafted 2026-05-12 in response to operator feedback on the bunkhouse-precedent failure mode. Open Qs Q28.a-e resolved 2026-05-13 (see ADR-0028 §"Resolved decisions"); coordinated alongside #108 + ADR-0027 in docs/plans/2026-05-13-in-session-sequencing.md.
 parent: docs/adrs/0028-db-authoritative-workflow-configs.md
+completed_at: 2026-05-13
 ---
+
+## Post-mortem (landed 2026-05-13)
+
+All 5 sub-tasks landed in-session across 5 commits:
+
+- `e942251` — phase 2a: alembic 0010 + RoleVersion model + backfill
+- `acaec57` — phase 2b: PATCH /roles/{id} + GET versions endpoints + v1-on-create
+- `bef0169` — phase 2c: seed --reset-prompts-from-code recovery flag
+- `11474ad` — phase 2d: treadmill role {show,update,versions} CLI
+- `e34144c` — phase 2e: auto-seed starters on first API startup (Q28.a (ii))
+- (this commit) — phase 2f: operator runbook at docs/runbooks/edit-a-role-prompt.md
+
+**Discovery delta vs the plan as written:** the plan assumed
+`role_versions` existed. It didn't. Phase 2a added the table +
+migration backfill + RoleVersion ORM model as the foundation. Tracked
+as drift in this section so a future plan-pattern reader sees what
+this kind of audit-then-implement step looks like in practice.
+
+**Coverage:**
+- Unit tests: 32/32 in test_starters.py (existing 30 updated for the
+  new SeedResult return shape + 2 new for the
+  reset_prompts_from_code path).
+- CLI tests: 28/28 in cli/tests/test_cli.py (existing 19 + 9 new for
+  the role subcommand surface).
+- Integration tests: 10 new in test_integration_routers.py
+  (TestRolePatchAndVersions) + 3 new in test_integration_auto_seed.py.
+  Will run when treadmill-local is up + TREADMILL_INTEGRATION=1.
+
+**What survived from the plan:** the sub-task ordering held —
+foundation → endpoints → seed flag → CLI → auto-seed → runbook. The
+auto-seed code lives in `starters.seed_starters_if_empty(session)`
+(session-based) rather than the HTTP-based `seed(api_client)` because
+auto-seed fires before uvicorn starts the async loop.
+
+**Deferred items (per Q resolutions):**
+- `treadmill role rollback` (Q28.b) — wait for forcing function.
+- Workflow / workflow_version CLIs (Q28.e) — workflows stay
+  code-driven.
+
+**Next:** Phase 3 (ADR-0027 plan — JSON envelope for review output).
 
 # Plan: DB-authoritative workflow / role / version configs (ADR-0028)
 
