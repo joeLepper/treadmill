@@ -1,6 +1,6 @@
 ---
-status: drafting
-trigger: ADR-0027 drafted 2026-05-12 in response to the PR #10 deathloop. Tourniquet 8ff414c shipped 2026-05-12; this plan implements the durable structured-JSON envelope. Holding at status:drafting until operator resolves Q27.a-d in ADR-0027.
+status: active
+trigger: ADR-0027 drafted 2026-05-12 in response to the PR #10 deathloop. Tourniquet 8ff414c shipped 2026-05-12; this plan implements the durable structured-JSON envelope. Open Qs Q27.a-d resolved 2026-05-13 (see ADR-0027 §"Resolved decisions"); coordinated alongside #108 + ADR-0028 in docs/plans/2026-05-13-in-session-sequencing.md.
 parent: docs/adrs/0027-structured-json-for-review-output.md
 ---
 
@@ -68,10 +68,10 @@ sequence_of_work:
 
       1. Add a ``ReviewVerdict`` Pydantic model with two fields:
          ``verdict: Literal["approve", "request_changes", "comment"]``
-         and ``rationale: str``. The closed value-set on ``verdict``
-         lets Pydantic reject anything else; ``rationale`` is required
-         (operator may set a max length per Q27.b — default
-         ``max_length=4000`` if unresolved).
+         and ``rationale: str = Field(max_length=4000)``. The closed
+         value-set on ``verdict`` lets Pydantic reject anything else;
+         ``rationale`` is required. ``max_length=4000`` per Q27.b
+         resolution — cheap insurance against a runaway model.
 
       2. Add a ``_extract_json_block(summary: str) -> str | None``
          helper that returns the contents of the LAST
@@ -176,10 +176,11 @@ sequence_of_work:
           ``approve`` or ``request_changes`` per the model's call.
 
       Run this smoke at least 10 times (re-merge whitespace edits)
-      to collect a parse-success rate. Per Q27.a, the bar for
-      tourniquet deletion is N consecutive runs without falling to
-      the regex path; this task collects the data, the operator
-      makes the call.
+      to collect a parse-success rate. Per Q27.a resolution, the bar
+      for tourniquet deletion is **10 consecutive runs** without
+      falling to the regex path. When the count is met, file a
+      follow-up task to delete ``_VERDICT_INNER_RE`` +
+      ``_normalize_verdict_line`` from ``review.py``.
     scope:
       files: []
     depends_on:

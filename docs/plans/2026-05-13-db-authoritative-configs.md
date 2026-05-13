@@ -1,6 +1,6 @@
 ---
-status: drafting
-trigger: ADR-0028 drafted 2026-05-12 in response to operator feedback on the bunkhouse-precedent failure mode. Holding at status:drafting until operator resolves Q28.a-e in ADR-0028.
+status: active
+trigger: ADR-0028 drafted 2026-05-12 in response to operator feedback on the bunkhouse-precedent failure mode. Open Qs Q28.a-e resolved 2026-05-13 (see ADR-0028 §"Resolved decisions"); coordinated alongside #108 + ADR-0027 in docs/plans/2026-05-13-in-session-sequencing.md.
 parent: docs/adrs/0028-db-authoritative-workflow-configs.md
 ---
 
@@ -23,9 +23,10 @@ After this plan executes:
 3. `seed-starters` 409-no-op behavior becomes the **default**.
    `--reset-prompts-from-code` is the explicit opt-in for the
    recovery case.
-4. Per Q28.a's resolution, fresh deployments either auto-seed on
-   first API startup (preferred) or require the explicit
-   `seed-starters` invocation (current behavior, unchanged).
+4. Per Q28.a resolution: fresh deployments **auto-seed on first
+   API startup** via `seed_starters_if_empty()` after alembic
+   upgrade, gated by `SELECT … FOR UPDATE` on `alembic_version` for
+   multi-replica safety.
 5. `test_starters.py` shape invariants remain valuable — they are
    the spec for the bootstrap content, not for the runtime prompt
    set.
@@ -151,9 +152,11 @@ sequence_of_work:
       * ``treadmill role versions <id>`` — list role_versions rows
         with version + created_at + created_by + notes (if present).
 
-      Rollback (``treadmill role rollback <id> --to-version N``):
-      gated on Q28.b. Include only if the operator resolves Q28.b
-      affirmatively at planning time.
+      Rollback (``treadmill role rollback <id> --to-version N``)
+      **deferred** per Q28.b resolution — not v1. Revisit when a
+      forcing function arises (e.g., a botched edit needs reverting
+      and the operator-grade UX of "rollback" beats "update with
+      the prior version's content").
 
       Tests: ``tests/test_cli_role.py`` (new file) using
       ``typer.testing.CliRunner`` + a mocked API client. Assert:
@@ -170,12 +173,11 @@ sequence_of_work:
     branch_hint: feat/cli-role-subcommands
 
   - id: auto-seed-on-fresh-db
-    title: Auto-seed starters when the DB is empty (per Q28.a)
+    title: Auto-seed starters when the DB is empty
     workflow: wf-author
     intent: |
-      ONLY if Q28.a resolves to option (ii). Otherwise skip this
-      task and the operator's ``seed-starters`` invocation remains
-      the bootstrap path.
+      Per Q28.a resolution (option (ii)): API auto-seeds on first
+      startup against a fresh DB.
 
       In ``services/api/treadmill_api/cli.py``, after the alembic
       upgrade succeeds, check if the roles table is empty. If yes:

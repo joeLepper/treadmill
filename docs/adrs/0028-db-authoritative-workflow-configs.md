@@ -1,6 +1,6 @@
 # ADR-0028 — Workflow / role / version configs live in the DB; code is bootstrap-only
 
-* Status: Proposed (drafted 2026-05-12)
+* Status: Accepted (drafted 2026-05-12, resolved 2026-05-13)
 * Trigger: Joe, 2026-05-12 — "we ran into this all the damn time in
   bunkhouse. There's this double-source of truth for role, workflow,
   etc configs. Ideally we get this into the DB and then take the
@@ -116,60 +116,45 @@ Web UI for prompt editing. Right end state for v1.5+ once we have
 operator-grade UI; not the v1 move. CLI is the right primitive to
 build first — a UI can wrap it later.
 
-## Open Qs (for operator review)
+## Resolved decisions (2026-05-13)
 
-* **Q28.a — How does a fresh deployment bootstrap?**
-  Options:
-  * (i) Operator runs `treadmill workflows seed-starters` after
-    `treadmill-local up` — current path, unchanged. Manual step but
-    explicit.
-  * (ii) API runs `seed_starters_if_empty()` on startup — auto on a
-    fresh DB, silent on an existing one. Tied to the alembic-on-startup
-    pattern in `services/api/treadmill_api/cli.py`. Slight risk of
-    racing if two API replicas come up against a fresh DB; benign
-    today (one-replica dev-local), worth flagging for the future.
-  * (iii) Seed via an alembic data migration — version-pinned, but
-    awkward to update since alembic migrations don't get edited
-    after they ship.
-  Leaning (ii) for the operator-ergonomics win; (i) is the
-  conservative fallback.
+* **Q28.a — Fresh-deployment bootstrap.** **(ii) auto-seed on first
+  API startup.** After `alembic upgrade` succeeds, the API checks if
+  `roles` is empty; if yes, calls `starters.seed(api_client)` once.
+  Race-safety on multi-replica deployments via `SELECT … FOR UPDATE`
+  on a sentinel row (the `alembic_version` table is a natural fit).
+  Today's dev-local is single-replica; the lock cost is paid up front
+  so future `fully_remote` doesn't surprise us.
 
-* **Q28.b — Edit interface for v1.**
-  CLI subcommands needed:
-  * `treadmill role show <id>` (current prompt).
-  * `treadmill role update <id> --prompt-from-file <path>` (PUT new
-    version).
-  * `treadmill role versions <id>` (history).
-  * `treadmill role rollback <id> --to-version <n>`?
-  * Equivalent commands for workflows + workflow versions?
-  Scope of v1 unclear. Minimum viable is `show` + `update`; the
-  others are quality-of-life.
+* **Q28.b — v1 CLI surface.** **`show` + `update` + `versions`.**
+  Rollback (`role rollback <id> --to-version N`) **deferred** — wait
+  for a forcing function (a botched edit that needs reverting in
+  prod, say) before adding the affordance. Workflow / workflow-version
+  CLIs out of scope per Q28.e.
 
-* **Q28.c — `starters.py`'s long-term fate.**
-  * (i) Keep in repo indefinitely as the bootstrap fixture +
-    invariant spec.
-  * (ii) Move to `infra/bootstrap/starters.py` to signal its
-    "fresh deploy only" status.
-  * (iii) Move to a separate fixtures package, version-pinned, so
-    the repo dev workflow doesn't surface it at all.
-  Leaning (i) — it's small, the invariants in `test_starters.py`
-  are valuable spec coverage, and the rename buys little.
+* **Q28.c — `starters.py`'s long-term home.** **Keep in repo** at
+  `services/api/treadmill_api/starters.py`. Rename buys little; the
+  `test_starters.py` invariants are valuable bootstrap-content spec
+  coverage. The mental model shift ("starters.py is a fixture, not
+  a runtime spec") is documented in the new runbook (ADR-0028 plan
+  task `runbook-role-edits`), not signaled by file path.
 
-* **Q28.d — Prompt edit audit trail.**
-  Do `role_versions` rows carry an optional `notes` / `pr_url`
-  column for the operator to link a prompt change back to a PR or
-  incident? Useful for explainability when the loop misbehaves;
-  cheap to add. Leaning yes.
+* **Q28.d — Prompt edit audit trail.** **Yes — add `notes` and
+  `pr_url` columns** to `role_versions`. Optional / nullable. The
+  CLI's `--notes` flag writes to `notes`; `pr_url` is operator-set
+  for high-stakes edits that warrant a paper trail. Cheap alembic
+  migration; valuable for explainability when the loop later
+  misbehaves and the question becomes "which prompt version was
+  live."
 
-* **Q28.e — Scope: just roles, or also workflows + versions?**
-  Roles' `system_prompt` is the obvious mutable surface. Workflow
-  shape (the step list, the role refs) is less commonly tweaked but
-  also lives in `starters.py`. Are workflow edits also operator-
-  initiated via the CLI, or are workflow-shape changes always a
-  code change requiring an ADR + re-seed? Leaning "workflows stay
-  code-driven; only role prompts go DB-authoritative" — workflow
-  shape is rarer and higher-stakes, and an ADR review is the right
-  forcing function.
+* **Q28.e — Scope.** **Roles only.** Workflow shape (step list, role
+  refs) stays code-driven — ADR review is the right forcing
+  function for shape changes, which are higher-stakes than prompt
+  tweaks. `workflows seed-starters` continues to handle workflow +
+  workflow_version rows on bootstrap; the `--reset-prompts-from-code`
+  flag only resets *role prompts*, not workflow shape (which is
+  always taken from code at seed time, since there's no edit path
+  for it).
 
 ## Phasing
 

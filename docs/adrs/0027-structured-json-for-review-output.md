@@ -1,6 +1,6 @@
 # ADR-0027 — Structured JSON envelope for review-kind step output
 
-* Status: Proposed (drafted 2026-05-12)
+* Status: Accepted (drafted 2026-05-12, resolved 2026-05-13)
 * Supersedes / amends: ADR-0022 §"`review` output kind"
 * Companion: ADR-0011 (uniform envelope), ADR-0012 (decision strings)
 * Trigger: live failure on PR #10 (2026-05-12) — the role emitted
@@ -121,28 +121,24 @@ output kind, since `claude --output-format json` reshapes the entire
 turn structure — not just the review case. Banked as a separate
 investigation (ADR-?? — output-format JSON across all kinds).
 
-## Open Qs (for operator review)
+## Resolved decisions (2026-05-13)
 
-* **Q27.a — Fallback retention period.** When do we delete the
-  tourniquet regex? Default: one full smoke cycle's worth of
-  reviews land cleanly via JSON before removal. Looking for a more
-  concrete bar (e.g., "10 consecutive runs without falling to the
-  regex path") or a time-based one.
-* **Q27.b — Rationale length cap.** Should `rationale` be capped
-  (e.g., `max_length=2000`) in the Pydantic model, or is the model
-  reasonable enough that we trust it? Cap is cheap insurance against
-  a runaway model; uncapped is less prompt-engineering pressure.
-* **Q27.c — Strip-the-fence policy.** When the handler strips the
-  JSON fence from the body it posts to GitHub, should it leave a
-  marker so reviewers know the structured channel exists (e.g.,
-  "Verdict: request_changes (parsed from structured block)")? Or
-  keep it invisible? Leaning invisible — the verdict's effect on
-  mergeability is the operator-visible signal already.
-* **Q27.d — Validation under `--dry-run`.** The dry-run path skips
-  `gh pr review`. Should it also skip JSON parsing (to allow
-  experimentation with prompt-only changes) or run the parser to
-  surface drift in test? Leaning "always parse, always log" — the
-  drift signal is the value.
+* **Q27.a — Tourniquet retention bar.** **10 consecutive review runs
+  land cleanly via the JSON path** (no `review.json_parse_failed`
+  warnings) before the regex tourniquet is deleted. Concrete count
+  rather than time-based so the bar is unambiguous when reading the
+  warning log.
+* **Q27.b — Rationale length cap.** **`max_length=4000`** on
+  `rationale`. Cheap insurance against a runaway model; generous
+  enough that a substantive rationale isn't squeezed.
+* **Q27.c — Strip-the-fence policy.** **Strip without marker.** The
+  PR-page reader sees clean prose. The verdict's mergeability-VIEW
+  effect is already the operator-visible signal; surfacing the
+  parsed-from-structured-block fact in the PR body adds noise.
+* **Q27.d — Validation under `--dry-run`.** **Always parse, always
+  log.** The drift signal is the value; experimentation friction is
+  acceptable. Dry-run still skips `gh pr review` itself — only the
+  parser is unconditional.
 
 ## Phasing
 
