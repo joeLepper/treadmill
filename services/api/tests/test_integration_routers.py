@@ -203,6 +203,174 @@ class TestRoles:
         assert got["skills"] == ["skill-c", "skill-a", "skill-b"]
 
 
+# ── Role prompt edits + version history (ADR-0028) ───────────────────────────
+
+
+class TestRolePatchAndVersions:
+    """PATCH + GET versions endpoints from ADR-0028 phase 2b. Each
+    POST /api/v1/roles emits a v1 backfill row implicitly (alembic
+    0010); subsequent PATCHes increment from there. The tests below
+    seed a fresh role and reason about versions from v1 onward."""
+
+    def _seed_role(
+        self, client: httpx.Client, role_id: str = "role-patch-target",
+        initial_prompt: str = "initial prompt v1",
+    ) -> None:
+        client.post("/api/v1/roles", json={
+            "id": role_id, "model": "claude", "system_prompt": initial_prompt,
+            "output_kind": "analysis",
+        })
+
+    def test_patch_creates_new_version_and_updates_live_prompt(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        self._seed_role(client)
+        resp = client.patch(
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": "edited prompt v2"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["role"]["system_prompt"] == "edited prompt v2"
+        assert body["version"] == 2
+        # The GET endpoint sees the live prompt change.
+        got = client.get("/api/v1/roles/role-patch-target").json()
+        assert got["system_prompt"] == "edited prompt v2"
+
+    def test_patch_404s_for_missing_role(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        resp = client.patch(
+            "/api/v1/roles/role-does-not-exist",
+            json={"system_prompt": "..."},
+        )
+        assert resp.status_code == 404
+        assert "role not found" in resp.json()["detail"]
+
+    def test_patch_422s_on_empty_prompt(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        self._seed_role(client)
+        resp = client.patch(
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": ""},
+        )
+        assert resp.status_code == 422
+
+    def test_patch_sequential_increments_version(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        self._seed_role(client)
+        v2 = client.patch(
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": "edit v2"},
+        ).json()
+        v3 = client.patch(
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": "edit v3"},
+        ).json()
+        assert v2["version"] == 2
+        assert v3["version"] == 3
+        assert v3["role"]["system_prompt"] == "edit v3"
+
+    def test_patch_records_notes_and_pr_url(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        self._seed_role(client)
+        client.patch(
+            "/api/v1/roles/role-patch-target",
+            json={
+                "system_prompt": "edit with audit trail",
+                "notes": "reduce false-positive request_changes verdicts",
+                "pr_url": "https://github.com/joeLepper/treadmill/pull/42",
+            },
+        )
+        v2 = client.get(
+            "/api/v1/roles/role-patch-target/versions/2",
+        ).json()
+        assert v2["notes"] == "reduce false-positive request_changes verdicts"
+        assert v2["pr_url"] == "https://github.com/joeLepper/treadmill/pull/42"
+
+    def test_post_role_emits_v1_audit_row(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        """ADR-0028: every role's audit trail starts at v1 = its
+        initial prompt. The alembic 0010 backfill handles roles
+        present at migration time; POST /roles handles roles created
+        afterward. Both paths converge on the same shape so the
+        ``versions`` endpoint reads identically in both cases."""
+        self._seed_role(client)
+        versions = client.get(
+            "/api/v1/roles/role-patch-target/versions",
+        ).json()
+        assert len(versions) == 1
+        assert versions[0]["version"] == 1
+        # The v1 row's notes records the POST origin so a reader can
+        # distinguish "initial bootstrap" from "operator edit".
+        assert "initial version" in versions[0]["notes"]
+        # The first PATCH lands as v2.
+        v2 = client.patch(
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": "first edit"},
+        ).json()
+        assert v2["version"] == 2
+
+    def test_list_versions_newest_first(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        self._seed_role(client)  # writes v1
+        client.patch(  # writes v2
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": "edit v2-content", "notes": "second"},
+        )
+        client.patch(  # writes v3
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": "edit v3-content", "notes": "third"},
+        )
+        versions = client.get(
+            "/api/v1/roles/role-patch-target/versions",
+        ).json()
+        assert [v["version"] for v in versions] == [3, 2, 1]
+        assert versions[0]["notes"] == "third"
+        # System_prompt is intentionally NOT in the summary payload.
+        assert "system_prompt" not in versions[0]
+
+    def test_list_versions_404s_for_missing_role(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        resp = client.get("/api/v1/roles/role-does-not-exist/versions")
+        assert resp.status_code == 404
+
+    def test_get_version_returns_full_prompt(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        # POST writes v1 (initial); PATCH writes v2 (edit).
+        self._seed_role(client, initial_prompt="initial baseline")
+        client.patch(
+            "/api/v1/roles/role-patch-target",
+            json={"system_prompt": "snapshot v2 content"},
+        )
+        # v1 = initial baseline from POST
+        v1 = client.get(
+            "/api/v1/roles/role-patch-target/versions/1",
+        ).json()
+        assert v1["version"] == 1
+        assert v1["system_prompt"] == "initial baseline"
+        # v2 = the PATCHed content
+        v2 = client.get(
+            "/api/v1/roles/role-patch-target/versions/2",
+        ).json()
+        assert v2["version"] == 2
+        assert v2["system_prompt"] == "snapshot v2 content"
+
+    def test_get_version_404s_for_missing_version(
+        self, client: httpx.Client, truncate: None,
+    ) -> None:
+        self._seed_role(client)
+        resp = client.get("/api/v1/roles/role-patch-target/versions/99")
+        assert resp.status_code == 404
+
+
 # ── Workflows + Versions ─────────────────────────────────────────────────────
 
 
