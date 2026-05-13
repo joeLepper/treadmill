@@ -196,6 +196,82 @@ def test_parse_verdict_marker_takes_last_match_when_ambiguous() -> None:
     assert _parse_verdict_marker(text) == "request_changes"
 
 
+# ── Marker-decoration tolerance (tourniquet for the PR #10 deathloop) ──────────
+#
+# The strict regex used to reject everything except ``^VERDICT: <verb>$``;
+# the model occasionally adds Markdown emphasis under the "end your
+# response with one of these lines" instruction, and that defeated the
+# parse → verdict defaulted to ``comment`` → mergeability collapsed to
+# ``blocked-on-review`` → the runner re-authored → deathloop. Each case
+# below is a real or near-real decoration we have observed (or trivially
+# expect to observe given the prompt's emphasis instructions).
+
+
+def test_parse_verdict_marker_tolerates_bold_wrap() -> None:
+    """``**VERDICT: request_changes**`` — the live PR #10 failure case."""
+    assert (
+        _parse_verdict_marker("blah\n**VERDICT: request_changes**\n")
+        == "request_changes"
+    )
+
+
+def test_parse_verdict_marker_tolerates_italic_wrap() -> None:
+    assert (
+        _parse_verdict_marker("blah\n*VERDICT: approve*\n") == "approve"
+    )
+
+
+def test_parse_verdict_marker_tolerates_backtick_wrap() -> None:
+    assert _parse_verdict_marker("blah\n`VERDICT: approve`\n") == "approve"
+
+
+def test_parse_verdict_marker_tolerates_double_wrap() -> None:
+    """The model has been seen to double-wrap (``**`VERDICT: ...`**``)."""
+    assert (
+        _parse_verdict_marker("blah\n**`VERDICT: request_changes`**\n")
+        == "request_changes"
+    )
+
+
+def test_parse_verdict_marker_tolerates_leading_bullet() -> None:
+    assert (
+        _parse_verdict_marker("Summary follows.\n- VERDICT: approve\n")
+        == "approve"
+    )
+
+
+def test_parse_verdict_marker_tolerates_leading_blockquote() -> None:
+    assert (
+        _parse_verdict_marker("> VERDICT: request_changes\n")
+        == "request_changes"
+    )
+
+
+def test_parse_verdict_marker_tolerates_trailing_punctuation() -> None:
+    assert (
+        _parse_verdict_marker("...\nVERDICT: approve.\n") == "approve"
+    )
+
+
+def test_parse_verdict_marker_rejects_unknown_verb() -> None:
+    """Tolerance widens decorations, NOT the verdict vocabulary —
+    ``VERDICT: lgtm`` is still nonsense and must fall through to the
+    safe default rather than silently rewriting to e.g. ``approve``."""
+    assert _parse_verdict_marker("VERDICT: lgtm") == "comment"
+
+
+def test_parse_verdict_marker_last_wins_across_decorated_lines() -> None:
+    """Last-marker-wins still holds when each candidate is decorated
+    differently — the normalization must not collapse multiple matches
+    into the first."""
+    text = (
+        "**VERDICT: approve**\n"
+        "Actually on reflection:\n"
+        "- VERDICT: request_changes\n"
+    )
+    assert _parse_verdict_marker(text) == "request_changes"
+
+
 def test_review_handler_raises_without_pr_number(tmp_path: Path) -> None:
     """A review-kind step against a task that hasn't opened a PR yet
     is a config error — raise loudly so the operator sees it as a

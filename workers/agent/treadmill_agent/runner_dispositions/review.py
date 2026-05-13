@@ -31,10 +31,45 @@ class MissingContextError(RuntimeError):
     a PR yet."""
 
 
-_VERDICT_RE = re.compile(
-    r"^\s*VERDICT:\s*(approve|request_changes|comment)\s*$",
-    re.MULTILINE,
+# Tourniquet for the markdown-drift bug observed on PR #10
+# 2026-05-12 (the strict ``^VERDICT: ...$`` regex rejected
+# ``**VERDICT: request_changes**`` — model emphasis defeated the parse,
+# the verdict fell back to ``comment``, the mergeability VIEW collapsed
+# that to ``blocked-on-review``, the runner re-authored, and the loop
+# deathlooped). Per-line normalization strips the common Markdown
+# decorations the model produces under emphasis instructions: leading
+# list / blockquote markers, surrounding ``*`` / ``_`` / backtick
+# wrapping, and trailing punctuation. The durable fix is a structured
+# JSON envelope (ADR-0027); this widening is the tourniquet that lets
+# the running loop survive until that lands.
+_VERDICT_INNER_RE = re.compile(
+    r"^VERDICT:\s*(approve|request_changes|comment)$",
 )
+_LEADING_MARKER_RE = re.compile(r"^\s*(?:[-*+>]\s+|>\s*)*")
+_SURROUNDING_DECORATION_RE = re.compile(r"^[*_`]+|[*_`]+$")
+_TRAILING_PUNCTUATION_RE = re.compile(r"[.,;:!?\s]+$")
+
+
+def _normalize_verdict_line(line: str) -> str:
+    """Strip the markdown decorations a model commonly adds around a
+    marker line so the strict inner regex can still match.
+
+    Operates on a single line. Returns the bare ``VERDICT: <value>``
+    text if recognizable, else an empty string. Conservative: only
+    peels decorations we've actually seen the model emit; does not
+    fuzzy-match the verdict word itself (so e.g. ``VERDICT: lgtm``
+    still fails, falling through to the safe default).
+    """
+    s = _LEADING_MARKER_RE.sub("", line).strip()
+    # Repeatedly peel surrounding ``*``/``_``/backtick pairs; the model
+    # occasionally double-wraps (``**`*VERDICT*`**``).
+    while True:
+        peeled = _SURROUNDING_DECORATION_RE.sub("", s).strip()
+        if peeled == s:
+            break
+        s = peeled
+    s = _TRAILING_PUNCTUATION_RE.sub("", s)
+    return s
 
 
 def _parse_verdict_marker(summary: str, *, default: str = "comment") -> str:
@@ -48,10 +83,13 @@ def _parse_verdict_marker(summary: str, *, default: str = "comment") -> str:
     The default — ``comment`` — is the benign fallback so a missing /
     malformed marker never accidentally approves a PR.
     """
-    matches = _VERDICT_RE.findall(summary or "")
-    if not matches:
-        return default
-    return matches[-1]
+    last: str | None = None
+    for line in (summary or "").splitlines():
+        normalized = _normalize_verdict_line(line)
+        m = _VERDICT_INNER_RE.match(normalized)
+        if m is not None:
+            last = m.group(1)
+    return last if last is not None else default
 
 
 def handle(ctx: DispositionContext) -> StepOutput:
