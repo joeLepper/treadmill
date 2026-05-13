@@ -33,7 +33,11 @@ from treadmill_agent.runner_dispositions._context import DispositionContext
 from treadmill_agent.runner_dispositions.plan_doc import PlanDocScopeError
 from treadmill_agent.runner_dispositions.review import (
     MissingContextError,
+    ReviewVerdict,
+    _extract_json_block,
+    _parse_review_envelope,
     _parse_verdict_marker,
+    _strip_json_block,
 )
 
 
@@ -270,6 +274,249 @@ def test_parse_verdict_marker_last_wins_across_decorated_lines() -> None:
         "- VERDICT: request_changes\n"
     )
     assert _parse_verdict_marker(text) == "request_changes"
+
+
+# ── ADR-0027: JSON envelope path ─────────────────────────────────────────────
+
+
+def test_extract_json_block_picks_last_fence() -> None:
+    """``_extract_json_block`` returns the LAST ```json fence so a
+    drift-inducing earlier fence (e.g., example data the model
+    rendered) doesn't shadow the terminal verdict block."""
+    text = (
+        "Earlier I might cite:\n"
+        "```json\n"
+        '{"example": "ignored"}\n'
+        "```\n"
+        "\nNow my actual verdict:\n"
+        "```json\n"
+        '{"verdict": "approve", "rationale": "looks good"}\n'
+        "```\n"
+    )
+    block = _extract_json_block(text)
+    assert block is not None
+    assert '"verdict": "approve"' in block
+    assert "example" not in block
+
+
+def test_extract_json_block_returns_none_when_absent() -> None:
+    assert _extract_json_block("no fence here, just prose") is None
+    assert _extract_json_block("") is None
+
+
+def test_extract_json_block_tolerates_mixed_case_lang_tag() -> None:
+    """The fence lang tag is case-insensitive per ADR-0027 — JSON,
+    Json, json5 all match. yaml does NOT."""
+    for tag in ("json", "JSON", "Json", "json5"):
+        text = f"prose\n```{tag}\n" + '{"v": 1}\n```\n'
+        assert _extract_json_block(text) == '{"v": 1}'
+
+
+def test_extract_json_block_rejects_non_json_fences() -> None:
+    """A ```yaml block looks structurally similar but is not the
+    JSON contract — the language-tag whitelist is the guard."""
+    text = "```yaml\nverdict: approve\n```\n"
+    assert _extract_json_block(text) is None
+
+
+def test_strip_json_block_removes_only_last_fence() -> None:
+    """``_strip_json_block`` removes only the last fence so earlier
+    legitimate blocks survive — defensive for the model that emits
+    example data plus a terminal verdict."""
+    text = (
+        "Example:\n"
+        "```json\n"
+        '{"example": "keep me"}\n'
+        "```\n"
+        "Verdict:\n"
+        "```json\n"
+        '{"verdict": "approve", "rationale": "ok"}\n'
+        "```\n"
+    )
+    out = _strip_json_block(text)
+    assert "keep me" in out
+    assert "verdict" not in out  # the terminal block is gone
+    assert "Verdict:" in out  # surrounding prose preserved
+
+
+def test_strip_json_block_noop_when_no_fence() -> None:
+    assert _strip_json_block("just prose") == "just prose"
+    assert _strip_json_block("") == ""
+
+
+def test_review_verdict_pydantic_rejects_unknown_verdict() -> None:
+    """Closed value-set is the contract — Pydantic raises on
+    anything outside approve / request_changes / comment."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ReviewVerdict.model_validate({"verdict": "lgtm", "rationale": "x"})
+
+
+def test_review_verdict_pydantic_enforces_rationale_max_length() -> None:
+    """Q27.b: max_length=4000 on rationale. 4001 chars rejects."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ReviewVerdict.model_validate({
+            "verdict": "approve",
+            "rationale": "x" * 4001,
+        })
+    # 4000 is fine.
+    ok = ReviewVerdict.model_validate({
+        "verdict": "approve",
+        "rationale": "x" * 4000,
+    })
+    assert len(ok.rationale) == 4000
+
+
+def test_parse_review_envelope_picks_from_json_fence_happy_path() -> None:
+    """The primary parser path: a clean JSON fence returns
+    ``(verdict, rationale)`` from the typed model."""
+    text = (
+        "Reviewed the diff.\n\n"
+        "```json\n"
+        '{"verdict": "request_changes", "rationale": "missing tests"}\n'
+        "```\n"
+    )
+    verdict, rationale = _parse_review_envelope(text)
+    assert verdict == "request_changes"
+    assert rationale == "missing tests"
+
+
+def test_parse_review_envelope_falls_through_to_regex_on_invalid_json() -> None:
+    """When the JSON block is malformed (syntactic), the parser falls
+    through to the regex tourniquet. Rationale is None because the
+    regex path can't recover one."""
+    text = (
+        "Reviewed the diff.\n\n"
+        "```json\n"
+        '{"verdict": "approve", but this is not valid json\n'
+        "```\n\n"
+        "VERDICT: approve\n"
+    )
+    verdict, rationale = _parse_review_envelope(text)
+    assert verdict == "approve"
+    assert rationale is None
+
+
+def test_parse_review_envelope_falls_through_on_invalid_verdict_value() -> None:
+    """When the JSON block parses but the verdict is outside the
+    closed value-set, fall through to regex (or default)."""
+    text = (
+        "```json\n"
+        '{"verdict": "lgtm", "rationale": "looks good"}\n'
+        "```\n"
+        "VERDICT: approve\n"
+    )
+    verdict, rationale = _parse_review_envelope(text)
+    assert verdict == "approve"
+    assert rationale is None
+
+
+def test_parse_review_envelope_logs_warning_on_json_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Q27.d: parse failures emit a structured ``review.json_parse_failed``
+    warning — the drift signal that the model has stopped honoring the
+    JSON envelope contract."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="treadmill.agent.review")
+    text = (
+        "```json\n"
+        '{"verdict": "lgtm", "rationale": "..."}\n'  # invalid verdict
+        "```\n"
+    )
+    _parse_review_envelope(text)
+    assert any(
+        "review.json_parse_failed" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_parse_review_envelope_safe_default_when_both_paths_fail() -> None:
+    """No JSON, no VERDICT line → safe default ``comment``."""
+    verdict, rationale = _parse_review_envelope("Just prose, no marker at all.")
+    assert verdict == "comment"
+    assert rationale is None
+
+
+def test_parse_review_envelope_regex_explicit_comment() -> None:
+    """The regex tourniquet can return ``comment`` explicitly. The
+    envelope parser distinguishes 'model explicitly said comment'
+    from 'we fell to the safe default' but both yield the same
+    verdict — the rationale is None either way (regex path
+    can't recover one)."""
+    text = "Some notes.\nVERDICT: comment\n"
+    verdict, rationale = _parse_review_envelope(text)
+    assert verdict == "comment"
+    assert rationale is None
+
+
+def test_review_handler_strips_json_fence_from_posted_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q27.c: the JSON fence is stripped from the body sent to gh
+    pr comment so the PR-page reader sees clean prose. The verdict
+    + rationale flow through the StepOutput envelope, not through
+    the comment body."""
+    captured: list[str] = []
+    monkeypatch.setattr(
+        gh, "pr_comment",
+        lambda pr_number, *, body, cwd=None: captured.append(body),
+    )
+
+    summary = (
+        "Diff has correctness issues with the merge-key logic.\n\n"
+        "```json\n"
+        '{"verdict": "request_changes", "rationale": "fix the merge key"}\n'
+        "```\n"
+    )
+    ctx = _disp_ctx(
+        repo_dir=tmp_path, output_kind="review", pr_number=42,
+        summary=summary,
+    )
+    out = handle_review(ctx)
+    assert len(captured) == 1
+    # The JSON fence is gone from the body.
+    assert "```json" not in captured[0]
+    # The JSON key is gone (the header line contains the bare word
+    # "verdict" by design, but the fenced ``"verdict":`` form does
+    # not survive the strip).
+    assert '"verdict"' not in captured[0]
+    assert '"rationale"' not in captured[0]
+    # The surrounding prose survives.
+    assert "merge-key logic" in captured[0]
+    # The verdict + rationale travel via the StepOutput envelope.
+    assert out.decision == "changes_requested"
+    assert out.payload["verdict"] == "request_changes"
+    assert out.payload["rationale"] == "fix the merge key"
+
+
+def test_review_handler_dry_run_still_parses_per_q27d(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q27.d resolution: the parser runs unconditionally even on
+    dry-run, so the drift warning surfaces in tests + dev exploration.
+    Only ``gh pr comment`` itself is dry-run-gated."""
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("gh.pr_comment should not be called in dry-run")
+
+    monkeypatch.setattr(gh, "pr_comment", _fail)
+    monkeypatch.setattr(gh, "pr_review", _fail)
+
+    summary = (
+        "```json\n"
+        '{"verdict": "approve", "rationale": "lgtm"}\n'
+        "```\n"
+    )
+    ctx = _disp_ctx(
+        repo_dir=tmp_path, output_kind="review", pr_number=42,
+        summary=summary, is_dry_run=True,
+    )
+    out = handle_review(ctx)
+    # Parser fired even in dry-run, so the envelope has the rationale.
+    assert out.payload["verdict"] == "approve"
+    assert out.payload["rationale"] == "lgtm"
+    assert out.decision == "approved"
 
 
 def test_review_handler_raises_without_pr_number(tmp_path: Path) -> None:

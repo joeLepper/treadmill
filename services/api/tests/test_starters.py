@@ -274,25 +274,43 @@ _ANALYZER_ROLE_IDS = {
 }
 
 
-def test_role_reviewer_prompt_teaches_verdict_marker() -> None:
-    """Per ADR-0022, the review disposition handler parses a VERDICT:
-    marker from Claude's output. The role-reviewer prompt must teach
-    Claude the marker convention; without it, Claude defaults to
-    free-form prose and the runner falls back to ``comment`` on every
-    review."""
+def test_role_reviewer_prompt_teaches_json_envelope() -> None:
+    """Per ADR-0027 (resolved 2026-05-13), the review disposition
+    handler parses a fenced JSON block as its primary verdict channel.
+    The role-reviewer prompt must teach Claude the JSON envelope
+    convention; without it, Claude defaults to free-form prose and
+    the runner falls back to the regex tourniquet or to the safe
+    default ``comment``.
+
+    The prompt must reference ``json`` (case-insensitive) at least
+    once — the runner expects a ```json fenced block. It must NOT
+    reference the legacy ``VERDICT:`` marker (which lives now only
+    in the runner-side tourniquet, not in the prompt).
+    """
     reviewer = next(r for r in _all_roles() if r["id"] == "role-reviewer")
     prompt = reviewer["system_prompt"]
-    assert "VERDICT:" in prompt, (
-        "role-reviewer prompt must teach the VERDICT: marker convention "
-        "(ADR-0022). The runner parses the last matching line and uses "
-        "it to drive gh pr review --approve / --request-changes / "
-        "--comment."
+    assert "json" in prompt.lower(), (
+        "role-reviewer prompt must teach the JSON envelope (ADR-0027). "
+        "The runner parses the last ``json fenced block to extract "
+        "verdict + rationale."
+    )
+    assert "VERDICT:" not in prompt, (
+        "ADR-0027 phase 3 dropped the prose VERDICT: marker from the "
+        "prompt. The runner's tourniquet regex still parses it as a "
+        "fallback, but the prompt should no longer teach it; mixing "
+        "the two conventions confuses the model."
     )
     for value in ("approve", "request_changes", "comment"):
         assert value in prompt, (
             f"role-reviewer prompt must reference verdict value {value!r}; "
             "the runner won't recognize verdicts the prompt doesn't teach."
         )
+    # The fenced JSON example should appear in the prompt so the
+    # model has a literal template to mirror.
+    assert "```json" in prompt, (
+        "role-reviewer prompt should include a literal ```json fence "
+        "example so the model has a concrete template."
+    )
 
 
 def test_role_code_author_prompt_mentions_scope_discipline() -> None:
