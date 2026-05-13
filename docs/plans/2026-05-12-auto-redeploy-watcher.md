@@ -1,6 +1,6 @@
 ---
-status: drafting
-trigger: ADR-0024 (proposed 2026-05-12); needed for "Treadmill builds Treadmill" chain so PRs landing on main are reflected in the running stack
+status: active
+trigger: ADR-0024 accepted 2026-05-13 (drafted 2026-05-12). Flipping to active 2026-05-13 alongside the ADR-0023 implementation work. This is the round-trip validation cycle for the two consumer/disposition fixes shipped in commit 8a52c17 (pr_merged → reevaluate + wf-feedback empty-diff softening). 5-task chain with depends_on sequencing — task 1 dispatches immediately, tasks 2-5 defer until upstream PR merges.
 parent: docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ---
 

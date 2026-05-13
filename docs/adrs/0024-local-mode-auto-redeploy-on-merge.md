@@ -1,8 +1,8 @@
 # ADR-0024: Local-mode auto-redeploy on merge to main
 
-- **Status:** proposed
-- **Date:** 2026-05-12
-- **Related:** ADR-0017 (webhook ingestion), ADR-0018 (autoscaler — precedent for host-side supervisor processes), ADR-0021 (existing pr_merged trigger), ADR-0019 (host-side credential injection — same execution context)
+- **Status:** accepted (2026-05-13)
+- **Date:** 2026-05-12 (proposed); 2026-05-13 (accepted)
+- **Related:** ADR-0017 (webhook ingestion), ADR-0018 (autoscaler — precedent for host-side supervisor processes), ADR-0021 (existing pr_merged trigger), ADR-0019 (host-side credential injection — same execution context), ADR-0023 (API IAM-user credentials — landed in PR #20 same day)
 
 ## Context
 
