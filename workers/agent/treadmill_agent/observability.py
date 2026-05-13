@@ -44,7 +44,7 @@ def _configure_otel() -> None:
         OTLPMetricExporter,
     )
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-    from opentelemetry.instrumentation.boto3 import Boto3Instrumentor
+    from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
     from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
     resource = Resource(attributes={SERVICE_NAME: service_name})
@@ -60,7 +60,7 @@ def _configure_otel() -> None:
     )
 
     HTTPXClientInstrumentor().instrument()
-    Boto3Instrumentor().instrument()
+    BotocoreInstrumentor().instrument()
     LoggingInstrumentor().instrument()
 
 

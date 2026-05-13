@@ -46,7 +46,7 @@ def _configure_otel() -> None:
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-    from opentelemetry.instrumentation.boto3 import Boto3Instrumentor
+    from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
     from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
     resource = Resource(attributes={SERVICE_NAME: service_name})
@@ -64,7 +64,7 @@ def _configure_otel() -> None:
     FastAPIInstrumentor().instrument()
     SQLAlchemyInstrumentor().instrument()
     HTTPXClientInstrumentor().instrument()
-    Boto3Instrumentor().instrument()
+    BotocoreInstrumentor().instrument()
     LoggingInstrumentor().instrument()
 
 

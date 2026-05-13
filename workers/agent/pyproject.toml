@@ -12,7 +12,7 @@ dependencies = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp>=0.41b0",
     "opentelemetry-instrumentation-httpx>=0.41b0",
-    "opentelemetry-instrumentation-boto3>=0.41b0",
+    "opentelemetry-instrumentation-botocore>=0.41b0",
     "opentelemetry-instrumentation-logging>=0.41b0",
 ]
 
