@@ -36,6 +36,7 @@ from treadmill_agent.api_client import ApiClient, WorkerContext
 from treadmill_agent.config import Settings
 from treadmill_agent.events import StepOutput
 from treadmill_agent.eventbus import EventPublisher
+from treadmill_agent.observability import get_tracer
 from treadmill_agent.runner_dispositions import (
     handle_analysis,
     handle_code,
@@ -241,39 +242,41 @@ def _handle_step(
     don't-delete-on-error semantics) — visibility expiry then redelivers
     or DLQs the message.
     """
-    publisher.publish_step_started(
-        task_id=claim.task_id, plan_id=claim.plan_id,
-        run_id=claim.run_id, step_id=claim.step_id,
-    )
-    try:
-        ctx = api.fetch_step_context(claim.step_id)
-    except Exception as exc:
-        logger.exception("step %s failed during context fetch", claim.step_id)
-        publisher.publish_step_failed(
+    tracer = get_tracer("treadmill.worker.step")
+    with tracer.start_as_current_span("treadmill.worker.step"):
+        publisher.publish_step_started(
             task_id=claim.task_id, plan_id=claim.plan_id,
             run_id=claim.run_id, step_id=claim.step_id,
-            error=str(exc),
         )
-        raise
-    logger.info(
-        "fetched context: step=%s task=%s repo=%s role=%s model=%s",
-        ctx.step_id, ctx.task_id, ctx.repo, ctx.role.id, ctx.role.model,
-    )
-    try:
-        output = _execute(ctx, settings)
-    except Exception as exc:
-        logger.exception("step %s failed during execution", ctx.step_id)
-        publisher.publish_step_failed(
+        try:
+            ctx = api.fetch_step_context(claim.step_id)
+        except Exception as exc:
+            logger.exception("step %s failed during context fetch", claim.step_id)
+            publisher.publish_step_failed(
+                task_id=claim.task_id, plan_id=claim.plan_id,
+                run_id=claim.run_id, step_id=claim.step_id,
+                error=str(exc),
+            )
+            raise
+        logger.info(
+            "fetched context: step=%s task=%s repo=%s role=%s model=%s",
+            ctx.step_id, ctx.task_id, ctx.repo, ctx.role.id, ctx.role.model,
+        )
+        try:
+            output = _execute(ctx, settings)
+        except Exception as exc:
+            logger.exception("step %s failed during execution", ctx.step_id)
+            publisher.publish_step_failed(
+                task_id=ctx.task_id, plan_id=ctx.plan_id,
+                run_id=ctx.run_id, step_id=ctx.step_id,
+                error=str(exc),
+            )
+            raise
+        publisher.publish_step_completed(
             task_id=ctx.task_id, plan_id=ctx.plan_id,
             run_id=ctx.run_id, step_id=ctx.step_id,
-            error=str(exc),
+            output=output,
         )
-        raise
-    publisher.publish_step_completed(
-        task_id=ctx.task_id, plan_id=ctx.plan_id,
-        run_id=ctx.run_id, step_id=ctx.step_id,
-        output=output,
-    )
 
 
 def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:

@@ -30,6 +30,7 @@ import time
 import uvicorn
 
 from treadmill_api.config import Settings, get_settings
+from treadmill_api.observability import configure as configure_observability
 
 
 def _run_migrations(settings: Settings) -> None:
@@ -134,6 +135,8 @@ def _auto_seed_starters(settings: Settings) -> None:
 
 def run() -> None:
     settings = get_settings()
+
+    configure_observability()
 
     # Configure the root logger so ``treadmill_api.*`` INFO surfaces in
     # stdout. Uvicorn applies its own log_config separately for access /

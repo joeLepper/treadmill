@@ -19,6 +19,7 @@ import sys
 from treadmill_agent import config, runner, startup_auth
 from treadmill_agent.api_client import ApiClient
 from treadmill_agent.eventbus import EventPublisher
+from treadmill_agent.observability import configure as configure_observability
 
 
 def main() -> int:
@@ -27,6 +28,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
         stream=sys.stderr,
     )
+    configure_observability()
     settings = config.load()
     logging.getLogger("treadmill.agent").info(
         "starting agent: api=%s queue=%s mode=%s exit_after_step=%s",

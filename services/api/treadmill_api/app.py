@@ -28,6 +28,7 @@ from treadmill_api.dependencies import (
     RedisProbe,
     WebhookInboxProbe,
 )
+from treadmill_api.observability import get_tracer
 from treadmill_api.health import router as health_router
 from treadmill_api.routers.event_triggers import router as event_triggers_router
 from treadmill_api.routers.hooks import router as hooks_router
@@ -206,25 +207,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "running" if webhook_inbox_poller is not None else "unconfigured",
     )
 
-    try:
-        yield
-    finally:
-        # Replay loop stops first — it shares the sessionmaker with the
-        # consumer, and we want it idle before the consumer (and engine)
-        # tear down so an in-flight tick can't double-write on shutdown.
-        if replay_loop is not None:
-            await replay_loop.stop()
-        if consumer is not None:
-            await consumer.stop()
-        if webhook_inbox_poller is not None:
-            await webhook_inbox_poller.stop()
-        if github_client is not None:
-            await github_client.aclose()
-        if engine is not None:
-            await engine.dispose()
-        if redis is not None:
-            await redis.aclose()
-        logger.info("Treadmill API shut down")
+    tracer = get_tracer("treadmill.api.startup")
+    with tracer.start_as_current_span("treadmill.api.startup"):
+        try:
+            yield
+        finally:
+            # Replay loop stops first — it shares the sessionmaker with the
+            # consumer, and we want it idle before the consumer (and engine)
+            # tear down so an in-flight tick can't double-write on shutdown.
+            if replay_loop is not None:
+                await replay_loop.stop()
+            if consumer is not None:
+                await consumer.stop()
+            if webhook_inbox_poller is not None:
+                await webhook_inbox_poller.stop()
+            if github_client is not None:
+                await github_client.aclose()
+            if engine is not None:
+                await engine.dispose()
+            if redis is not None:
+                await redis.aclose()
+            logger.info("Treadmill API shut down")
 
 
 def _build_probes(
