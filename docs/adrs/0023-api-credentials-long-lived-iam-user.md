@@ -1,7 +1,7 @@
 # ADR-0023: API credentials use long-lived IAM-User keys (not operator SSO)
 
-- **Status:** proposed
-- **Date:** 2026-05-12
+- **Status:** accepted (2026-05-13)
+- **Date:** 2026-05-12 (proposed); 2026-05-13 (accepted)
 - **Related:** ADR-0016, ADR-0019 (supersedes §"The API still uses the operator's SSO profile")
 
 ## Context

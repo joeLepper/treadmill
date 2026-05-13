@@ -1,6 +1,6 @@
 ---
-status: drafting
-trigger: ADR-0023 (proposed 2026-05-12); resolves the live SSO-expiry bleeding observed during the o11y plan-merge smoke
+status: active
+trigger: ADR-0023 accepted 2026-05-13 (drafted 2026-05-12). Flipped active to dispatch through the plan-merge-to-main trigger now that #108 + ADR-0027 + ADR-0028 have shipped and the API + worker can self-build via wf-author + wf-review.
 parent: docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ---
 
@@ -9,8 +9,6 @@ parent: docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ADR-0023 commits to giving the API its own IAM user, replacing the
 operator-SSO frozen-credentials path that bites every ~1h. This plan
 is the implementation.
-
-`status: drafting` — operator review pass before flipping to active.
 
 ## Goal
 
