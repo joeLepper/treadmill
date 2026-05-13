@@ -18,7 +18,7 @@ Command groups:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -39,9 +39,15 @@ task_app = typer.Typer(name="task", help="Task operations.", no_args_is_help=Tru
 workflows_app = typer.Typer(
     name="workflows", help="Workflow operations.", no_args_is_help=True,
 )
+role_app = typer.Typer(
+    name="role",
+    help="Role operations (ADR-0028: DB-authoritative role prompts).",
+    no_args_is_help=True,
+)
 app.add_typer(plan_app)
 app.add_typer(task_app)
 app.add_typer(workflows_app)
+app.add_typer(role_app)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -390,6 +396,149 @@ def workflows_seed_starters(
             f"{len(result.role_prompts_reset)} role(s):[/yellow] "
             + ", ".join(result.role_prompts_reset)
         )
+
+
+# ── role show / update / versions (ADR-0028) ─────────────────────────────────
+
+
+@role_app.command("show")
+def role_show(
+    role_id: Annotated[str, typer.Argument(help="The role slug (e.g. role-reviewer).")],
+    version: Annotated[int | None, typer.Option(
+        "--version", "-v",
+        help="A specific version to show. Omit to show the live prompt.",
+    )] = None,
+) -> None:
+    """Print a role's current prompt + metadata, or a specific past version.
+
+    Without ``--version``, hits ``GET /api/v1/roles/{id}`` and shows the
+    live ``system_prompt``. With ``--version``, hits
+    ``GET /api/v1/roles/{id}/versions/{version}`` and shows that
+    snapshot including its notes + pr_url audit fields.
+    """
+    try:
+        with _client() as client:
+            if version is None:
+                resp = client._request("GET", f"/api/v1/roles/{role_id}")
+            else:
+                resp = client._request(
+                    "GET", f"/api/v1/roles/{role_id}/versions/{version}",
+                )
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+    if version is None:
+        console.print(
+            f"[bold]{resp['id']}[/bold]  "
+            f"model={resp['model']}  "
+            f"kind={resp['output_kind']}"
+        )
+        console.print(f"[dim]updated_at: {resp['updated_at']}[/dim]")
+        console.print()
+        console.print(resp["system_prompt"])
+    else:
+        console.print(
+            f"[bold]{role_id}[/bold]  v{resp['version']}  "
+            f"created_at={resp['created_at']}  "
+            f"by={resp.get('created_by') or 'unknown'}"
+        )
+        if resp.get("notes"):
+            console.print(f"[dim]notes: {resp['notes']}[/dim]")
+        if resp.get("pr_url"):
+            console.print(f"[dim]pr_url: {resp['pr_url']}[/dim]")
+        console.print()
+        console.print(resp["system_prompt"])
+
+
+@role_app.command("update")
+def role_update(
+    role_id: Annotated[str, typer.Argument(help="The role slug.")],
+    prompt_from_file: Annotated[Path, typer.Option(
+        "--prompt-from-file", "-f",
+        help="Path to a file containing the new system_prompt.",
+    )],
+    notes: Annotated[str | None, typer.Option(
+        "--notes", "-n",
+        help="Optional rationale for the edit (audit trail).",
+    )] = None,
+    pr_url: Annotated[str | None, typer.Option(
+        "--pr-url",
+        help="Optional PR URL linking this edit to its review (audit trail).",
+    )] = None,
+) -> None:
+    """PATCH a role's system_prompt and append a new role_versions row.
+
+    Per ADR-0028, this is the supported edit path. Editing
+    ``starters.py`` in code has NO effect on running deployments —
+    the DB is authoritative for role prompts after bootstrap.
+    """
+    if not prompt_from_file.exists():
+        err_console.print(f"[red]file not found: {prompt_from_file}[/red]")
+        raise typer.Exit(code=2)
+    new_prompt = prompt_from_file.read_text()
+    if not new_prompt.strip():
+        err_console.print(
+            f"[red]file is empty: {prompt_from_file}[/red]"
+        )
+        raise typer.Exit(code=2)
+
+    body: dict[str, Any] = {"system_prompt": new_prompt}
+    if notes:
+        body["notes"] = notes
+    if pr_url:
+        body["pr_url"] = pr_url
+
+    try:
+        with _client() as client:
+            resp = client._request(
+                "PATCH", f"/api/v1/roles/{role_id}", json=body,
+            )
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+    console.print(
+        f"[green]updated[/green] {role_id} → version {resp['version']}"
+    )
+
+
+@role_app.command("versions")
+def role_versions(
+    role_id: Annotated[str, typer.Argument(help="The role slug.")],
+) -> None:
+    """List a role's version history, newest first.
+
+    Each row shows the version, created_at, created_by, notes, and
+    pr_url. system_prompt is omitted for compactness — use
+    ``role show <id> --version N`` to inspect a specific version's
+    prompt content.
+    """
+    try:
+        with _client() as client:
+            versions = client._request(
+                "GET", f"/api/v1/roles/{role_id}/versions",
+            )
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+    if not versions:
+        console.print(f"[yellow]no versions for {role_id}[/yellow]")
+        return
+
+    table = Table(title=f"versions: {role_id}", show_header=True)
+    table.add_column("v", justify="right")
+    table.add_column("created_at")
+    table.add_column("created_by")
+    table.add_column("notes")
+    table.add_column("pr_url")
+    for v in versions:
+        table.add_row(
+            str(v["version"]),
+            v["created_at"],
+            v.get("created_by") or "—",
+            v.get("notes") or "—",
+            v.get("pr_url") or "—",
+        )
+    console.print(table)
 
 
 if __name__ == "__main__":

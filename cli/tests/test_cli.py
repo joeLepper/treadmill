@@ -411,3 +411,174 @@ def test_status_reports_unreachable_dep(httpx_mock: HTTPXMock) -> None:
     result = runner.invoke(app, ["status"])
     # status_code 503 gets surfaced as ApiError → exit 2.
     assert result.exit_code == 2
+
+
+# ── role show / update / versions (ADR-0028) ─────────────────────────────────
+
+
+def _role_payload(role_id: str = "role-reviewer", **overrides) -> dict:
+    base = {
+        "id": role_id,
+        "model": "claude-3.5",
+        "system_prompt": "you are a careful reviewer.",
+        "output_kind": "review",
+        "skills": [],
+        "hooks": [],
+        "created_at": "2026-05-13T12:00:00Z",
+        "updated_at": "2026-05-13T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_role_show_displays_live_prompt(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="GET", url="http://fake-api/api/v1/roles/role-reviewer",
+        json=_role_payload(),
+    )
+    result = runner.invoke(app, ["role", "show", "role-reviewer"])
+    assert result.exit_code == 0, result.output
+    assert "role-reviewer" in result.output
+    assert "you are a careful reviewer." in result.output
+    assert "review" in result.output  # output_kind
+
+
+def test_role_show_with_version_displays_snapshot(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url="http://fake-api/api/v1/roles/role-reviewer/versions/2",
+        json={
+            "version": 2,
+            "system_prompt": "version 2 prompt body",
+            "notes": "tightened verdict criteria",
+            "pr_url": "https://github.com/x/y/pull/42",
+            "created_at": "2026-05-13T13:00:00Z",
+            "created_by": "api",
+        },
+    )
+    result = runner.invoke(
+        app, ["role", "show", "role-reviewer", "--version", "2"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "v2" in result.output
+    assert "version 2 prompt body" in result.output
+    assert "tightened verdict criteria" in result.output
+    assert "https://github.com/x/y/pull/42" in result.output
+
+
+def test_role_show_handles_404(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="GET", url="http://fake-api/api/v1/roles/role-missing",
+        json={"detail": "role not found"}, status_code=404,
+    )
+    result = runner.invoke(app, ["role", "show", "role-missing"])
+    assert result.exit_code == 2
+
+
+def test_role_update_patches_with_file_contents(
+    httpx_mock: HTTPXMock, tmp_path: Path,
+) -> None:
+    prompt_file = tmp_path / "new_prompt.md"
+    prompt_file.write_text("you are an even more careful reviewer.\n")
+
+    httpx_mock.add_response(
+        method="PATCH", url="http://fake-api/api/v1/roles/role-reviewer",
+        json={"role": _role_payload(), "version": 2},
+    )
+
+    result = runner.invoke(app, [
+        "role", "update", "role-reviewer",
+        "--prompt-from-file", str(prompt_file),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "updated" in result.output
+    assert "version 2" in result.output
+
+    # Body contains the file's contents as system_prompt.
+    patches = [r for r in httpx_mock.get_requests() if r.method == "PATCH"]
+    assert len(patches) == 1
+    import json
+    body = json.loads(patches[0].content)
+    assert body["system_prompt"] == "you are an even more careful reviewer.\n"
+
+
+def test_role_update_propagates_notes_and_pr_url(
+    httpx_mock: HTTPXMock, tmp_path: Path,
+) -> None:
+    prompt_file = tmp_path / "p.md"
+    prompt_file.write_text("new prompt body")
+
+    httpx_mock.add_response(
+        method="PATCH", url="http://fake-api/api/v1/roles/role-x",
+        json={"role": _role_payload(role_id="role-x"), "version": 3},
+    )
+
+    result = runner.invoke(app, [
+        "role", "update", "role-x",
+        "--prompt-from-file", str(prompt_file),
+        "--notes", "incident response for o11y smoke",
+        "--pr-url", "https://github.com/joeLepper/treadmill/pull/99",
+    ])
+    assert result.exit_code == 0, result.output
+
+    import json
+    patch = next(
+        r for r in httpx_mock.get_requests() if r.method == "PATCH"
+    )
+    body = json.loads(patch.content)
+    assert body["notes"] == "incident response for o11y smoke"
+    assert body["pr_url"] == "https://github.com/joeLepper/treadmill/pull/99"
+
+
+def test_role_update_missing_file_errors() -> None:
+    result = runner.invoke(app, [
+        "role", "update", "role-x",
+        "--prompt-from-file", "/nonexistent/path.md",
+    ])
+    assert result.exit_code == 2
+    assert "not found" in result.output
+
+
+def test_role_update_empty_file_errors(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.md"
+    empty.write_text("   \n  \n")
+    result = runner.invoke(app, [
+        "role", "update", "role-x", "--prompt-from-file", str(empty),
+    ])
+    assert result.exit_code == 2
+    assert "empty" in result.output
+
+
+def test_role_versions_lists_history(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="GET", url="http://fake-api/api/v1/roles/role-reviewer/versions",
+        json=[
+            {
+                "version": 2, "notes": "edit",
+                "pr_url": "https://github.com/x/y/pull/42",
+                "created_at": "2026-05-13T13:00:00Z", "created_by": "api",
+            },
+            {
+                "version": 1, "notes": "initial",
+                "pr_url": None,
+                "created_at": "2026-05-13T12:00:00Z", "created_by": "api",
+            },
+        ],
+    )
+    result = runner.invoke(app, ["role", "versions", "role-reviewer"])
+    assert result.exit_code == 0, result.output
+    assert "2" in result.output and "1" in result.output
+    assert "edit" in result.output
+    assert "initial" in result.output
+
+
+def test_role_versions_empty_lists_friendly_message(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="GET", url="http://fake-api/api/v1/roles/role-empty/versions",
+        json=[],
+    )
+    result = runner.invoke(app, ["role", "versions", "role-empty"])
+    assert result.exit_code == 0
+    assert "no versions" in result.output
