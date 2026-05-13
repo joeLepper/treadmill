@@ -132,11 +132,86 @@ def test_coordination_queue_redrive_policy():
     assert redrive["maxReceiveCount"] == 5
 
 
+def test_deploy_events_queue_with_deployment_suffix():
+    template = _template()
+    template.has_resource_properties(
+        "AWS::SQS::Queue",
+        {"QueueName": "treadmill-test-deploy-events"},
+    )
+
+
+def test_deploy_events_dlq_with_deployment_suffix():
+    template = _template()
+    template.has_resource_properties(
+        "AWS::SQS::Queue",
+        {"QueueName": "treadmill-test-deploy-events-dlq"},
+    )
+
+
+def test_deploy_events_queue_redrive_policy():
+    """Deploy-events queue redrives to its DLQ after 3 failed receives."""
+    template = _template()
+    queues = template.find_resources(
+        "AWS::SQS::Queue",
+        {"Properties": {"QueueName": "treadmill-test-deploy-events"}},
+    )
+    assert len(queues) == 1
+    [(_lid, queue)] = queues.items()
+    redrive = queue["Properties"].get("RedrivePolicy")
+    assert redrive is not None, "deploy-events queue must have a RedrivePolicy"
+    assert redrive["maxReceiveCount"] == 3
+
+
+def test_deploy_events_queue_visibility_timeout():
+    """Deploy-events queue has 30s visibility timeout."""
+    template = _template()
+    queues = template.find_resources(
+        "AWS::SQS::Queue",
+        {"Properties": {"QueueName": "treadmill-test-deploy-events"}},
+    )
+    assert len(queues) == 1
+    [(_lid, queue)] = queues.items()
+    assert queue["Properties"]["VisibilityTimeout"] == 30
+
+
+def test_deploy_events_sns_subscription_with_filter_policy():
+    """Deploy-events queue is subscribed to events topic with filter policy
+    limiting to github PRs merged."""
+    template = _template().to_json()
+    resources = template.get("Resources", {})
+
+    # Find SNS subscriptions with FilterPolicy
+    found_deploy_events_sub = False
+    for resource in resources.values():
+        if resource.get("Type") != "AWS::SNS::Subscription":
+            continue
+        props = resource.get("Properties", {})
+        filter_policy = props.get("FilterPolicy")
+        if filter_policy is None:
+            continue
+        # Check if filter policy has entity_type=github AND action=pr_merged
+        if (
+            isinstance(filter_policy, dict)
+            and "entity_type" in filter_policy
+            and "action" in filter_policy
+            and filter_policy.get("entity_type") == ["github"]
+            and filter_policy.get("action") == ["pr_merged"]
+        ):
+            found_deploy_events_sub = True
+            break
+
+    assert found_deploy_events_sub, (
+        "expected SNS subscription with filter policy "
+        "(entity_type=['github'] AND action=['pr_merged'])"
+    )
+
+
 def test_dlqs_have_14_day_retention():
     template = _template()
     for name in (
         "treadmill-test-work-dlq.fifo",
         "treadmill-test-coordination-dlq",
+        "treadmill-test-deploy-events-dlq",
     ):
         dlqs = template.find_resources(
             "AWS::SQS::Queue", {"Properties": {"QueueName": name}},
@@ -158,13 +233,34 @@ def test_sns_topic_count_after_phase_b_composition():
     template.resource_count_is("AWS::SNS::Topic", 2)
 
 
+def test_deploy_events_cfn_outputs():
+    """Two CloudFormation outputs for deploy-events:
+    - DeployEventsQueueUrl
+    - DeployEventsDlqUrl
+    """
+    template = _template().to_json()
+    outputs = template.get("Outputs", {})
+    output_keys = set(outputs.keys())
+
+    # CDK appends an 8-char hash to the logical ID
+    queue_output_keys = [key for key in output_keys if "DeployEventsQueueUrl" in key]
+    dlq_output_keys = [key for key in output_keys if "DeployEventsDlqUrl" in key]
+
+    assert len(queue_output_keys) == 1, (
+        f"expected exactly 1 DeployEventsQueueUrl output, got {queue_output_keys}"
+    )
+    assert len(dlq_output_keys) == 1, (
+        f"expected exactly 1 DeployEventsDlqUrl output, got {dlq_output_keys}"
+    )
+
+
 def test_resource_count_is_minimal():
     """CloudLite holds only the cloud-lite shape — no VPC, no ECS, no S3.
     Compute (API, Postgres, Redis, workers) stays on the laptop.
 
-    Expected counts after Phase B composition + ADR-0023:
-      - SQS queues: 6 (work, work-dlq, coordination, coord-dlq,
-        webhook-inbox, webhook-inbox-dlq).
+    Expected counts after Phase B + ADR-0023 + deploy-events composition:
+      - SQS queues: 8 (work, work-dlq, coordination, coord-dlq,
+        webhook-inbox, webhook-inbox-dlq, deploy-events, deploy-events-dlq).
       - SNS topics: 2 (events, billing-alarms).
       - Secrets Manager: 4 (github-webhook-secret, github-pat,
         worker-aws-credentials, api-aws-credentials per ADR-0023).
@@ -173,7 +269,7 @@ def test_resource_count_is_minimal():
       - Zero VPC / ECS / S3 — compute is local per ADR-0016.
     """
     template = _template()
-    template.resource_count_is("AWS::SQS::Queue", 6)
+    template.resource_count_is("AWS::SQS::Queue", 8)
     template.resource_count_is("AWS::SNS::Topic", 2)
     template.resource_count_is("AWS::SecretsManager::Secret", 4)
     template.resource_count_is("AWS::Lambda::Function", 1)

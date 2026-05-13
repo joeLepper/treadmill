@@ -5,6 +5,8 @@ shape for a Treadmill deployment whose compute (API, Postgres, Redis,
 workers) runs on the operator's laptop. Composes:
 
 - :class:`MessagingConstruct`       — SNS events topic + SQS queues
+- :class:`DeployEventsConstruct`    — SQS deploy-events queue subscribed to
+  events topic with filter policy (entity_type=github AND action=pr_merged)
 - :class:`SecretsConstruct`         — github-webhook-secret + github-pat
   + worker-aws-credentials (empty containers; operator populates via
   ``aws secretsmanager put-secret-value``)
@@ -37,6 +39,7 @@ import aws_cdk as cdk
 from constructs import Construct
 
 from treadmill_infra.constructs import (
+    DeployEventsConstruct,
     MessagingConstruct,
     ObservabilityConstruct,
     SecretsConstruct,
@@ -110,6 +113,12 @@ class TreadmillCloudLite(cdk.Stack):
         # ── Constructs ────────────────────────────────────────────────────────
         self.messaging = MessagingConstruct(
             self, "Messaging", deployment_id=deployment_id,
+        )
+        self.deploy_events = DeployEventsConstruct(
+            self,
+            "DeployEvents",
+            deployment_id=deployment_id,
+            events_topic=self.messaging.events_topic,
         )
         self.secrets = SecretsConstruct(
             self, "Secrets", deployment_id=deployment_id,
