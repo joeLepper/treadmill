@@ -79,7 +79,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
-from treadmill_api.events.step import StepReady
+from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.models import (
     EventTrigger,
     Task,
@@ -232,7 +232,7 @@ async def evaluate_triggers(
                 dispatcher,
                 task=task,
                 workflow_id=_workflow_id,
-                trigger_event=event_type,
+                trigger=f"webhook:{event_type}",
             )
 
         run_id = await maybe_dispatch_with_dedup(
@@ -363,13 +363,99 @@ async def _is_capped(
     return count >= cap
 
 
+async def maybe_dispatch_feedback_on_review_changes_requested(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """Fire ``wf-feedback`` when a ``wf-review`` step completes with
+    ``decision='changes_requested'`` (task #108 path 1).
+
+    Companion to the github-webhook-driven ``evaluate_triggers``: that
+    function fires ``wf-feedback`` on a ``pr_review_submitted`` event
+    with ``state='changes_requested'`` (human reviewer outside
+    Treadmill). This function fires it on Treadmill's own self-review,
+    which under path 1 no longer emits ``pr_review_submitted`` (we
+    switched to ``gh pr comment``).
+
+    Skips cleanly when:
+      * The completed step isn't a ``wf-review`` step.
+      * The envelope's ``decision`` isn't ``changes_requested``.
+      * Owning task can't be resolved (deleted between dispatch + completion).
+      * No ``WorkflowVersion`` exists for ``wf-feedback`` (un-seeded
+        install).
+
+    Dedup is gated by ADR-0026's ``WorkflowDispatchDedup`` table keyed
+    on ``wf-feedback:<repo>:review-run=<wf_review_run_id>`` (see
+    ``dispatch_dedup._build_wf_feedback_key``). A redelivered
+    ``step.completed`` event finds the existing row and skips.
+
+    Returns the new ``wf-feedback`` run's id, or ``None`` if any of
+    the skip conditions fired.
+    """
+    if typed.output.decision != "changes_requested":
+        return None
+    # Resolve (workflow_id, run_id, task_id, repo) for this step.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "review-feedback trigger: no run/task resolvable for step %s; "
+            "skipping",
+            step_id,
+        )
+        return None
+    if row.workflow_id != "wf-review":
+        # Only wf-review's changes_requested verdict fires feedback.
+        return None
+
+    # Re-fetch the Task so the dispatch helper has the full ORM object.
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {"repo": row.repo, "review_run_id": str(row.run_id)}
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id="wf-feedback",
+            trigger="self:wf-review-changes-requested",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id="wf-feedback",
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
 async def _create_and_publish_run(
     session: AsyncSession,
     dispatcher: Any,
     *,
     task: Task,
     workflow_id: str,
-    trigger_event: str,
+    trigger: str,
 ) -> uuid.UUID | None:
     """Create a WorkflowRun + step rows for the workflow and publish
     ``step.ready`` for the first step.
@@ -377,9 +463,11 @@ async def _create_and_publish_run(
     Mirrors bunkhouse ``TriggerEvaluator._create_workflow_run`` adapted
     to Treadmill's schema: ``WorkflowRun.workflow_version_id`` (not
     ``workflow_id``), and the ``trigger`` column is one string (not the
-    bunkhouse pair of ``trigger`` + ``trigger_event``). We encode both
-    pieces into the ``trigger`` value as ``webhook:<event>`` so the
-    audit trail still tells you what fired the run.
+    bunkhouse pair of ``trigger`` + ``trigger_event``). Callers encode
+    the source + event into the ``trigger`` value
+    (e.g. ``webhook:pr_synchronize`` for the github path,
+    ``self:wf-review-changes-requested`` for the step-output path) so
+    the audit trail still tells you what fired the run.
 
     Returns the run's id, or ``None`` if the workflow has no version
     (un-seeded install) or no steps (degenerate workflow).
@@ -422,7 +510,7 @@ async def _create_and_publish_run(
     run = WorkflowRun(
         task_id=task.id,
         workflow_version_id=wv.id,
-        trigger=f"webhook:{trigger_event}",
+        trigger=trigger,
     )
     session.add(run)
     await session.flush()
@@ -518,6 +606,6 @@ async def _create_and_publish_run(
 
     logger.info(
         "trigger evaluator: dispatched %s for task %s (run %s) on %s",
-        workflow_id, task.id, run.id, trigger_event,
+        workflow_id, task.id, run.id, trigger,
     )
     return run.id

@@ -283,25 +283,34 @@ def test_review_handler_raises_without_pr_number(tmp_path: Path) -> None:
         handle_review(ctx)
 
 
-def test_review_handler_invokes_gh_pr_review_with_parsed_verdict(
+def test_review_handler_invokes_gh_pr_comment_with_verdict_header(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The review handler shells out to ``gh.pr_review`` with the
-    verdict parsed from Claude's output and the PR number from the
-    step context. The decision maps to ADR-0012's wf-review value set."""
+    """The review handler shells out to ``gh.pr_comment`` (NOT
+    ``gh.pr_review`` — GitHub blocks same-author reviews; task #108
+    path 1) with a body that prepends a human-readable verdict header
+    so PR-page readers see the verdict above the prose. The decision
+    on the envelope still maps to ADR-0012's wf-review value set."""
     calls: list[dict[str, Any]] = []
 
-    def _fake(pr_number, *, verdict, body, cwd=None):
-        calls.append({"pr": pr_number, "verdict": verdict, "body": body})
+    def _fake_comment(pr_number, *, body, cwd=None):
+        calls.append({"pr": pr_number, "body": body})
 
-    monkeypatch.setattr(gh, "pr_review", _fake)
+    def _fail_review(*_args, **_kwargs):
+        raise AssertionError("gh.pr_review must not be called (#108 path 1)")
+
+    monkeypatch.setattr(gh, "pr_comment", _fake_comment)
+    monkeypatch.setattr(gh, "pr_review", _fail_review)
 
     ctx = _disp_ctx(
         repo_dir=tmp_path, output_kind="review", pr_number=42,
         summary="Reviewed the diff carefully.\n\nVERDICT: approve\n",
     )
     out = handle_review(ctx)
-    assert calls == [{"pr": 42, "verdict": "approve", "body": ctx.claude_result.summary}]
+    assert len(calls) == 1
+    assert calls[0]["pr"] == 42
+    assert calls[0]["body"].startswith("## Treadmill review verdict: approve\n\n")
+    assert ctx.claude_result.summary in calls[0]["body"]
     # ADR-0012 mapping: approve → approved.
     assert out.decision == "approved"
     review_artifacts = [a for a in out.artifacts if a.kind == "pr_review"]
@@ -311,6 +320,26 @@ def test_review_handler_invokes_gh_pr_review_with_parsed_verdict(
     assert out.payload["verdict"] == "approve"
 
 
+def test_review_handler_comment_header_uses_human_verb_for_request_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``request_changes`` reads naturally in prose as
+    ``request changes`` — the header verb is the human-facing form,
+    not the snake_case value-set member."""
+    captured: list[str] = []
+    monkeypatch.setattr(
+        gh, "pr_comment",
+        lambda pr_number, *, body, cwd=None: captured.append(body),
+    )
+    monkeypatch.setattr(gh, "pr_review", lambda *a, **kw: None)
+    ctx = _disp_ctx(
+        repo_dir=tmp_path, output_kind="review", pr_number=11,
+        summary="Diff has correctness issues.\nVERDICT: request_changes\n",
+    )
+    handle_review(ctx)
+    assert captured[0].startswith("## Treadmill review verdict: request changes\n\n")
+
+
 def test_review_handler_skips_gh_in_dry_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -318,8 +347,9 @@ def test_review_handler_skips_gh_in_dry_run(
     reflects the parsed verdict so tests can exercise the marker
     convention without a live GitHub."""
     def _fail(*_args, **_kwargs):
-        raise AssertionError("gh.pr_review should not be called in dry-run")
+        raise AssertionError("gh.pr_comment should not be called in dry-run")
 
+    monkeypatch.setattr(gh, "pr_comment", _fail)
     monkeypatch.setattr(gh, "pr_review", _fail)
     ctx = _disp_ctx(
         repo_dir=tmp_path, output_kind="review", pr_number=42,

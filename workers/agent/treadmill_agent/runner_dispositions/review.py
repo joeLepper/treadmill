@@ -1,14 +1,26 @@
-"""``review`` disposition — post a PR review via ``gh pr review``.
+"""``review`` disposition — post a PR comment carrying the verdict.
 
-Per ADR-0022, the review-kind role's prompt instructs Claude to end
-its output with ``VERDICT: approve | request_changes | comment``. The
-handler greps for the last matching line; if none is found, the
-verdict defaults to ``comment`` (the safe default — never accidentally
-approves a PR Treadmill can't actually evaluate).
+Per ADR-0022 + task #108 path 1, the review-kind role's prompt
+instructs Claude to end its output with
+``VERDICT: approve | request_changes | comment``. The handler greps
+for the last matching line; if none is found, the verdict defaults to
+``comment`` (the safe default — never accidentally approves a PR
+Treadmill can't actually evaluate).
+
+The handler posts the verdict as a ``gh pr comment`` body (not
+``gh pr review``) — GitHub blocks same-author ``gh pr review`` calls,
+and Treadmill's single-PAT identity authors and reviews under the
+same user. The mergeability VIEW (ADR-0013) reads ``decision`` from
+the Treadmill envelope rather than from GitHub's pr_review_submitted
+event, so the formal-review state on the PR page is no longer
+load-bearing. The companion change in
+``coordination/triggers.py`` fires ``wf-feedback`` directly from a
+``wf-review.step.completed`` event whose ``decision`` is
+``changes_requested``, so the self-feedback loop survives the switch.
 
 Empty diff is a SUCCESS for review-kind. The reviewer was asked to
 look at code, not to modify it. The PR-side side effect (the posted
-review) is the role's actual output.
+comment) is the role's human-facing output.
 
 Required context: ``pr_number`` must be present on the step context.
 A review-kind step against a task that hasn't opened a PR yet is a
@@ -92,8 +104,28 @@ def _parse_verdict_marker(summary: str, *, default: str = "comment") -> str:
     return last if last is not None else default
 
 
+_VERDICT_HEADER_VERB: dict[str, str] = {
+    "approve": "approve",
+    "request_changes": "request changes",
+    "comment": "comment",
+}
+
+
+def _compose_comment_body(verdict: str, summary: str) -> str:
+    """Prepend a verdict header to the model's review body so a human
+    reader scanning the PR page sees the verdict immediately.
+
+    The header is the *only* contract surface for a human reader; the
+    runner side reads the verdict from the StepOutput envelope, not by
+    re-parsing this body. Header text is deliberately a plain English
+    verb (``approve`` / ``request changes`` / ``comment``) so it reads
+    naturally above the review prose."""
+    verb = _VERDICT_HEADER_VERB.get(verdict, verdict)
+    return f"## Treadmill review verdict: {verb}\n\n{summary}"
+
+
 def handle(ctx: DispositionContext) -> StepOutput:
-    """Parse the verdict, post the review, return the envelope."""
+    """Parse the verdict, post the comment, return the envelope."""
     if ctx.ctx.pr_number is None:
         raise MissingContextError(
             f"review-kind step {ctx.ctx.step_id!r} requires pr_number but "
@@ -104,10 +136,9 @@ def handle(ctx: DispositionContext) -> StepOutput:
     # Dry-run path: skip the gh CLI invocation; tests assert the
     # parsed verdict + envelope shape without a live GitHub.
     if not ctx.is_dry_run:
-        gh.pr_review(
+        gh.pr_comment(
             ctx.ctx.pr_number,
-            verdict=verdict,  # type: ignore[arg-type]
-            body=ctx.claude_result.summary,
+            body=_compose_comment_body(verdict, ctx.claude_result.summary),
             cwd=ctx.repo_dir,
         )
     return StepOutput(

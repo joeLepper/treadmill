@@ -68,6 +68,40 @@ def test_wf_feedback_builder_emits_review_id() -> None:
     assert key == "wf-feedback:joeLepper/treadmill:review=PRR_kwDOSb12345"
 
 
+def test_wf_feedback_builder_emits_review_run_id_for_self_trigger() -> None:
+    """Task #108 path 1: when Treadmill self-fires wf-feedback off a
+    ``wf-review.step.completed`` (because the ``gh pr comment`` switch
+    means no ``pr_review_submitted`` webhook fires), the dedup key
+    uses ``review-run=<wf_review_run_id>`` namespace — distinct from
+    the human-reviewer ``review=<github_node_id>`` namespace so the
+    two trigger sources do not collide on the dedup table."""
+    key = build_dedup_key(
+        "wf-feedback",
+        {
+            "repo": "joeLepper/treadmill",
+            "review_run_id": "01234567-89ab-cdef-0123-456789abcdef",
+        },
+    )
+    assert key == (
+        "wf-feedback:joeLepper/treadmill:"
+        "review-run=01234567-89ab-cdef-0123-456789abcdef"
+    )
+
+
+def test_wf_feedback_builder_prefers_review_id_over_review_run_id() -> None:
+    """If both fields are present (unexpected — defensive), the
+    github-driven ``review_id`` wins. Documents the precedence."""
+    key = build_dedup_key(
+        "wf-feedback",
+        {
+            "repo": "joeLepper/treadmill",
+            "review_id": "PRR_kwDOSb12345",
+            "review_run_id": "01234567-89ab-cdef-0123-456789abcdef",
+        },
+    )
+    assert key == "wf-feedback:joeLepper/treadmill:review=PRR_kwDOSb12345"
+
+
 def test_wf_ci_fix_builder_emits_check_run_id() -> None:
     """``wf-ci-fix:<repo>:check_run=<check_run_id>`` — one fix per
     failing check_run."""

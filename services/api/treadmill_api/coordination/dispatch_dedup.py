@@ -84,18 +84,38 @@ def _build_wf_review_key(payload: dict[str, Any]) -> str | None:
 
 
 def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
-    """``wf-feedback:<repo>:review=<review_id>``.
+    """``wf-feedback:<repo>:review=<review_id>`` (human-submitted review)
+    or ``wf-feedback:<repo>:review-run=<run_id>`` (Treadmill self-trigger).
 
-    One feedback run per review. ``review_id`` is the GitHub review's
-    node-id (e.g. ``PRR_kwDOSb...``); the normalizer does NOT emit this
-    field today, so this builder returns ``None`` for now. See module
-    docstring for the missing-field disposition.
+    Two trigger sources fire wf-feedback:
+
+      * ``pr_review_submitted`` webhook (human reviewer outside
+        Treadmill) — payload carries ``review_id`` (GitHub node-id like
+        ``PRR_kwDOSb...``). The normalizer does NOT emit this field
+        today, so the human path falls through to unconditional
+        dispatch.
+
+      * ``wf-review.step.completed`` with ``decision='changes_requested'``
+        (task #108 path 1 — Treadmill's own self-review fires this via
+        ``maybe_dispatch_feedback_on_review_changes_requested``).
+        Payload carries ``review_run_id`` (UUID of the wf-review run).
+
+    Different namespaces (``review=`` vs ``review-run=``) intentionally
+    so the two trigger sources do not collide on the dedup table — if
+    a human submits ``changes_requested`` on the same SHA the
+    self-trigger also fired against, both wf-feedback runs are
+    legitimate (different intent sources).
     """
     repo = payload.get("repo")
-    review_id = payload.get("review_id")
-    if not repo or not review_id:
+    if not repo:
         return None
-    return f"wf-feedback:{repo}:review={review_id}"
+    review_id = payload.get("review_id")
+    if review_id:
+        return f"wf-feedback:{repo}:review={review_id}"
+    review_run_id = payload.get("review_run_id")
+    if review_run_id:
+        return f"wf-feedback:{repo}:review-run={review_run_id}"
+    return None
 
 
 def _build_wf_ci_fix_key(payload: dict[str, Any]) -> str | None:

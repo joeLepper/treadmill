@@ -373,6 +373,14 @@ class CoordinationConsumer:
                 await self._write_task_prs_on_completed(
                     session, step_id, typed, payload,
                 )
+                # task #108 path 1: when a wf-review step completes
+                # with decision=changes_requested, fire wf-feedback
+                # directly (we no longer get a pr_review_submitted
+                # webhook because the runner posts via ``gh pr
+                # comment`` instead of ``gh pr review``). The helper
+                # short-circuits cleanly for non-wf-review steps and
+                # for verdicts other than changes_requested.
+                await self._maybe_fire_review_feedback(session, step_id, typed)
             # B.2 — cross-step dispatch. When a step terminates and the
             # workflow has a next pending step, materialize its
             # ``step.ready`` Event row + SQS claim. Per ADR-0015 §"No
@@ -876,6 +884,45 @@ class CoordinationConsumer:
                     "repo=%s pr_number=%d task_id=%s; row still committed",
                     repo, pr_number, task_id,
                 )
+
+    # ── Self-trigger: wf-review changes_requested → wf-feedback (#108) ────────
+
+    async def _maybe_fire_review_feedback(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """Companion side-effect to ``_write_task_prs_on_completed`` —
+        when a ``wf-review.step.completed`` arrives with
+        ``decision='changes_requested'``, dispatch ``wf-feedback``
+        directly (path 1 of task #108 — see
+        ``coordination/triggers.maybe_dispatch_feedback_on_review_changes_requested``).
+
+        Skips cleanly when ``self.dispatcher`` is ``None`` (narrow
+        tests that don't exercise dispatch). Failures are logged but
+        do not propagate — the prior step's projection has already
+        committed; rolling that back on a dispatch failure would lose
+        progress. The dispatch helper's own retry / dedup logic
+        handles transient errors on the next event delivery.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_feedback_on_review_changes_requested,
+        )
+        try:
+            await maybe_dispatch_feedback_on_review_changes_requested(
+                session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_review_feedback: dispatch failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
 
     # ── Cross-step dispatch (B.2) ─────────────────────────────────────────────
 
