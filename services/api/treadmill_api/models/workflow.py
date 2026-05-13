@@ -195,6 +195,55 @@ class Role(Base):
     )
 
 
+class RoleVersion(Base):
+    """Audit log of role.system_prompt edits per ADR-0028.
+
+    Each PATCH to ``/api/v1/roles/{id}`` (operator prompt edit via
+    ``treadmill role update``) appends a row here capturing the new
+    system_prompt + optional ``notes`` / ``pr_url`` for the audit
+    trail. The live ``Role.system_prompt`` column stays as the
+    hot-path read for workers — this table is history only, no
+    runtime JOIN cost on the read path.
+
+    The alembic 0010 migration backfills a v1 row for every role at
+    install time so the audit trail starts coherent.
+    """
+
+    __tablename__ = "role_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    role_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "role_id", "version", name="uq_role_versions_role_id_version",
+        ),
+        Index(
+            "ix_role_versions_role_id_version",
+            "role_id",
+            text("version DESC"),
+        ),
+    )
+
+
 class Skill(Base):
     __tablename__ = "skills"
 
