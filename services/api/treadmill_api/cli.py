@@ -4,7 +4,7 @@ Starts uvicorn against the FastAPI app on the configured port. Production
 deploys typically run uvicorn directly via the ECS task command; this
 entrypoint exists for local invocation.
 
-Two startup responsibilities live here (and *only* here — so test paths
+Three startup responsibilities live here (and *only* here — so test paths
 that bypass ``run()`` are unaffected):
 
 1. ``logging.basicConfig`` — without it, Python's root logger sits at
@@ -16,6 +16,10 @@ that bypass ``run()`` are unaffected):
    ``alembic.ini`` is copied there, so the relative path resolves. If
    alembic fails, we fail-fast (let the exception propagate) — a
    schema-misaligned API serving traffic is worse than crash-looping.
+3. Auto-seed starters when ``roles`` is empty (ADR-0028 Q28.a). Closes
+   the bunkhouse "I forgot to run seed-starters" failure mode. Multi-
+   replica safety via ``SELECT FOR UPDATE`` on the ``alembic_version``
+   sentinel row.
 """
 
 from __future__ import annotations
@@ -85,6 +89,49 @@ def _run_migrations(settings: Settings) -> None:
             delay = min(delay * 1.5, 5.0)
 
 
+def _auto_seed_starters(settings: Settings) -> None:
+    """Auto-seed roles + workflows + event_triggers when the DB is empty.
+
+    Per ADR-0028 Q28.a, the resolution is "(ii) auto-seed on first
+    API startup." This runs AFTER ``_run_migrations`` so the
+    ``alembic_version`` sentinel row exists for the SELECT FOR UPDATE
+    lock that serializes multi-replica startups.
+
+    Failures during seed propagate — a half-seeded DB is a worse
+    failure mode than crash-looping the API. If
+    ``TREADMILL_SKIP_AUTO_SEED=true``, this is a no-op (handy for
+    test fixtures that seed differently).
+    """
+    if settings.skip_auto_seed:
+        logging.getLogger(__name__).info(
+            "TREADMILL_SKIP_AUTO_SEED=true — skipping auto-seed",
+        )
+        return
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from treadmill_api.starters import seed_starters_if_empty
+
+    logger = logging.getLogger(__name__)
+    # Use the sync URL since the auto-seed runs before uvicorn starts
+    # the async event loop. Mirror ``database.py``'s URL-rewrite
+    # discipline: alembic uses sync URLs and so do we here.
+    sync_url = settings.database_url.replace("+asyncpg", "+psycopg")
+    engine = create_engine(sync_url)
+    try:
+        with Session(engine) as session:
+            seeded = seed_starters_if_empty(session)
+        if seeded > 0:
+            logger.info(
+                "auto-seed: seeded %d starter roles into fresh DB", seeded,
+            )
+        else:
+            logger.debug("auto-seed: DB already populated; no-op")
+    finally:
+        engine.dispose()
+
+
 def run() -> None:
     settings = get_settings()
 
@@ -97,6 +144,7 @@ def run() -> None:
     )
 
     _run_migrations(settings)
+    _auto_seed_starters(settings)
 
     uvicorn.run(
         "treadmill_api.app:app",

@@ -88,6 +88,15 @@ class Settings(BaseSettings):
     # separate step, use this. Default behavior runs migrations.
     skip_migrations: bool = Field(default=False)
 
+    # ── Startup: auto-seed starters (ADR-0028 Q28.a) ──────────────────────────
+    # After ``alembic upgrade head`` succeeds, the entrypoint calls
+    # ``seed_starters_if_empty`` to bulk-INSERT canonical roles +
+    # workflows + event_triggers when the DB is empty. Set
+    # ``TREADMILL_SKIP_AUTO_SEED=true`` to opt out — test fixtures that
+    # seed their own schema state use this so the auto-seed doesn't
+    # collide with their setup.
+    skip_auto_seed: bool = Field(default=False)
+
     # ── Logging ───────────────────────────────────────────────────────────────
     # The CLI entrypoint calls ``logging.basicConfig`` at this level so
     # ``treadmill_api.*`` INFO logs surface in container stdout (Week 4

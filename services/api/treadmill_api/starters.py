@@ -670,3 +670,127 @@ def seed(
         fresh_workflows=fresh_workflow_count,
         role_prompts_reset=role_prompts_reset,
     )
+
+
+# ── Auto-seed on first API startup (ADR-0028 Q28.a) ──────────────────────────
+
+
+def seed_starters_if_empty(session: Any) -> int:
+    """Bulk-INSERT every role + workflow + version + step + trigger into
+    a fresh DB. Called from the API startup path
+    (``treadmill_api.cli.run``) after ``alembic upgrade head`` succeeds.
+
+    Serializes across multi-replica startups via ``SELECT FOR UPDATE`` on
+    the single ``alembic_version`` sentinel row. The second-replica
+    arrival sees ``roles`` already non-empty after the first replica
+    commits + drops its lock, so it returns 0 and proceeds.
+
+    Idempotent: when ``roles`` has any rows, this is a no-op. Returns
+    the count of newly-seeded roles (0 on a re-run; ~8 on a fresh DB).
+
+    This is a session-based parallel of ``seed()`` (the HTTP-driven
+    operator CLI path). The two paths exist for different lifecycle
+    moments:
+
+      * ``seed_starters_if_empty(session)`` — startup-time bulk INSERT
+        into a fresh DB. No API yet. No 409 handling needed (the
+        empty-check at the top is the gate).
+      * ``seed(api_client)`` — operator CLI hits the running API. Has
+        idempotent 409 handling + optional ``--reset-prompts-from-code``
+        per Q28.a-e resolutions.
+
+    Uses ``sqlalchemy.text`` for the lock + the empty-check; uses
+    ``session.add`` for the bulk inserts so the same Pydantic-validated
+    starters constants serve both paths.
+    """
+    import sqlalchemy as sa
+    from sqlalchemy import func, select as sa_select
+
+    from treadmill_api.models import (
+        EventTrigger,
+        Role,
+        RoleVersion,
+        Workflow,
+        WorkflowVersion,
+        WorkflowVersionStep,
+    )
+
+    # 1. Lock the alembic_version sentinel row so concurrent replica
+    # startups serialize. ``alembic upgrade head`` (which ran just
+    # before this) guarantees the row exists.
+    session.execute(sa.text("SELECT version_num FROM alembic_version FOR UPDATE"))
+
+    # 2. Empty-check. If any role exists, the DB has been seeded
+    # before — by an earlier replica startup, by an earlier alembic
+    # 0010 backfill on a populated DB, or by an operator's manual
+    # ``treadmill workflows seed-starters``. Either way, we're done.
+    role_count = session.execute(
+        sa_select(func.count(Role.id))
+    ).scalar_one()
+    if role_count > 0:
+        logger.debug(
+            "seed_starters_if_empty: %d roles already present; skipping",
+            role_count,
+        )
+        return 0
+
+    # Best-effort static check — same as ``seed()``.
+    _validate_workflow_shapes()
+
+    # 3. Bulk insert. Order matters: roles before workflow_versions
+    # (which reference role_id via workflow_version_steps).
+    seeded_role_count = 0
+    for role_def in _all_roles():
+        session.add(Role(
+            id=role_def["id"],
+            model=role_def["model"],
+            system_prompt=role_def["system_prompt"],
+            output_kind=role_def["output_kind"],
+        ))
+        # v1 audit row mirroring the post-alembic-0010 invariant
+        # "every role has a v1".
+        session.add(RoleVersion(
+            role_id=role_def["id"],
+            version=1,
+            system_prompt=role_def["system_prompt"],
+            notes="initial version (auto-seed on first API startup)",
+            created_by="auto-seed",
+        ))
+        seeded_role_count += 1
+
+    # Flush so the workflow_version_steps FK references resolve.
+    session.flush()
+
+    for wf in STARTERS:
+        session.add(Workflow(
+            id=wf["id"], description=wf["description"],
+        ))
+    session.flush()
+
+    for wf in STARTERS:
+        wv = WorkflowVersion(workflow_id=wf["id"], version=1)
+        session.add(wv)
+        session.flush()  # materialize wv.id for the step FK below
+        for idx, step in enumerate(wf["steps"]):
+            session.add(WorkflowVersionStep(
+                workflow_version_id=wv.id,
+                step_index=idx,
+                step_name=step["name"],
+                role_id=step["role_id"],
+            ))
+
+    for event_type, workflow_id in _DEFAULT_EVENT_TRIGGERS:
+        session.add(EventTrigger(
+            repo=None,
+            event_type=event_type,
+            workflow_id=workflow_id,
+            version_strategy="latest",
+            enabled=True,
+        ))
+
+    session.commit()
+    logger.info(
+        "auto-seed complete: %d roles, %d workflows, %d event_triggers",
+        seeded_role_count, len(STARTERS), len(_DEFAULT_EVENT_TRIGGERS),
+    )
+    return seeded_role_count
