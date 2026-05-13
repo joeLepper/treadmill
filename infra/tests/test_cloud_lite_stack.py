@@ -162,12 +162,12 @@ def test_resource_count_is_minimal():
     """CloudLite holds only the cloud-lite shape — no VPC, no ECS, no S3.
     Compute (API, Postgres, Redis, workers) stays on the laptop.
 
-    Expected counts after Phase B composition:
+    Expected counts after Phase B composition + ADR-0023:
       - SQS queues: 6 (work, work-dlq, coordination, coord-dlq,
         webhook-inbox, webhook-inbox-dlq).
       - SNS topics: 2 (events, billing-alarms).
-      - Secrets Manager: 3 (github-webhook-secret, github-pat,
-        worker-aws-credentials).
+      - Secrets Manager: 4 (github-webhook-secret, github-pat,
+        worker-aws-credentials, api-aws-credentials per ADR-0023).
       - Lambda: 1 (webhook receiver).
       - CloudWatch Alarm: 1 (monthly billing).
       - Zero VPC / ECS / S3 — compute is local per ADR-0016.
@@ -175,7 +175,7 @@ def test_resource_count_is_minimal():
     template = _template()
     template.resource_count_is("AWS::SQS::Queue", 6)
     template.resource_count_is("AWS::SNS::Topic", 2)
-    template.resource_count_is("AWS::SecretsManager::Secret", 3)
+    template.resource_count_is("AWS::SecretsManager::Secret", 4)
     template.resource_count_is("AWS::Lambda::Function", 1)
     template.resource_count_is("AWS::CloudWatch::Alarm", 1)
     template.resource_count_is("AWS::EC2::VPC", 0)
