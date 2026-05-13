@@ -325,19 +325,54 @@ def status() -> None:
 
 
 @workflows_app.command("seed-starters")
-def workflows_seed_starters() -> None:
+def workflows_seed_starters(
+    reset_prompts_from_code: Annotated[bool, typer.Option(
+        "--reset-prompts-from-code",
+        help=(
+            "Explicit recovery path (ADR-0028): for every role that "
+            "already exists in the DB, PATCH its system_prompt back to "
+            "the code-side definition. Off by default — the no-op 409 "
+            "behavior is the normal idempotency. ONLY use this when "
+            "the DB has diverged from what you expect and you want the "
+            "bootstrap shape back."
+        ),
+    )] = False,
+    yes: Annotated[bool, typer.Option(
+        "--yes", "-y",
+        help="Skip the confirmation prompt when --reset-prompts-from-code is set.",
+    )] = False,
+) -> None:
     """Seed the canonical seven starter workflows + their roles.
 
     Idempotent — a 409 on any role / workflow / version is treated as
     already-seeded and silently skipped, so re-running this command on
     a partially-seeded install heals the gap. Per decision #16 in the
     2026-05-11 closure plan.
+
+    With ``--reset-prompts-from-code``, role 409s trigger a follow-up
+    PATCH that overwrites the DB prompt with the code-side definition
+    (ADR-0028 recovery path). Confirms interactively unless ``--yes``
+    is passed for scripted use.
     """
     from treadmill_api.starters import STARTERS, StarterSeedError, seed
 
+    if reset_prompts_from_code and not yes:
+        confirm = typer.confirm(
+            "--reset-prompts-from-code will overwrite existing role "
+            "prompts in the DB with the code-side definition. This is "
+            "destructive of any operator edits made via 'treadmill role "
+            "update'. Continue?",
+            default=False,
+        )
+        if not confirm:
+            console.print("[yellow]aborted[/yellow]")
+            raise typer.Exit(code=1)
+
     try:
         with _client() as client:
-            created = seed(client)
+            result = seed(
+                client, reset_prompts_from_code=reset_prompts_from_code,
+            )
     except StarterSeedError as exc:
         err_console.print(f"[red]starter seed failed: {exc}[/red]")
         raise typer.Exit(code=2)
@@ -346,9 +381,15 @@ def workflows_seed_starters() -> None:
 
     total = len(STARTERS)
     console.print(
-        f"[green]seeded:[/green] {created} new of {total} starter workflows "
-        f"({total - created} already existed)"
+        f"[green]seeded:[/green] {result.fresh_workflows} new of {total} "
+        f"starter workflows ({total - result.fresh_workflows} already existed)"
     )
+    if result.role_prompts_reset:
+        console.print(
+            f"[yellow]reset prompts from code for "
+            f"{len(result.role_prompts_reset)} role(s):[/yellow] "
+            + ", ".join(result.role_prompts_reset)
+        )
 
 
 if __name__ == "__main__":

@@ -427,6 +427,7 @@ class _StubApiClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict]] = []
         self._roles: set[str] = set()
+        self._role_prompts: dict[str, str] = {}  # role_id → current system_prompt
         self._workflows: dict[str, dict] = {}  # id → {latest_version: int|None}
         self._triggers: set[tuple[str | None, str]] = set()  # (repo, event_type)
 
@@ -441,7 +442,15 @@ class _StubApiClient:
             if role_id in self._roles:
                 raise ApiError(409, f"role {role_id!r} exists")
             self._roles.add(role_id)
+            self._role_prompts[role_id] = body.get("system_prompt", "")
             return {"id": role_id}
+
+        if method == "PATCH" and path.startswith("/api/v1/roles/"):
+            role_id = path.rsplit("/", 1)[-1]
+            if role_id not in self._roles:
+                raise ApiError(404, f"role {role_id!r} not found")
+            self._role_prompts[role_id] = body.get("system_prompt", "")
+            return {"role": {"id": role_id}, "version": 2}
 
         if method == "POST" and path == "/api/v1/workflows":
             wf_id = body.get("id")
@@ -485,10 +494,13 @@ def test_seed_posts_every_role_and_workflow_on_clean_install() -> None:
     from treadmill_api.starters import seed
 
     client = _StubApiClient()
-    created = seed(client)
+    result = seed(client)
 
     # Every workflow was freshly created.
-    assert created == len(STARTERS)
+    assert result.fresh_workflows == len(STARTERS)
+    # No prompts reset on a clean install — there were no existing
+    # role rows to PATCH against.
+    assert result.role_prompts_reset == []
 
     # Roles POSTed first — exactly one per declared role (the de-dup
     # collapses the four references to ``role-code-author`` into one
@@ -527,10 +539,12 @@ def test_seed_is_idempotent_on_re_run() -> None:
         for wf_id, data in client._workflows.items()
     }
 
-    created = seed(client)
+    result = seed(client)
 
     # No workflows created on the second run.
-    assert created == 0
+    assert result.fresh_workflows == 0
+    # Default (reset_prompts_from_code=False) leaves prompts alone.
+    assert result.role_prompts_reset == []
     # No new versions either — the GET-before-POST guard kicked in.
     for wf in STARTERS:
         assert client._workflows[wf["id"]]["latest_version"] == pre_second_run_versions[wf["id"]]
@@ -546,11 +560,59 @@ def test_seed_creates_v1_when_workflow_exists_without_versions() -> None:
     # Pre-seed just one workflow row, no version.
     client._workflows["wf-author"] = {"latest_version": None}
 
-    created = seed(client)
+    result = seed(client)
     # wf-author was already there → not counted as fresh; the other six are.
-    assert created == len(STARTERS) - 1
+    assert result.fresh_workflows == len(STARTERS) - 1
     # And the half-seeded one received its v1.
     assert client._workflows["wf-author"]["latest_version"] == 1
+
+
+def test_seed_default_does_not_overwrite_existing_role_prompts() -> None:
+    """ADR-0028 default behavior: a re-run against an already-seeded
+    install with ``reset_prompts_from_code=False`` (the default) does
+    NOT PATCH any role prompts back — operator edits via 'treadmill
+    role update' are preserved."""
+    from treadmill_api.starters import seed
+
+    client = _StubApiClient()
+    seed(client)  # first run primes everything
+    # Operator edits a role's prompt via PATCH (simulated by direct
+    # state mutation; real-world this happens via 'treadmill role
+    # update'). The default re-run should leave this untouched.
+    client._role_prompts["role-code-author"] = "OPERATOR EDIT"
+
+    result = seed(client)
+
+    assert result.role_prompts_reset == []
+    # The operator edit is preserved.
+    assert client._role_prompts["role-code-author"] == "OPERATOR EDIT"
+    # No PATCH was issued by the default seed.
+    patches = [c for c in client.calls if c[0] == "PATCH"]
+    assert patches == []
+
+
+def test_seed_reset_prompts_from_code_patches_existing_roles() -> None:
+    """ADR-0028 recovery path: ``reset_prompts_from_code=True``
+    overwrites every existing role's system_prompt with the code-side
+    definition. Returns the list of role ids that were reset."""
+    from treadmill_api.starters import _all_roles, seed
+
+    client = _StubApiClient()
+    seed(client)  # prime everything
+    # Operator drift on one role.
+    client._role_prompts["role-code-author"] = "DRIFTED EDIT"
+
+    result = seed(client, reset_prompts_from_code=True)
+
+    # Every role's POST returned 409, so every role got PATCHed.
+    expected_role_ids = {r["id"] for r in _all_roles()}
+    assert set(result.role_prompts_reset) == expected_role_ids
+    # The drifted edit was overwritten back to the code-side definition.
+    code_prompts = {r["id"]: r["system_prompt"] for r in _all_roles()}
+    assert (
+        client._role_prompts["role-code-author"]
+        == code_prompts["role-code-author"]
+    )
 
 
 def test_seed_posts_role_code_author_only_once() -> None:

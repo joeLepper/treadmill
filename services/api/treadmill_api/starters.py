@@ -18,9 +18,14 @@ This module exposes:
     enforces the content invariants per ADR-0015 §"``starters.py``
     rewrite".
 
-  * ``seed(api_client)`` — POSTs each role + workflow + version to the
-    existing CRUD endpoints, swallowing 409s so re-runs are idempotent.
-    Returns the count of *newly created* workflows (409s don't count).
+  * ``seed(api_client, *, reset_prompts_from_code=False)`` — POSTs each
+    role + workflow + version to the existing CRUD endpoints, swallowing
+    409s so re-runs are idempotent. Returns a ``SeedResult`` with the
+    count of newly created workflows + the list of role ids whose
+    prompts were reset (only non-empty when ``reset_prompts_from_code``
+    is True; per ADR-0028 the DB is authoritative for prompts after
+    bootstrap, so the explicit-opt-in flag is the recovery path for
+    "the DB drifted and I want the code-side back").
 
 The planner is the only role on the expensive opus tier per ADR-0015
 §"Trade-offs". All other roles (including the analyzers) run on the
@@ -30,9 +35,26 @@ analyzer from action in the first place.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+import logging
+from typing import Any, NamedTuple, Protocol
 
 from treadmill_api.models import OutputKind
+
+logger = logging.getLogger("treadmill.api.starters")
+
+
+class SeedResult(NamedTuple):
+    """Outcome of a ``seed()`` call.
+
+    * ``fresh_workflows`` — number of workflows freshly created (409s
+      on workflow POST do not count).
+    * ``role_prompts_reset`` — role ids whose ``system_prompt`` was
+      patched back to the code-side definition during this run. Always
+      empty when ``reset_prompts_from_code=False`` (the default).
+    """
+
+    fresh_workflows: int
+    role_prompts_reset: list[str]
 
 
 # Model identifiers — kept as a small constant so the test can assert
@@ -486,12 +508,24 @@ def _validate_workflow_shapes() -> None:
                 )
 
 
-def seed(api_client: _SeedClient) -> int:
+def seed(
+    api_client: _SeedClient,
+    *,
+    reset_prompts_from_code: bool = False,
+) -> SeedResult:
     """Seed the starter workflows + roles via the API CRUD endpoints.
 
     Idempotent: each POST that returns 409 is treated as already-seeded
-    and silently skipped. Returns the count of *workflows freshly
-    created* on this call (does not include roles or versions).
+    and silently skipped.
+
+    Per ADR-0028: when ``reset_prompts_from_code=True`` AND a role POST
+    returns 409, the seed follow-ups with a PATCH that overwrites
+    ``roles.system_prompt`` with the code-side definition. This is the
+    explicit recovery path for "the DB diverged from what the operator
+    expects and I want the bootstrap shape back". Off by default — the
+    no-op 409 behavior is the normal idempotency. Loud per-role log
+    output when the reset fires so the operator sees what's being
+    overwritten.
 
     Also ensures the five default ``event_triggers`` catch-all rows
     exist (per Week-3 plan §C.2). Alembic migration ``0007`` is the
@@ -499,6 +533,9 @@ def seed(api_client: _SeedClient) -> int:
     skips them because the workflows don't exist yet (FK constraint).
     Re-running ``seed()`` after the workflow POSTs closes that gap.
     Both paths are idempotent.
+
+    Returns a ``SeedResult`` capturing freshly-created workflow count +
+    the list of role ids whose prompts were reset on this run.
     """
     from treadmill_cli.api_client import ApiError  # local import for protocol decoupling
 
@@ -508,6 +545,7 @@ def seed(api_client: _SeedClient) -> int:
     _validate_workflow_shapes()
 
     fresh_workflow_count = 0
+    role_prompts_reset: list[str] = []
 
     # Roles first — workflows reference them by id.
     for role in _all_roles():
@@ -530,6 +568,33 @@ def seed(api_client: _SeedClient) -> int:
             )
         except ApiError as exc:
             if exc.status_code == 409:
+                if reset_prompts_from_code:
+                    # ADR-0028: explicit reset path. PATCH the prompt
+                    # back to the code-side definition. Loud log so
+                    # the operator sees which roles are being
+                    # overwritten.
+                    try:
+                        api_client._request(
+                            "PATCH", f"/api/v1/roles/{role['id']}",
+                            json={
+                                "system_prompt": role["system_prompt"],
+                                "notes": (
+                                    "reset from code via "
+                                    "seed-starters --reset-prompts-from-code"
+                                ),
+                            },
+                        )
+                    except ApiError as patch_exc:
+                        raise StarterSeedError(
+                            f"resetting role {role['id']!r} from code "
+                            f"failed: {patch_exc.detail}"
+                        ) from patch_exc
+                    role_prompts_reset.append(role["id"])
+                    logger.warning(
+                        "RESET: overwriting role %r from code-side definition "
+                        "(operator opted in via --reset-prompts-from-code)",
+                        role["id"],
+                    )
                 continue
             raise StarterSeedError(
                 f"seeding role {role['id']!r} failed: {exc.detail}"
@@ -601,4 +666,7 @@ def seed(api_client: _SeedClient) -> int:
                 f"failed: {exc.detail}"
             ) from exc
 
-    return fresh_workflow_count
+    return SeedResult(
+        fresh_workflows=fresh_workflow_count,
+        role_prompts_reset=role_prompts_reset,
+    )
