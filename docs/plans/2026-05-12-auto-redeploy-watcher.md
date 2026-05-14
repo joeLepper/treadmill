@@ -1,6 +1,6 @@
 ---
 status: active
-trigger: ADR-0024 accepted 2026-05-13 (drafted 2026-05-12). Flipping to active 2026-05-13 alongside the ADR-0023 implementation work. This is the round-trip validation cycle for the two consumer/disposition fixes shipped in commit 8a52c17 (pr_merged → reevaluate + wf-feedback empty-diff softening). 5-task chain with depends_on sequencing — task 1 dispatches immediately, tasks 2-5 defer until upstream PR merges.
+trigger: ADR-0024 accepted 2026-05-13. Task 1 (deploy-events-queue-cdk) shipped via PR #23 on 2026-05-13. Chain stalled when session shifted to ralph-loop / ADR-0029 work. Re-firing 2026-05-14 with task 1 trimmed + validation scripts added per migration 0011's CHECK constraint. 4 remaining tasks: init wire, watcher module, spawn-on-up, smoke+docs. Need this shipped because the running API doesn't pick up new main commits without manual ``treadmill-local down/up`` — the friction is real (the same task #120 fix we just merged hasn't taken effect yet).
 parent: docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ---
 
@@ -65,63 +65,9 @@ After this plan executes:
 
 ```yaml
 sequence_of_work:
-  - id: deploy-events-queue-cdk
-    title: Provision deploy-events SQS queue + SNS subscription via CDK
-    workflow: wf-author
-    intent: |
-      Extend the messaging-construct family (or add a sibling
-      ``DeployEventsConstruct`` in ``infra/treadmill_infra/constructs/``)
-      to provision per ``TreadmillCloudLite`` deployment:
-
-      - One SQS queue: ``treadmill-<deployment_id>-deploy-events``.
-        Standard (not FIFO). 14-day retention. Visibility timeout
-        30s (rebuild takes <30s in cached-image case; longer rebuilds
-        will re-deliver and be deduped by the watcher's state file).
-        DLQ with maxReceiveCount=3.
-      - One SQS DLQ: ``treadmill-<deployment_id>-deploy-events-dlq``.
-        14-day retention.
-      - One SNS subscription: the deploy-events queue subscribes to
-        the events topic (per ADR-0017's messaging) with a filter
-        policy limiting deliveries to messages whose attributes
-        carry ``entity_type=github`` AND ``action=pr_merged``. The
-        existing publishers (in ``eventbus.py``) set those attributes
-        already — no change needed there.
-
-      CFN outputs:
-      - ``DeployEventsQueueUrl``
-      - ``DeployEventsDlqUrl``
-
-      Tests in ``infra/tests/test_messaging_construct.py`` (or a new
-      ``test_deploy_events_construct.py``):
-      - The queue exists with the expected name + DLQ wired.
-      - The SNS subscription's filter policy carries the
-        entity_type + action filters.
-      - The two CFN outputs are present.
-    scope:
-      files:
-        - infra/treadmill_infra/constructs/messaging.py
-        - infra/treadmill_infra/stacks/cloud_lite.py
-        - infra/tests/test_messaging_construct.py
-        - infra/tests/test_cloud_lite_stack.py
-    validation:
-      - kind: deterministic
-        description: |
-          ``cdk synth TreadmillCloudLite --context mode=dev_local
-          --context deployment_id=test`` produces a template
-          containing the new SQS queue + DLQ + an SNS subscription
-          whose filter policy contains
-          ``entity_type=[github], action=[pr_merged]``.
-      - kind: deterministic
-        description: |
-          ``test_cloud_lite_stack.py::test_resource_count_is_minimal``
-          updated to reflect the two new SQS queues (now 8 total in
-          CloudLite).
-
   - id: treadmill-local-init-deploy-events
     title: treadmill-local init reads deploy-events CFN outputs into the YAML
     workflow: wf-author
-    depends_on:
-      - task.deploy-events-queue-cdk.pr_merged
     intent: |
       Extend ``tools/local-adapter/treadmill_local/deployment_config.py``
       to read ``DeployEventsQueueUrl`` and ``DeployEventsDlqUrl``
@@ -145,6 +91,9 @@ sequence_of_work:
           ``DeployEventsQueueUrl=...`` serializes with
           ``aws.deploy_events_queue_url`` set to that value.
 
+        script: |
+          cd tools/local-adapter && uv run pytest tests/test_deployment_config.py -q \
+            && grep -q "deploy_events_queue_url" treadmill_local/deployment_config.py
   - id: deploy-watcher-module
     title: Deploy watcher module + dispatch table + state file
     workflow: wf-author
@@ -212,10 +161,15 @@ sequence_of_work:
           ``pr_merged`` message; stub the gh API; stub
           ``subprocess.run``; the watcher rebuilds the right images
           per category and acks the message.
+        script: |
+          cd tools/local-adapter && uv run pytest tests/test_deploy_watcher.py -q \
+            && test -f treadmill_local/deploy_watcher.py
       - kind: deterministic
         description: |
           Stub a second delivery with the same SHA; the watcher
           checks the state file and skips the rebuild.
+        script: |
+          cd tools/local-adapter && uv run pytest tests/test_deploy_watcher.py -q
 
   - id: deploy-watcher-spawn-on-up
     title: treadmill-local up spawns the deploy watcher
@@ -263,6 +217,9 @@ sequence_of_work:
           ``_start_deploy_watcher_dev_local`` is called by default
           and skipped when ``--no-deploy-watcher`` is set.
 
+        script: |
+          cd tools/local-adapter && uv run pytest tests/test_image_build.py -q \
+            && grep -q "_start_deploy_watcher" treadmill_local/runtime.py
   - id: deploy-watcher-smoke-and-docs
     title: Operator-runbook + manual smoke for deploy-watcher
     workflow: wf-author
@@ -297,4 +254,6 @@ sequence_of_work:
           The Week-4 plan's running log contains a section titled
           "Deploy-watcher smoke" (or similar) with the six manual
           steps listed.
+        script: |
+          grep -q "Deploy-watcher smoke" docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ```
