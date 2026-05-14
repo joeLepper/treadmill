@@ -301,6 +301,65 @@ Redeploy after destroy is just Phase E.1 + E.2 verbatim. The **API Gateway URL c
 
 The `removalPolicy=DESTROY` + `forceDeletion=True` props on the `Secret` constructs in B.2 are load-bearing here — without them, step 3 (`cdk destroy`) hangs on the Secrets Manager 30-day deletion-protection window. Confirm those props are set during code review of B.2.
 
+### Operator runbook: API credentials (worker + API post-deploy setup)
+
+After `cdk deploy TreadmillCloudLite` provisions the IAM users and empty secrets, the operator must populate the AWS credentials for both the worker and the API. This is a single multi-step operation; do both in sequence:
+
+#### Step 1: Create and store worker AWS credentials
+
+The CDK has provisioned an IAM user `treadmill-<deployment_id>-worker` with scoped policy. Create its access key and store it in Secrets Manager:
+
+```bash
+# 1. Generate access key for the worker IAM user.
+aws iam create-access-key \
+  --user-name treadmill-personal-worker \
+  --profile treadmill-personal
+
+# 2. The output includes AccessKeyId + SecretAccessKey. Capture the JSON output,
+#    then extract and re-shape to {aws_access_key_id, aws_secret_access_key}.
+#    Store in the Secrets Manager secret:
+aws secretsmanager put-secret-value \
+  --secret-id treadmill-personal/worker-aws-credentials \
+  --secret-string '{"aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}' \
+  --profile treadmill-personal
+```
+
+#### Step 2: Create and store API AWS credentials
+
+The CDK has provisioned an IAM user `treadmill-<deployment_id>-api` with scoped policy (read only on Secrets Manager, not SNS/SQS). Create its access key and store it in Secrets Manager:
+
+```bash
+# 1. Generate access key for the API IAM user.
+aws iam create-access-key \
+  --user-name treadmill-personal-api \
+  --profile treadmill-personal
+
+# 2. The output includes AccessKeyId + SecretAccessKey. Capture the JSON output,
+#    then extract and re-shape to {aws_access_key_id, aws_secret_access_key}.
+#    Store in the Secrets Manager secret:
+aws secretsmanager put-secret-value \
+  --secret-id treadmill-personal/api-aws-credentials \
+  --secret-string '{"aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}' \
+  --profile treadmill-personal
+```
+
+#### Step 3 (optional): Rotate old API key if re-deploying
+
+On subsequent deploys, if the API user already has an access key from a prior deployment, delete it to enforce one-key-per-user:
+
+```bash
+# List existing keys for the API user (should show old + new if this is a redeploy).
+aws iam list-access-keys \
+  --user-name treadmill-personal-api \
+  --profile treadmill-personal
+
+# Delete the old AccessKeyId (keep the one you just created).
+aws iam delete-access-key \
+  --user-name treadmill-personal-api \
+  --access-key-id AKIA... \
+  --profile treadmill-personal
+```
+
 ### Webhook secret rotation
 
 ```bash
