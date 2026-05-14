@@ -159,6 +159,23 @@ def _build_wf_conflict_key(payload: dict[str, Any]) -> str | None:
     return f"wf-conflict:{repo}:pr={pr_number},sha={base_sha}"
 
 
+def _build_wf_doc_amend_key(payload: dict[str, Any]) -> str | None:
+    """``wf-doc-amend:<repo>:docs-amend-run=<run_id>``
+    (wf-validate ``docs-current-with-pr`` failure trigger).
+
+    One doc-amend remediation per wf-validate run that fails the
+    ``docs-current-with-pr`` check. ``docs_amend_run_id`` is the UUID
+    of the wf-validate run that triggered the dispatch; using the
+    validate run id as the discriminator ensures at most one wf-doc-amend
+    is dispatched per validation run regardless of re-delivery.
+    """
+    repo = payload.get("repo")
+    docs_amend_run_id = payload.get("docs_amend_run_id")
+    if not repo or not docs_amend_run_id:
+        return None
+    return f"wf-doc-amend:{repo}:docs-amend-run={docs_amend_run_id}"
+
+
 # Per-workflow dedup-key builders. Workflows not in this dict implicitly
 # opt out (the helper treats a missing entry as "return None"). Per
 # ADR-0026's table, wf-author and wf-plan have no natural dedup key:
@@ -174,6 +191,7 @@ DEDUP_KEY_BUILDERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
     "wf-feedback": _build_wf_feedback_key,
     "wf-ci-fix": _build_wf_ci_fix_key,
     "wf-conflict": _build_wf_conflict_key,
+    "wf-doc-amend": _build_wf_doc_amend_key,
 }
 
 

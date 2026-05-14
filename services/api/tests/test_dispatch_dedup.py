@@ -296,6 +296,67 @@ def test_builders_dict_does_not_include_opt_out_workflows() -> None:
     assert "wf-plan" not in DEDUP_KEY_BUILDERS
 
 
+def test_wf_doc_amend_builder_emits_docs_amend_run_id() -> None:
+    """``wf-doc-amend:<repo>:docs-amend-run=<run_id>`` — one doc-amend
+    remediation per wf-validate run that fails the docs-current-with-pr
+    check. ``docs_amend_run_id`` is the UUID of the wf-validate run."""
+    key = build_dedup_key(
+        "wf-doc-amend",
+        {
+            "repo": "joeLepper/treadmill",
+            "docs_amend_run_id": "fedcba98-7654-3210-fedc-ba9876543210",
+        },
+    )
+    assert key == (
+        "wf-doc-amend:joeLepper/treadmill:"
+        "docs-amend-run=fedcba98-7654-3210-fedc-ba9876543210"
+    )
+
+
+def test_wf_doc_amend_builder_returns_none_when_run_id_missing() -> None:
+    """When ``docs_amend_run_id`` is absent (e.g. normalizer not yet
+    extended), the builder gracefully opts out to unconditional dispatch."""
+    assert build_dedup_key("wf-doc-amend", {"repo": "x/y"}) is None
+
+
+def test_wf_doc_amend_builder_returns_none_when_repo_missing() -> None:
+    """Repo is required; missing repo → None."""
+    assert build_dedup_key(
+        "wf-doc-amend",
+        {"docs_amend_run_id": "fedcba98-7654-3210-fedc-ba9876543210"},
+    ) is None
+
+
+def test_wf_doc_amend_in_dedup_key_builders() -> None:
+    """wf-doc-amend must be registered in DEDUP_KEY_BUILDERS — a missing
+    entry would silently fall back to unconditional dispatch and break
+    the single-dispatch-per-validate-run guarantee."""
+    assert "wf-doc-amend" in DEDUP_KEY_BUILDERS
+
+
+def test_wf_doc_amend_namespace_distinct_from_wf_feedback() -> None:
+    """The wf-doc-amend dedup key uses a different workflow prefix than
+    wf-feedback so the two cannot collide on the dedup table even when
+    they share the same validate run id."""
+    doc_amend_key = build_dedup_key(
+        "wf-doc-amend",
+        {
+            "repo": "x/y",
+            "docs_amend_run_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+    feedback_key = build_dedup_key(
+        "wf-feedback",
+        {
+            "repo": "x/y",
+            "validate_run_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+    assert doc_amend_key is not None
+    assert feedback_key is not None
+    assert doc_amend_key != feedback_key
+
+
 # ── maybe_dispatch_with_dedup: None key → unconditional dispatch ────────────
 
 

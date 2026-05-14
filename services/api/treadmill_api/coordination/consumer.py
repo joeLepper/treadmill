@@ -1062,7 +1062,7 @@ class CoordinationConsumer:
                 step_id,
             )
 
-    # ── Self-trigger: wf-validate failure → wf-feedback (ADR-0029) ────────
+    # ── Self-trigger: wf-validate failure → wf-feedback / wf-doc-amend ────
 
     async def _maybe_fire_validate_feedback(
         self,
@@ -1070,9 +1070,17 @@ class CoordinationConsumer:
         step_id: str,
         typed: Any,
     ) -> None:
-        """Fire ``wf-feedback`` when a ``wf-validate.step.completed``
-        arrives with ``decision='fail'`` or ``'error'`` (ADR-0029 convergence
-        trigger).
+        """Fire the appropriate convergence workflow when a
+        ``wf-validate.step.completed`` arrives with ``decision='fail'``
+        or ``'error'`` (ADR-0029 + fourth dispatch source).
+
+        Routing for ``decision='fail'``:
+          * If the ``docs-current-with-pr`` check is in the failing set
+            → dispatch ``wf-doc-amend`` (fourth source).
+          * Otherwise (different rule failures)
+            → dispatch ``wf-feedback`` (existing path).
+
+        ``decision='error'`` always dispatches ``wf-feedback`` unchanged.
 
         Skips cleanly when ``self.dispatcher`` is ``None`` (narrow tests
         that don't exercise dispatch). Failures are logged but do not
@@ -1086,18 +1094,26 @@ class CoordinationConsumer:
         if not isinstance(typed, StepCompleted):
             return
         from treadmill_api.coordination.triggers import (
+            is_docs_current_check_failure,
+            maybe_dispatch_doc_amend_on_docs_check_fail,
             maybe_dispatch_feedback_on_terminal_failure,
         )
         try:
-            # Fire on 'fail' verdict
             if typed.output.decision == "fail":
-                await maybe_dispatch_feedback_on_terminal_failure(
-                    session, self.dispatcher,
-                    step_id=step_id, typed=typed,
-                    workflow_id="wf-validate",
-                    fail_decision="fail",
-                )
-            # Fire on 'error' verdict
+                if is_docs_current_check_failure(typed.output):
+                    # docs-current-with-pr check failed → route to wf-doc-amend
+                    await maybe_dispatch_doc_amend_on_docs_check_fail(
+                        session, self.dispatcher,
+                        step_id=step_id, typed=typed,
+                    )
+                else:
+                    # Different rule failure → wf-feedback (existing path)
+                    await maybe_dispatch_feedback_on_terminal_failure(
+                        session, self.dispatcher,
+                        step_id=step_id, typed=typed,
+                        workflow_id="wf-validate",
+                        fail_decision="fail",
+                    )
             elif typed.output.decision == "error":
                 await maybe_dispatch_feedback_on_terminal_failure(
                     session, self.dispatcher,

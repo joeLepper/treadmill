@@ -101,9 +101,15 @@ logger = logging.getLogger("treadmill.coordination.triggers")
 CI_FIX_WORKFLOW_ID = "wf-ci-fix"
 CONFLICT_WORKFLOW_ID = "wf-conflict"
 FEEDBACK_WORKFLOW_ID = "wf-feedback"
+DOC_AMEND_WORKFLOW_ID = "wf-doc-amend"
 CI_FIX_MAX_ATTEMPTS = 3
 CONFLICT_RESOLVE_MAX_ATTEMPTS = 3
 FEEDBACK_MAX_ATTEMPTS = 5
+DOC_AMEND_MAX_ATTEMPTS = 5
+
+# The check_id that routes wf-validate failures to wf-doc-amend instead
+# of wf-feedback. Any other check failure still dispatches wf-feedback.
+DOCS_CURRENT_CHECK_ID = "docs-current-with-pr"
 
 
 # Conclusions that represent a genuine CI failure — the only ones that
@@ -340,6 +346,8 @@ def _cap_for(workflow_id: str) -> int:
         return CONFLICT_RESOLVE_MAX_ATTEMPTS
     if workflow_id == FEEDBACK_WORKFLOW_ID:
         return FEEDBACK_MAX_ATTEMPTS
+    if workflow_id == DOC_AMEND_WORKFLOW_ID:
+        return DOC_AMEND_MAX_ATTEMPTS
     return 0
 
 
@@ -505,6 +513,127 @@ async def maybe_dispatch_feedback_on_review_changes_requested(
         typed=typed,
         workflow_id="wf-review",
         fail_decision="changes_requested",
+    )
+
+
+def is_docs_current_check_failure(output: Any) -> bool:
+    """Return ``True`` if the step output payload contains a failing
+    ``docs-current-with-pr`` check.
+
+    Reads ``output.payload["checks"]`` (the list emitted by the
+    validation worker per ADR-0029). A check is considered failing when
+    its ``verdict`` is anything other than ``"pass"``. Only the
+    ``docs-current-with-pr`` check_id is tested; other checks are ignored.
+
+    Used by the coordination consumer to route wf-validate ``fail``
+    verdicts: when this check is in the failing set the consumer dispatches
+    ``wf-doc-amend``; otherwise it falls through to ``wf-feedback``.
+    """
+    checks = output.payload.get("checks", [])
+    return any(
+        check.get("check_id") == DOCS_CURRENT_CHECK_ID
+        and check.get("verdict") not in ("pass", None)
+        for check in checks
+    )
+
+
+async def maybe_dispatch_doc_amend_on_docs_check_fail(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """Fire ``wf-doc-amend`` when ``wf-validate.step.completed`` arrives
+    with ``decision='fail'`` and the ``docs-current-with-pr`` check is
+    among the failing checks.
+
+    Fourth dispatch source — mirrors ADR-0029's third-source pattern but
+    routes to ``wf-doc-amend`` rather than ``wf-feedback``:
+
+      * ``wf-validate.step.completed`` with ``decision='fail'`` AND
+        ``docs-current-with-pr`` check present in failing set
+        → dispatch ``wf-doc-amend``.
+      * Different check failures (no ``docs-current-with-pr`` in the
+        failing set) continue to dispatch ``wf-feedback`` via the
+        existing ``maybe_dispatch_feedback_on_terminal_failure`` path.
+
+    Skips cleanly when:
+      * The step's ``decision`` is not ``'fail'``.
+      * The owning run's ``workflow_id`` is not ``wf-validate``.
+      * Owning task can't be resolved (deleted between dispatch + completion).
+      * No ``WorkflowVersion`` exists for ``wf-doc-amend`` (un-seeded install).
+      * Task has already dispatched ``wf-doc-amend`` >= 5 times (cap).
+
+    Dedup is gated on:
+      ``wf-doc-amend:<repo>:docs-amend-run=<wf_validate_run_id>``
+
+    so each wf-validate run triggers at most one doc-amend attempt.
+
+    Returns the new ``wf-doc-amend`` run's id, or ``None`` if any skip
+    condition fired.
+    """
+    if typed.output.decision != "fail":
+        return None
+
+    # Resolve (workflow_id, run_id, task_id, repo) for this step.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "doc-amend trigger: no run/task resolvable for step %s; skipping",
+            step_id,
+        )
+        return None
+    if row.workflow_id != "wf-validate":
+        return None
+
+    # Check cap: skip if this task has already dispatched wf-doc-amend
+    # >= DOC_AMEND_MAX_ATTEMPTS times.
+    if await _is_capped(session, row.task_id, DOC_AMEND_WORKFLOW_ID):
+        logger.warning(
+            "doc-amend trigger: %s capped for task %s (>=%d prior runs); skipping",
+            DOC_AMEND_WORKFLOW_ID, row.task_id, DOC_AMEND_MAX_ATTEMPTS,
+        )
+        return None
+
+    # Re-fetch the Task so the dispatch helper has the full ORM object.
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    # Dedup namespace: docs-amend-run=<wf_validate_run_id> — one
+    # doc-amend attempt per wf-validate run that failed the check.
+    payload = {"repo": row.repo, "docs_amend_run_id": str(row.run_id)}
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=DOC_AMEND_WORKFLOW_ID,
+            trigger="self:wf-validate-docs-current-fail",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=DOC_AMEND_WORKFLOW_ID,
+        payload=payload,
+        dispatch_fn=_dispatch,
     )
 
 

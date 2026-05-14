@@ -935,3 +935,180 @@ async def test_wf_feedback_cap_constant_is_five() -> None:
         "ADR-0029 Q29.e specifies a 5-attempt cap per task for wf-feedback; "
         "the constant must match"
     )
+
+
+# ── docs-current-with-pr → wf-doc-amend (fourth dispatch source) ──────────────
+
+
+def test_wf_doc_amend_cap_constant_is_five() -> None:
+    """Per the task spec, the per-task cap on wf-doc-amend dispatches
+    is exactly 5 attempts."""
+    from treadmill_api.coordination.triggers import DOC_AMEND_MAX_ATTEMPTS
+
+    assert DOC_AMEND_MAX_ATTEMPTS == 5, (
+        "the task spec caps wf-doc-amend at 5 attempts per task; "
+        "the constant must match"
+    )
+
+
+def test_is_docs_current_check_failure_true_when_check_fails() -> None:
+    """``is_docs_current_check_failure`` returns True when the payload
+    contains a docs-current-with-pr check with verdict != 'pass'."""
+    from treadmill_api.coordination.triggers import is_docs_current_check_failure
+    from treadmill_api.events.step_output import StepOutput, Metadata
+
+    output = StepOutput(
+        summary="fail",
+        decision="fail",
+        payload={
+            "checks": [
+                {
+                    "check_id": "docs-current-with-pr",
+                    "kind": "deterministic",
+                    "severity": "blocking",
+                    "verdict": "fail",
+                    "rationale": "docs out of date",
+                    "log_excerpt": "",
+                },
+            ]
+        },
+        metadata=Metadata(),
+    )
+    assert is_docs_current_check_failure(output) is True
+
+
+def test_is_docs_current_check_failure_false_when_check_passes() -> None:
+    """Returns False when the docs-current-with-pr check verdict is 'pass'."""
+    from treadmill_api.coordination.triggers import is_docs_current_check_failure
+    from treadmill_api.events.step_output import StepOutput, Metadata
+
+    output = StepOutput(
+        summary="pass",
+        decision="pass",
+        payload={
+            "checks": [
+                {
+                    "check_id": "docs-current-with-pr",
+                    "kind": "deterministic",
+                    "severity": "blocking",
+                    "verdict": "pass",
+                    "rationale": "",
+                    "log_excerpt": "",
+                },
+            ]
+        },
+        metadata=Metadata(),
+    )
+    assert is_docs_current_check_failure(output) is False
+
+
+def test_is_docs_current_check_failure_false_when_check_absent() -> None:
+    """Returns False when no docs-current-with-pr check is present
+    (different check failures route to wf-feedback, not wf-doc-amend)."""
+    from treadmill_api.coordination.triggers import is_docs_current_check_failure
+    from treadmill_api.events.step_output import StepOutput, Metadata
+
+    output = StepOutput(
+        summary="fail",
+        decision="fail",
+        payload={
+            "checks": [
+                {
+                    "check_id": "some-other-rule",
+                    "kind": "deterministic",
+                    "severity": "blocking",
+                    "verdict": "fail",
+                    "rationale": "different rule",
+                    "log_excerpt": "",
+                },
+            ]
+        },
+        metadata=Metadata(),
+    )
+    assert is_docs_current_check_failure(output) is False
+
+
+def test_is_docs_current_check_failure_false_when_no_checks() -> None:
+    """Returns False when the payload has no checks at all."""
+    from treadmill_api.coordination.triggers import is_docs_current_check_failure
+    from treadmill_api.events.step_output import StepOutput, Metadata
+
+    output = StepOutput(
+        summary="fail",
+        decision="fail",
+        payload={},
+        metadata=Metadata(),
+    )
+    assert is_docs_current_check_failure(output) is False
+
+
+@pytest.mark.asyncio
+async def test_docs_check_fail_triggers_wf_doc_amend_helper() -> None:
+    """When step.completed arrives with decision='fail' AND the
+    docs-current-with-pr check is in the failing set, the consumer calls
+    _maybe_fire_validate_feedback which internally routes to wf-doc-amend.
+    This test verifies the consumer dispatches _maybe_fire_validate_feedback
+    for docs-check failures (routing tested via is_docs_current_check_failure)."""
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    feedback_calls: list[dict] = []
+
+    async def _stub_feedback_dispatch(*args: object, **kwargs: object) -> None:
+        feedback_calls.append({"args": args, "kwargs": kwargs})
+
+    consumer._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(uuid.uuid4()),
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "completed_at": "2026-05-08T10:00:00+00:00",
+            "output": {
+                "summary": "docs check failed",
+                "decision": "fail",
+                "commit_sha": "abc123",
+                "artifacts": [],
+                "payload": {
+                    "checks": [
+                        {
+                            "check_id": "docs-current-with-pr",
+                            "kind": "deterministic",
+                            "severity": "blocking",
+                            "verdict": "fail",
+                            "rationale": "docs not current with PR",
+                            "log_excerpt": "",
+                        }
+                    ]
+                },
+                "metadata": {},
+            },
+        },
+    })
+
+    assert len(feedback_calls) >= 1, (
+        "consumer must call _maybe_fire_validate_feedback for step.completed "
+        "with docs-current-with-pr failure so it can route to wf-doc-amend"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wf_doc_amend_dedup_key_includes_docs_amend_run() -> None:
+    """Per the task spec, the dedup key for wf-doc-amend triggered by
+    docs-current-with-pr failure uses the ``docs-amend-run=<run_id>``
+    namespace to distinguish it from all other dispatch sources."""
+    from treadmill_api.coordination.dispatch_dedup import build_dedup_key
+
+    key = build_dedup_key(
+        "wf-doc-amend",
+        {
+            "repo": "example/repo",
+            "docs_amend_run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        },
+    )
+    assert key == (
+        "wf-doc-amend:example/repo:"
+        "docs-amend-run=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    )
