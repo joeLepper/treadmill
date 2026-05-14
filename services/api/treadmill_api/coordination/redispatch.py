@@ -2,27 +2,41 @@
 
 When a lifecycle event lands that *might* unblock a downstream task —
 ``step.completed``, ``step.failed`` (eventually), ``plan.activated``, or
-later ``github.pr_merged`` — the consumer re-scans for tasks that:
+``github.pr_merged`` — the consumer re-scans for two populations:
 
-  1. Have ``task_status.derived_status = 'registered'`` (not blocked,
-     not yet dispatched).
-  2. Belong to a plan whose ``plan_status.derived_status = 'active'``.
-  3. Have no ``step.ready`` event yet for their run (proxy: no run rows).
+  1. **Never-dispatched tasks** — ``task_status.derived_status =
+     'registered'``, belonging to an ``active`` plan, with no workflow
+     runs yet.
+  2. **Deferred-run tasks** — tasks that *do* have a ``workflow_runs``
+     row (so ``task_status`` projects them as ``<wf>: executing``) but
+     have not yet had a ``step.ready`` event emitted. These are the
+     leftover artifact of the dispatcher's D.2 / D.5 deferred-dispatch
+     path: a prior dispatch call hit a gate, persisted the run + step
+     rows so the run graph stays complete, but skipped publish. When a
+     satisfying event lands later (the canonical case: ``pr_merged``
+     satisfies a ``task.<uuid>.pr_merged`` dependency) the re-evaluation
+     pass must re-call ``dispatch_task`` on these so step.ready actually
+     fires.
 
-and dispatches each of them. The dispatcher itself is the one place that
-gates on ``task_dependencies`` / ``plan_status`` — this module just
-finds candidate tasks and calls ``Dispatcher.dispatch_task``; the
-dispatcher skips if any of its gates fire (Phase 3 D.2 + D.5 own those
-gates).
+Hole 4 (2026-05-13 handoff) — without population (2), tasks with deferred
+runs sit forever: ``reevaluate`` filtered them out (they aren't
+``registered`` anymore) and so the dispatcher was never re-called even
+when their dependency was satisfied. See
+``docs/handoffs/2026-05-13-ralph-loop-scoping-signal.md`` for the bug
+class. The dispatcher's ``_find_deferred_run`` helper (added with this
+fix) ensures the re-call reuses the existing run rather than stacking a
+duplicate.
 
-At v0 only ``step.completed`` and ``plan.activated`` trigger this pass.
-Other event types (``github.pr_merged``, ``step.failed``) land in Week 3
-with the trigger evaluator (per the 2026-05-11 closure plan).
+The dispatcher itself remains the one place that gates on
+``task_dependencies`` / ``plan_status`` — this module just finds
+candidate tasks and calls ``Dispatcher.dispatch_task``; the dispatcher
+skips publish if any of its gates still fire (Phase 3 D.2 + D.5 own
+those gates), and the deferred run is kept around for the next pass.
 
-Idempotency: a task that was already dispatched in a prior pass has a
-``workflow_runs`` row — its ``task_status.derived_status`` is no longer
-``'registered'`` and the SELECT below filters it out. So repeated
-deliveries of the same trigger event produce at most one dispatch.
+Idempotency: a task whose step.ready event has been emitted hits the
+dispatcher's idempotency probe (``_has_step_ready_event``) and
+short-circuits cleanly. Repeated deliveries of the same trigger event
+produce at most one ``step.ready``.
 """
 
 from __future__ import annotations
@@ -43,19 +57,40 @@ _PENDING_TASKS_SQL = sa.text(
     """
     SELECT t.id
     FROM tasks t
-    JOIN task_status ts ON ts.id = t.id
     JOIN plan_status ps ON ps.id = t.plan_id
-    WHERE ts.derived_status = 'registered'
-      AND ps.derived_status = 'active'
+    LEFT JOIN task_status ts ON ts.id = t.id
+    WHERE ps.derived_status = 'active'
+      AND (
+            ts.derived_status = 'registered'
+         OR (
+                EXISTS (
+                    SELECT 1 FROM workflow_runs r WHERE r.task_id = t.id
+                )
+            AND NOT EXISTS (
+                    SELECT 1 FROM events e
+                    WHERE e.task_id = t.id
+                      AND e.entity_type = 'step'
+                      AND e.action = 'ready'
+                )
+            )
+          )
     """
 )
 """Tasks that may now be dispatchable.
 
-The ``task_status`` VIEW already collapses to ``'registered'`` only for
-tasks that have no workflow runs *and* no unmet dependencies — see the
-0002 migration. So this SELECT is sufficient to find candidates; the
-dispatcher then enforces dependency + plan-active gates as the final
-authority (Phase 3 D.2 + D.5).
+Two populations:
+
+  * ``task_status.derived_status = 'registered'`` — never dispatched
+    (the original D.6 set).
+  * Has a ``workflow_runs`` row but no ``step.ready`` event — the
+    deferred-dispatch case (hole 4 from the 2026-05-13 handoff). The
+    dispatcher's ``_find_deferred_run`` reuses the existing run when
+    re-called, so picking these up here is safe — no duplicate run
+    rows result.
+
+The dispatcher enforces dependency + plan-active gates as the final
+authority (Phase 3 D.2 + D.5); this SELECT errs on the side of
+including candidates that may still be gated.
 """
 
 

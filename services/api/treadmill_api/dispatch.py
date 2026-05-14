@@ -422,6 +422,32 @@ class Dispatcher:
         )
         return result.scalar_one_or_none()
 
+    async def _find_deferred_run(
+        self, session: AsyncSession, task_id: uuid.UUID,
+    ) -> uuid.UUID | None:
+        """Find an existing ``WorkflowRun`` for the task that has not yet
+        had ``step.ready`` emitted — the "deferred dispatch" case.
+
+        The deferred-dispatch path (D.5 / D.2 gate failure) persists a
+        ``WorkflowRun`` + step rows up front so the run graph stays
+        complete, but skips publishing ``step.ready``. The caller — the
+        consumer's re-evaluation pass (D.6) — wants to retry dispatch on
+        these tasks when a satisfying event lands. Without this probe a
+        re-call of ``dispatch_task`` would create a *duplicate* run; we
+        return the existing run id so dispatch can reuse it and emit
+        ``step.ready`` against its first step.
+
+        Returns the oldest such run id (there should be exactly one in
+        practice; ordering is defensive against future races).
+        """
+        result = await session.execute(
+            select(WorkflowRun.id)
+            .where(WorkflowRun.task_id == task_id)
+            .order_by(WorkflowRun.created_at.asc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def dispatch_task(
         self, session: AsyncSession, task: Task
     ) -> uuid.UUID:
@@ -437,12 +463,19 @@ class Dispatcher:
              for this task, return the existing run_id without any
              further DB writes. Makes the consumer's re-evaluation pass
              (D.6) safe to call on already-dispatched tasks.
-          2. **Plan-active gate (D.5)** — if the task's parent plan is
+          2. **Deferred-run reuse** — if a ``WorkflowRun`` exists for
+             this task but no ``step.ready`` event has been emitted
+             (the D.2 / D.5 deferred-dispatch path on a prior call),
+             reuse that run instead of creating a duplicate. The
+             re-evaluation pass (D.6) calls back here after a satisfying
+             event (``pr_merged``, ``plan.activated``, ...) lands; we
+             must not stack a second run on top.
+          3. **Plan-active gate (D.5)** — if the task's parent plan is
              not yet ``active`` (drafting / planning), persist the run +
              steps and return the run_id; skip publish + SQS send. The
              consumer's re-evaluation pass picks it up when
              ``plan.activated`` lands.
-          3. **Dependency gate (D.2)** — if any ``task_dependencies``
+          4. **Dependency gate (D.2)** — if any ``task_dependencies``
              row is unsatisfied, same deferred-dispatch path: run + steps
              persisted, no publish + no send.
         """
@@ -473,30 +506,48 @@ class Dispatcher:
         wv = await session.get(WorkflowVersion, task.workflow_version_id)
         workflow_slug = wv.workflow_id if wv is not None else ""
 
-        # ── 3. Persist the WorkflowRun + step rows up front ──────────────
-        # The run graph exists in either dispatched or gated state — the
+        # ── 3. Reuse-or-create the WorkflowRun + step rows ───────────────
+        # The run graph must exist in either dispatched or gated state — the
         # consumer's re-evaluation pass (D.6) reads ``task_status`` which
         # joins workflow_runs; a missing run would orphan the task.
-        run = WorkflowRun(
-            task_id=task.id,
-            workflow_version_id=task.workflow_version_id,
-            trigger="registered",
-        )
-        session.add(run)
-        await session.flush()
-
-        run_steps: list[WorkflowRunStep] = []
-        for wv_step in wv_steps:
-            rs = WorkflowRunStep(
-                run_id=run.id,
-                step_index=wv_step.step_index,
-                step_name=wv_step.step_name,
-                role_id=wv_step.role_id,
-                status="pending",
+        #
+        # Hole 4 fix (2026-05-13): if a prior call deferred and left a run
+        # behind, reuse it rather than stacking a duplicate. See
+        # ``docs/handoffs/2026-05-13-ralph-loop-scoping-signal.md``.
+        deferred_run_id = await self._find_deferred_run(session, task.id)
+        if deferred_run_id is not None:
+            run = await session.get(WorkflowRun, deferred_run_id)
+            existing_steps_result = await session.execute(
+                select(WorkflowRunStep)
+                .where(WorkflowRunStep.run_id == deferred_run_id)
+                .order_by(WorkflowRunStep.step_index)
             )
-            session.add(rs)
-            run_steps.append(rs)
-        await session.flush()
+            run_steps = list(existing_steps_result.scalars())
+            logger.info(
+                "dispatch_task: reusing deferred run %s for task %s",
+                deferred_run_id, task.id,
+            )
+        else:
+            run = WorkflowRun(
+                task_id=task.id,
+                workflow_version_id=task.workflow_version_id,
+                trigger="registered",
+            )
+            session.add(run)
+            await session.flush()
+
+            run_steps = []
+            for wv_step in wv_steps:
+                rs = WorkflowRunStep(
+                    run_id=run.id,
+                    step_index=wv_step.step_index,
+                    step_name=wv_step.step_name,
+                    role_id=wv_step.role_id,
+                    status="pending",
+                )
+                session.add(rs)
+                run_steps.append(rs)
+            await session.flush()
 
         # ── 4. Plan-active gate (D.5) ─────────────────────────────────────
         # Read the ``plan_status`` VIEW; the flush above is critical so

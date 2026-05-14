@@ -219,6 +219,72 @@ async def test_handle_github_pr_merged_runs_reevaluate_for_dependent_tasks() -> 
 
 
 @pytest.mark.asyncio
+async def test_reevaluate_dispatches_tasks_returned_by_sql_including_deferred() -> None:
+    """Hole 4 (2026-05-13) — ``reevaluate`` must dispatch every task id
+    its SELECT returns, including tasks with deferred runs (population 2
+    in the docstring). We don't drive live Postgres here — we fake the
+    SQL result and verify the dispatcher is called for each id.
+
+    Pairs with ``test_dispatch_task_reuses_deferred_run_*`` in
+    ``test_dispatch_unit.py``: that suite covers the reuse semantics on
+    the dispatcher side; this test covers the SELECT-then-dispatch loop
+    that drives them.
+    """
+    from unittest.mock import MagicMock, AsyncMock
+
+    from treadmill_api.coordination.redispatch import reevaluate
+
+    deferred_task_id = uuid.uuid4()
+    fresh_task_id = uuid.uuid4()
+
+    # Fake session.execute returns two rows (deferred + fresh); session.get
+    # returns a Task stub for each.
+    class _Row:
+        def __init__(self, task_id: uuid.UUID) -> None:
+            self.id = task_id
+
+    rows = [_Row(deferred_task_id), _Row(fresh_task_id)]
+    session = AsyncMock()
+    exec_result = MagicMock()
+    exec_result.all.return_value = rows
+    session.execute = AsyncMock(return_value=exec_result)
+
+    async def _fake_get(_model: Any, task_id: uuid.UUID) -> Any:
+        stub = MagicMock()
+        stub.id = task_id
+        return stub
+
+    session.get = _fake_get
+
+    dispatched_with: list[uuid.UUID] = []
+
+    class _StubDispatcher:
+        async def dispatch_task(self, _session: Any, task: Any) -> uuid.UUID:
+            dispatched_with.append(task.id)
+            return uuid.uuid4()
+
+    result = await reevaluate(session, _StubDispatcher())
+    assert dispatched_with == [deferred_task_id, fresh_task_id]
+    assert result == [deferred_task_id, fresh_task_id]
+
+
+def test_pending_tasks_sql_includes_deferred_run_population() -> None:
+    """Hole 4 (2026-05-13) — structural assertion: the SELECT must
+    include tasks that have a ``workflow_runs`` row but no
+    ``step.ready`` event. A future refactor that quietly drops this
+    branch would reintroduce the bug; the test fails fast.
+    """
+    from treadmill_api.coordination.redispatch import _PENDING_TASKS_SQL
+
+    sql = str(_PENDING_TASKS_SQL)
+    assert "workflow_runs" in sql
+    assert "step" in sql and "ready" in sql, (
+        "the SELECT must reference the step.ready event to identify "
+        "the deferred-run population"
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_github_pr_opened_does_not_run_reevaluate() -> None:
     """The reevaluate pass on github events is specific to pr_merged
     (the verb that can satisfy a task.<uuid>.pr_merged dependency).

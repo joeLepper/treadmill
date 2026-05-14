@@ -98,6 +98,9 @@ class _FakeSession:
         plan_active: bool = True,
         dependency_expressions: list[str] | None = None,
         existing_step_ready_run_id: uuid.UUID | None = None,
+        existing_deferred_run_id: uuid.UUID | None = None,
+        existing_deferred_run_steps: list[Any] | None = None,
+        dep_pr_merged_count: int = 0,
     ) -> None:
         self.added: list[Any] = []
         self._wv_steps = wv_steps
@@ -105,6 +108,9 @@ class _FakeSession:
         self._plan_active = plan_active
         self._dep_expressions = list(dependency_expressions or [])
         self._existing_run_id = existing_step_ready_run_id
+        self._existing_deferred_run_id = existing_deferred_run_id
+        self._existing_deferred_run_steps = list(existing_deferred_run_steps or [])
+        self._dep_pr_merged_count = dep_pr_merged_count
         self.flushed = 0
 
     async def execute(self, stmt: Any, params: Any = None) -> Any:
@@ -125,18 +131,27 @@ class _FakeSession:
             result.scalars.return_value.all.return_value = list(self._dep_expressions)
             return result
         if "count" in compiled.lower() and "events" in compiled:
-            # _is_dep_pr_merged() — count(events). Treat all such queries
-            # as zero matches at the unit level; integration tests cover
-            # the satisfied path against live Postgres.
-            result.scalar_one.return_value = 0
+            # _is_dep_pr_merged() — count(events). Configurable so we can
+            # exercise the deferred→satisfied transition at the unit level.
+            result.scalar_one.return_value = self._dep_pr_merged_count
             return result
         if "count" in compiled.lower() and "workflow_run_steps" in compiled:
             # _is_dep_step_completed() — count(workflow_run_steps).
             result.scalar_one.return_value = 0
             return result
+        if "workflow_run_steps" in compiled and "workflow_runs" not in compiled:
+            # _find_deferred_run reuse path fetches the existing steps
+            # via SELECT WorkflowRunStep WHERE run_id = ...
+            result.scalars.return_value = iter(self._existing_deferred_run_steps)
+            return result
         if "workflow_runs" in compiled and "workflow_run_steps" not in compiled:
-            # _is_dep_run_completed() — runs select; no runs at unit level.
+            # Two queries hit this branch:
+            #   * _is_dep_run_completed() — .scalars().all() of runs
+            #   * _find_deferred_run() — .scalar_one_or_none() of single id
+            # We populate both result-extractors on the same mock so the
+            # caller picks the shape they expect.
             result.scalars.return_value.all.return_value = []
+            result.scalar_one_or_none.return_value = self._existing_deferred_run_id
             return result
         if "FROM events" in compiled or "events.run_id" in compiled or "events.task_id" in compiled:
             # _has_step_ready_event() — single run_id or None
@@ -146,7 +161,16 @@ class _FakeSession:
         result.scalars.return_value = iter(self._wv_steps)
         return result
 
-    async def get(self, _model: Any, _id: Any) -> Any:
+    async def get(self, model: Any, _id: Any) -> Any:
+        # The dispatcher's deferred-run reuse path calls
+        # ``session.get(WorkflowRun, deferred_run_id)`` to load the
+        # existing run; default-construct a stand-in so the caller can
+        # read ``.id`` off it. Everything else maps to the workflow
+        # version stub.
+        if getattr(model, "__name__", "") == "WorkflowRun":
+            stub = MagicMock()
+            stub.id = self._existing_deferred_run_id
+            return stub
         return self._workflow_version
 
     def add(self, obj: Any) -> None:
@@ -665,3 +689,194 @@ async def test_dispatch_task_malformed_dependency_blocks_dispatch() -> None:
     await d.dispatch_task(session, task)  # type: ignore[arg-type]
     assert publisher.calls == []
     assert sqs.sent == []
+
+
+# ── Hole 4 (2026-05-13) — deferred-run re-dispatch ────────────────────────────
+#
+# When ``dispatch_task`` hits the D.2 / D.5 deferred path it persists a
+# ``WorkflowRun`` + steps but does not publish step.ready. The consumer's
+# re-evaluation pass calls back into ``dispatch_task`` when an event that
+# might satisfy the gate lands. Two properties matter:
+#
+#   * On the re-call with deps still unsatisfied, NO duplicate run is
+#     created (the helper finds the existing deferred run and reuses it).
+#   * On the re-call once deps are satisfied, the existing run is the one
+#     that gets step.ready emitted (no duplicate).
+#
+# Both are unit-level — the integration suite exercises the round-trip
+# through Postgres + the redispatch SELECT in
+# ``test_integration_redispatch.py``.
+
+
+@pytest.mark.asyncio
+async def test_dispatch_task_reuses_deferred_run_when_deps_still_unsatisfied() -> None:
+    """Hole 4 (2026-05-13) — calling ``dispatch_task`` twice on a task
+    whose dependency is unsatisfied both times must NOT create a duplicate
+    ``WorkflowRun``. The second call finds the run from the first call
+    and reuses it.
+    """
+    publisher = _FakePublisher()
+    sqs = _FakeSqs()
+    d = Dispatcher(
+        publisher=publisher, sqs_client=sqs,
+        work_queue_url="https://sqs.example.com/work",
+    )
+    wv = MagicMock()
+    wv.workflow_id = "wf-author"
+    sibling_uuid = uuid.uuid4()
+    # First call: no deferred run exists yet — the dispatcher creates one.
+    session = _FakeSession(
+        wv_steps=[
+            MagicMock(
+                step_index=0, step_name="author", role_id="role-author",
+                workflow_version_id=uuid.uuid4(),
+            )
+        ],
+        workflow_version=wv,
+        plan_active=True,
+        dependency_expressions=[f"task.{sibling_uuid}.pr_merged"],
+    )
+    task = _task()
+    first_run_id = await d.dispatch_task(session, task)  # type: ignore[arg-type]
+    runs_after_first = [
+        x for x in session.added if type(x).__name__ == "WorkflowRun"
+    ]
+    assert len(runs_after_first) == 1
+    assert publisher.calls == []
+    assert sqs.sent == []
+
+    # Second call simulates the re-evaluation pass: pre-populate the
+    # fake session as if the deferred run from the first call were
+    # already persisted, and call ``dispatch_task`` again with deps
+    # still unsatisfied. No duplicate run must result.
+    deferred_run_steps = [
+        MagicMock(
+            id=uuid.uuid4(),
+            step_index=0,
+            step_name="author",
+            role_id="role-author",
+        )
+    ]
+    session2 = _FakeSession(
+        wv_steps=[
+            MagicMock(
+                step_index=0, step_name="author", role_id="role-author",
+                workflow_version_id=uuid.uuid4(),
+            )
+        ],
+        workflow_version=wv,
+        plan_active=True,
+        dependency_expressions=[f"task.{sibling_uuid}.pr_merged"],
+        existing_deferred_run_id=first_run_id,
+        existing_deferred_run_steps=deferred_run_steps,
+    )
+    second_run_id = await d.dispatch_task(session2, task)  # type: ignore[arg-type]
+    assert second_run_id == first_run_id
+    runs_after_second = [
+        x for x in session2.added if type(x).__name__ == "WorkflowRun"
+    ]
+    assert runs_after_second == [], (
+        "deferred-run reuse must not create a duplicate WorkflowRun "
+        "on the re-dispatch call when the gate is still failing"
+    )
+    # Still no publish — gate still failing.
+    assert publisher.calls == []
+    assert sqs.sent == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_task_reuses_deferred_run_and_emits_when_deps_satisfied() -> None:
+    """Hole 4 (2026-05-13) — when the re-evaluation pass calls
+    ``dispatch_task`` after the satisfying event (``pr_merged``) lands,
+    the dispatcher finds the deferred run, reuses it, and emits
+    ``step.ready`` against its first step. No duplicate run.
+    """
+    publisher = _FakePublisher()
+    sqs = _FakeSqs()
+    d = Dispatcher(
+        publisher=publisher, sqs_client=sqs,
+        work_queue_url="https://sqs.example.com/work",
+    )
+    wv = MagicMock()
+    wv.workflow_id = "wf-author"
+    sibling_uuid = uuid.uuid4()
+    deferred_run_id = uuid.uuid4()
+    deferred_step = MagicMock(
+        id=uuid.uuid4(),
+        step_index=0,
+        step_name="author",
+        role_id="role-author",
+    )
+    # Pre-state: a prior deferred dispatch already persisted the run +
+    # step. The pr_merged event has now landed (dep_pr_merged_count=1)
+    # so the gate should pass on this call.
+    session = _FakeSession(
+        wv_steps=[
+            MagicMock(
+                step_index=0, step_name="author", role_id="role-author",
+                workflow_version_id=uuid.uuid4(),
+            )
+        ],
+        workflow_version=wv,
+        plan_active=True,
+        dependency_expressions=[f"task.{sibling_uuid}.pr_merged"],
+        existing_deferred_run_id=deferred_run_id,
+        existing_deferred_run_steps=[deferred_step],
+        dep_pr_merged_count=1,
+    )
+    task = _task()
+    returned_run_id = await d.dispatch_task(session, task)  # type: ignore[arg-type]
+
+    # The returned run id is the deferred one — not a fresh uuid.
+    assert returned_run_id == deferred_run_id
+    # No new WorkflowRun in session.added — the existing one was reused.
+    runs_added = [x for x in session.added if type(x).__name__ == "WorkflowRun"]
+    assert runs_added == []
+    # No new WorkflowRunStep rows either — the existing steps were reused.
+    steps_added = [
+        x for x in session.added if type(x).__name__ == "WorkflowRunStep"
+    ]
+    assert steps_added == []
+    # step.ready emitted exactly once with run_id == deferred_run_id.
+    step_ready_events = [
+        x for x in session.added
+        if type(x).__name__ == "Event" and x.action == "ready"
+    ]
+    assert len(step_ready_events) == 1
+    assert step_ready_events[0].run_id == deferred_run_id
+    assert len(publisher.calls) == 1
+    # SQS claim body references the deferred run.
+    assert len(sqs.sent) == 1
+    body = json.loads(sqs.sent[0]["MessageBody"])
+    assert body["run_id"] == str(deferred_run_id)
+    assert body["step_id"] == str(deferred_step.id)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_task_idempotency_probe_still_short_circuits_with_deferred_run() -> None:
+    """The idempotency probe (``_has_step_ready_event``) must still win
+    over the deferred-run reuse path. A task with both a deferred run
+    *and* a step.ready event (e.g. a successful re-dispatch landed and
+    then the consumer re-fires) short-circuits to the step.ready event's
+    run id without any further side effects.
+    """
+    publisher = _FakePublisher()
+    sqs = _FakeSqs()
+    d = Dispatcher(
+        publisher=publisher, sqs_client=sqs,
+        work_queue_url="https://sqs.example.com/work",
+    )
+    existing_run_id = uuid.uuid4()
+    other_deferred_id = uuid.uuid4()
+    session = _FakeSession(
+        wv_steps=[],  # would raise DispatchError if probe didn't fire first
+        workflow_version=MagicMock(),
+        existing_step_ready_run_id=existing_run_id,
+        existing_deferred_run_id=other_deferred_id,  # ignored — probe wins
+    )
+    task = _task()
+    returned = await d.dispatch_task(session, task)  # type: ignore[arg-type]
+    assert returned == existing_run_id
+    assert publisher.calls == []
+    assert sqs.sent == []
+    assert session.added == []
