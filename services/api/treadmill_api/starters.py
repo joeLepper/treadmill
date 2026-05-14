@@ -157,16 +157,17 @@ _ROLES: list[dict[str, Any]] = [
     },
     {
         "id": "role-code-author",
-        # Operator-bumped 2026-05-14 from WORKER_MODEL (haiku) to sonnet:
-        # haiku produced plausible-prose-but-no-deliverable on the ADR-0032
-        # documentation.py + architecture.py disposition tasks (worker logs
-        # showed confident "✅ wired from runner.py" claims but the file
-        # wasn't on disk; author-side validation per task #121 caught it).
-        # role-code-author does the load-bearing implementation work for
-        # all four code-emitting workflows (wf-author, wf-feedback,
-        # wf-ci-fix, wf-conflict); the quality gap was felt across all
-        # the in-flight tasks. Sonnet 4.6 is the next tier up.
-        "model": "claude-sonnet-4-6",
+        # Reverted to haiku 2026-05-14 after the sonnet bump didn't solve
+        # what we thought it would. The original failures we attributed to
+        # haiku quality on documentation.py + architecture.py were caught
+        # by author-side validation per task #121 — i.e. the safety net
+        # already works. Subsequent failures on the parser task (same
+        # session) were not model-quality but harness issues: validation
+        # script path bug, validation snapshotted in DB across re-fires,
+        # log_excerpt capturing only stderr so we couldn't see what failed.
+        # Bumping the model didn't address any of those. Default back to
+        # haiku and bump only on fresh, distinct evidence.
+        "model": WORKER_MODEL,
         "output_kind": OutputKind.CODE,
         "system_prompt": (
             "You are the Treadmill code author — the shared terminal "
