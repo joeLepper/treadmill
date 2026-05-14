@@ -64,14 +64,27 @@ def test_volumes_for_agent_family_mounts_credentials_rw(
     }
 
 
-def test_volumes_for_non_agent_family_is_empty(
+def test_volumes_for_postgres_mounts_named_volume_for_persistence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Postgres / Redis / API containers don't get the credentials mount."""
+    """Postgres family gets a deployment-scoped named volume so DB state
+    survives ``down`` + ``up``. Fully-local (no deployment_config) uses
+    ``treadmill-local-postgres-data``. Redis / API containers still
+    have no mounts."""
     rt = _make_runtime(tmp_path, monkeypatch)
-    other = ContainerSpec(family="treadmill-postgres", name="postgres", image="postgres:16")
-    assert rt._volumes_for(other) == {}
+
+    pg = ContainerSpec(family="treadmill-postgres", name="postgres", image="postgres:16")
+    pg_mounts = rt._volumes_for(pg)
+    assert pg_mounts == {
+        "treadmill-local-postgres-data": {
+            "bind": "/var/lib/postgresql/data",
+            "mode": "rw",
+        }
+    }
+
+    api = ContainerSpec(family="treadmill-api", name="api", image="treadmill-api:dev")
+    assert rt._volumes_for(api) == {}
 
 
 def test_volumes_for_agent_family_skips_credentials_when_absent(

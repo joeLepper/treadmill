@@ -482,17 +482,23 @@ def test_volumes_for_api_in_fully_local_has_no_aws_mount(
     assert mounts == {}
 
 
-def test_volumes_for_postgres_in_dev_local_has_no_mounts(
+def test_volumes_for_postgres_in_dev_local_mounts_deployment_scoped_named_volume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Postgres + Redis ship without volumes — stock images that don't
-    talk to AWS at all."""
+    """Postgres gets a deployment-scoped named volume so DB state
+    survives ``down`` + ``up`` cycles — smokes can resume after an
+    SSO refresh instead of losing workflow_runs / events / tasks."""
     rt = _make_runtime_with_aws_dir(
         tmp_path, monkeypatch, deployment_config=_valid_yaml_dict(),
     )
     pg_spec = ContainerSpec(family=POSTGRES_FAMILY, name="pg", image="postgres:16-alpine")
-    assert rt._volumes_for(pg_spec) == {}
+    assert rt._volumes_for(pg_spec) == {
+        "treadmill-personal-postgres-data": {
+            "bind": "/var/lib/postgresql/data",
+            "mode": "rw",
+        }
+    }
 
 
 # ── Host-side credential fetch (ADR-0019) ────────────────────────────────────

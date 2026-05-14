@@ -910,8 +910,19 @@ class LocalRuntime:
         root cause of the SSO-cache-refresh-writeback class of bugs that
         ADR-0019 retires.
 
-        Other families (postgres, redis) ship without volumes —
-        their state lives in the container until ``down``.
+        Postgres ships with a **named** volume so DB state persists
+        across ``down`` + ``up`` cycles (operator framing 2026-05-14:
+        smokes need to be resumable; losing the workflow_runs /
+        events / tasks tables every redeploy means every SSO-TTL hit
+        is a hard reset). Volume name is deployment-scoped:
+        ``treadmill-<deployment_id>-postgres-data`` for dev-local;
+        ``treadmill-local-postgres-data`` for fully-local. Docker
+        creates the volume automatically if it doesn't exist. To
+        explicitly wipe the DB, ``docker volume rm <name>``.
+
+        Redis still ships without a volume — its state is
+        regenerable cache (per ADR-0011's "Redis is cache, Postgres
+        is source-of-truth"), no harm in losing it on a cycle.
         """
         mounts: dict[str, dict[str, str]] = {}
 
@@ -926,6 +937,19 @@ class LocalRuntime:
             bare_root.mkdir(parents=True, exist_ok=True)
             mounts[str(bare_root)] = {
                 "bind": "/var/treadmill/repos", "mode": "rw",
+            }
+
+        # Postgres: named volume for state persistence across cycles.
+        if spec.family == POSTGRES_FAMILY:
+            deployment_id = (
+                self.deployment_config["deployment_id"]
+                if self.deployment_config is not None
+                else "local"
+            )
+            volume_name = f"treadmill-{deployment_id}-postgres-data"
+            mounts[volume_name] = {
+                "bind": "/var/lib/postgresql/data",
+                "mode": "rw",
             }
 
         return mounts
