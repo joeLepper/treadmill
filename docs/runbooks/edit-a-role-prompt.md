@@ -185,6 +185,53 @@ subprocess/llm-judge dispatch mechanism.
 
 ---
 
+## ADR-0030 discipline: editing ``starters.py`` vs. the DB
+
+Per ADR-0030 (Federated in-repo agent context), three roles carry
+discipline-critical system prompts that operationalize diagrams and
+``AGENT.md`` synchronization:
+
+- `role-doc-author` instructs embedding Mermaid diagrams in plans
+  per ADR-0004's conformance checklist.
+- `role-code-author` instructs reading diagrams as contracts of intent
+  and updating ``AGENT.md`` when surface changes.
+- `role-reviewer` instructs flagging missing diagrams and stale
+  ``AGENT.md`` entries in ``request_changes`` verdicts.
+
+### When to edit these three roles in code
+
+Edits to these three prompts should normally flow **through `starters.py`
+→ code review → merge → operator seed**, not through `treadmill role
+update` directly:
+
+1. **Update the code-side definition** in
+   `services/api/treadmill_api/starters.py`.
+2. **PR and review** — the changes are part of ADR-0030's design and
+   deserve peer review before they ship.
+3. **Merge** the PR.
+4. **Operator seeds** at the next convenient moment (after re-deploy or
+   explicitly):
+   ```bash
+   treadmill workflows seed-starters --reset-prompts-from-code
+   ```
+
+The `--reset-prompts-from-code` flag is specifically designed for this
+use case — to pull discipline-critical prompt edits from code into the
+running deployment.
+
+### When to use `treadmill role update` for these roles
+
+The direct `treadmill role update` path is appropriate only for
+**narrowly scoped tuning** of an already-seeded role — e.g., "the
+request_changes verdict is too strict; soften the criteria" — when you
+want to test the change live without a code review + re-deploy cycle.
+
+After you verify the tuning works, port the edit back to `starters.py`,
+PR it, and re-seed with `--reset-prompts-from-code` so the change is
+durable and code-reviewed.
+
+---
+
 ## Related
 
 * [ADR-0028 — DB-authoritative workflow/role configs](../adrs/0028-db-authoritative-workflow-configs.md)
