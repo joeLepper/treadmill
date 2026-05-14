@@ -88,7 +88,14 @@ def run_deterministic(
             text=True,
             timeout=timeout_seconds,
         )
-        stderr_excerpt = result.stderr[-2000:] if result.stderr else ""
+        combined = ""
+        if result.stdout:
+            combined += "--- stdout ---\n" + result.stdout
+        if result.stderr:
+            if combined:
+                combined += "\n"
+            combined += "--- stderr ---\n" + result.stderr
+        excerpt = combined[-4000:] if combined else ""
         if result.returncode == 0:
             return CheckResult(
                 check_id=check.id,
@@ -96,7 +103,7 @@ def run_deterministic(
                 severity=check.severity,
                 verdict="pass",
                 rationale=f"Script exited 0: {check.script}",
-                log_excerpt=stderr_excerpt,
+                log_excerpt=excerpt,
             )
         else:
             return CheckResult(
@@ -105,7 +112,7 @@ def run_deterministic(
                 severity=check.severity,
                 verdict="fail",
                 rationale=f"Script exited {result.returncode}: {check.script}",
-                log_excerpt=stderr_excerpt,
+                log_excerpt=excerpt,
             )
     except subprocess.TimeoutExpired:
         return CheckResult(

@@ -91,15 +91,24 @@ def test_deterministic_stderr_captured(tmp_path: Path) -> None:
     assert "error message" in result.log_excerpt
 
 
-def test_deterministic_large_stderr_truncated(tmp_path: Path) -> None:
-    """Very large stderr is truncated to last ~2000 chars."""
-    # Generate large output (>2000 chars)
-    large_output = "x" * 3000
+def test_deterministic_stdout_captured(tmp_path: Path) -> None:
+    """Stdout output is also captured in log_excerpt — pytest writes its
+    failure summary to stdout, not stderr."""
+    check = _check(script='echo "pytest FAILED in test_x"; exit 1')
+    result = run_deterministic(check, tmp_path, timeout_seconds=5)
+
+    assert result.verdict == "fail"
+    assert "pytest FAILED in test_x" in result.log_excerpt
+
+
+def test_deterministic_large_output_truncated(tmp_path: Path) -> None:
+    """Very large output is truncated to the last ~4000 chars."""
+    large_output = "x" * 6000
     check = _check(script=f'echo "{large_output}" >&2; exit 1')
     result = run_deterministic(check, tmp_path, timeout_seconds=5)
 
     assert result.verdict == "fail"
-    assert len(result.log_excerpt) <= 2000
+    assert len(result.log_excerpt) <= 4000
 
 
 # ── LLM-judge tests ──────────────────────────────────────────────────────────
