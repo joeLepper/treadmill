@@ -1,0 +1,40 @@
+name: pr-description-conforms
+description: >
+  Pull request descriptions must contain all five required sections to ensure
+  reviewers and future maintainers have complete context for changes. Required
+  sections are: Summary (high-level overview), Why (motivation and rationale),
+  Test plan (how changes were verified), Validation (criteria for success), and
+  Refs (related issues, ADRs, learning documents).
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - Q33.b  # PR description structure as distinct concern (per ADR-0033)
+
+# applies_to omitted — defaults to all Treadmill-managed projects.
+
+checks:
+  - id: required-sections-present
+    type: deterministic
+    description: >
+      Verifies that the PR description (body) contains all five required section
+      headers: ## Summary, ## Why, ## Test plan, ## Validation, and ## Refs.
+      These sections ensure complete context for reviewers and maintainers.
+    script: tools/rule-checks/pr-description-conforms/check.sh
+    severity: blocking
+
+remediations:
+  - "on": required-sections-present:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR description is missing one or more required sections. Per
+      rule:pr-description-conforms, all PRs must include these five sections:
+      ## Summary, ## Why, ## Test plan, ## Validation, and ## Refs.
+      See the check output for which sections are missing. Add them to the PR
+      description and push to update.
+
+references:
+  - ADR-0033  # hands-free driving mega-plan (Q33.b)
+  - ADR-0006  # rules + remediations primitive
