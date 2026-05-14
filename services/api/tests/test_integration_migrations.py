@@ -176,6 +176,8 @@ def test_task_validations_columns_match_model(engine: Engine) -> None:
         "position",
         "kind",
         "description",
+        "script",
+        "prompt",
         "created_at",
     }
     # FK target.

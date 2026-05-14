@@ -71,6 +71,8 @@ def test_task_validation_table_shape():
         "position",
         "kind",
         "description",
+        "script",
+        "prompt",
         "created_at",
     }
 
@@ -79,12 +81,12 @@ def test_task_validation_table_shape():
     assert fk.column.table.name == "tasks"
     assert fk.ondelete == "CASCADE"
 
-    # CHECK constraint pins kind to the two v0 values.
+    # CHECK constraint enforces script/prompt pairing per kind.
     check_names = {
         c.name for c in table.constraints
         if c.__class__.__name__ == "CheckConstraint"
     }
-    assert "ck_task_validations_kind" in check_names
+    assert "ck_task_validations_kind_script_prompt" in check_names
 
     # UNIQUE (task_id, position) so re-renders stay stable.
     uniques = [

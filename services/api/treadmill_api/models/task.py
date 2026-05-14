@@ -151,6 +151,9 @@ class TaskValidation(Base):
     The kinds are gated by a ``CHECK`` constraint so an unknown ``kind``
     cannot enter the table. ``position`` enforces a deterministic ordering
     so re-renders of a plan doc preserve check identity.
+
+    ``script`` (for deterministic) and ``prompt`` (for llm-judge) are
+    paired: exactly one must be NOT NULL per the CHECK constraint.
     """
 
     __tablename__ = "task_validations"
@@ -168,6 +171,8 @@ class TaskValidation(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    script: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
@@ -176,8 +181,9 @@ class TaskValidation(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('deterministic', 'llm-judge')",
-            name="ck_task_validations_kind",
+            "(kind='deterministic' AND script IS NOT NULL AND prompt IS NULL) "
+            "OR (kind='llm-judge' AND prompt IS NOT NULL AND script IS NULL)",
+            name="ck_task_validations_kind_script_prompt",
         ),
         UniqueConstraint(
             "task_id", "position", name="uq_task_validations_task_position"
