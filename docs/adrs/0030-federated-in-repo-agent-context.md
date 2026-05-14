@@ -95,18 +95,20 @@ Four rules in `docs/knowledge-base/rules/`:
 ### 4. Backfill discipline
 
 After ADR-0030 + its plan land, Treadmill dispatches the backfill
-recursively (Q30.e). Backfill PRs surface three classes of gap:
+recursively (Q30.e). Backfill PRs surface three classes of gap
+(formalized in ADR-0032 §Gap classification for broader use):
 
-- **Class A** — clean: ADR intent matches code. Diagram is
-  documentation. Standard PR flow.
-- **Class B** — drift: intent and code both reasonable but
+- **Class A — alignment.** ADR intent matches current code. The
+  diagram captures reality. Standard PR flow.
+- **Class B — drift.** Intent and code both reasonable but
   divergent. Per ADR-0004's amendment protocol: diagram reflects
   current reality; ADR gets an amendment note.
-- **Class C** — sub-optimality: code violates an architectural
-  standard (DRY, async idempotency, etc.). The diagram surfaces
+- **Class C — sub-optimality.** Code violates an architectural
+  standard (DRY, async-idempotency, etc.). The diagram surfaces
   this honestly. The PR also opens a `docs/learnings/` capturing
   the gap + flags it in the PR description. Operator decides:
-  amend, supersede, or open a remediation plan.
+  amend, supersede, or open a remediation plan (ADR-0032 formalizes
+  this triage via `role-architect`).
 
 **Principle: honest current-state in the diagram, never aspirational.**
 Sub-optimal reality must be visible — that visibility is what makes
