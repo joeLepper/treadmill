@@ -89,14 +89,17 @@ sequenceDiagram
 
 ## Follow-ups
 
-Open Questions for the associated plan:
+Open Questions resolved 2026-05-14 by operator review:
 
-- **Q35.a — engine: build or adopt?** Compare in-tree autoscaler-shape subprocess against OpenClaw / Temporal / Inngest. Decide based on (a) topology fit (fully_local + dev_local + fully_remote), (b) Python-native, (c) cron + missed-tick semantics, (d) deployment footprint.
-- **Q35.b — schedule row shape.** Standard 5-field cron, or 6-field with seconds? Payload templating syntax (Jinja2 vs simple `{{var}}` vs raw JSON only)?
-- **Q35.c — missed-tick semantics.** When the scheduler is down across a fire window, do we catch up (fire every missed tick on recovery) or skip (only fire the most recent one)? Per-schedule override?
-- **Q35.d — jitter.** Add per-schedule jitter (0-60s) to avoid thundering herd at common cron boundaries?
-- **Q35.e — operator CLI.** `treadmill schedules list`, `create`, `pause`, `resume`, `delete`. What's the minimal v1 surface?
-- **Q35.f — observability.** How does an operator see "which schedule fired when, what it dispatched, did it succeed?" Likely routes through ADR-0020 observability stack once that lands.
+- **Q35.a — engine: build or adopt?** **Build.** Operator has prior art in RAMJAC's scrape scheduler; reimplementing in-tree (autoscaler-shape subprocess) gives us the features we know we want (jitter, quiet hours, missed-tick catch-up) without taking on a new framework's surface. *Operator note 2026-05-14: not married to RAMJAC's library or language; the feature set is what's being adopted.*
+- **Q35.b — schedule row shape.** Standard 5-field cron (minute resolution; seconds not needed). Payload templating syntax informed by RAMJAC's scheduler; plan-level decision.
+- **Q35.c — missed-tick semantics.** Catch-up within a 4-hour window. If the scheduler is down longer than that, missed ticks are dropped (the workload-state likely requires re-evaluation anyway). Per-schedule override possible (plan-level).
+- **Q35.d — jitter.** Yes — per-schedule jitter (RAMJAC precedent). Default jitter to something sensible (~60s); per-schedule override.
+- **Q35.e — operator CLI.** `treadmill schedules list / create / pause / resume / delete`. Robust CLI from the start — cheap to add now, expensive to retrofit. *Operator note: "It's essentially cheap for us to go in with a robust cli to begin with."*
+- **Q35.f — observability.** Grafana transactions to start (via ADR-0020 stack). A future Treadmill UI surfaces schedule state too.
+- **Q35.g — quiet hours.** **Yes** — per-schedule quiet-hour windows (RAMJAC precedent). A schedule with quiet hours `22:00-06:00 US/Pacific` skips ticks that fall inside the window. Plan-level: timezone semantics + DST handling.
+
+Plan-level homework: read RAMJAC's scrape scheduler source (and likely its git history, since the operator notes Juan may have removed features). Pull jitter + quiet-hours + missed-tick logic into the in-tree implementation. Adapt the per-schedule data model (cron expression + jitter + quiet-hour windows + missed-tick policy) into Treadmill's `schedules` table.
 
 ## References
 
@@ -105,4 +108,11 @@ Open Questions for the associated plan:
 - ADR-0020 — observability stack (will consume scheduler signals once it lands).
 - ADR-0032 §Q32.f — first consumer (periodic documentarian audit).
 - ADR-0034 §Q34.d — second consumer (periodic learnings crystallization).
-- OpenClaw, Temporal, Inngest — candidate engines for Q35.a evaluation.
+- **RAMJAC's scrape scheduler** — concrete prior art at `service/scrape_scheduler/src/scheduler.py` (last present at commit `2b9e9cead^`, removed in `2b9e9cead "Remove deprecated webhook pipeline and related services"` 2025-10). Original implementation (PR #489 "scheduler: add backoff with jitter", 2025-10-06) carried the feature set we want:
+  - **Jitter**: deterministic, hash-based (`sha1(key) % (2*amp+1) - amp`), `JITTER_RATIO=0.15` default. Stable per-schedule, not random per-fire — same schedule fires at the same offset each time, avoiding thundering herd without re-rolling on every fire.
+  - **Quiet hours**: `"20-4"` (8pm-4am) format with timezone (`SCHED_TIMEZONE=America/Los_Angeles`), wraparound-aware.
+  - **Quiet multiplier + cap**: during quiet hours, intervals × `QUIET_MULTIPLIER` (default 6×), capped at `QUIET_MAX_SEC` (12h). Schedules slow down during off-hours rather than firing aggressively while no one's watching.
+  - **Backoff**: `next_interval_seconds(attempts, base, factor, cap, key)` — exponential `min(cap, base * factor^attempts) + jitter`.
+  - **Engine**: APScheduler + Redis (`RedisJobStore` + `BackgroundScheduler`). State in Redis sorted sets (`scheduler:due` keyed by epoch).
+  - **OTel spans** wrapping each scheduler op.
+- Treadmill's adoption: same feature shape, Python-native, integrated with the existing event bus (ADR-0011) rather than APScheduler's direct-call model. The plan revisits whether to use APScheduler or hand-roll the cron-tick loop.
