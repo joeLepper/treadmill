@@ -71,6 +71,25 @@ Backfilling diagrams for these 33 artifacts:
 - **Diagram interpretation variance**: ADRs/plans written before ADR-0004 was adopted may not have obvious diagrams embedded in prose. Mitigation: the implementation-conforms-to-diagram judge can return `fail-diagram` (advisory) if the backfilled diagram doesn't match the intent; re-author as needed.
 - **Learning generation**: Class C gaps (sub-optimal implementation/design) discovered during backfill require judgment calls on what constitutes a "gap worth capturing" vs. a known-acceptable deviation.
 
+## Diagram
+
+The backfill process fans out one wf-author task per missing artifact. Each task reads the target ADR/plan, authors a conformant diagram per ADR-0004 + ADR-0030, and conditionally opens a learning doc if Class C gaps are discovered.
+
+```mermaid
+flowchart TD
+    Start["Operator triggers backfill plan"] --> FanOut["Fan out to 33 wf-author tasks<br/>(18 ADRs + 15 plans)"]
+    FanOut --> Dispatch["Each task: read target artifact<br/>+ identify diagram type per ADR-0004"]
+    Dispatch --> Author["Author conformant mermaid<br/>reflecting current implementation"]
+    Author --> GapCheck{Class C gaps<br/>discovered?}
+    GapCheck -->|Yes| Learning["Open learning doc at<br/>docs/learnings/2026-05-14-backfill-&lt;slug&gt;-gap.md"]
+    GapCheck -->|No| Validate["Validate: artifact now<br/>contains mermaid block"]
+    Learning --> Validate
+    Validate --> Gather["Gather all 33 touched artifacts"]
+    Gather --> CheckDiagrams["Verify all contain mermaid blocks"]
+    CheckDiagrams --> LearningDocs["Review all generated learning docs<br/>for Class C gaps"]
+    LearningDocs --> Complete["Operator reviews + completes plan<br/>ready for rule enforcement"]
+```
+
 ## Sequence of work
 
 ```yaml
