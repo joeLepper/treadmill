@@ -71,7 +71,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy import select, update
+from sqlalchemy import func, select, String, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from treadmill_api.events.registry import (
@@ -511,6 +511,9 @@ class CoordinationConsumer:
             # ── Conflict sweep (Week 3 B.3, pr_merged only) ──────────────
             if action == "pr_merged":
                 await self._sweep_after_pr_merged(session, typed)
+                # Task #124 — branch-name fallback for operator-completed PRs.
+                # Runs after the sweep so conflicts are resolved first.
+                await self._try_task_prs_fallback_on_pr_merged(session, typed)
 
             await session.commit()
 
@@ -589,6 +592,127 @@ class CoordinationConsumer:
                 "repo=%s (after pr=%s merged)",
                 emitted, typed.repo, typed.pr_number,
             )
+
+    async def _try_task_prs_fallback_on_pr_merged(
+        self,
+        session: AsyncSession,
+        typed: Any,
+    ) -> None:
+        """Try to populate task_prs via branch-name parsing when the normal
+        path didn't find a row.
+
+        Per task #124: if a pr_merged event has no task_prs row, parse the
+        head branch name as ``task/<8-char-task-id-prefix>-<slug>``. If the
+        prefix matches exactly one task, insert the task_prs row and drain
+        any pending events buffered against the (repo, pr_number) pair.
+
+        Only runs when a task_prs row doesn't already exist (operator-
+        completed PRs that were authored outside of the Treadmill workflow).
+        """
+        # Check if task_prs already exists for this (repo, pr_number).
+        result = await session.execute(
+            select(TaskPR.task_id).where(
+                func.lower(TaskPR.repo) == func.lower(typed.repo),
+                TaskPR.pr_number == typed.pr_number,
+            )
+        )
+        if result.scalar_one_or_none() is not None:
+            # Row already exists; nothing to do.
+            return
+
+        # No head_branch in the event payload — can't parse.
+        if not typed.head_branch:
+            logger.debug(
+                "task_prs fallback: no head_branch for repo=%s pr=%d; skipping",
+                typed.repo, typed.pr_number,
+            )
+            return
+
+        # Parse branch name: task/<prefix>-<slug>
+        parts = typed.head_branch.split("/", 1)
+        if len(parts) != 2 or parts[0] != "task":
+            logger.debug(
+                "task_prs fallback: head_branch=%s doesn't match "
+                "task/<prefix>-<slug>; skipping",
+                typed.head_branch,
+            )
+            return
+
+        prefix_and_slug = parts[1]
+        prefix_parts = prefix_and_slug.split("-", 1)
+        # ADR-0033 requires ``task/<prefix>-<slug>`` — both halves present
+        # and non-empty.
+        if len(prefix_parts) != 2 or not prefix_parts[1]:
+            logger.debug(
+                "task_prs fallback: branch=%s missing slug suffix; skipping",
+                typed.head_branch,
+            )
+            return
+
+        prefix = prefix_parts[0]
+        if len(prefix) != 8:
+            logger.debug(
+                "task_prs fallback: prefix=%s is not 8 chars; skipping",
+                prefix,
+            )
+            return
+
+        # Query for tasks whose ID starts with this prefix.
+        result = await session.execute(
+            select(Task.id, Task.repo)
+            .where(
+                func.left(func.cast(Task.id, String), 8) == prefix
+            )
+        )
+        matching_tasks = result.all()
+
+        if len(matching_tasks) != 1:
+            logger.debug(
+                "task_prs fallback: found %d task(s) matching prefix=%s "
+                "for repo=%s pr=%d; need exactly 1",
+                len(matching_tasks), prefix, typed.repo, typed.pr_number,
+            )
+            return
+
+        task_id, stored_repo = matching_tasks[0]
+
+        # Insert the task_prs row using the task's stored repo
+        # (never the payload's claimed repo).
+        stmt = (
+            pg_insert(TaskPR)
+            .values(
+                repo=stored_repo,
+                pr_number=typed.pr_number,
+                task_id=task_id,
+                branch=typed.head_branch,
+            )
+            .on_conflict_do_nothing(index_elements=["repo", "pr_number"])
+        )
+        await session.execute(stmt)
+        logger.info(
+            "task_prs fallback: inserted row for repo=%s pr=%d task_id=%s "
+            "via branch=%s",
+            stored_repo, typed.pr_number, task_id, typed.head_branch,
+        )
+
+        # D.8 — drain any pending webhook events buffered against this
+        # PR. Skips cleanly if redis_client / publisher not wired.
+        if self.redis_client is not None and self.publisher is not None:
+            try:
+                await drain_pending_events(
+                    self.redis_client,
+                    session,
+                    self.publisher,
+                    stored_repo,
+                    typed.pr_number,
+                    task_id,
+                )
+            except Exception:
+                logger.exception(
+                    "task_prs fallback: drain_pending_events failed for "
+                    "repo=%s pr_number=%d task_id=%s; row still committed",
+                    stored_repo, typed.pr_number, task_id,
+                )
 
     async def _handle_plan_doc_merged(self, typed: Any) -> None:
         """Run the ADR-0021 plan-merge trigger after a ``pr_merged`` event.

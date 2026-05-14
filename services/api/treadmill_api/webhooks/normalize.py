@@ -105,6 +105,7 @@ def _normalize_pull_request(body: dict[str, Any]) -> NormalizationResult | None:
                 "pr_number": int(pr.get("number") or 0),
                 "sender": sender,
                 "merged_sha": pr.get("merge_commit_sha"),
+                "head_branch": head.get("ref"),
             },
             repo=repo_full,
             pr_number=int(pr.get("number") or 0),

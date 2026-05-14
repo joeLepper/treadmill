@@ -52,6 +52,8 @@ class GithubPrMerged(EventPayload):
     pr_number: int
     sender: str
     merged_sha: str | None = None
+    head_branch: str | None = None
+    """The PR's head branch name, used for task_id fallback parsing."""
 
 
 class GithubPrReviewSubmitted(EventPayload):

@@ -177,8 +177,11 @@ async def test_handle_github_pr_merged_skips_sweep_when_github_client_unwired() 
             "merged_sha": "deadbeef" * 5,
         },
     })
-    # One execute call for the audit-row INSERT; commit fires once.
-    assert session.execute.await_count == 1
+    # Two execute calls: the audit-row INSERT + the task_prs fallback's
+    # initial SELECT (task #124). The fallback's SELECT returns a truthy
+    # MagicMock by default, so the fallback returns early — no INSERT.
+    # commit fires once.
+    assert session.execute.await_count == 2
     session.commit.assert_awaited()
 
 
@@ -384,6 +387,218 @@ async def test_handle_github_unknown_action_is_dropped_before_db() -> None:
     })
     session.execute.assert_not_awaited()
     session.commit.assert_not_awaited()
+
+
+# ── task_prs fallback on pr_merged (task #124) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_task_prs_fallback_parses_branch_and_inserts_row() -> None:
+    """Per task #124, when a pr_merged event has no task_prs row, the
+    consumer parses the head_branch as ``task/<8-char-prefix>-<slug>``.
+    If the prefix matches exactly one task, insert the task_prs row."""
+    from unittest.mock import AsyncMock, MagicMock
+    from sqlalchemy import select
+    from treadmill_api.models import Task, TaskPR
+
+    session = AsyncMock()
+    consumer = _consumer(session)
+
+    # Mock the first query: no existing task_prs row
+    exec_result_no_prs = MagicMock()
+    exec_result_no_prs.scalar_one_or_none.return_value = None
+
+    # Mock the second query: one matching task
+    task_id = uuid.uuid4()
+    exec_result_matching = MagicMock()
+    exec_result_matching.all.return_value = [(task_id, "x/y")]
+
+    # Mock the third query: the INSERT (no return value used).
+    exec_result_insert = MagicMock()
+
+    # Return results in order: task_prs SELECT, task SELECT, task_prs INSERT
+    session.execute = AsyncMock(
+        side_effect=[exec_result_no_prs, exec_result_matching, exec_result_insert]
+    )
+
+    await consumer._try_task_prs_fallback_on_pr_merged(
+        session,
+        MagicMock(
+            repo="x/y",
+            pr_number=42,
+            head_branch="task/12345678-add-feature",
+        ),
+    )
+
+    # Three execute calls: task_prs SELECT + task SELECT + task_prs INSERT
+    assert session.execute.await_count == 3
+    # Verify the branch-name parsing worked by checking the second call args
+    second_call_stmt = session.execute.await_args_list[1][0][0]
+    assert str(second_call_stmt).count("left") > 0
+
+
+@pytest.mark.asyncio
+async def test_task_prs_fallback_skips_when_row_exists() -> None:
+    """When task_prs already has a row for (repo, pr_number), the fallback
+    skips without parsing the branch."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = AsyncMock()
+    consumer = _consumer(session)
+
+    # Mock the first query: existing task_prs row
+    exec_result = MagicMock()
+    existing_task_id = uuid.uuid4()
+    exec_result.scalar_one_or_none.return_value = existing_task_id
+
+    session.execute = AsyncMock(return_value=exec_result)
+
+    await consumer._try_task_prs_fallback_on_pr_merged(
+        session,
+        MagicMock(
+            repo="x/y",
+            pr_number=42,
+            head_branch="task/12345678-add-feature",
+        ),
+    )
+
+    # Only one execute call (the task_prs check); fallback returns early
+    assert session.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_task_prs_fallback_skips_without_head_branch() -> None:
+    """When the event has no head_branch, the fallback cannot parse and
+    skips cleanly."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = AsyncMock()
+    consumer = _consumer(session)
+
+    # Mock: no existing task_prs row
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=exec_result)
+
+    await consumer._try_task_prs_fallback_on_pr_merged(
+        session,
+        MagicMock(
+            repo="x/y",
+            pr_number=42,
+            head_branch=None,
+        ),
+    )
+
+    # One execute call (task_prs check); fallback returns before branch parse
+    assert session.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_task_prs_fallback_skips_malformed_branch_name() -> None:
+    """Branch names that don't match ``task/<8-char>-<slug>`` are skipped."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = AsyncMock()
+    consumer = _consumer(session)
+
+    # Mock: no existing task_prs row
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=exec_result)
+
+    # Try various malformed branch names
+    malformed_names = [
+        "feature/my-change",  # Not task/*
+        "task/short-name",    # Prefix < 8 chars
+        "task/toolong12345-slug",  # Prefix > 8 chars
+        "task/12345678",      # No slug after prefix
+    ]
+
+    for branch in malformed_names:
+        session.execute.reset_mock()
+        await consumer._try_task_prs_fallback_on_pr_merged(
+            session,
+            MagicMock(
+                repo="x/y",
+                pr_number=42,
+                head_branch=branch,
+            ),
+        )
+        # Only the task_prs check; fallback rejects the branch name
+        assert session.execute.await_count == 1, f"Failed for branch: {branch}"
+
+
+@pytest.mark.asyncio
+async def test_task_prs_fallback_skips_multiple_matching_tasks() -> None:
+    """When the prefix matches multiple tasks, the fallback rejects (ambiguous)
+    and skips without inserting."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = AsyncMock()
+    consumer = _consumer(session)
+
+    # Mock: no existing task_prs row
+    exec_result_no_prs = MagicMock()
+    exec_result_no_prs.scalar_one_or_none.return_value = None
+
+    # Mock: two matching tasks (ambiguous)
+    task_id1 = uuid.uuid4()
+    task_id2 = uuid.uuid4()
+    exec_result_matching = MagicMock()
+    exec_result_matching.all.return_value = [
+        (task_id1, "x/y"),
+        (task_id2, "x/y"),
+    ]
+
+    session.execute = AsyncMock(
+        side_effect=[exec_result_no_prs, exec_result_matching]
+    )
+
+    await consumer._try_task_prs_fallback_on_pr_merged(
+        session,
+        MagicMock(
+            repo="x/y",
+            pr_number=42,
+            head_branch="task/12345678-add-feature",
+        ),
+    )
+
+    # Two execute calls (task_prs check, then task search) but no INSERT
+    # because multiple matches; verify by checking execute count
+    assert session.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_task_prs_fallback_skips_zero_matching_tasks() -> None:
+    """When the prefix matches no tasks, the fallback skips without inserting."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = AsyncMock()
+    consumer = _consumer(session)
+
+    # Mock: no existing task_prs row
+    exec_result_no_prs = MagicMock()
+    exec_result_no_prs.scalar_one_or_none.return_value = None
+
+    # Mock: no matching tasks
+    exec_result_matching = MagicMock()
+    exec_result_matching.all.return_value = []
+
+    session.execute = AsyncMock(
+        side_effect=[exec_result_no_prs, exec_result_matching]
+    )
+
+    await consumer._try_task_prs_fallback_on_pr_merged(
+        session,
+        MagicMock(
+            repo="x/y",
+            pr_number=42,
+            head_branch="task/ffffffff-add-feature",
+        ),
+    )
+
+    # Two execute calls but no INSERT
+    assert session.execute.await_count == 2
 
 
 # ── Poll-loop resilience + health status (A.11) ───────────────────────────────
