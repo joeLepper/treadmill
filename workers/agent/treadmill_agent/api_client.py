@@ -8,7 +8,7 @@ no synchronous HTTP write path from worker to API.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -116,10 +116,13 @@ class WorkerContext:
     ``review``-kind steps; the dispatch handler raises
     ``MissingContextError`` when absent."""
     prior_steps: list[PriorStep]
-    task_validations: list[TaskValidationInfo]
+    task_validations: list[TaskValidationInfo] = field(default_factory=list)
     """Task-specific validation checks from the plan-doc task spec.
     Per the 2026-05-14 learning, the code disposition runs deterministic
-    checks before pushing to gate on author-side self-validation."""
+    checks before pushing to gate on author-side self-validation. Defaults
+    to empty so callers that don't have validation info (e.g. unit tests
+    constructing WorkerContext directly, or the dry-run path) don't need
+    to thread an empty list everywhere."""
 
 
 class ApiClient:

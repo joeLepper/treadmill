@@ -460,15 +460,21 @@ def test_open_pr_github_mode_shells_to_gh_and_returns_url(
     assert pr_number == 42
 
     gh_calls = _read_stub_log(github_mode_stubs["gh_log"])
-    assert len(gh_calls) == 1
-    argv = gh_calls[0]["argv"]
-    assert argv[:3] == ["pr", "create", "--title"]
+    # Two calls per task #120's idempotency: ``gh pr list`` to check for an
+    # existing PR for this branch (returns empty in this test's stub), then
+    # ``gh pr create`` to open a new one.
+    assert len(gh_calls) == 2
+    list_argv = gh_calls[0]["argv"]
+    assert list_argv[:3] == ["pr", "list", "--head"]
+    create_argv = gh_calls[1]["argv"]
+    assert create_argv[:3] == ["pr", "create", "--title"]
     # Our worker code does not set GH_TOKEN — even though the test process
     # has GITHUB_PAT set, the recorded gh env must NOT carry it as GH_TOKEN
     # (which is what ``gh`` would use for auth). The keyring is the only
     # channel.
-    assert "GH_TOKEN" not in gh_calls[0]["env"]
-    assert "GITHUB_TOKEN" not in gh_calls[0]["env"]
+    for call in gh_calls:
+        assert "GH_TOKEN" not in call["env"]
+        assert "GITHUB_TOKEN" not in call["env"]
     _assert_no_pat_leak(gh_calls)
 
 
