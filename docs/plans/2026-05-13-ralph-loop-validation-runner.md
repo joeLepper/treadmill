@@ -165,8 +165,6 @@ sequence_of_work:
   - id: role-validator-reclassify
     title: role-validator becomes a structural artifact, not a Claude role
     workflow: wf-author
-    depends_on:
-      - task.validation-disposition-handler.pr_merged
     intent: |
       Update
       ``services/api/treadmill_api/starters.py``'s ``role-validator``
