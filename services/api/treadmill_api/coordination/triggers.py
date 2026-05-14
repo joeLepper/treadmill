@@ -73,9 +73,10 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
@@ -797,3 +798,331 @@ async def _create_and_publish_run(
         workflow_id, task.id, run.id, trigger,
     )
     return run.id
+
+
+# ── Auto-merge cooling-off trigger (ADR-0031) ─────────────────────────────────
+
+AUTO_MERGE_DEADLINE_KEY_PREFIX = "treadmill:auto-merge-deadline:"
+AUTO_MERGE_FIRED_KEY_PREFIX = "treadmill:auto-merge-fired:"
+AUTO_MERGE_COOLDOWN_SECONDS = 30
+
+_AUTO_MERGE_KEY_TTL_SECONDS = AUTO_MERGE_COOLDOWN_SECONDS + 60
+_AUTO_MERGE_FIRED_TTL_SECONDS = 86400  # 24h
+
+# Only these workflow completions drive the cooling-off window.
+_AUTO_MERGE_TRIGGER_WORKFLOWS: frozenset[str] = frozenset(
+    {"wf-validate", "wf-review"}
+)
+
+
+async def maybe_auto_merge_on_mergeable(
+    session: AsyncSession,
+    redis_client: Any,
+    *,
+    step_id: str,
+) -> bool:
+    """Set/push the 30-second cooling-off deadline when wf-validate or
+    wf-review completes and the task's mergeability VIEW reads ``mergeable``.
+
+    Per ADR-0031, the auto-merge trigger fires on the
+    ``mergeability.changed.mergeable`` projection — implemented here as a
+    check of the VIEW after each wf-validate / wf-review step completion.
+    The 30-second window absorbs event races between the two workflows.
+
+    Skip conditions (any one short-circuits):
+      * Not a wf-validate or wf-review step.
+      * ``redis_client`` not wired (auto-merge poll loop inoperable).
+      * ``plan.auto_merge IS FALSE`` — plan has opted out (ADR-0031 Q31.c).
+      * ``derived_mergeability != 'mergeable'`` — task is not ready.
+      * ``validate_decision != 'pass'`` — ADR-0031 Q31.b: ``uncertain``
+        does NOT auto-merge; routes to wf-feedback for rework instead.
+      * ``review_decision != 'approved'`` — pending human review.
+      * ``treadmill:auto-merge-fired:<task_id>`` key exists in Redis —
+        merge already dispatched for this task.
+
+    On pass: writes (or overwrites) ``treadmill:auto-merge-deadline:<task_id>``
+    as a JSON blob with ``deadline_at = now + 30s``. Subsequent calls while
+    the task remains mergeable push the deadline forward, absorbing the
+    wf-validate / wf-review completion race. The consumer's 5-second poll
+    loop (``fire_elapsed_auto_merges``) consumes this key.
+
+    Returns ``True`` if the deadline was set/pushed, ``False`` otherwise.
+    """
+    if redis_client is None:
+        return False
+
+    # Resolve workflow_id + task_id from the completing step.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.task_id,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "auto-merge: no run/task for step %s; skipping", step_id,
+        )
+        return False
+
+    if row.workflow_id not in _AUTO_MERGE_TRIGGER_WORKFLOWS:
+        return False
+
+    task_id = row.task_id
+
+    # Skip if auto-merge was already dispatched for this task.
+    fired_key = AUTO_MERGE_FIRED_KEY_PREFIX + str(task_id)
+    if await redis_client.exists(fired_key):
+        logger.debug(
+            "auto-merge: already fired for task %s; skipping", task_id,
+        )
+        return False
+
+    # Query mergeability VIEW + plan.auto_merge in one pass.
+    merge_result = await session.execute(
+        text("""
+            SELECT
+                tm.derived_mergeability,
+                tm.validate_decision,
+                tm.review_decision,
+                tm.repo,
+                tm.pr_number,
+                p.auto_merge
+            FROM task_mergeability tm
+            JOIN tasks t ON t.id = tm.task_id
+            JOIN plans p ON p.id = t.plan_id
+            WHERE tm.task_id = CAST(:task_id AS uuid)
+        """),
+        {"task_id": str(task_id)},
+    )
+    merge_row = merge_result.first()
+    if merge_row is None:
+        logger.debug(
+            "auto-merge: no mergeability row for task %s; skipping", task_id,
+        )
+        return False
+
+    # plan.auto_merge=false → plan has opted out.
+    if merge_row.auto_merge is False:
+        logger.debug(
+            "auto-merge: plan.auto_merge=false for task %s; skipping", task_id,
+        )
+        return False
+
+    # Not currently mergeable.
+    if merge_row.derived_mergeability != "mergeable":
+        logger.debug(
+            "auto-merge: task %s mergeability=%r; skipping",
+            task_id, merge_row.derived_mergeability,
+        )
+        return False
+
+    # ADR-0031 Q31.b: only 'pass' auto-merges; 'uncertain' routes to wf-feedback.
+    if merge_row.validate_decision != "pass":
+        logger.debug(
+            "auto-merge: validate_decision=%r for task %s; skipping",
+            merge_row.validate_decision, task_id,
+        )
+        return False
+
+    # Pending human review (review_decision must be 'approved').
+    if merge_row.review_decision != "approved":
+        logger.debug(
+            "auto-merge: review_decision=%r for task %s; skipping",
+            merge_row.review_decision, task_id,
+        )
+        return False
+
+    # All checks pass — set/push the 30-second cooling-off deadline.
+    deadline_at = datetime.now(timezone.utc) + timedelta(
+        seconds=AUTO_MERGE_COOLDOWN_SECONDS
+    )
+    deadline_key = AUTO_MERGE_DEADLINE_KEY_PREFIX + str(task_id)
+    value = json.dumps({
+        "task_id": str(task_id),
+        "repo": merge_row.repo,
+        "pr_number": merge_row.pr_number,
+        "deadline_at": deadline_at.isoformat(),
+    })
+    await redis_client.set(
+        deadline_key,
+        value,
+        ex=_AUTO_MERGE_KEY_TTL_SECONDS,
+    )
+    logger.info(
+        "auto-merge: deadline set for task %s (repo=%s pr=%d deadline=%s)",
+        task_id, merge_row.repo, merge_row.pr_number, deadline_at.isoformat(),
+    )
+    return True
+
+
+async def fire_elapsed_auto_merges(
+    redis_client: Any,
+    sessionmaker: Any,
+    github_client: Any,
+) -> int:
+    """Scan Redis for elapsed auto-merge deadlines and fire the GitHub merge.
+
+    Called every 5 seconds by the consumer's auto-merge poll loop. For each
+    ``treadmill:auto-merge-deadline:<task_id>`` key whose ``deadline_at`` is
+    in the past:
+
+      1. Re-verifies mergeability via the VIEW (a new push may have
+         invalidated the prior thumbs since the deadline was set).
+      2. Issues ``PUT /repos/{repo}/pulls/{pr_number}/merge`` with
+         ``merge_method=squash`` via the GitHub API client.
+      3. Marks the task as fired (``treadmill:auto-merge-fired:<task_id>``
+         with a 24h TTL) and deletes the deadline key.
+
+    Merge failures are logged and retried on the next 5s tick (the deadline
+    key remains until a successful fire or the TTL expires).
+
+    Returns the count of merges fired this tick.
+    """
+    if redis_client is None or github_client is None:
+        return 0
+
+    fired = 0
+    cursor = 0
+    now = datetime.now(timezone.utc)
+
+    while True:
+        cursor, keys = await redis_client.scan(
+            cursor, match=AUTO_MERGE_DEADLINE_KEY_PREFIX + "*", count=100,
+        )
+        for raw_key in keys:
+            did_fire = await _process_deadline_key(
+                redis_client=redis_client,
+                sessionmaker=sessionmaker,
+                github_client=github_client,
+                raw_key=raw_key,
+                now=now,
+            )
+            if did_fire:
+                fired += 1
+
+        if cursor == 0:
+            break
+
+    return fired
+
+
+async def _process_deadline_key(
+    redis_client: Any,
+    sessionmaker: Any,
+    github_client: Any,
+    raw_key: Any,
+    now: datetime,
+) -> bool:
+    """Process one deadline key from the auto-merge Redis scan.
+
+    Returns ``True`` if a merge was fired, ``False`` otherwise.
+    All exceptions are swallowed so the caller's scan loop continues.
+    """
+    key_str = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+    raw_val = await redis_client.get(raw_key)
+    if raw_val is None:
+        return False
+
+    try:
+        data = json.loads(raw_val)
+    except (ValueError, TypeError):
+        logger.warning("auto-merge poll: malformed key %s; deleting", key_str)
+        await redis_client.delete(raw_key)
+        return False
+
+    task_id_str = data.get("task_id")
+    repo = data.get("repo")
+    pr_number = data.get("pr_number")
+    deadline_str = data.get("deadline_at")
+
+    if not task_id_str or not repo or pr_number is None or not deadline_str:
+        await redis_client.delete(raw_key)
+        return False
+
+    try:
+        task_id = uuid.UUID(task_id_str)
+        deadline_at = datetime.fromisoformat(deadline_str)
+    except (ValueError, AttributeError):
+        await redis_client.delete(raw_key)
+        return False
+
+    if deadline_at > now:
+        return False  # Still in the cooling-off window.
+
+    # Re-verify mergeability before firing — a new push may have invalidated.
+    try:
+        async with sessionmaker() as session:
+            still_ok = await _check_still_mergeable_for_auto_merge(
+                session, task_id,
+            )
+    except Exception:
+        logger.exception(
+            "auto-merge poll: mergeability re-check failed for task %s; "
+            "skipping this tick",
+            task_id,
+        )
+        return False
+
+    if not still_ok:
+        logger.info(
+            "auto-merge poll: task %s no longer mergeable; clearing deadline",
+            task_id,
+        )
+        await redis_client.delete(raw_key)
+        return False
+
+    # Fire the merge via the GitHub REST API.
+    try:
+        response = await github_client.put(
+            f"/repos/{repo}/pulls/{pr_number}/merge",
+            json={"merge_method": "squash"},
+        )
+        response.raise_for_status()
+    except Exception:
+        logger.exception(
+            "auto-merge poll: GitHub merge failed for task %s "
+            "(repo=%s pr=%s); will retry on next tick",
+            task_id, repo, pr_number,
+        )
+        return False
+
+    # Mark as fired + remove the deadline key.
+    fired_key = AUTO_MERGE_FIRED_KEY_PREFIX + str(task_id)
+    await redis_client.set(fired_key, b"1", ex=_AUTO_MERGE_FIRED_TTL_SECONDS)
+    await redis_client.delete(raw_key)
+    logger.info(
+        "auto-merge poll: merged task %s (repo=%s pr=%d)",
+        task_id, repo, pr_number,
+    )
+    return True
+
+
+async def _check_still_mergeable_for_auto_merge(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+) -> bool:
+    """Re-verify mergeability + plan opt-out before the poll loop fires a merge.
+
+    Returns ``True`` only when the VIEW still reads ``mergeable`` and the
+    plan hasn't opted out.
+    """
+    result = await session.execute(
+        text("""
+            SELECT tm.derived_mergeability, p.auto_merge
+            FROM task_mergeability tm
+            JOIN tasks t ON t.id = tm.task_id
+            JOIN plans p ON p.id = t.plan_id
+            WHERE tm.task_id = CAST(:task_id AS uuid)
+        """),
+        {"task_id": str(task_id)},
+    )
+    row = result.first()
+    if row is None:
+        return False
+    if row.auto_merge is False:
+        return False
+    return row.derived_mergeability == "mergeable"

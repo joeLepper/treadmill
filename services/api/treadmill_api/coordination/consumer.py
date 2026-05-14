@@ -166,25 +166,31 @@ class CoordinationConsumer:
         self.settings = settings
         self._stopped = False
         self._task: asyncio.Task[None] | None = None
+        self._auto_merge_task: asyncio.Task[None] | None = None
         self._health_status: HealthStatus = "starting"
 
     async def start(self) -> None:
         self._stopped = False
         self._health_status = "starting"
         self._task = asyncio.create_task(self._run(), name="coordination-consumer")
+        self._auto_merge_task = asyncio.create_task(
+            self._auto_merge_loop(), name="auto-merge-poll",
+        )
         logger.info("coordination consumer started: queue=%s", self.queue_url)
 
     async def stop(self) -> None:
         self._stopped = True
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("coordination consumer raised on shutdown")
-            self._task = None
+        for task in (self._task, self._auto_merge_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("coordination consumer raised on shutdown")
+        self._task = None
+        self._auto_merge_task = None
         logger.info("coordination consumer stopped")
 
     async def _run(self) -> None:
@@ -385,6 +391,12 @@ class CoordinationConsumer:
             # or 'error', dispatch wf-feedback directly (convergence trigger).
             if action == "completed":
                 await self._maybe_fire_validate_feedback(session, step_id, typed)
+            # ADR-0031: when a wf-validate or wf-review step completes,
+            # set/push the auto-merge cooling-off deadline in Redis. The
+            # 5s poll loop (``_auto_merge_loop``) fires the merge when
+            # the 30s window elapses without a reset.
+            if action == "completed":
+                await self._maybe_fire_auto_merge(session, step_id)
             # B.2 — cross-step dispatch. When a step terminates and the
             # workflow has a next pending step, materialize its
             # ``step.ready`` Event row + SQS claim. Per ADR-0015 §"No
@@ -1127,6 +1139,76 @@ class CoordinationConsumer:
                 "prior projection committed, will retry on redelivery",
                 step_id,
             )
+
+    # ── Auto-merge cooling-off trigger (ADR-0031) ─────────────────────────────
+
+    async def _maybe_fire_auto_merge(
+        self,
+        session: AsyncSession,
+        step_id: str,
+    ) -> None:
+        """Set/push the auto-merge cooling-off deadline after step.completed.
+
+        Delegates to ``maybe_auto_merge_on_mergeable`` which resolves the
+        completing step's workflow, checks the mergeability VIEW, and writes
+        (or refreshes) the Redis deadline key when all conditions pass.
+
+        Skips cleanly when ``redis_client`` is not wired. Failures are logged
+        but do not propagate — the prior step's projection has already
+        committed; rolling that back on a deadline-write failure would lose
+        progress. The next event delivery re-tries naturally.
+        """
+        if self.redis_client is None:
+            return
+        from treadmill_api.coordination.triggers import maybe_auto_merge_on_mergeable
+        try:
+            await maybe_auto_merge_on_mergeable(
+                session,
+                self.redis_client,
+                step_id=step_id,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_auto_merge: deadline update failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    async def _auto_merge_loop(self) -> None:
+        """5-second tick: detect elapsed auto-merge deadlines and fire merges.
+
+        Scans ``treadmill:auto-merge-deadline:*`` keys in Redis. For each key
+        whose ``deadline_at`` has elapsed, re-verifies mergeability and issues
+        ``PUT /repos/{repo}/pulls/{pr_number}/merge`` with ``merge_method=squash``.
+
+        Short-circuits cleanly when ``redis_client`` or ``github_client`` is
+        not wired. All non-cancellation exceptions are swallowed so the loop
+        stays alive on transient GitHub API or Redis errors.
+        """
+        while not self._stopped:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                raise
+            if self.redis_client is None or self.github_client is None:
+                continue
+            try:
+                from treadmill_api.coordination.triggers import (
+                    fire_elapsed_auto_merges,
+                )
+                fired = await fire_elapsed_auto_merges(
+                    redis_client=self.redis_client,
+                    sessionmaker=self.sessionmaker,
+                    github_client=self.github_client,
+                )
+                if fired:
+                    logger.info(
+                        "auto-merge poll: fired %d merge(s) this tick", fired,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("auto-merge poll loop raised; continuing")
 
     # ── Cross-step dispatch (B.2) ─────────────────────────────────────────────
 

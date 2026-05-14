@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,6 +45,14 @@ class Plan(Base):
         nullable=True,
     )
     """Reserved for future hierarchy; unused at v1 per ADR-0010."""
+
+    auto_merge: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        default=None,
+    )
+    """Per ADR-0031 Q31.c: NULL/True = auto-merge enabled (default);
+    False = plan has opted out via front-matter ``auto_merge: false``."""
 
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
