@@ -28,6 +28,7 @@ from treadmill_agent.runner_dispositions import (
     handle_code,
     handle_plan_doc,
     handle_review,
+    handle_validation,
 )
 from treadmill_agent.runner_dispositions._context import DispositionContext
 from treadmill_agent.runner_dispositions.plan_doc import PlanDocScopeError
@@ -709,13 +710,223 @@ def test_plan_doc_handler_rejects_diff_outside_docs_plans(tmp_path: Path) -> Non
         handle_plan_doc(ctx)
 
 
+# ── validation handler ──────────────────────────────────────────────────────
+
+
+def test_validation_handler_aggregates_worst_wins_with_blocking_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation handler aggregates with worst-wins, but ONLY blocking
+    severity checks count toward the decision. Advisory failures do not
+    flip the aggregate to fail."""
+    # Stub subprocess calls for gh pr diff
+    def _fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "--name-only" in cmd:
+            result.stdout = "src/main.py\ntest_main.py\n"
+        elif "rev-parse" in cmd and "HEAD" in cmd:
+            result.stdout = "abc123def456\n"
+        else:
+            result.stdout = "diff content"
+        result.returncode = 0
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    # Stub gh.pr_comment to verify it gets called
+    called_with = {}
+
+    def _fake_comment(pr_number, **kwargs):
+        called_with["pr"] = pr_number
+        called_with["body"] = kwargs.get("body")
+
+    monkeypatch.setattr(gh, "pr_comment", _fake_comment)
+
+    # Stub validation_runtime to return deterministic results
+    def _fake_deterministic(check, repo_dir, timeout_seconds):
+        from treadmill_agent import validation_runtime
+
+        # blocking:pass, warning:fail, advisory:fail
+        verdicts = {
+            "blocking-check": "pass",
+            "warning-check": "fail",
+            "advisory-check": "fail",
+        }
+        return validation_runtime.CheckResult(
+            check_id=check.id,
+            kind="deterministic",
+            severity=check.severity,
+            verdict=verdicts.get(check.id, "pass"),
+            rationale=f"{check.id} rationale",
+            log_excerpt="",
+        )
+
+    monkeypatch.setattr(
+        "treadmill_agent.validation_runtime.run_deterministic", _fake_deterministic
+    )
+
+    # Create synthetic checks
+    class FakeCheck:
+        def __init__(self, check_id, severity):
+            self.id = check_id
+            self.severity = severity
+            self.kind = "deterministic"
+            self.description = ""
+
+    checks = [
+        FakeCheck("blocking-check", "blocking"),
+        FakeCheck("warning-check", "warning"),
+        FakeCheck("advisory-check", "advisory"),
+    ]
+
+    # Stub _load_checks to return our synthetic checks
+    def _fake_load_checks(ctx):
+        return checks
+
+    import treadmill_agent.runner_dispositions.validation as val_module
+
+    monkeypatch.setattr(val_module, "_load_checks", _fake_load_checks)
+
+    # Call the handler
+    ctx = _disp_ctx(
+        repo_dir=tmp_path, pr_number=42, workflow_id="wf-validate"
+    )
+    out = handle_validation(ctx)
+
+    # Decision should be 'pass' because the only blocking check passed.
+    # The warning and advisory failures don't flip the aggregate.
+    assert out.decision == "pass"
+    assert out.commit_sha == "abc123def456"
+    assert len(out.payload["checks"]) == 3
+    assert called_with["pr"] == 42
+    assert "Validation Results" in called_with["body"]
+
+
+def test_validation_handler_fails_on_blocking_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a blocking severity check fails, the aggregate flips to fail."""
+
+    def _fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "rev-parse" in cmd and "HEAD" in cmd:
+            result.stdout = "abc123def456\n"
+        else:
+            result.stdout = "src/main.py\n"
+        result.returncode = 0
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(gh, "pr_comment", lambda *a, **kw: None)
+
+    from treadmill_agent import validation_runtime
+
+    def _fake_deterministic(check, repo_dir, timeout_seconds):
+        return validation_runtime.CheckResult(
+            check_id=check.id,
+            kind="deterministic",
+            severity=check.severity,
+            verdict="fail",
+            rationale="failed",
+            log_excerpt="",
+        )
+
+    monkeypatch.setattr(
+        "treadmill_agent.validation_runtime.run_deterministic", _fake_deterministic
+    )
+
+    class FakeCheck:
+        def __init__(self, check_id, severity):
+            self.id = check_id
+            self.severity = severity
+            self.kind = "deterministic"
+            self.description = ""
+
+    checks = [FakeCheck("block1", "blocking")]
+
+    import treadmill_agent.runner_dispositions.validation as val_module
+
+    monkeypatch.setattr(val_module, "_load_checks", lambda ctx: checks)
+
+    ctx = _disp_ctx(repo_dir=tmp_path, pr_number=42, workflow_id="wf-validate")
+    out = handle_validation(ctx)
+    assert out.decision == "fail"
+
+
+def test_validation_handler_raises_without_pr_number(tmp_path: Path) -> None:
+    """The validation handler requires pr_number; absent context raises."""
+    ctx = _disp_ctx(repo_dir=tmp_path, pr_number=None, workflow_id="wf-validate")
+    with pytest.raises(ValueError, match="pr_number"):
+        handle_validation(ctx)
+
+
+def test_validation_handler_dry_run_skips_gh_pr_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In dry-run, the handler skips posting the comment but still returns
+    the full envelope."""
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("gh.pr_comment should not be called in dry-run")
+
+    monkeypatch.setattr(gh, "pr_comment", _fail)
+
+    def _fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "rev-parse" in cmd and "HEAD" in cmd:
+            result.stdout = "abc123def456\n"
+        else:
+            result.stdout = "src/main.py\n"
+        result.returncode = 0
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    from treadmill_agent import validation_runtime
+
+    def _fake_deterministic(check, repo_dir, timeout_seconds):
+        return validation_runtime.CheckResult(
+            check_id=check.id,
+            kind="deterministic",
+            severity="warning",
+            verdict="pass",
+            rationale="ok",
+            log_excerpt="",
+        )
+
+    monkeypatch.setattr(
+        "treadmill_agent.validation_runtime.run_deterministic", _fake_deterministic
+    )
+
+    class FakeCheck:
+        def __init__(self, check_id):
+            self.id = check_id
+            self.severity = "warning"
+            self.kind = "deterministic"
+            self.description = ""
+
+    checks = [FakeCheck("check1")]
+
+    import treadmill_agent.runner_dispositions.validation as val_module
+
+    monkeypatch.setattr(val_module, "_load_checks", lambda ctx: checks)
+
+    ctx = _disp_ctx(
+        repo_dir=tmp_path, pr_number=42, workflow_id="wf-validate", is_dry_run=True
+    )
+    out = handle_validation(ctx)
+    assert out.decision == "pass"
+    assert out.summary is not None
+
+
 # ── runner-level dispatch ────────────────────────────────────────────────────
 
 
 def test_runner_dispatch_table_covers_all_four_v0_kinds() -> None:
     """The dispatch table has exactly the four ADR-0022 v0 kinds.
-    A future kind (e.g. when the Ralph-loop validation ADR lands) is
-    an intentional addition; this test is the tripwire."""
+    Per ADR-0029, validation dispatches by workflow_id (not in the
+    output_kind table), so it's not counted here.
+    This test is the tripwire for new kinds."""
     from treadmill_agent.runner import DISPOSITIONS
 
     assert set(DISPOSITIONS) == {"code", "review", "analysis", "plan_doc"}

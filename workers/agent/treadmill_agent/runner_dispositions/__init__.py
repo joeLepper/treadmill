@@ -34,10 +34,12 @@ from treadmill_agent.runner_dispositions.analysis import handle as handle_analys
 from treadmill_agent.runner_dispositions.code import handle as handle_code
 from treadmill_agent.runner_dispositions.plan_doc import handle as handle_plan_doc
 from treadmill_agent.runner_dispositions.review import handle as handle_review
+from treadmill_agent.runner_dispositions.validation import handle as handle_validation
 
 __all__ = [
     "handle_analysis",
     "handle_code",
     "handle_plan_doc",
     "handle_review",
+    "handle_validation",
 ]

@@ -42,6 +42,7 @@ from treadmill_agent.runner_dispositions import (
     handle_code,
     handle_plan_doc,
     handle_review,
+    handle_validation,
 )
 from treadmill_agent.runner_dispositions._context import DispositionContext
 
@@ -295,11 +296,41 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
                        downstream step (ADR-0015 composition)
       * ``plan_doc`` — like code, diff confined to ``docs/plans/``
 
+    Per ADR-0029 — when workflow_id == 'wf-validate', the runner skips
+    the Claude Code prefix entirely and dispatches directly to the
+    validation handler.
+
     The runner's exception layer wraps the entire call so any handler
     raise (e.g. ``CodeAuthorError`` for empty-diff code-kind,
     ``MissingContextError`` for review-kind against a no-PR task)
     becomes a clean ``step.failed`` event.
     """
+    # Per ADR-0029: for wf-validate, skip Claude Code and dispatch directly
+    if ctx.workflow_id == "wf-validate":
+        branch = _branch_for_step(ctx)
+        with workspace.workspace_for_step(settings.workspace_dir, ctx.step_id) as ws:
+            repo_dir = git.clone(
+                repo=ctx.repo,
+                mode=settings.repo_mode,
+                bare_repos_dir=settings.bare_repos_dir,
+                workspace=ws,
+            )
+            git.checkout_branch(repo_dir, branch)
+
+            from treadmill_agent.claude_code import CodeAuthorResult  # local import
+
+            dry_run = _is_dry_run()
+            disposition_ctx = DispositionContext(
+                ctx=ctx,
+                claude_result=CodeAuthorResult(summary=""),
+                repo_dir=repo_dir,
+                branch=branch,
+                settings=settings,
+                is_dry_run=dry_run,
+            )
+            return handle_validation(disposition_ctx)
+
+    # Standard path for non-wf-validate workflows
     branch = _branch_for_step(ctx)
     with workspace.workspace_for_step(settings.workspace_dir, ctx.step_id) as ws:
         repo_dir = git.clone(
