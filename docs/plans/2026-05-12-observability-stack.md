@@ -1,6 +1,6 @@
 ---
 status: active
-trigger: ADR-0020 phase 2 implemented + RAMJAC-precedent reframe 2026-05-12; operator approval 2026-05-12; PR #7 merged but plan-doc trigger race-lost on workflow seed (DB was fresh; seed-starters ran after the trigger) — re-merged via PR #8. Re-merged 2026-05-12 as the end-to-end smoke for loop hardening (ADR-0025 heartbeat + ADR-0026 dispatch dedup, commits 213b23c + 4357bd5). Re-merging 2026-05-13 as the Phase 4 smoke for #108 path 1 (gh pr comment, commit 65022aa), ADR-0028 (DB-authoritative configs, e942251-b87d340), and ADR-0027 (JSON envelope, fa0f82c).
+trigger: ADR-0020 phase 2 implemented + RAMJAC-precedent reframe 2026-05-12; multiple re-fires landed only as smoke triggers for other ADRs (none of the 5 actual o11y tasks ever merged). 2026-05-14 — added a script field to each validation entry per migration 0011's CHECK constraint. **Awaiting dispatch — held until ADR-0031 hands-free driving lands per operator guidance "don't submit further plans until we get hands-free."** See memory/feedback_dont_compound_during_migration.md.
 parent: docs/plans/2026-05-13-week-4-dev-local-deployment.md
 ---
 
@@ -163,6 +163,11 @@ sequence_of_work:
           Both ``treadmill_api.observability`` and
           ``treadmill_agent.observability`` import cleanly and expose
           ``get_tracer`` / ``get_meter`` / ``get_logger``.
+        script: |
+          cd services/api && uv run python -c "from treadmill_api.observability import get_tracer, get_meter, get_logger" \
+            && cd ../../workers/agent && uv run python -c "from treadmill_agent.observability import get_tracer, get_meter, get_logger" \
+            && cd ../../services/api && uv run pytest tests/test_observability.py -q \
+            && cd ../../workers/agent && uv run pytest tests/test_observability.py -q
       - kind: deterministic
         description: |
           When ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set to a stub
@@ -170,6 +175,11 @@ sequence_of_work:
           at least one span. When the env var is unset, neither
           service errors at startup and no spans are emitted.
 
+        script: |
+          cd services/api && uv run python -c "from treadmill_api.observability import get_tracer, get_meter, get_logger" \
+            && cd ../../workers/agent && uv run python -c "from treadmill_agent.observability import get_tracer, get_meter, get_logger" \
+            && cd ../../services/api && uv run pytest tests/test_observability.py -q \
+            && cd ../../workers/agent && uv run pytest tests/test_observability.py -q
   - id: observability-cdk-construct
     title: TreadmillObservabilityStack — one stack per deployment, deployed identically
     workflow: wf-author
@@ -258,16 +268,25 @@ sequence_of_work:
           mode=dev_local --context deployment_id=test`` produces a
           valid CloudFormation template with one EC2, the EBS
           volumes, the S3 bucket, and the four CFN outputs.
+        script: |
+          cd infra && uv run pytest tests/test_observability_construct.py tests/test_observability_stack.py -q \
+            && cd ../tools/local-adapter && uv run pytest tests/test_deployment_config.py -q
       - kind: deterministic
         description: |
           The Grafana provisioning config has three datasources with
           UIDs exactly ``loki``, ``prometheus``, ``tempo``. A
           regression test asserts this.
+        script: |
+          cd infra && uv run pytest tests/test_observability_construct.py tests/test_observability_stack.py -q \
+            && cd ../tools/local-adapter && uv run pytest tests/test_deployment_config.py -q
       - kind: deterministic
         description: |
           ``treadmill-local init <deployment_id>`` populates the four
           new YAML keys when run against a deployed stack; tested
           against mocked boto3 with a synthetic CFN response.
+        script: |
+          cd infra && uv run pytest tests/test_observability_construct.py tests/test_observability_stack.py -q \
+            && cd ../tools/local-adapter && uv run pytest tests/test_deployment_config.py -q
       - kind: deterministic
         description: |
           When the YAML's ``observability_collector_endpoint`` is
@@ -275,6 +294,9 @@ sequence_of_work:
           ``OTEL_EXPORTER_OTLP_ENDPOINT``. When absent (fully-local
           fixture), neither container env carries the var.
 
+        script: |
+          cd infra && uv run pytest tests/test_observability_construct.py tests/test_observability_stack.py -q \
+            && cd ../tools/local-adapter && uv run pytest tests/test_deployment_config.py -q
   - id: treadmill-observe-cli
     title: treadmill observe CLI subcommand — access-layer to Grafana
     workflow: wf-author
@@ -322,6 +344,8 @@ sequence_of_work:
           ``treadmill observe status --deployment personal`` reports
           either ``direct`` or ``ssm-tunnel`` as the access method
           (mocked test against synthetic YAML + reachability stub).
+        script: |
+          cd cli && uv run pytest tests/test_observe.py -q
       - kind: deterministic
         description: |
           ``treadmill observe logs --task <uuid> --deployment personal``
@@ -329,6 +353,8 @@ sequence_of_work:
           ``loki`` datasource with a query that filters on
           ``task_id="<uuid>"``.
 
+        script: |
+          cd cli && uv run pytest tests/test_observe.py -q
   - id: trace-context-through-sqs
     title: Propagate trace context across the SQS hop
     workflow: wf-author
@@ -377,6 +403,9 @@ sequence_of_work:
           extracts the value and the resulting span has the same
           trace_id as the producer's span.
 
+        script: |
+          cd workers/agent && uv run pytest tests/test_trace_propagation.py -q \
+            && cd ../../services/api && uv run pytest tests/test_trace_propagation.py -q
   - id: token-tracking-via-claude-json
     title: Capture Claude Code token usage as OTel metrics
     workflow: wf-author
@@ -422,4 +451,6 @@ sequence_of_work:
           ``docs/learnings/2026-05-XX-claude-json-output-tokens.md``
           documents the gap and the task's ``decision`` is
           ``blocked``.
+        script: |
+          cd workers/agent && uv run pytest tests/ -k 'token or claude_json' -q
 ```
