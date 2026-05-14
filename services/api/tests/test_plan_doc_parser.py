@@ -9,6 +9,7 @@ from treadmill_api.parsers import (
     PlanDocFormatError,
     TaskScope,
     TaskSpec,
+    TaskValidationCheck,
     extract_sequence_yaml,
     parse_plan_doc,
 )
@@ -48,8 +49,10 @@ _VALID_YAML = """sequence_of_work:
     validation:
       - kind: deterministic
         description: "alembic upgrade head runs cleanly"
+        script: "alembic upgrade head"
       - kind: llm-judge
         description: "Migration creates users table with id + email + created_at"
+        prompt: "Does the migration create a users table with id + email + created_at columns?"
 """
 
 
@@ -124,6 +127,7 @@ def test_parse_plan_doc_handles_multiple_tasks():
     validation:
       - kind: deterministic
         description: "tests pass"
+        script: "pytest -q"
   - id: t1
     title: "Second"
     workflow: wf-author
@@ -135,6 +139,7 @@ def test_parse_plan_doc_handles_multiple_tasks():
     validation:
       - kind: deterministic
         description: "tests still pass"
+        script: "pytest -q"
 """
     specs = parse_plan_doc(_wrap_plan_md(yaml_body))
     assert [s.id for s in specs] == ["t0", "t1"]
@@ -249,12 +254,12 @@ def test_validate_unique_task_ids_passes_for_unique():
         TaskSpec(
             id="t0", title="x", workflow="wf-author", intent="x",
             scope=TaskScope(files=["a.py"]),
-            validation=[{"kind": "deterministic", "description": "x"}],
+            validation=[{"kind": "deterministic", "description": "x", "script": "echo test"}],
         ),
         TaskSpec(
             id="t1", title="y", workflow="wf-author", intent="y",
             scope=TaskScope(files=["b.py"]),
-            validation=[{"kind": "deterministic", "description": "y"}],
+            validation=[{"kind": "deterministic", "description": "y", "script": "echo test"}],
         ),
     ]
     validate_unique_task_ids(specs)  # does not raise
@@ -265,13 +270,214 @@ def test_validate_unique_task_ids_rejects_duplicates():
         TaskSpec(
             id="t0", title="x", workflow="wf-author", intent="x",
             scope=TaskScope(files=["a.py"]),
-            validation=[{"kind": "deterministic", "description": "x"}],
+            validation=[{"kind": "deterministic", "description": "x", "script": "echo test"}],
         ),
         TaskSpec(
             id="t0", title="y", workflow="wf-author", intent="y",
             scope=TaskScope(files=["b.py"]),
-            validation=[{"kind": "deterministic", "description": "y"}],
+            validation=[{"kind": "deterministic", "description": "y", "script": "echo test"}],
         ),
     ]
     with pytest.raises(PlanDocFormatError, match="duplicate task id"):
         validate_unique_task_ids(specs)
+
+
+# ── TaskValidationCheck ───────────────────────────────────────────────────────
+
+
+def test_task_validation_check_deterministic_happy_path():
+    """Deterministic checks require a script and forbid prompt."""
+    check = TaskValidationCheck(
+        kind="deterministic",
+        description="tests pass",
+        script="pytest",
+    )
+    assert check.kind == "deterministic"
+    assert check.script == "pytest"
+    assert check.prompt is None
+    assert check.severity == "blocking"
+    assert check.timeout_seconds == 30
+
+
+def test_task_validation_check_llm_judge_happy_path():
+    """LLM-judge checks require a prompt and forbid script."""
+    check = TaskValidationCheck(
+        kind="llm-judge",
+        description="code is idiomatic",
+        prompt="Does this code follow style conventions?",
+        llm_model="claude-opus-4-7",
+    )
+    assert check.kind == "llm-judge"
+    assert check.prompt == "Does this code follow style conventions?"
+    assert check.script is None
+    assert check.llm_model == "claude-opus-4-7"
+    assert check.severity == "blocking"
+
+
+def test_task_validation_check_rejects_deterministic_without_script():
+    """Deterministic checks must have a script."""
+    with pytest.raises(ValidationError, match="deterministic requires script"):
+        TaskValidationCheck(
+            kind="deterministic",
+            description="tests pass",
+        )
+
+
+def test_task_validation_check_rejects_deterministic_with_prompt():
+    """Deterministic checks must not have a prompt."""
+    with pytest.raises(ValidationError, match="deterministic forbids prompt"):
+        TaskValidationCheck(
+            kind="deterministic",
+            description="tests pass",
+            script="pytest",
+            prompt="This should not be here",
+        )
+
+
+def test_task_validation_check_rejects_llm_judge_without_prompt():
+    """LLM-judge checks must have a prompt."""
+    with pytest.raises(ValidationError, match="llm-judge requires prompt"):
+        TaskValidationCheck(
+            kind="llm-judge",
+            description="code is idiomatic",
+        )
+
+
+def test_task_validation_check_rejects_llm_judge_with_script():
+    """LLM-judge checks must not have a script."""
+    with pytest.raises(ValidationError, match="llm-judge forbids script"):
+        TaskValidationCheck(
+            kind="llm-judge",
+            description="code is idiomatic",
+            prompt="Is this good?",
+            script="echo test",
+        )
+
+
+def test_task_validation_check_custom_severity():
+    """Severity can be overridden."""
+    check = TaskValidationCheck(
+        kind="deterministic",
+        description="optional check",
+        script="lint",
+        severity="advisory",
+    )
+    assert check.severity == "advisory"
+
+
+def test_parse_plan_doc_with_deterministic_script():
+    """Plan doc with deterministic validation including script field."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "Test"
+    workflow: wf-author
+    intent: do test
+    scope:
+      files: [test.py]
+    validation:
+      - kind: deterministic
+        description: "tests pass"
+        script: "pytest -q"
+        script: "pytest tests/"
+"""
+    specs = parse_plan_doc(_wrap_plan_md(yaml_body))
+    assert len(specs) == 1
+    assert specs[0].validation[0].kind == "deterministic"
+    assert specs[0].validation[0].script == "pytest tests/"
+    assert specs[0].validation[0].prompt is None
+
+
+def test_parse_plan_doc_with_llm_judge_prompt():
+    """Plan doc with llm-judge validation including prompt field."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "Test"
+    workflow: wf-author
+    intent: do test
+    scope:
+      files: [test.py]
+    validation:
+      - kind: llm-judge
+        description: "code quality check"
+        prompt: "Is the code well written?"
+        llm_model: "claude-opus-4-7"
+"""
+    specs = parse_plan_doc(_wrap_plan_md(yaml_body))
+    assert len(specs) == 1
+    assert specs[0].validation[0].kind == "llm-judge"
+    assert specs[0].validation[0].prompt == "Is the code well written?"
+    assert specs[0].validation[0].script is None
+    assert specs[0].validation[0].llm_model == "claude-opus-4-7"
+
+
+def test_parse_plan_doc_rejects_deterministic_missing_script():
+    """Parsing fails when deterministic check lacks script."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "Test"
+    workflow: wf-author
+    intent: do test
+    scope:
+      files: [test.py]
+    validation:
+      - kind: deterministic
+        description: "tests pass"
+"""
+    with pytest.raises(ValidationError, match="deterministic requires script"):
+        parse_plan_doc(_wrap_plan_md(yaml_body))
+
+
+def test_parse_plan_doc_rejects_deterministic_with_prompt():
+    """Parsing fails when deterministic check includes prompt."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "Test"
+    workflow: wf-author
+    intent: do test
+    scope:
+      files: [test.py]
+    validation:
+      - kind: deterministic
+        description: "tests pass"
+        script: "pytest -q"
+        script: "pytest"
+        prompt: "Is it good?"
+"""
+    with pytest.raises(ValidationError, match="deterministic forbids prompt"):
+        parse_plan_doc(_wrap_plan_md(yaml_body))
+
+
+def test_parse_plan_doc_rejects_llm_judge_missing_prompt():
+    """Parsing fails when llm-judge check lacks prompt."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "Test"
+    workflow: wf-author
+    intent: do test
+    scope:
+      files: [test.py]
+    validation:
+      - kind: llm-judge
+        description: "code quality"
+"""
+    with pytest.raises(ValidationError, match="llm-judge requires prompt"):
+        parse_plan_doc(_wrap_plan_md(yaml_body))
+
+
+def test_parse_plan_doc_rejects_llm_judge_with_script():
+    """Parsing fails when llm-judge check includes script."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "Test"
+    workflow: wf-author
+    intent: do test
+    scope:
+      files: [test.py]
+    validation:
+      - kind: llm-judge
+        description: "code quality"
+        prompt: "Is it good?"
+        script: "pytest"
+"""
+    with pytest.raises(ValidationError, match="llm-judge forbids script"):
+        parse_plan_doc(_wrap_plan_md(yaml_body))

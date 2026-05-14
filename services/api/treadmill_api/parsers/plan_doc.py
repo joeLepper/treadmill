@@ -30,7 +30,7 @@ import re
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 class PlanDocFormatError(ValueError):
@@ -57,7 +57,25 @@ class TaskValidationCheck(BaseModel):
 
     kind: Literal["deterministic", "llm-judge"]
     description: str
-    # ``script`` is added in Phase 4 alongside the rule engine.
+    script: str | None = None
+    prompt: str | None = None
+    severity: Literal["blocking", "warning", "advisory"] = "blocking"
+    llm_model: str | None = None
+    timeout_seconds: int = 30
+
+    @model_validator(mode='after')
+    def _validate_kind_content(self) -> "TaskValidationCheck":
+        if self.kind == "deterministic":
+            if not self.script:
+                raise ValueError("deterministic requires script")
+            if self.prompt:
+                raise ValueError("deterministic forbids prompt")
+        else:  # llm-judge
+            if not self.prompt:
+                raise ValueError("llm-judge requires prompt")
+            if self.script:
+                raise ValueError("llm-judge forbids script")
+        return self
 
 
 class TaskSpec(BaseModel):

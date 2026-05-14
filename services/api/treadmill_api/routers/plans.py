@@ -199,33 +199,16 @@ async def _spawn_tasks_from_specs(
     # Pass 2: persist validations + dependencies, and emit lifecycle events.
     for task in tasks:
         spec = spec_by_task_id[task.id]
-        # D.3 — task_validations. Alembic 0011 (per ADR-0029)
-        # added a CHECK constraint requiring ``script`` for
-        # deterministic and ``prompt`` for llm-judge. The parser's
-        # TaskValidationCheck doesn't carry those fields yet (task
-        # parser-script-prompt-fields of the ADR-0029 plan is the
-        # update that adds them). Until that lands, we write the
-        # same placeholder values the migration's backfill uses so
-        # the constraint passes; the validation runner treats
-        # placeholders as ``error`` so the operator sees the rule
-        # needs to be authored. Bridge code — drop the
-        # placeholders once TaskValidationCheck.{script,prompt}
-        # land and the parser starts writing real values.
+        # D.3 — task_validations. Parse now provides script/prompt.
         for index, check in enumerate(spec.validation):
-            if check.kind == "deterministic":
-                script_value = 'echo "placeholder-no-content"'
-                prompt_value = None
-            else:
-                script_value = None
-                prompt_value = "Placeholder; rule not authored."
             session.add(
                 TaskValidation(
                     task_id=task.id,
                     position=index,
                     kind=check.kind,
                     description=check.description,
-                    script=script_value,
-                    prompt=prompt_value,
+                    script=check.script,
+                    prompt=check.prompt,
                 )
             )
         # D.1 — task_dependencies (grammar-validate + substitute sibling UUIDs)
