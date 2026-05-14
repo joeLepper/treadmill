@@ -102,6 +102,57 @@ def test_wf_feedback_builder_prefers_review_id_over_review_run_id() -> None:
     assert key == "wf-feedback:joeLepper/treadmill:review=PRR_kwDOSb12345"
 
 
+def test_wf_feedback_builder_emits_validate_run_id_for_validation_trigger() -> None:
+    """ADR-0029: when Treadmill's wf-validate fires wf-feedback off a
+    ``wf-validate.step.completed`` with ``decision='fail'`` or ``'error'``,
+    the dedup key uses ``validate-run=<wf_validate_run_id>`` namespace —
+    distinct from the ``review=`` and ``review-run=`` namespaces so
+    different trigger sources do not collide on the dedup table."""
+    key = build_dedup_key(
+        "wf-feedback",
+        {
+            "repo": "joeLepper/treadmill",
+            "validate_run_id": "fedcba98-7654-3210-fedc-ba9876543210",
+        },
+    )
+    assert key == (
+        "wf-feedback:joeLepper/treadmill:"
+        "validate-run=fedcba98-7654-3210-fedc-ba9876543210"
+    )
+
+
+def test_wf_feedback_builder_prefers_review_id_over_validate_run_id() -> None:
+    """If multiple fields are present (unexpected — defensive), the
+    github-driven ``review_id`` wins (highest priority), then
+    ``review_run_id``, then ``validate_run_id``. Documents the precedence."""
+    key = build_dedup_key(
+        "wf-feedback",
+        {
+            "repo": "joeLepper/treadmill",
+            "review_id": "PRR_kwDOSb12345",
+            "validate_run_id": "fedcba98-7654-3210-fedc-ba9876543210",
+        },
+    )
+    assert key == "wf-feedback:joeLepper/treadmill:review=PRR_kwDOSb12345"
+
+
+def test_wf_feedback_builder_prefers_review_run_id_over_validate_run_id() -> None:
+    """If review_id is missing but both review_run_id and validate_run_id
+    are present (unexpected — defensive), review_run_id wins."""
+    key = build_dedup_key(
+        "wf-feedback",
+        {
+            "repo": "joeLepper/treadmill",
+            "review_run_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "validate_run_id": "fedcba98-7654-3210-fedc-ba9876543210",
+        },
+    )
+    assert key == (
+        "wf-feedback:joeLepper/treadmill:"
+        "review-run=01234567-89ab-cdef-0123-456789abcdef"
+    )
+
+
 def test_wf_ci_fix_builder_emits_check_run_id() -> None:
     """``wf-ci-fix:<repo>:check_run=<check_run_id>`` — one fix per
     failing check_run."""
@@ -177,9 +228,10 @@ def test_wf_review_returns_none_when_repo_missing() -> None:
     ) is None
 
 
-def test_wf_feedback_returns_none_when_review_id_missing() -> None:
-    """The normalizer does NOT emit ``review_id`` today; until it
-    does, this builder is a graceful no-op."""
+def test_wf_feedback_returns_none_when_all_ids_missing() -> None:
+    """When none of the three dedup discriminators (review_id,
+    review_run_id, validate_run_id) are present, the builder gracefully
+    opts out to unconditional dispatch."""
     assert build_dedup_key("wf-feedback", {"repo": "x/y"}) is None
 
 

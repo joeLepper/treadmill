@@ -381,6 +381,10 @@ class CoordinationConsumer:
                 # short-circuits cleanly for non-wf-review steps and
                 # for verdicts other than changes_requested.
                 await self._maybe_fire_review_feedback(session, step_id, typed)
+            # ADR-0029: when a wf-validate step completes with decision='fail'
+            # or 'error', dispatch wf-feedback directly (convergence trigger).
+            if action == "completed":
+                await self._maybe_fire_validate_feedback(session, step_id, typed)
             # B.2 — cross-step dispatch. When a step terminates and the
             # workflow has a next pending step, materialize its
             # ``step.ready`` Event row + SQS claim. Per ADR-0015 §"No
@@ -930,6 +934,56 @@ class CoordinationConsumer:
         except Exception:
             logger.exception(
                 "_maybe_fire_review_feedback: dispatch failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    # ── Self-trigger: wf-validate failure → wf-feedback (ADR-0029) ────────
+
+    async def _maybe_fire_validate_feedback(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """Fire ``wf-feedback`` when a ``wf-validate.step.completed``
+        arrives with ``decision='fail'`` or ``'error'`` (ADR-0029 convergence
+        trigger).
+
+        Skips cleanly when ``self.dispatcher`` is ``None`` (narrow tests
+        that don't exercise dispatch). Failures are logged but do not
+        propagate — the prior step's projection has already committed;
+        rolling that back on a dispatch failure would lose progress. The
+        dispatch helper's own retry / dedup logic handles transient errors
+        on the next event delivery.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_feedback_on_terminal_failure,
+        )
+        try:
+            # Fire on 'fail' verdict
+            if typed.output.decision == "fail":
+                await maybe_dispatch_feedback_on_terminal_failure(
+                    session, self.dispatcher,
+                    step_id=step_id, typed=typed,
+                    workflow_id="wf-validate",
+                    fail_decision="fail",
+                )
+            # Fire on 'error' verdict
+            elif typed.output.decision == "error":
+                await maybe_dispatch_feedback_on_terminal_failure(
+                    session, self.dispatcher,
+                    step_id=step_id, typed=typed,
+                    workflow_id="wf-validate",
+                    fail_decision="error",
+                )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_validate_feedback: dispatch failed for step %s; "
                 "prior projection committed, will retry on redelivery",
                 step_id,
             )

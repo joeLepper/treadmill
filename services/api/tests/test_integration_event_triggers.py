@@ -337,6 +337,37 @@ def _count_runs_for_workflow(
         ), {"t": task_id, "w": workflow_id}).scalar()
 
 
+def _step_completed_event_record(
+    *,
+    step_id: str | uuid.UUID = "",
+    decision: str = "pass",
+    workflow_id: str = "wf-validate",
+) -> dict[str, Any]:
+    """Build a coordination-consumer-shaped step.completed event record.
+
+    Used for testing self-triggered workflows like wf-validate → wf-feedback.
+    """
+    if not step_id:
+        step_id = str(uuid.uuid4())
+    return {
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(step_id),
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "completed_at": "2026-05-08T10:00:00+00:00",
+            "output": {
+                "summary": f"validation {decision}",
+                "decision": decision,
+                "commit_sha": "abc123",
+                "artifacts": [],
+                "payload": {},
+                "metadata": {},
+            },
+        },
+    }
+
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 
@@ -670,3 +701,158 @@ async def test_step_ready_published_for_dispatched_run(
 
     # SQS claim sent for the same run.
     assert len(sqs.sent) == 1
+
+
+# ── wf-validate → wf-feedback convergence trigger (ADR-0029) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_wf_validate_fail_fires_wf_feedback(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0029 convergence trigger: when a ``wf-validate.step.completed``
+    arrives with ``decision='fail'``, the consumer must dispatch ``wf-feedback``
+    to analyze the failure and provide a task directive for re-authoring."""
+    task_id, _, wv_ids = _seed_world(engine)
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer(session_factory, publisher, sqs)
+
+    # Create a wf-validate run + step so the completion event finds a
+    # valid step to update.
+    with engine.begin() as conn:
+        run_id = conn.execute(sa.text(
+            "INSERT INTO workflow_runs "
+            "(task_id, workflow_version_id, trigger) "
+            "VALUES (:t, :wv, 'pr_synchronize') "
+            "RETURNING id"
+        ), {"t": task_id, "wv": wv_ids["wf-validate"]}).scalar()
+        step_id = conn.execute(sa.text(
+            "INSERT INTO workflow_run_steps "
+            "(run_id, step_index, step_name, role_id, status) "
+            "VALUES (:r, 0, 'step-0', 'role-validator', 'running') "
+            "RETURNING id"
+        ), {"r": run_id}).scalar()
+
+    # Send a wf-validate completion with decision='fail'.
+    await consumer.handle(_step_completed_event_record(
+        step_id=step_id,
+        decision="fail",
+        workflow_id="wf-validate",
+    ))
+
+    # Verify wf-feedback was dispatched.
+    assert _count_runs_for_workflow(engine, task_id, "wf-feedback") == 1
+
+
+@pytest.mark.asyncio
+async def test_wf_validate_pass_does_not_fire_wf_feedback(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0029: when a ``wf-validate.step.completed`` arrives with
+    ``decision='pass'``, wf-feedback must NOT be dispatched."""
+    task_id, _, wv_ids = _seed_world(engine)
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer(session_factory, publisher, sqs)
+
+    with engine.begin() as conn:
+        run_id = conn.execute(sa.text(
+            "INSERT INTO workflow_runs "
+            "(task_id, workflow_version_id, trigger) "
+            "VALUES (:t, :wv, 'pr_synchronize') "
+            "RETURNING id"
+        ), {"t": task_id, "wv": wv_ids["wf-validate"]}).scalar()
+        step_id = conn.execute(sa.text(
+            "INSERT INTO workflow_run_steps "
+            "(run_id, step_index, step_name, role_id, status) "
+            "VALUES (:r, 0, 'step-0', 'role-validator', 'running') "
+            "RETURNING id"
+        ), {"r": run_id}).scalar()
+
+    await consumer.handle(_step_completed_event_record(
+        step_id=step_id,
+        decision="pass",
+        workflow_id="wf-validate",
+    ))
+
+    # Verify wf-feedback was NOT dispatched.
+    assert _count_runs_for_workflow(engine, task_id, "wf-feedback") == 0
+
+
+@pytest.mark.asyncio
+async def test_wf_feedback_caps_at_five_attempts(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0029 Q29.e: wf-feedback caps at 5 attempts per task across
+    all trigger sources. The 6th wf-feedback dispatch must be rejected."""
+    task_id, _, wv_ids = _seed_world(engine)
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer(session_factory, publisher, sqs)
+
+    with engine.begin() as conn:
+        run_id = conn.execute(sa.text(
+            "INSERT INTO workflow_runs "
+            "(task_id, workflow_version_id, trigger) "
+            "VALUES (:t, :wv, 'pr_synchronize') "
+            "RETURNING id"
+        ), {"t": task_id, "wv": wv_ids["wf-validate"]}).scalar()
+        step_id = conn.execute(sa.text(
+            "INSERT INTO workflow_run_steps "
+            "(run_id, step_index, step_name, role_id, status) "
+            "VALUES (:r, 0, 'step-0', 'role-validator', 'running') "
+            "RETURNING id"
+        ), {"r": run_id}).scalar()
+
+    # First five wf-validate failures each dispatch wf-feedback.
+    for i in range(5):
+        # Create a new wf-validate run for each attempt
+        with engine.begin() as conn:
+            new_run_id = conn.execute(sa.text(
+                "INSERT INTO workflow_runs "
+                "(task_id, workflow_version_id, trigger) "
+                "VALUES (:t, :wv, 'pr_synchronize') "
+                "RETURNING id"
+            ), {"t": task_id, "wv": wv_ids["wf-validate"]}).scalar()
+            new_step_id = conn.execute(sa.text(
+                "INSERT INTO workflow_run_steps "
+                "(run_id, step_index, step_name, role_id, status) "
+                "VALUES (:r, 0, 'step-0', 'role-validator', 'running') "
+                "RETURNING id"
+            ), {"r": new_run_id}).scalar()
+
+        await consumer.handle(_step_completed_event_record(
+            step_id=new_step_id,
+            decision="fail",
+        ))
+
+    assert _count_runs_for_workflow(engine, task_id, "wf-feedback") == 5
+
+    # 6th failure is rejected by the cap; wf-feedback count stays at 5.
+    with engine.begin() as conn:
+        final_run_id = conn.execute(sa.text(
+            "INSERT INTO workflow_runs "
+            "(task_id, workflow_version_id, trigger) "
+            "VALUES (:t, :wv, 'pr_synchronize') "
+            "RETURNING id"
+        ), {"t": task_id, "wv": wv_ids["wf-validate"]}).scalar()
+        final_step_id = conn.execute(sa.text(
+            "INSERT INTO workflow_run_steps "
+            "(run_id, step_index, step_name, role_id, status) "
+            "VALUES (:r, 0, 'step-0', 'role-validator', 'running') "
+            "RETURNING id"
+        ), {"r": final_run_id}).scalar()
+
+    await consumer.handle(_step_completed_event_record(
+        step_id=final_step_id,
+        decision="fail",
+    ))
+
+    assert _count_runs_for_workflow(engine, task_id, "wf-feedback") == 5

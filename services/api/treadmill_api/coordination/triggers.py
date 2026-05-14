@@ -96,11 +96,14 @@ logger = logging.getLogger("treadmill.coordination.triggers")
 
 # Cap constants per ADR-0015 Q15.b. The bunkhouse precedent caps
 # ``wf-ci-fix`` and ``wf-validation-fix`` at 3 each; Treadmill's
-# equivalent is ``wf-ci-fix`` + ``wf-conflict``.
+# equivalent is ``wf-ci-fix`` + ``wf-conflict``. Per ADR-0029 Q29.e,
+# ``wf-feedback`` is capped at 5 attempts per task (across all trigger sources).
 CI_FIX_WORKFLOW_ID = "wf-ci-fix"
 CONFLICT_WORKFLOW_ID = "wf-conflict"
+FEEDBACK_WORKFLOW_ID = "wf-feedback"
 CI_FIX_MAX_ATTEMPTS = 3
 CONFLICT_RESOLVE_MAX_ATTEMPTS = 3
+FEEDBACK_MAX_ATTEMPTS = 5
 
 
 # Conclusions that represent a genuine CI failure — the only ones that
@@ -335,6 +338,8 @@ def _cap_for(workflow_id: str) -> int:
         return CI_FIX_MAX_ATTEMPTS
     if workflow_id == CONFLICT_WORKFLOW_ID:
         return CONFLICT_RESOLVE_MAX_ATTEMPTS
+    if workflow_id == FEEDBACK_WORKFLOW_ID:
+        return FEEDBACK_MAX_ATTEMPTS
     return 0
 
 
@@ -363,41 +368,52 @@ async def _is_capped(
     return count >= cap
 
 
-async def maybe_dispatch_feedback_on_review_changes_requested(
+async def maybe_dispatch_feedback_on_terminal_failure(
     session: AsyncSession,
     dispatcher: Any,
     *,
     step_id: str,
     typed: StepCompleted,
+    workflow_id: str,
+    fail_decision: str,
 ) -> uuid.UUID | None:
-    """Fire ``wf-feedback`` when a ``wf-review`` step completes with
-    ``decision='changes_requested'`` (task #108 path 1).
+    """Fire ``wf-feedback`` when a step completes with a terminal verdict
+    that should trigger analysis + resolution.
+
+    Handles three scenarios:
+      1. ``wf-review`` with ``decision='changes_requested'`` (task #108 path 1)
+      2. ``wf-validate`` with ``decision='fail'`` (ADR-0029)
+      3. ``wf-validate`` with ``decision='error'`` (ADR-0029)
 
     Companion to the github-webhook-driven ``evaluate_triggers``: that
     function fires ``wf-feedback`` on a ``pr_review_submitted`` event
-    with ``state='changes_requested'`` (human reviewer outside
-    Treadmill). This function fires it on Treadmill's own self-review,
-    which under path 1 no longer emits ``pr_review_submitted`` (we
-    switched to ``gh pr comment``).
+    with ``state='changes_requested'`` (human reviewer outside Treadmill).
+    This function fires it on Treadmill's own verdicts (self-review via
+    ``wf-review`` which no longer emits ``pr_review_submitted`` webhook,
+    and validation failures via ``wf-validate``).
 
     Skips cleanly when:
-      * The completed step isn't a ``wf-review`` step.
-      * The envelope's ``decision`` isn't ``changes_requested``.
+      * The completed step's workflow doesn't match ``workflow_id``.
+      * The envelope's ``decision`` isn't ``fail_decision``.
       * Owning task can't be resolved (deleted between dispatch + completion).
-      * No ``WorkflowVersion`` exists for ``wf-feedback`` (un-seeded
-        install).
+      * No ``WorkflowVersion`` exists for ``wf-feedback`` (un-seeded install).
+      * Task has already dispatched wf-feedback >= 5 times (cap per ADR-0029 Q29.e).
 
-    Dedup is gated by ADR-0026's ``WorkflowDispatchDedup`` table keyed
-    on ``wf-feedback:<repo>:review-run=<wf_review_run_id>`` (see
-    ``dispatch_dedup._build_wf_feedback_key``). A redelivered
-    ``step.completed`` event finds the existing row and skips.
+    Dedup is gated by ADR-0026's ``WorkflowDispatchDedup`` table keyed on:
+      * ``wf-feedback:<repo>:review-run=<wf_review_run_id>`` for wf-review
+      * ``wf-feedback:<repo>:validate-run=<wf_validate_run_id>`` for wf-validate
 
-    Returns the new ``wf-feedback`` run's id, or ``None`` if any of
-    the skip conditions fired.
+    Different namespaces prevent different trigger sources from colliding
+    on the dedup table — multiple legitimate sources can fire feedback
+    against the same task.
+
+    Returns the new ``wf-feedback`` run's id, or ``None`` if any skip
+    condition fired.
     """
-    if typed.output.decision != "changes_requested":
+    if typed.output.decision != fail_decision:
         return None
-    # Resolve (workflow_id, run_id, task_id, repo) for this step.
+
+    # Resolve (resolved_workflow_id, run_id, task_id, repo) for this step.
     result = await session.execute(
         select(
             WorkflowVersion.workflow_id,
@@ -416,13 +432,21 @@ async def maybe_dispatch_feedback_on_review_changes_requested(
     row = result.first()
     if row is None:
         logger.debug(
-            "review-feedback trigger: no run/task resolvable for step %s; "
-            "skipping",
+            "feedback trigger: no run/task resolvable for step %s; skipping",
             step_id,
         )
         return None
-    if row.workflow_id != "wf-review":
-        # Only wf-review's changes_requested verdict fires feedback.
+    if row.workflow_id != workflow_id:
+        # Only the specified workflow's verdict fires feedback.
+        return None
+
+    # Check cap: if this task has already dispatched wf-feedback >= FEEDBACK_MAX_ATTEMPTS,
+    # skip and log task.capped.
+    if await _is_capped(session, row.task_id, FEEDBACK_WORKFLOW_ID):
+        logger.warning(
+            "feedback trigger: %s capped for task %s (>=%d prior runs); skipping",
+            FEEDBACK_WORKFLOW_ID, row.task_id, FEEDBACK_MAX_ATTEMPTS,
+        )
         return None
 
     # Re-fetch the Task so the dispatch helper has the full ORM object.
@@ -430,7 +454,19 @@ async def maybe_dispatch_feedback_on_review_changes_requested(
     if task is None:
         return None
 
-    payload = {"repo": row.repo, "review_run_id": str(row.run_id)}
+    # Build the payload with the appropriate dedup namespace.
+    if workflow_id == "wf-review":
+        payload = {"repo": row.repo, "review_run_id": str(row.run_id)}
+        trigger = "self:wf-review-changes-requested"
+    elif workflow_id == "wf-validate":
+        payload = {"repo": row.repo, "validate_run_id": str(row.run_id)}
+        trigger = f"self:wf-validate-{fail_decision}"
+    else:
+        logger.warning(
+            "feedback trigger: unexpected workflow_id %s for step %s; skipping",
+            workflow_id, step_id,
+        )
+        return None
 
     async def _dispatch() -> uuid.UUID | None:
         return await _create_and_publish_run(
@@ -438,7 +474,7 @@ async def maybe_dispatch_feedback_on_review_changes_requested(
             dispatcher,
             task=task,
             workflow_id="wf-feedback",
-            trigger="self:wf-review-changes-requested",
+            trigger=trigger,
         )
 
     return await maybe_dispatch_with_dedup(
@@ -446,6 +482,29 @@ async def maybe_dispatch_feedback_on_review_changes_requested(
         workflow_id="wf-feedback",
         payload=payload,
         dispatch_fn=_dispatch,
+    )
+
+
+async def maybe_dispatch_feedback_on_review_changes_requested(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """Legacy wrapper for backwards compatibility with wf-review feedback.
+
+    Delegates to the generalized
+    ``maybe_dispatch_feedback_on_terminal_failure`` with the
+    wf-review workflow and changes_requested decision.
+    """
+    return await maybe_dispatch_feedback_on_terminal_failure(
+        session,
+        dispatcher,
+        step_id=step_id,
+        typed=typed,
+        workflow_id="wf-review",
+        fail_decision="changes_requested",
     )
 
 

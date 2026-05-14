@@ -85,9 +85,10 @@ def _build_wf_review_key(payload: dict[str, Any]) -> str | None:
 
 def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
     """``wf-feedback:<repo>:review=<review_id>`` (human-submitted review)
-    or ``wf-feedback:<repo>:review-run=<run_id>`` (Treadmill self-trigger).
+    or ``wf-feedback:<repo>:review-run=<run_id>`` (wf-review self-trigger)
+    or ``wf-feedback:<repo>:validate-run=<run_id>`` (wf-validate failure trigger).
 
-    Two trigger sources fire wf-feedback:
+    Three trigger sources fire wf-feedback:
 
       * ``pr_review_submitted`` webhook (human reviewer outside
         Treadmill) — payload carries ``review_id`` (GitHub node-id like
@@ -97,14 +98,18 @@ def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
 
       * ``wf-review.step.completed`` with ``decision='changes_requested'``
         (task #108 path 1 — Treadmill's own self-review fires this via
-        ``maybe_dispatch_feedback_on_review_changes_requested``).
+        ``maybe_dispatch_feedback_on_terminal_failure``).
         Payload carries ``review_run_id`` (UUID of the wf-review run).
 
-    Different namespaces (``review=`` vs ``review-run=``) intentionally
-    so the two trigger sources do not collide on the dedup table — if
-    a human submits ``changes_requested`` on the same SHA the
-    self-trigger also fired against, both wf-feedback runs are
-    legitimate (different intent sources).
+      * ``wf-validate.step.completed`` with ``decision='fail'`` or ``'error'``
+        (ADR-0029 — validation failure trigger via
+        ``maybe_dispatch_feedback_on_terminal_failure``).
+        Payload carries ``validate_run_id`` (UUID of the wf-validate run).
+
+    Different namespaces (``review=`` vs ``review-run=`` vs ``validate-run=``)
+    intentionally so trigger sources do not collide on the dedup table — if
+    multiple sources fire against the same task, both/all wf-feedback runs
+    are legitimate (different intent sources).
     """
     repo = payload.get("repo")
     if not repo:
@@ -115,6 +120,9 @@ def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
     review_run_id = payload.get("review_run_id")
     if review_run_id:
         return f"wf-feedback:{repo}:review-run={review_run_id}"
+    validate_run_id = payload.get("validate_run_id")
+    if validate_run_id:
+        return f"wf-feedback:{repo}:validate-run={validate_run_id}"
     return None
 
 

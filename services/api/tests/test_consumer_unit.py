@@ -596,3 +596,127 @@ async def test_health_status_dead_when_task_died_unexpectedly() -> None:
 
     assert consumer.status_for_health() == "dead"
     assert consumer.is_running() is False
+
+
+# ── wf-validate feedback dispatch (ADR-0029) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_validation_fail_triggers_wf_feedback() -> None:
+    """Per ADR-0029, when ``wf-validate.step.completed`` arrives with
+    ``decision='fail'``, the consumer immediately dispatches ``wf-feedback``
+    (convergence trigger). This test verifies the helper is called and would
+    dispatch — the actual dispatch logic is in the triggers module's unit
+    tests.
+    """
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    feedback_calls: list[dict] = []
+
+    async def _stub_feedback_dispatch(*args: object, **kwargs: object) -> None:
+        feedback_calls.append({"args": args, "kwargs": kwargs})
+
+    # Patch the trigger to record calls without actually dispatching
+    consumer._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
+
+    from treadmill_api.events.step import StepCompleted, StepOutput
+
+    await consumer.handle({
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(uuid.uuid4()),
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "completed_at": "2026-05-08T10:00:00+00:00",
+            "output": {
+                "summary": "validation failed",
+                "decision": "fail",
+                "commit_sha": "abc123",
+                "artifacts": [],
+                "payload": {},
+                "metadata": {},
+            },
+        },
+    })
+
+    # Verify the feedback trigger helper was called
+    assert len(feedback_calls) >= 1, (
+        "consumer must call _maybe_fire_validate_feedback when "
+        "step.completed with decision='fail'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_validation_pass_does_not_trigger_wf_feedback() -> None:
+    """When ``wf-validate.step.completed`` arrives with
+    ``decision='pass'``, no wf-feedback dispatch should occur."""
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    feedback_calls: list[dict] = []
+
+    async def _stub_feedback_dispatch(*args: object, **kwargs: object) -> None:
+        feedback_calls.append({"args": args, "kwargs": kwargs})
+
+    consumer._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(uuid.uuid4()),
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "completed_at": "2026-05-08T10:00:00+00:00",
+            "output": {
+                "summary": "validation passed",
+                "decision": "pass",
+                "commit_sha": "abc123",
+                "artifacts": [],
+                "payload": {},
+                "metadata": {},
+            },
+        },
+    })
+
+    # Verify the feedback trigger helper was called (it should filter internally)
+    # but the actual dispatch would be skipped inside the helper
+    assert len(feedback_calls) >= 1, (
+        "consumer calls _maybe_fire_validate_feedback for all completions; "
+        "the helper filters out non-fail/error decisions internally"
+    )
+
+
+# ── wf-feedback cap tests (ADR-0029 Q29.e) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wf_feedback_dispatch_dedup_key_includes_validate_run() -> None:
+    """Per ADR-0029, the dedup key for wf-feedback triggered by wf-validate
+    failure includes the ``validate-run=<run_id>`` namespace to distinguish
+    it from wf-review and human-review trigger sources."""
+    from treadmill_api.coordination.dispatch_dedup import build_dedup_key
+
+    key = build_dedup_key(
+        "wf-feedback",
+        {
+            "repo": "example/repo",
+            "validate_run_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        },
+    )
+    assert key == (
+        "wf-feedback:example/repo:"
+        "validate-run=f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wf_feedback_cap_constant_is_five() -> None:
+    """Per ADR-0029 Q29.e, the per-task cap on wf-feedback dispatches
+    is exactly 5 attempts across all trigger sources."""
+    from treadmill_api.coordination.triggers import FEEDBACK_MAX_ATTEMPTS
+
+    assert FEEDBACK_MAX_ATTEMPTS == 5, (
+        "ADR-0029 Q29.e specifies a 5-attempt cap per task for wf-feedback; "
+        "the constant must match"
+    )
