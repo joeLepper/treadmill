@@ -53,7 +53,10 @@ class OutputKind(StrEnum):
       * ``ANALYSIS`` — empty diff is success; output flows to downstream step
         via the existing ADR-0015 step-output composition.
       * ``PLAN_DOC`` — like ``CODE`` but the diff MUST be confined to
-        ``docs/plans/``.
+        ``docs/plans/``. Triggers ADR-0021 plan-creation on merge.
+      * ``DOCUMENTATION`` — produces documentation artifacts; distinct from
+        ``PLAN_DOC`` (which triggers plan-creation). The documentation
+        disposition handler processes these artifacts.
 
     Spellings are lowercase snake_case per ADR-0016's canonical-spellings
     discipline. The Ralph-loop validation pattern reserves the word
@@ -65,6 +68,7 @@ class OutputKind(StrEnum):
     REVIEW = "review"
     ANALYSIS = "analysis"
     PLAN_DOC = "plan_doc"
+    DOCUMENTATION = "documentation"
 
 
 class Workflow(Base):
