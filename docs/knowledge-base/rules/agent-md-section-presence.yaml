@@ -1,0 +1,36 @@
+name: agent-md-section-presence
+description: >
+  Validates that all AGENT.md files contain the five required section headers:
+  Purpose, Key surfaces, Recent changes, Pitfalls, and Navigation. Missing
+  sections indicate incomplete documentation and must be fixed before merge.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - ADR-0030  # federated in-repo agent context surfaces this rule
+
+references:
+  - ADR-0030  # federated in-repo agent context (mermaid + AGENT.md)
+  - docs/agent-md-schema.md
+
+checks:
+  - id: all-sections-present
+    type: deterministic
+    description: >
+      For every AGENT.md file changed in this PR, verify that all five required
+      section headers are present: ## Purpose, ## Key surfaces, ## Recent changes,
+      ## Pitfalls, and ## Navigation.
+    script: tools/rule-checks/agent-md-section-presence/check.sh
+    severity: blocking
+
+remediations:
+  - "on": all-sections-present:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      One or more AGENT.md files in this PR are missing required sections.
+      Per rule:agent-md-section-presence, all AGENT.md files must contain the
+      five required section headers: ## Purpose, ## Key surfaces, ## Recent
+      changes, ## Pitfalls, and ## Navigation. See docs/agent-md-schema.md for
+      detailed guidance on each section.

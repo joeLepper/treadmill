@@ -7,6 +7,9 @@ description: >
 status: active
 created: 2026-05-14
 
+crystallized_from:
+  - ADR-0030  # federated in-repo agent context surfaces this rule
+
 references:
   - ADR-0030  # federated in-repo agent context (mermaid + AGENT.md)
 
@@ -18,3 +21,23 @@ payload:
     - tools/local-adapter
     - tools/dev-hooks
     - docs
+
+checks:
+  - id: configured-locations-have-agent-md
+    type: deterministic
+    description: >
+      For each location declared in payload.locations, verify that
+      <location>/AGENT.md exists in the repo. Catches drift between
+      the configured location set and the on-disk reality.
+    script: tools/rule-checks/agent-md-locations/check.sh
+    severity: blocking
+
+remediations:
+  - "on": configured-locations-have-agent-md:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      One or more locations declared in agent-md-locations.yaml lack
+      an AGENT.md file. Either author the missing file (see
+      docs/agent-md-schema.md) or remove the location from the
+      payload if the component no longer warrants federated context.
