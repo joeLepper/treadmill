@@ -1,6 +1,6 @@
 ---
-status: drafting
-trigger: ADR-0032 accepted 2026-05-14; awaits operator review of plan, then flips active and dispatches via CLI submission.
+status: superseded by 2026-05-14-hands-free-driving
+trigger: ADR-0032 accepted 2026-05-14; superseded same-day by the consolidated hands-free-driving plan that bundles ADR-0031, ADR-0032, ADR-0033, and the four prereq tasks into a single dispatch so Treadmill can express cross-ADR dependencies natively.
 parent: docs/adrs/0032-documentarian-and-architect-roles.md
 ---
 
