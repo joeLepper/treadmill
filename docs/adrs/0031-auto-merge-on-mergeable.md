@@ -1,6 +1,6 @@
 # ADR-0031: Auto-merge on mergeability=mergeable
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-14
 - **Related:** ADR-0004 (diagrams as contract of intent), ADR-0023 (long-lived IAM keys), ADR-0029 (Ralph-loop validation runner), ADR-0030 (federated in-repo agent context)
 

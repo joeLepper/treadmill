@@ -1,6 +1,6 @@
 # ADR-0030: Federated in-repo agent context (mermaid + AGENT.md)
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-14
 - **Related:** ADR-0004 (diagrams as contract of intent), ADR-0006 (rules + remediations primitive), ADR-0028 (DB-authoritative role configs), ADR-0029 (Ralph-loop validation runner)
 

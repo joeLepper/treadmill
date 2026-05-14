@@ -1,6 +1,6 @@
 # ADR-0032: Documentarian + architect roles + drift-resolution workflows
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-14
 - **Related:** ADR-0004 (diagrams as contract of intent), ADR-0022 (role output_kind taxonomy), ADR-0028 (DB-authoritative role configs), ADR-0030 (federated context), ADR-0031 (auto-merge)
 
