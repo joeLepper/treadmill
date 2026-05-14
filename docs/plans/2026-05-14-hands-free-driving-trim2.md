@@ -259,9 +259,12 @@ sequence_of_work:
     intent: |
       Extend ``parsers/plan_doc.py`` to parse optional
       ``auto_merge: bool`` from plan frontmatter (default true).
-      Plumb through to ``Plan`` SQLAlchemy model; Alembic
-      migration for the new boolean column with server default
-      true.
+      Plumb through to ``Plan`` SQLAlchemy model.
+
+      NOTE: The ``Plan.auto_merge`` column + Alembic migration
+      0012 already landed in PR #64 (auto-merge-trigger) — that
+      task needed to read the column. Confirm the column exists;
+      do not create a duplicate migration.
 
       Document the flag in
       ``.claude/skills/plan/SKILL.md``.
@@ -279,8 +282,8 @@ sequence_of_work:
         description: |
           Parser + model + migration; tests pass; skill docs flag.
         script: |
-          cd services/api && uv run pytest tests/test_plan_doc_parser.py -q \
-            && grep -q "auto_merge" treadmill_api/models/plan.py \
+          ( cd services/api && uv run pytest tests/test_plan_doc_parser.py -q ) \
+            && grep -q "auto_merge" services/api/treadmill_api/models/plan.py \
             && grep -q "auto_merge" .claude/skills/plan/SKILL.md
 
   - id: auto-merge-trigger
