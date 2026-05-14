@@ -1,6 +1,6 @@
 ---
-status: drafting
-trigger: ADR-0029 accepted 2026-05-13. Implementation plan. Holding at status:drafting until operator pass on the task list below.
+status: active
+trigger: ADR-0029 accepted 2026-05-13; flipped active to dispatch through the plan-merge trigger. Hole 4 (deferred-run redispatch) landed in commit 6588efa earlier today, so dependent tasks should chain cleanly through pr_merged → reevaluate → step.ready emission against the existing pending run.
 parent: docs/adrs/0029-ralph-loop-validation-runner-and-rule-engine.md
 ---
 
