@@ -1,0 +1,40 @@
+name: python-tests-resolve
+description: >
+  Python test suites must be importable and runnable. Changes to Python
+  code (imports, module structure, test fixtures) must not break the ability
+  to collect and parse tests, catching hallucinated imports and module-load
+  failures before merge.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - claude-hallucinated-imports-go-undetected
+
+applies_to:
+  - '**/*.py'
+  - '**/pyproject.toml'
+
+checks:
+  - id: pytest-collect-pass
+    type: deterministic
+    description: >
+      The test collection phase completes without errors (pytest --collect-only).
+      This catches hallucinated imports, missing dependencies, and module-load
+      failures before they break the CI build.
+    script: tools/rule-checks/python-tests-resolve/pytest-collect.sh
+    severity: blocking
+
+remediations:
+  - "on": pytest-collect-pass:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      Test collection failed. Run ``uv run pytest --collect-only -q`` locally
+      to debug. This often indicates hallucinated imports, missing dependencies,
+      or broken module structure. Per rule:python-tests-resolve, code that
+      breaks test discovery cannot merge.
+
+references:
+  - ADR-0006  # rules + remediations primitive
+  - claude-hallucinated-imports-go-undetected  # source observation

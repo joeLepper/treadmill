@@ -53,7 +53,7 @@ checks:
       file in the rationale.
 
 remediations:
-  - on: test-files-changed:fail
+  - "on": test-files-changed:fail
     action: block-merge
     target: pr-author
     message: >
@@ -64,7 +64,7 @@ remediations:
       with tests in the same session. Either add tests, or — if this is
       intentional spike-mode — declare the elision in the plan.
 
-  - on: tests-exercise-success-criteria:fail
+  - "on": tests-exercise-success-criteria:fail
     action: comment-on-pr
     target: pr-author
     message: >
@@ -73,7 +73,7 @@ remediations:
       the change. See the judge's rationale on the PR. Adjust tests or
       respond with reasoning if the judge is wrong.
 
-  - on: tests-exercise-success-criteria:uncertain
+  - "on": tests-exercise-success-criteria:uncertain
     action: warn
     target: pr-author
     message: >

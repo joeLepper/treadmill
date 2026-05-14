@@ -1,0 +1,41 @@
+name: cdk-synth-passes
+description: >
+  AWS CDK synthesis must complete without errors. Changes to infrastructure code
+  (imports, construct instantiation, token usage) must not break the CDK synth
+  phase, catching hallucinated constructs, import errors, and token-shape mistakes
+  before merge.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - cdk-synthesis-failures-hidden-until-deploy
+
+applies_to:
+  - 'infra/**/*.py'
+
+checks:
+  - id: cdk-synth-success
+    type: deterministic
+    description: >
+      CDK synthesis completes without errors (cdk synth -q). This catches
+      hallucinated construct names (e.g., PR #23's SubscriptionFilter import
+      path), token-shape mistakes (e.g., PR #20's unhashable dict as a token),
+      and missing construct dependencies.
+    script: tools/rule-checks/cdk-synth-passes/cdk-synth-check.sh
+    severity: blocking
+
+remediations:
+  - "on": cdk-synth-success:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      CDK synthesis failed. Run ``cd infra && uv run cdk synth -q`` locally
+      to debug. Common causes: hallucinated import paths (e.g., wrong construct
+      location), invalid token usage (dicts instead of IResolvable), or missing
+      dependencies. Per rule:cdk-synth-passes (motivated by PRs #20, #23),
+      infrastructure code must synthesize cleanly before merge.
+
+references:
+  - ADR-0006  # rules + remediations primitive
+  - cdk-synthesis-failures-hidden-until-deploy  # source learning

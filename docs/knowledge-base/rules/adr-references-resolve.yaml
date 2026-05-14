@@ -1,0 +1,77 @@
+name: adr-references-resolve
+description: >
+  ADR citations in documentation must refer to ADRs that actually exist.
+  Changes to docs/adrs/ or docs/plans/ must not include references to
+  hallucinated or removed ADRs, caught by an LLM judge.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - broken-adr-references-in-documentation
+
+applies_to:
+  - 'docs/adrs/*.md'
+  - 'docs/plans/*.md'
+
+checks:
+  - id: adr-references-exist
+    type: llm-judge
+    description: >
+      Any ADR citations in the diff (ADR-NNNN or KB-ADR-NNNN patterns) must
+      refer to files that exist in docs/knowledge-base/adrs/ or docs/adrs/.
+      This catches hallucinated or broken ADR references before merge.
+    severity: advisory
+    prompt: |
+      You are evaluating whether a code change satisfies the rule
+      "adr-references-resolve": ADR citations in documentation must refer to
+      ADRs that actually exist.
+
+      Inputs you receive:
+        DIFF — the full unified diff of the change.
+        ADR_CATALOG — the list of existing ADRs in the repository
+                      (you will be given this separately).
+
+      Scan the diff for ADR citations using patterns like:
+        ADR-0001, ADR-0006, KB-ADR-0023, etc.
+
+      For each citation found, check whether a corresponding file exists:
+        ADR-NNNN       → docs/adrs/NNNN-*.md or docs/knowledge-base/adrs/NNNN-*.md
+        KB-ADR-NNNN    → docs/knowledge-base/adrs/NNNN-*.md
+
+      Decide one of three outcomes:
+        pass        — no ADR citations in the diff, OR all citations refer to
+                      existing ADR files.
+        fail        — the diff adds or modifies citations to ADRs that do not
+                      exist in the repository.
+        uncertain   — it is unclear whether a citation refers to a real ADR or
+                      the citation pattern is ambiguous; flag for human review.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"result": "pass" | "fail" | "uncertain",
+         "rationale": "<one to two sentences explaining your judgment>"}
+
+      Be terse and cite specific ADR numbers if broken citations are found.
+
+remediations:
+  - "on": adr-references-exist:fail
+    action: comment-on-pr
+    target: pr-author
+    message: >
+      This PR contains references to ADRs that do not exist in the repository.
+      Per rule:adr-references-resolve, documentation must cite actual ADRs.
+      Check docs/adrs/ for the correct ADR number, or remove the citation if
+      the ADR has not yet been written.
+
+  - "on": adr-references-exist:uncertain
+    action: warn
+    target: pr-author
+    message: >
+      The LLM judge could not confidently verify all ADR citations. Please
+      review the references and ensure they point to existing ADRs in
+      docs/adrs/ or docs/knowledge-base/adrs/.
+
+references:
+  - ADR-0006  # rules + remediations primitive
+  - ADR-0003  # three-layer documentation model (ADR storage)
+  - broken-adr-references-in-documentation  # source learning

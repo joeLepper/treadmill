@@ -1,0 +1,41 @@
+name: uv-lock-resolves
+description: >
+  Dependency declarations in pyproject.toml must resolve cleanly. Changes to
+  dependencies must not introduce hallucinated package names, version constraints
+  that cannot be satisfied, or other resolve failures. The uv lock check catches
+  these before merge.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - pr-18-boto3-vs-botocore-hallucination
+
+applies_to:
+  - '**/pyproject.toml'
+
+checks:
+  - id: uv-lock-check
+    type: deterministic
+    description: >
+      The dependency resolver cleanly locks all dependencies without errors.
+      This catches hallucinated package names (e.g., PR #18's
+      opentelemetry-instrumentation-boto3 instead of -botocore), invalid version
+      constraints, and other resolve failures.
+    script: tools/rule-checks/uv-lock-resolves/uv-lock-check.sh
+    severity: blocking
+
+remediations:
+  - "on": uv-lock-check:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      Dependency resolution failed. Run ``uv lock --check`` locally to see the
+      error. This typically indicates a hallucinated or misspelled dependency
+      name, or an impossible version constraint. Check PyPI to verify the package
+      name and available versions. Per rule:uv-lock-resolves (motivated by PR
+      #18), dependencies must resolve cleanly before merge.
+
+references:
+  - ADR-0006  # rules + remediations primitive
+  - pr-18-boto3-vs-botocore-hallucination  # source incident (commit b71c023)

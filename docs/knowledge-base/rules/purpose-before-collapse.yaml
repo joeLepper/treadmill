@@ -53,7 +53,7 @@ checks:
       rationale.
 
 remediations:
-  - on: purpose-articulated-in-collapse-proposal:fail
+  - "on": purpose-articulated-in-collapse-proposal:fail
     action: comment-on-pr
     target: pr-author
     message: >
@@ -65,7 +65,7 @@ remediations:
       confirm that the purpose has dissolved before proposing removal. Either
       add the analysis, or revise the proposal.
 
-  - on: purpose-articulated-in-collapse-proposal:uncertain
+  - "on": purpose-articulated-in-collapse-proposal:uncertain
     action: warn
     target: pr-author
     message: >

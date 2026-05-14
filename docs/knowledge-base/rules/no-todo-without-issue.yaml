@@ -1,0 +1,72 @@
+name: no-todo-without-issue
+description: >
+  TODO, FIXME, and XXX comments in code must reference an issue or task.
+  Bare TODO comments without an issue link are debt without a home; this rule
+  ensures follow-up work is tracked.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - todo-comments-without-issues-create-orphaned-debt
+
+applies_to:
+  - '**/*.py'
+
+checks:
+  - id: todo-issue-reference
+    type: llm-judge
+    description: >
+      TODO, FIXME, or XXX comments in the diff must include a reference to an
+      issue or task (e.g., TODO(#NNN) or TODO(task-name)). Bare TODO comments
+      are flagged as warnings.
+    severity: warning
+    prompt: |
+      You are evaluating whether a code change satisfies the rule
+      "no-todo-without-issue": TODO, FIXME, and XXX comments in code must
+      reference an issue or task.
+
+      Inputs you receive:
+        DIFF — the full unified diff of the change.
+
+      Scan the diff for new or modified TODO, FIXME, or XXX comments.
+      For each match, check whether it includes a reference like:
+        TODO(#123)        — GitHub issue
+        TODO(task-123)    — Treadmill task
+        FIXME(#456)       — any issue/task reference in parentheses
+
+      Decide one of three outcomes:
+        pass        — no TODO/FIXME/XXX comments in the diff, OR all existing
+                      comments include issue/task references.
+        fail        — the diff adds or modifies TODO/FIXME/XXX comments that
+                      lack any issue/task reference (bare TODO is fail).
+        uncertain   — it is unclear whether a reference exists or points to
+                      a real issue; flag for human review.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"result": "pass" | "fail" | "uncertain",
+         "rationale": "<one to two sentences explaining your judgment>"}
+
+      Be terse and cite specific line content if applicable.
+
+remediations:
+  - "on": todo-issue-reference:fail
+    action: comment-on-pr
+    target: pr-author
+    message: >
+      This PR contains TODO, FIXME, or XXX comments without issue or task
+      references. Per rule:no-todo-without-issue, these comments must include
+      a reference (e.g., TODO(#123) or TODO(task-name)) so follow-up work is
+      tracked and discoverable.
+
+  - "on": todo-issue-reference:uncertain
+    action: warn
+    target: pr-author
+    message: >
+      The LLM judge could not confidently determine whether all TODO/FIXME/XXX
+      comments include valid issue references. Please review and verify, or
+      clarify the references in the comments.
+
+references:
+  - ADR-0006  # rules + remediations primitive
+  - todo-comments-without-issues-create-orphaned-debt  # source learning
