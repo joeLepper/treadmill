@@ -157,7 +157,16 @@ _ROLES: list[dict[str, Any]] = [
     },
     {
         "id": "role-code-author",
-        "model": WORKER_MODEL,
+        # Operator-bumped 2026-05-14 from WORKER_MODEL (haiku) to sonnet:
+        # haiku produced plausible-prose-but-no-deliverable on the ADR-0032
+        # documentation.py + architecture.py disposition tasks (worker logs
+        # showed confident "✅ wired from runner.py" claims but the file
+        # wasn't on disk; author-side validation per task #121 caught it).
+        # role-code-author does the load-bearing implementation work for
+        # all four code-emitting workflows (wf-author, wf-feedback,
+        # wf-ci-fix, wf-conflict); the quality gap was felt across all
+        # the in-flight tasks. Sonnet 4.6 is the next tier up.
+        "model": "claude-sonnet-4-6",
         "output_kind": OutputKind.CODE,
         "system_prompt": (
             "You are the Treadmill code author — the shared terminal "

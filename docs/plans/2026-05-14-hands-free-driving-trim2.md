@@ -1,10 +1,18 @@
 ---
 status: active
-trigger: Mega-plan (2026-05-14-hands-free-driving) workers hit author-side validation failures (task #121) because validation scripts use ``uv run pytest`` and the worker container lacked uv. Fixed in commit 75ce71e (Dockerfile adds uv). Re-firing the truly-unshipped tasks here so they dispatch fresh against the new worker image. Tasks whose work is in main were correctly skipped on this trim; only 9 tasks remain.
+trigger: |
+  Mega-plan re-fire iteration 2. First trim was blocked by missing
+  uv (fixed in 75ce71e). Second iteration tasks went "done" with
+  no PRs — haiku produced plausible-prose-but-no-deliverable.
+  Operator-bumped role-code-author to sonnet 4.6 (DB UPDATE +
+  starters.py edit). Validation scripts strengthened to catch
+  the slop class — substance checks (grep for function names,
+  required strings, wired entrypoints) plus pytest, so the
+  agent can't satisfy validation by writing prose-without-files.
 parent: docs/adrs/0031-auto-merge-on-mergeable.md
 related: docs/adrs/0032-documentarian-and-architect-roles.md, docs/adrs/0033-git-artifact-discipline.md
 supersedes:
-  - docs/plans/2026-05-14-hands-free-driving.md (in-progress; this re-fire only contains the remaining unshipped work)
+  - docs/plans/2026-05-14-hands-free-driving.md
 ---
 
 # Plan: Hands-free driving — trim 2 (9 remaining tasks)
@@ -79,10 +87,23 @@ sequence_of_work:
     validation:
       - kind: deterministic
         description: |
-          Disposition module exists; tests pass.
+          Substance check: documentation.py exists with a ``handle``
+          entrypoint, references the Class C escalation target
+          ``wf-architecture-resolve``, is wired in runner.py on
+          output_kind ``documentation``, and the dispositions test
+          suite exercises it (at least one test name contains
+          ``documentation``). The strict greps are deliberate —
+          earlier attempts produced plausible prose without the
+          deliverable.
         script: |
-          cd workers/agent && uv run pytest tests/test_runner_dispositions.py -q \
-            && test -f treadmill_agent/runner_dispositions/documentation.py
+          cd workers/agent \
+            && test -f treadmill_agent/runner_dispositions/documentation.py \
+            && grep -q "def handle" treadmill_agent/runner_dispositions/documentation.py \
+            && grep -qE "wf-architecture-resolve|architecture_resolve" treadmill_agent/runner_dispositions/documentation.py \
+            && grep -qE "Class C|class_c|escalat" treadmill_agent/runner_dispositions/documentation.py \
+            && grep -qE "documentation|DOCUMENTATION" treadmill_agent/runner.py \
+            && uv run pytest tests/test_runner_dispositions.py -q -k documentation \
+            && uv run pytest tests/test_runner_dispositions.py -q
 
   - id: wf-architecture-resolve-disposition
     title: workers architecture.py + verdict routing
@@ -114,10 +135,23 @@ sequence_of_work:
     validation:
       - kind: deterministic
         description: |
-          Disposition module + tests; cap enforced.
+          Substance check: architecture.py exists with a ``handle``
+          entrypoint, parses ``ArchitectVerdict``, routes all four
+          verdicts (amend / supersede / accept-as-is / uncertain),
+          enforces a per-task rework cap, is wired in runner.py,
+          and the test suite parametrizes over the four verdicts.
         script: |
-          cd workers/agent && uv run pytest tests/test_runner_dispositions.py -q \
-            && test -f treadmill_agent/runner_dispositions/architecture.py
+          cd workers/agent \
+            && test -f treadmill_agent/runner_dispositions/architecture.py \
+            && grep -q "def handle" treadmill_agent/runner_dispositions/architecture.py \
+            && grep -q "ArchitectVerdict" treadmill_agent/runner_dispositions/architecture.py \
+            && grep -q '"amend"' treadmill_agent/runner_dispositions/architecture.py \
+            && grep -q '"supersede"' treadmill_agent/runner_dispositions/architecture.py \
+            && grep -q '"accept-as-is"' treadmill_agent/runner_dispositions/architecture.py \
+            && grep -q '"uncertain"' treadmill_agent/runner_dispositions/architecture.py \
+            && grep -qE "cap|MAX_ATTEMPTS|max_attempts" treadmill_agent/runner_dispositions/architecture.py \
+            && uv run pytest tests/test_runner_dispositions.py -q -k architecture \
+            && uv run pytest tests/test_runner_dispositions.py -q
 
   - id: validator-remediation-dispatch
     title: docs-current-with-pr.fail → wf-doc-amend (fourth dispatch source)
@@ -148,9 +182,18 @@ sequence_of_work:
     validation:
       - kind: deterministic
         description: |
-          Trigger + dedup tests pass.
+          Substance check: triggers.py exposes a function whose
+          name contains ``doc_amend``; dispatch_dedup recognizes
+          the ``docs-amend-run=`` namespace; consumer wires the
+          new dispatch source on docs-current-with-pr failures;
+          the cap is enforced.
         script: |
-          cd services/api && uv run pytest tests/test_consumer_unit.py tests/test_dispatch_dedup.py -q
+          cd services/api \
+            && grep -qE "maybe_dispatch_doc_amend|doc_amend_on" treadmill_api/coordination/triggers.py \
+            && grep -q "docs-amend-run=" treadmill_api/coordination/dispatch_dedup.py \
+            && grep -q "docs-current-with-pr" treadmill_api/coordination/consumer.py \
+            && grep -qE "5|MAX_DOC_AMEND_ATTEMPTS|max_doc_amend_attempts" treadmill_api/coordination/triggers.py \
+            && uv run pytest tests/test_consumer_unit.py tests/test_dispatch_dedup.py -q
 
   - id: rebackfill-via-doc-amend
     title: Re-fire ADR-0030 backfill plan through wf-doc-amend
