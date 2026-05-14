@@ -1,6 +1,6 @@
 # ADR-0029: Ralph-loop validation runner + rule engine
 
-- **Status:** Proposed (drafted 2026-05-13)
+- **Status:** Accepted (drafted + resolved 2026-05-13)
 - **Date:** 2026-05-13
 - **Related:** ADR-0006 (rule primitive — §"Engine deferred" is what this ADR answers), ADR-0007 (Bunkhouse-precedent validation runner pattern), ADR-0013 (mergeability VIEW reads `validate.decision`), ADR-0015 (wf-validate placeholder; `validation:` block contract), ADR-0022 (deliberate omission of a `validation` output kind), ADR-0026 (dispatch dedup), ADR-0027 (JSON envelope precedent for LLM verdicts), task #101.
 
@@ -329,54 +329,57 @@ unchanged — it already takes a task directive.
   risk surface?"). The Ralph-loop framing in ADR-0001 commits to
   hybrid.
 
-## Open Qs
+## Resolved decisions (2026-05-13)
 
-* **Q29.a — Rule storage location.** Today's ADR-0006 says
-  `docs/knowledge-base/rules/<slug>.yaml`. For the Treadmill repo
-  managing itself that's fine; rules live in the repo being
-  validated. For managing OTHER repos (#95, bootstrap
-  non-Treadmilled repos), where do rules come from — the managed
-  repo, a per-deployment config in Treadmill's DB, or both? Lean:
-  both; rules in the managed repo apply locally, rules in the
-  deployment config apply across all managed repos for that
-  deployment.
+* **Q29.a — Rule storage location.** **Both** — global rules
+  shipped with Treadmill (the orchestrator-side `docs/knowledge-base/rules/`)
+  apply across every managed repo for the deployment; per-repo
+  rules in the managed repo's own `docs/knowledge-base/rules/`
+  apply locally to that repo. This is consistent with ADR-0003's
+  three-layer documentation model (Layer 3 = cross-project
+  policy; Layer 1 = project-local). For Treadmill self-hosting,
+  Treadmill is BOTH the orchestrator AND a managed repo, so its
+  rules surface live in the same tree but are evaluated through
+  both lenses.
 
-* **Q29.b — LLM-judge model selection.** Should `check.llm_model`
-  be a per-rule field (cheap haiku vs expensive opus), or should
-  Treadmill pick a default and let rules opt out? Lean: rules
-  specify; default is the deployment's `WORKER_MODEL` (haiku).
+* **Q29.b — LLM-judge model selection.** **Default to
+  `WORKER_MODEL` (haiku); rules override via per-check
+  `llm_model:` field.** The cheap default keeps the common case
+  affordable; rules that need opus (semantic-correctness checks
+  on critical paths) opt in explicitly.
 
-* **Q29.c — Per-check timeout.** Subprocess timeout for
-  deterministic checks. 5 min is a guess. Lean: per-rule
-  `timeout_seconds:` field with a global default.
+* **Q29.c — Per-check timeout.** **Global default 30 seconds;
+  per-check `timeout_seconds:` overrides.** Most deterministic
+  checks (`pytest --collect-only`, `uv lock --check`, `cdk
+  synth`) finish well inside 30s; full test suites or
+  end-to-end builds opt up.
 
-* **Q29.d — GitHub check_run posting.** Tells human observers
-  what failed without going through the API. Not load-bearing
-  for mergeability. Lean: deferred; add when needed; the runner
-  posts a single `gh pr comment` with the check summary (same
-  shape as ADR-0027's review comment) until then.
+* **Q29.d — GitHub check_run posting.** **Deferred.** The runner
+  posts a single `gh pr comment` with the per-check summary +
+  aggregate verdict (same shape as ADR-0027's review comment).
+  When Treadmill becomes a GitHub App (#109), check_run posting
+  is part of that migration.
 
-* **Q29.e — wf-feedback cap.** Per ADR-0015, `wf-feedback` is
-  uncapped today (only `wf-ci-fix` + `wf-conflict` are capped at
-  3). With the new `wf-validate.fail → wf-feedback` path, the
-  loop can in principle run unbounded. Lean: cap wf-feedback at
-  5 attempts per task. After cap, surface to operator as
-  `task.capped`.
+* **Q29.e — wf-feedback cap.** **5 attempts per task; after cap,
+  surface as `task.capped` and stop dispatching.** The third
+  dispatch source (wf-validate.fail) joins the existing two
+  (pr_review_submitted, wf-review.changes_requested) under the
+  same per-task counter — total wf-feedback budget is 5 across
+  all sources for any one task.
 
-* **Q29.f — Aggregation of `pass` checks with `advisory` /
-  `warning` severity.** ADR-0006's rule schema has `severity:
-  blocking | warning | advisory`. Today's `verdict_aggregate`
-  treats all `fail`s equally. Lean: only `severity=blocking`
-  fail/error block merge; warning + advisory surface in the
-  envelope payload but don't gate.
+* **Q29.f — Severity gating.** **Only `severity=blocking` checks
+  gate merge.** `warning` + `advisory` fails / errors surface in
+  the envelope's `payload.checks` and in the PR comment so the
+  operator sees them, but don't flip the aggregate to `fail`
+  for mergeability purposes. ADR-0006's three-tier severity is
+  preserved end-to-end.
 
-* **Q29.g — Sharing the deterministic + llm-judge code with
-  bunkhouse / future fully_remote.** ADR-0007's bunkhouse runner
-  has S3-cached scripts + cross-account roles. The v0 dev-local
-  runner reads `script` text directly + executes in-process.
-  When `fully_remote` lands, the same handler interface can swap
-  underlying execution (S3 fetch vs in-DB script) without
-  changing the worker boundary.
+* **Q29.g — fully_remote shape.** **v0 dev-local runner reads
+  script text directly from the DB + executes in-process.**
+  Bunkhouse's S3-cached scripts + cross-account roles (per
+  ADR-0007) is the right shape for fully_remote; the disposition
+  handler's interface stays the same so the underlying execution
+  can swap without changing the worker boundary.
 
 ## Phasing
 
