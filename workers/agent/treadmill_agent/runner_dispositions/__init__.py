@@ -34,6 +34,7 @@ context types; the table imports the handlers).
 from __future__ import annotations
 
 from treadmill_agent.runner_dispositions.analysis import handle as handle_analysis
+from treadmill_agent.runner_dispositions.architecture import handle as handle_architecture
 from treadmill_agent.runner_dispositions.code import handle as handle_code
 from treadmill_agent.runner_dispositions.documentation import handle as handle_documentation
 from treadmill_agent.runner_dispositions.plan_doc import handle as handle_plan_doc
@@ -42,6 +43,7 @@ from treadmill_agent.runner_dispositions.validation import handle as handle_vali
 
 __all__ = [
     "handle_analysis",
+    "handle_architecture",
     "handle_code",
     "handle_documentation",
     "handle_plan_doc",

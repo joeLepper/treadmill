@@ -39,6 +39,7 @@ from treadmill_agent.eventbus import EventPublisher
 from treadmill_agent.observability import get_tracer
 from treadmill_agent.runner_dispositions import (
     handle_analysis,
+    handle_architecture,
     handle_code,
     handle_documentation,
     handle_plan_doc,
@@ -392,6 +393,16 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
             settings=settings,
             is_dry_run=dry_run,
         )
+        # ADR-0032 §wf-architecture-resolve: role-architect uses
+        # output_kind=analysis but routes to a dedicated disposition
+        # (architecture.py) for verdict-envelope parsing + downstream
+        # dispatch hints. Other analysis roles (planner, ci-analyzer,
+        # feedback-analyzer, conflict-analyzer, validator) flow through
+        # handle_analysis as before. Branch on role.id rather than
+        # adding a new output_kind — keeps the schema stable while
+        # letting role-architect have its own routing logic.
+        if ctx.role.id == "role-architect":
+            return handle_architecture(disposition_ctx)
         try:
             handler = DISPOSITIONS[ctx.role.output_kind]
         except KeyError:

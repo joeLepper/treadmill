@@ -25,11 +25,16 @@ from treadmill_agent.claude_code import CodeAuthorResult
 from treadmill_agent.config import Settings
 from treadmill_agent.runner_dispositions import (
     handle_analysis,
+    handle_architecture,
     handle_code,
     handle_documentation,
     handle_plan_doc,
     handle_review,
     handle_validation,
+)
+from treadmill_agent.runner_dispositions.architecture import (
+    ArchitectVerdictParseError,
+    MAX_REWORK_ATTEMPTS,
 )
 from treadmill_agent.runner_dispositions._context import DispositionContext
 from treadmill_agent.runner_dispositions.plan_doc import PlanDocScopeError
@@ -1306,3 +1311,161 @@ def test_documentation_handler_raises_on_empty_diff(tmp_path: Path) -> None:
     )
     with pytest.raises(claude_code.CodeAuthorError, match="no changes"):
         handle_documentation(ctx)
+
+
+# ── architecture handler (ADR-0032 wf-architecture-resolve) ────────────────────
+
+
+def _arch_ctx(
+    tmp_path: Path,
+    summary: str,
+    *,
+    role_id: str = "role-architect",
+) -> DispositionContext:
+    """Build a DispositionContext for the architect handler.
+
+    Architect uses output_kind=analysis (per ADR-0032) but routes to
+    handle_architecture via role.id branch in runner.py — for direct
+    handler tests we just build a ctx with role-architect and a summary
+    carrying the verdict envelope.
+    """
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        output_kind="analysis",
+        role_id=role_id,
+        workflow_id="wf-architecture-resolve",
+        summary=summary,
+    )
+    return ctx
+
+
+def test_architecture_handler_amend_verdict_routes_to_wf_plan(
+    tmp_path: Path,
+) -> None:
+    """``amend`` verdict → payload.dispatch.workflow_id == 'wf-plan'."""
+    summary = (
+        "I reviewed the gap.\n\n"
+        '```json\n'
+        '{"verdict": "amend", "reasoning": "Code violates async '
+        'idempotency standard; ADR intent is right.", '
+        '"target_artifact": "services/api/treadmill_api/coordination/'
+        'consumer.py", "remediation_summary": "Wrap _handle_step in an '
+        'idempotency guard keyed on event_id."}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "amend"
+    assert out.commit_sha is None
+    assert out.payload["dispatch"]["workflow_id"] == "wf-plan"
+    assert out.payload["dispatch"]["task_id"] == ctx.ctx.task_id
+    assert "Wrap _handle_step" in out.payload["dispatch"]["remediation_summary"]
+
+
+def test_architecture_handler_supersede_verdict_routes_to_doc_amend(
+    tmp_path: Path,
+) -> None:
+    """``supersede`` → wf-doc-amend with intent=author-superseding-adr."""
+    summary = (
+        '```json\n'
+        '{"verdict": "supersede", "reasoning": "Original ADR-0010 intent '
+        'no longer matches reality after #95 bootstrap.", '
+        '"target_artifact": "docs/adrs/0010-branch-conventions.md"}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "supersede"
+    assert out.payload["dispatch"]["workflow_id"] == "wf-doc-amend"
+    assert out.payload["dispatch"]["intent"] == "author-superseding-adr"
+
+
+def test_architecture_handler_accept_as_is_emits_pr_comment(
+    tmp_path: Path,
+) -> None:
+    """``accept-as-is`` → wf-doc-amend (Pitfalls) + pr_comment payload."""
+    summary = (
+        '```json\n'
+        '{"verdict": "accept-as-is", "reasoning": "Tradeoff is acceptable '
+        'for v1; capture in Pitfalls.", '
+        '"target_artifact": "workers/agent/AGENT.md"}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
+    assert out.payload["dispatch"]["workflow_id"] == "wf-doc-amend"
+    assert out.payload["dispatch"]["intent"] == "append-pitfall"
+    # PR comment for operator confirmation per ADR-0033.
+    assert "pr_comment" in out.payload
+    assert out.payload["pr_comment"]["signal"] == "accept-as-is"
+
+
+def test_architecture_handler_uncertain_redispatches_with_attempt_counter(
+    tmp_path: Path,
+) -> None:
+    """``uncertain`` before the cap → re-dispatch wf-architecture-resolve
+    with ``rework_attempt`` incremented."""
+    summary = (
+        '```json\n'
+        '{"verdict": "uncertain", "reasoning": "Need more context on the '
+        'caller graph.", "target_artifact": "services/api/...", '
+        '"rework_attempt": 2}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "uncertain"
+    assert out.payload["dispatch"]["workflow_id"] == "wf-architecture-resolve"
+    assert out.payload["dispatch"]["rework_attempt"] == 3
+    # No PR comment until cap.
+    assert "pr_comment" not in out.payload
+
+
+def test_architecture_handler_uncertain_caps_at_5_and_emits_pr_comment(
+    tmp_path: Path,
+) -> None:
+    """The 5th uncertain (rework_attempt=5 inbound, would be 6) → capped,
+    no re-dispatch, pr_comment carries the operator-needed signal."""
+    summary = (
+        '```json\n'
+        '{"verdict": "uncertain", "reasoning": "Still ambiguous after 5 '
+        'attempts.", "target_artifact": "services/api/X", '
+        f'"rework_attempt": {MAX_REWORK_ATTEMPTS}'
+        '}\n```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "uncertain"
+    assert out.payload["dispatch"]["capped"] is True
+    assert out.payload["dispatch"]["workflow_id"] is None
+    assert out.payload["pr_comment"]["signal"] == "capped"
+
+
+def test_architecture_handler_raises_on_missing_envelope(
+    tmp_path: Path,
+) -> None:
+    """No JSON block with a valid ``verdict`` → ArchitectVerdictParseError.
+    wf-feedback can re-run the architect with an envelope reminder."""
+    ctx = _arch_ctx(tmp_path, "I thought about this for a while but didn't decide.")
+    with pytest.raises(ArchitectVerdictParseError, match="JSON block"):
+        handle_architecture(ctx)
+
+
+def test_architecture_handler_takes_last_verdict_block(
+    tmp_path: Path,
+) -> None:
+    """Mirroring ADR-0027: when multiple JSON blocks carry verdicts, the
+    last one wins (the architect explored alternatives + converged)."""
+    summary = (
+        "First I considered:\n"
+        '```json\n{"verdict": "amend", "reasoning": "first thought", '
+        '"target_artifact": "x"}\n```\n'
+        "On reflection:\n"
+        '```json\n{"verdict": "accept-as-is", "reasoning": "actually fine", '
+        '"target_artifact": "x"}\n```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
