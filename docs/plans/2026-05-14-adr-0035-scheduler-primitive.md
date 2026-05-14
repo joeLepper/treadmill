@@ -6,7 +6,12 @@ parent: docs/adrs/0035-scheduler-primitive-for-periodic-agent-work.md
 
 # Plan: Scheduler primitive (ADR-0035 execution)
 
-Port RAMJAC's scrape-scheduler pattern in-tree: cron schedules → tick events → bound workflow dispatch, with jitter + quiet hours + 4h missed-tick catch-up. Unlocks ADR-0032 Q32.f (periodic documentarian audit) + ADR-0034 Q34.d (periodic learnings crystallization).
+Port RAMJAC's scrape-scheduler pattern in-tree: cron schedules → tick events → bound workflow dispatch, with jitter + quiet hours + 4h missed-tick catch-up. Unlocks four first-consumer ops bots:
+
+1. **Documentarian audit** (weekly) — ADR-0032 Q32.f
+2. **Crystallization sweep** (weekly) — ADR-0034 Q34.d
+3. **Stuck-task sweep** (every 10 min) — empirically validated 2026-05-14 by parser silent-stall; see `docs/learnings/2026-05-14-author-side-fail-no-remediation.md`. Bunkhouse precedent: similar stalls killed productivity there until proactive sweeping was added.
+4. **Observability regression scan** (every 15 min) — consumes ADR-0020 stack; opens remediation tasks when error-rate / latency / failed-step rate regress.
 
 ## Goal
 
@@ -19,7 +24,7 @@ After execution: operator creates a schedule via `treadmill schedules create '0 
 - Scheduler spawns as a sibling subprocess of the autoscaler when `treadmill-local up` runs in dev-local mode (per ADR-0018 precedent).
 - `treadmill schedules list / create / pause / resume / delete` work end-to-end against the live API.
 - Consumer's trigger evaluator recognizes `scheduled.tick.<schedule_id>` events + dispatches the bound workflow.
-- Two seed schedules registered on first deploy: `wf-documentarian-audit` (weekly Monday 9am Pacific) + `wf-crystallize-learning` (weekly Sunday 8pm Pacific).
+- Four seed schedules registered on first deploy: `wf-documentarian-audit` (weekly Monday 9am Pacific), `wf-crystallize-learning` (weekly Sunday 8pm Pacific), `wf-stuck-task-sweep` (every 10 min), `wf-o11y-regression-scan` (every 15 min).
 - Smoke: create a one-off test schedule firing in the next minute; watch the tick event land + the bound workflow dispatch; observe Grafana traces (ADR-0020) carry the schedule span.
 
 ## Constraints / scope
@@ -258,14 +263,14 @@ sequence_of_work:
             && cd ../services/api && uv run pytest tests/test_schedules_router.py -q
 
   - id: seed-schedules
-    title: Seed schedules for documentarian + crystallization
+    title: Seed schedules for first-consumer ops bots
     workflow: wf-author
     depends_on:
       - task.scheduled-tick-trigger-routing.pr_merged
       - task.scheduler-spawn-on-up.pr_merged
     intent: |
       Add a seed step (alongside ``seed-starters``) that on
-      first deploy creates two schedules:
+      first deploy creates four schedules:
 
         - id: ``periodic-documentarian-audit``
           cron: ``0 9 * * 1`` (Monday 9am Pacific)
@@ -280,7 +285,47 @@ sequence_of_work:
           quiet_hours: null
           payload_template: ``{"trigger": "scheduled-sweep"}``
 
-      Idempotent — re-running seed is safe.
+        - id: ``periodic-stuck-task-sweep``
+          cron: ``*/10 * * * *`` (every 10 minutes)
+          workflow_id: ``wf-stuck-task-sweep``
+          quiet_hours: null
+          payload_template: ``{"trigger": "scheduled-sweep"}``
+
+          Detects in-flight tasks whose last event is older than
+          a configurable threshold (default 20 min) and whose
+          last step.completed had ``decision=fail`` without a
+          downstream dispatch — i.e. the silent-stall pattern
+          we hit on 2026-05-14 with task ``0ac62421`` (parser
+          author-side fail; see
+          ``docs/learnings/2026-05-14-author-side-fail-no-remediation.md``).
+          Disposition: dispatch ``wf-feedback`` with the stall
+          rationale, or page the operator if the task has already
+          been retried N times. Frequent cadence because stuck
+          tasks block downstream cascades — the cost of a tick
+          is small, the cost of silence is hours.
+
+        - id: ``periodic-o11y-regression-scan``
+          cron: ``*/15 * * * *`` (every 15 minutes)
+          workflow_id: ``wf-o11y-regression-scan``
+          quiet_hours: null
+          payload_template: ``{"trigger": "scheduled-scan"}``
+
+          Queries the ADR-0020 observability stack (Grafana /
+          Loki / Tempo) for regressions: error-rate spikes,
+          latency p99 jumps, failed-step rate by role / workflow.
+          Disposition: open an analysis task summarizing the
+          regression with linked traces + a remediation
+          suggestion. Routes to wf-architecture-resolve if the
+          regression looks structural, wf-author if it looks
+          tactical. Blocked on observability stack being live
+          (ADR-0020 phase 3+); until then, the schedule
+          short-circuits to a no-op until the queries succeed.
+
+      Idempotent — re-running seed is safe. The two new ops-bot
+      schedules ship enabled but each schedule has an
+      ``enabled`` flag (per ADR-0035 §Decision) so operators
+      can disable until the consumer workflows + observability
+      stack are wired.
     scope:
       files:
         - services/api/treadmill_api/seed/schedules.py
@@ -288,7 +333,7 @@ sequence_of_work:
     validation:
       - kind: deterministic
         description: |
-          Seed creates both schedules; idempotent.
+          Seed creates all four schedules; idempotent.
         script: |
           cd services/api && uv run pytest tests/test_seed_schedules.py -q
 
