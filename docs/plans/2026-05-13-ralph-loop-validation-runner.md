@@ -100,181 +100,18 @@ After this plan executes:
 # adjusted: the original task-2 dep (task.schema-script-prompt-columns.pr_merged)
 # is satisfied in main, so task 2 (now first in the chain) runs with
 # no deps. Git history preserves the original 8-task sequence.
+#
+# 2026-05-14 update: tasks 2, 3, 4 also landed (PRs #28, #29, #30).
+# The smoke had to redeploy after SSO TTL and lost DB state; trimming
+# to the unmerged tasks below so wf-author doesn't hit empty-diff on
+# already-merged work. Tasks dropped: parser-script-prompt-fields,
+# validation-runtime-module, validation-disposition-handler. First task
+# in the trimmed chain is convergence-trigger-third-source with no deps.
 
 sequence_of_work:
-  - id: parser-script-prompt-fields
-    title: TaskValidationCheck parses script + prompt from plan-doc YAML
-    workflow: wf-author
-    intent: |
-      Extend ``TaskValidationCheck`` Pydantic in
-      ``services/api/treadmill_api/parsers/plan_doc.py``:
-
-        class TaskValidationCheck(BaseModel):
-            model_config = ConfigDict(extra="forbid")
-            kind: Literal["deterministic", "llm-judge"]
-            description: str
-            script: str | None = None
-            prompt: str | None = None
-            severity: Literal["blocking", "warning", "advisory"] = "blocking"
-            llm_model: str | None = None
-            timeout_seconds: int = 30  # Q29.c default
-
-        @model_validator(mode='after')
-        def _validate_kind_content(self):
-            if self.kind == "deterministic":
-                if not self.script: raise ValueError("deterministic requires script")
-                if self.prompt: raise ValueError("deterministic forbids prompt")
-            else:
-                if not self.prompt: raise ValueError("llm-judge requires prompt")
-                if self.script: raise ValueError("llm-judge forbids script")
-            return self
-
-      Update the persistence side in ``routers/plans.py`` to
-      write the new columns when creating TaskValidation rows.
-
-      Tests in
-      ``services/api/tests/test_parsers_plan_doc.py``:
-      happy paths for both kinds + the model_validator rejects.
-    scope:
-      files:
-        - services/api/treadmill_api/parsers/plan_doc.py
-        - services/api/treadmill_api/routers/plans.py
-        - services/api/tests/test_parsers_plan_doc.py
-        - services/api/tests/test_integration_plans_router.py
-    validation:
-      - kind: deterministic
-        description: |
-          parser tests pass: a YAML block with script + prompt
-          fields round-trips; the model_validator rejects
-          deterministic-without-script and llm-judge-without-prompt.
-
-  - id: validation-runtime-module
-    title: Worker validation_runtime — deterministic + llm-judge primitives
-    workflow: wf-author
-    depends_on:
-      - task.parser-script-prompt-fields.pr_merged
-    intent: |
-      New module
-      ``workers/agent/treadmill_agent/validation_runtime.py``
-      with two public functions:
-
-        @dataclass(frozen=True)
-        class CheckResult:
-            check_id: str          # task_validations row id
-            kind: str              # 'deterministic' | 'llm-judge'
-            severity: str          # 'blocking' | 'warning' | 'advisory'
-            verdict: str           # 'pass' | 'fail' | 'error'
-            rationale: str         # human-readable why
-            log_excerpt: str       # last ~2000 chars of subprocess stderr
-                                   #  or LLM rationale
-
-        def run_deterministic(check, repo_dir, timeout_seconds): CheckResult
-        def run_llm_judge(check, repo_dir, diff, task_spec,
-                          model, timeout_seconds): CheckResult
-
-      Deterministic: ``subprocess.run`` with shell=True, cwd=repo_dir,
-      capture stdout+stderr, ``timeout=timeout_seconds``. Exit 0 →
-      verdict=pass. Non-zero → verdict=fail. ``subprocess.TimeoutExpired``
-      → verdict=error with rationale="timeout after Xs". Other
-      exceptions → verdict=error.
-
-      LLM-judge: compose a prompt template:
-        f"{check.prompt}\n\n## PR diff\n{diff}\n\n## Task spec\n{task_spec}\n\nRespond with the JSON envelope (see ValidationVerdict)."
-      Spawn Claude Code via the existing ``claude_code.run_claude``
-      seam with model=check.llm_model OR settings.WORKER_MODEL.
-      Parse the output with the new ``ValidationVerdict`` Pydantic
-      (sibling to ``ReviewVerdict`` per ADR-0027). Strip the JSON
-      fence from the user-visible body. Verdict 'pass' / 'fail'
-      from the parsed model; parse failure or unknown verdict →
-      error.
-
-      Tests in ``workers/agent/tests/test_validation_runtime.py``
-      (new file): deterministic happy/fail/timeout/exception
-      paths; llm-judge happy/fail/parse-failure paths against a
-      stubbed ``run_claude``.
-    scope:
-      files:
-        - workers/agent/treadmill_agent/validation_runtime.py
-        - workers/agent/treadmill_agent/runner_dispositions/_validation_verdict.py
-        - workers/agent/tests/test_validation_runtime.py
-    validation:
-      - kind: deterministic
-        description: |
-          test_validation_runtime.py passes: subprocess timeout
-          maps to verdict='error'; non-zero exit maps to 'fail';
-          exit 0 maps to 'pass'; LLM-judge happy path parses
-          ValidationVerdict; parse failure maps to 'error'.
-
-  - id: validation-disposition-handler
-    title: validation.py disposition handler — gather, run, aggregate
-    workflow: wf-author
-    depends_on:
-      - task.validation-runtime-module.pr_merged
-    intent: |
-      New module
-      ``workers/agent/treadmill_agent/runner_dispositions/validation.py``
-      with a ``handle(ctx) -> StepOutput`` entry point.
-
-      Steps:
-        1. Read task_validations rows for ctx.ctx.task_id via the
-           API (extend api_client if needed; one GET call).
-        2. Load
-           ``docs/knowledge-base/rules/*.yaml`` from the cloned
-           repo. Parse each into the rule schema from ADR-0006.
-           For each rule, evaluate ``applies_to:`` (glob match
-           against the PR's changed files; obtain diff via
-           ``gh pr diff <n> --name-only``). Matching rules'
-           checks join the validation set.
-        3. For each check, dispatch to
-           validation_runtime.run_deterministic or
-           run_llm_judge. Collect CheckResults.
-        4. Aggregate worst-wins, but ONLY the
-           ``severity=blocking`` checks count toward the
-           aggregate (Q29.f). warning + advisory verdicts surface
-           in ``payload.checks`` but don't flip the aggregate.
-        5. Compose a human-readable summary (one line per check,
-           grouped by verdict). Build the body that goes to gh pr
-           comment.
-        6. ``gh pr comment <pr_number> --body <summary>`` (unless
-           dry_run).
-        7. Return StepOutput with:
-             - summary: the composed text
-             - decision: aggregate (pass | fail | error)
-             - commit_sha: ctx.ctx.head_sha
-             - payload: {'checks': [r.model_dump() for r in results]}
-
-      Routing in ``runner.py``: extend the dispatch table to key
-      on workflow_id == 'wf-validate' BEFORE consulting
-      output_kind. The wf-validate path skips the Claude shared
-      prefix entirely; the validation handler owns the worker's
-      whole step.
-
-      Tests in
-      ``workers/agent/tests/test_runner_dispositions.py``:
-      validation_handler aggregates worst-wins; advisory failures
-      don't gate; mixed task+rule checks both fire; happy path
-      via stubbed validation_runtime functions.
-    scope:
-      files:
-        - workers/agent/treadmill_agent/runner_dispositions/validation.py
-        - workers/agent/treadmill_agent/runner_dispositions/__init__.py
-        - workers/agent/treadmill_agent/runner.py
-        - workers/agent/treadmill_agent/api_client.py
-        - workers/agent/tests/test_runner_dispositions.py
-    validation:
-      - kind: deterministic
-        description: |
-          test_runner_dispositions.py passes: aggregate worst-wins
-          across mixed blocking/warning/advisory verdicts; routing
-          by workflow_id == 'wf-validate' is exercised; rule
-          loading from docs/knowledge-base/rules/ matches applicable
-          rules to PR scope.
-
   - id: convergence-trigger-third-source
     title: wf-validate.fail → wf-feedback as the third dispatch source
     workflow: wf-author
-    depends_on:
-      - task.validation-disposition-handler.pr_merged
     intent: |
       Generalize
       ``coordination/triggers.maybe_dispatch_feedback_on_review_changes_requested``
@@ -322,6 +159,8 @@ sequence_of_work:
           validation fail dispatches wf-feedback via validate-run=
           namespace; 5-attempt cap holds; dedup builder for the
           new namespace is correctly keyed.
+        script: |
+          cd services/api && uv run pytest tests/test_consumer_unit.py tests/test_dispatch_dedup.py -q
 
   - id: role-validator-reclassify
     title: role-validator becomes a structural artifact, not a Claude role
@@ -366,6 +205,11 @@ sequence_of_work:
           test_starters.py passes; role-validator's new prompt
           does not contain the word 'placeholder'; the prompt
           explains the runtime routing.
+        script: |
+          cd services/api && uv run pytest tests/test_starters.py -q \
+            && ! grep -i placeholder treadmill_api/starters.py \
+            | grep -i "role-validator" \
+            && grep -q "ADR-0029" treadmill_api/starters.py
 
   - id: treadmill-self-hosting-rules
     title: First Treadmill-specific rules in docs/knowledge-base/rules/
@@ -438,6 +282,15 @@ sequence_of_work:
           test_rules_schema.py passes for all 5 starter rules;
           each rule YAML parses against ADR-0006's schema;
           referenced check.sh scripts exist with executable bit.
+        script: |
+          cd services/api && uv run pytest tests/test_rules_schema.py -q \
+            && for f in docs/knowledge-base/rules/python-tests-resolve.yaml \
+                       docs/knowledge-base/rules/uv-lock-resolves.yaml \
+                       docs/knowledge-base/rules/cdk-synth-passes.yaml \
+                       docs/knowledge-base/rules/no-todo-without-issue.yaml \
+                       docs/knowledge-base/rules/adr-references-resolve.yaml; do \
+                 test -f "../../$f" || { echo "missing: $f"; exit 1; }; \
+               done
 
   - id: smoke-validation
     title: End-to-end smoke — deliberately reintroduce a bug; watch loop converge
@@ -478,6 +331,10 @@ sequence_of_work:
         description: |
           The handoff doc exists at the named path and contains
           the cycle count + observed token spend.
+        script: |
+          test -f docs/handoffs/2026-05-14-ralph-loop-first-smoke.md \
+            && grep -qi "cycle" docs/handoffs/2026-05-14-ralph-loop-first-smoke.md \
+            && grep -qi "token" docs/handoffs/2026-05-14-ralph-loop-first-smoke.md
 ```
 
 ## Operator action items (post-implementation)
