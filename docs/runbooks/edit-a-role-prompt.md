@@ -232,9 +232,60 @@ durable and code-reviewed.
 
 ---
 
+## ADR-0033 discipline: editing commit and PR format prompts
+
+Per ADR-0033 (Git artifact discipline — commits, PRs, comments), two roles carry
+discipline-critical system prompts that enforce standardized commit and PR formats:
+
+- `role-code-author` instructs writing commits with subject ≤72 chars, why section,
+  Refs/Co-Authored-By trailers, and PRs with Summary / Why / Test plan / Validation / Refs
+  sections. Also teaches branch naming as `task/<task-id-prefix>-<slug>`.
+- `role-doc-author` instructs the same format for plan-doc commits and PRs, with
+  branch naming as `plan/<plan-id-prefix>-<slug>`.
+
+### When to edit these two roles in code
+
+Edits to these two prompts should normally flow **through `starters.py`
+→ code review → merge → operator seed**, not through `treadmill role
+update` directly:
+
+1. **Update the code-side definition** in
+   `services/api/treadmill_api/starters.py` (the `role-code-author` and
+   `role-doc-author` entries).
+2. **Update corresponding tests** in
+   `services/api/tests/test_starters.py` to assert that the new prompt
+   content is present.
+3. **PR and review** — the changes are part of ADR-0033's design and
+   deserve peer review before they ship.
+4. **Merge** the PR.
+5. **Operator seeds** at the next convenient moment (after re-deploy or
+   explicitly):
+   ```bash
+   treadmill workflows seed-starters --reset-prompts-from-code
+   ```
+
+The `--reset-prompts-from-code` flag is specifically designed for this
+use case — to pull discipline-critical prompt edits from code into the
+running deployment.
+
+### When to use `treadmill role update` for these roles
+
+The direct `treadmill role update` path is appropriate only for
+**narrowly scoped tuning** of an already-seeded role — e.g., "the
+test-plan guidance is confusing; clarify the wording" — when you
+want to test the change live without a code review + re-deploy cycle.
+
+After you verify the tuning works, port the edit back to `starters.py`,
+update the corresponding tests, PR it, and re-seed with `--reset-prompts-from-code`
+so the change is durable and code-reviewed.
+
+---
+
 ## Related
 
 * [ADR-0028 — DB-authoritative workflow/role configs](../adrs/0028-db-authoritative-workflow-configs.md)
 * [ADR-0029 — Ralph-loop validation runner + rule engine](../adrs/0029-ralph-loop-validation-runner-and-rule-engine.md)
+* [ADR-0030 — Federated in-repo agent context](../adrs/0030-federated-in-repo-agent-context.md)
+* [ADR-0033 — Git artifact discipline](../adrs/0033-git-artifact-discipline.md)
 * [In-session sequencing plan](../plans/2026-05-13-in-session-sequencing.md)
 * `treadmill role --help` for the CLI surface

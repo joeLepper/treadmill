@@ -325,6 +325,92 @@ def test_role_code_author_prompt_mentions_scope_discipline() -> None:
     )
 
 
+def test_role_code_author_prompt_teaches_adr_0033_commit_format() -> None:
+    """Per ADR-0033 §Decision, role-code-author must teach the standardized
+    commit message format: subject ≤72, why, Refs: and Co-Authored-By
+    trailers."""
+    code_author = next(r for r in _all_roles() if r["id"] == "role-code-author")
+    prompt = code_author["system_prompt"]
+    assert "ADR-0033" in prompt, (
+        "role-code-author prompt must reference ADR-0033 for commit discipline"
+    )
+    assert "Refs:" in prompt and "Co-Authored-By:" in prompt, (
+        "role-code-author prompt must teach Refs: and Co-Authored-By: trailers"
+    )
+    assert "≤72" in prompt or "72 chars" in prompt, (
+        "role-code-author prompt must specify subject line ≤72 chars"
+    )
+
+
+def test_role_code_author_prompt_teaches_adr_0033_pr_format() -> None:
+    """Per ADR-0033 §Decision, role-code-author must teach the standardized
+    PR description structure: Summary / Why / Test plan / Validation / Refs."""
+    code_author = next(r for r in _all_roles() if r["id"] == "role-code-author")
+    prompt = code_author["system_prompt"]
+    required_sections = ["## Summary", "## Why", "## Test plan", "## Validation", "## Refs"]
+    for section in required_sections:
+        assert section in prompt, (
+            f"role-code-author prompt must include {section!r} in PR description template"
+        )
+
+
+def test_role_code_author_prompt_teaches_adr_0033_branch_naming() -> None:
+    """Per ADR-0033 §Decision, role-code-author must teach the standardized
+    branch naming convention: task/<task-id-prefix>-<slug> with 8-char UUID."""
+    code_author = next(r for r in _all_roles() if r["id"] == "role-code-author")
+    prompt = code_author["system_prompt"]
+    assert "task/" in prompt and "task-id-prefix" in prompt, (
+        "role-code-author prompt must teach task/<task-id-prefix>-<slug> "
+        "branch naming per ADR-0033"
+    )
+    assert "8" in prompt, (
+        "role-code-author prompt must specify 8-char UUID prefix length"
+    )
+
+
+def test_role_doc_author_prompt_teaches_adr_0033_commit_format() -> None:
+    """Per ADR-0033 §Decision, role-doc-author must teach the standardized
+    commit message format: subject ≤72, why, Refs: and Co-Authored-By
+    trailers."""
+    doc_author = next(r for r in _all_roles() if r["id"] == "role-doc-author")
+    prompt = doc_author["system_prompt"]
+    assert "ADR-0033" in prompt, (
+        "role-doc-author prompt must reference ADR-0033 for commit discipline"
+    )
+    assert "Refs:" in prompt and "Co-Authored-By:" in prompt, (
+        "role-doc-author prompt must teach Refs: and Co-Authored-By: trailers"
+    )
+    assert "≤72" in prompt or "72 chars" in prompt, (
+        "role-doc-author prompt must specify subject line ≤72 chars"
+    )
+
+
+def test_role_doc_author_prompt_teaches_adr_0033_pr_format() -> None:
+    """Per ADR-0033 §Decision, role-doc-author must teach the standardized
+    PR description structure: Summary / Why / Test plan / Validation / Refs."""
+    doc_author = next(r for r in _all_roles() if r["id"] == "role-doc-author")
+    prompt = doc_author["system_prompt"]
+    required_sections = ["## Summary", "## Why", "## Test plan", "## Validation", "## Refs"]
+    for section in required_sections:
+        assert section in prompt, (
+            f"role-doc-author prompt must include {section!r} in PR description template"
+        )
+
+
+def test_role_doc_author_prompt_teaches_adr_0033_branch_naming() -> None:
+    """Per ADR-0033 §Decision, role-doc-author must teach the standardized
+    branch naming convention: plan/<plan-id-prefix>-<slug> with 8-char UUID."""
+    doc_author = next(r for r in _all_roles() if r["id"] == "role-doc-author")
+    prompt = doc_author["system_prompt"]
+    assert "plan/" in prompt and "plan-id-prefix" in prompt, (
+        "role-doc-author prompt must teach plan/<plan-id-prefix>-<slug> "
+        "branch naming per ADR-0033"
+    )
+    assert "8" in prompt, (
+        "role-doc-author prompt must specify 8-char UUID prefix length"
+    )
+
+
 # Note: the prior contract tests asserted that every prompt mentioned
 # the ``StepOutput`` envelope, listed decision values, and named
 # ``task_directive`` for analyzer roles. Those tests encoded the
