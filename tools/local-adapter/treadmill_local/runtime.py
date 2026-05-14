@@ -226,12 +226,12 @@ class LocalRuntime:
         (the resource URLs/ARNs come from ``~/.treadmill/<id>.yaml``,
         produced by C.4's ``init`` subcommand).
 
-        Per ADR-0019, the AWS credentials for both the worker (long-lived
-        IAM-User keys from Secrets Manager) and the API (operator's SSO
-        session, exported as static creds) are fetched on the host before
-        any container starts. The values live in memory on this runtime
-        and are injected as env vars on every container we spawn — no
-        ``~/.aws`` mount, no SSO inside containers.
+        Per ADR-0019, the AWS credentials for both the worker and API are
+        long-lived IAM-User keys fetched from Secrets Manager on the host
+        and injected as env vars before any container starts. The values
+        live in memory on this runtime and are injected as env vars on
+        every container we spawn — no ``~/.aws`` mount, no SSO inside
+        containers.
 
         The agent worker is NOT started here — it's launched on-demand
         by ``start_worker_once`` (same pattern as fully-local mode),

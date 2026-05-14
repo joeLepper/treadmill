@@ -7,9 +7,10 @@ Covers:
   expected ``TREADMILL_*`` / aliased env vars from the YAML; no
   ``AWS_ENDPOINT_URL`` (that's the moto override).
 - Host-side credential injection per ADR-0019:
-  * API container env carries operator-SSO-derived
-    ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` + ``AWS_SESSION_TOKEN``
-    (no ``AWS_PROFILE``).
+  * API container env carries IAM-User keys
+    ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` fetched from the
+    deployment's api-aws-credentials secret (no ``AWS_PROFILE``,
+    no ``AWS_SESSION_TOKEN``).
   * Worker container env carries IAM-User keys
     ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` fetched from the
     deployment's worker-aws-credentials secret (no ``AWS_PROFILE``,
@@ -408,9 +409,9 @@ def test_no_aws_mount_in_dev_local_for_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Per ADR-0019: the API container in dev-local does NOT mount
-    ``~/.aws``. Operator-SSO credentials are exported on the host and
-    injected as ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` +
-    ``AWS_SESSION_TOKEN`` env vars on the container.
+    ``~/.aws``. API's IAM-User keys are fetched from Secrets Manager on
+    the host and injected as ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY``
+    env vars on the container (no ``AWS_SESSION_TOKEN``).
 
     Even when ``~/.aws`` exists on the host (the normal case), the
     mount must not be added — the mount itself is the failure mode
