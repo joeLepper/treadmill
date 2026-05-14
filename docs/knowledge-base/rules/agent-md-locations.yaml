@@ -1,0 +1,20 @@
+name: agent-md-locations
+description: >
+  Declares the directories where AGENT.md files must be present in this repository.
+  This is a per-repo configuration rule; other Treadmill-managed projects define
+  their own locations via this same rule.
+
+status: active
+created: 2026-05-14
+
+references:
+  - ADR-0030  # federated in-repo agent context (mermaid + AGENT.md)
+
+payload:
+  locations:
+    - services/api
+    - workers/agent
+    - infra
+    - tools/local-adapter
+    - tools/dev-hooks
+    - docs
