@@ -55,7 +55,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from treadmill_api.eventbus import EventPublisher
 from treadmill_api.events import encode_payload, parse_payload
-from treadmill_api.models import Event
+from sqlalchemy import func, select
+from treadmill_api.models import Event, TaskPR
 from treadmill_api.webhooks.inbox_envelope import WebhookInboxEnvelope
 from treadmill_api.webhooks.normalize import (
     NormalizationResult,
@@ -475,12 +476,30 @@ class WebhookInboxPoller:
         commit_sha = _extract_commit_sha(normalized.action, body_json)
 
         async with self.sessionmaker() as session:
+            # Resolve task_id via the task_prs bridge — mirror of the
+            # HTTP route at ``routers/webhooks.py:193-202``. The two
+            # ingress paths must stay in lock-step on this field; the
+            # dependency gate ``dispatch._is_dep_pr_merged`` queries
+            # ``events.task_id`` directly and a NULL here silently
+            # blocks downstream task dispatch. See the dual-ingress
+            # drift learning at 2026-05-14.
+            task_id: uuid.UUID | None = None
+            if normalized.repo and normalized.pr_number is not None:
+                result = await session.execute(
+                    select(TaskPR.task_id).where(
+                        func.lower(TaskPR.repo) == normalized.repo.lower(),
+                        TaskPR.pr_number == normalized.pr_number,
+                    )
+                )
+                task_id = result.scalar_one_or_none()
+
             stmt = (
                 pg_insert(Event)
                 .values(
                     id=event_id,
                     entity_type=normalized.entity_type,
                     action=normalized.action,
+                    task_id=task_id,
                     payload=encode_payload(typed),
                     commit_sha=commit_sha,
                 )
