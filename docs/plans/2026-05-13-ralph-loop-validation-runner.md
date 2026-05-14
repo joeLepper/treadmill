@@ -93,46 +93,18 @@ After this plan executes:
 ## Sequence of work
 
 ```yaml
+# Task 1 (schema-script-prompt-columns) landed via PR #26 on
+# 2026-05-14 — alembic 0011 + TaskValidation model change. Dropped
+# from this re-fire so wf-author doesn't hit empty-diff on the
+# already-merged work. Tasks 2-8 below have had their depends_on
+# adjusted: the original task-2 dep (task.schema-script-prompt-columns.pr_merged)
+# is satisfied in main, so task 2 (now first in the chain) runs with
+# no deps. Git history preserves the original 8-task sequence.
+
 sequence_of_work:
-  - id: schema-script-prompt-columns
-    title: Add script + prompt columns to task_validations
-    workflow: wf-author
-    intent: |
-      Alembic migration 0011: add nullable ``script`` (text) and
-      ``prompt`` (text) columns to ``task_validations``. Extend
-      the CHECK constraint so:
-        (kind='deterministic' AND script IS NOT NULL AND prompt IS NULL)
-        OR (kind='llm-judge' AND prompt IS NOT NULL AND script IS NULL)
-      Migration is forward-only — existing rows have neither
-      column populated (the plan-doc parser today writes only
-      kind + description). The migration backfills them with a
-      placeholder ``script='echo "placeholder-no-content"'`` for
-      deterministic rows and ``prompt='Placeholder; rule not
-      authored.'`` for llm-judge rows so the CHECK passes. The
-      validation handler treats placeholder values as `error`
-      with a clear message so the operator sees they need to
-      author the actual check.
-
-      Update ``treadmill_api/models/task.py``'s ``TaskValidation``
-      class to declare the new columns. Update
-      ``test_role_output_kind_migration`` siblings if any reference
-      the table's shape.
-    scope:
-      files:
-        - services/api/alembic/versions/0011_task_validations_content.py
-        - services/api/treadmill_api/models/task.py
-    validation:
-      - kind: deterministic
-        description: |
-          alembic upgrade then downgrade in a fresh DB round-trips
-          cleanly; the CHECK constraint rejects insertion of a row
-          with kind='deterministic' but no script.
-
   - id: parser-script-prompt-fields
     title: TaskValidationCheck parses script + prompt from plan-doc YAML
     workflow: wf-author
-    depends_on:
-      - task.schema-script-prompt-columns.pr_merged
     intent: |
       Extend ``TaskValidationCheck`` Pydantic in
       ``services/api/treadmill_api/parsers/plan_doc.py``:
