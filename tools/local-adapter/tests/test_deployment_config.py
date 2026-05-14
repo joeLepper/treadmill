@@ -77,6 +77,9 @@ def synthetic_outputs() -> dict[str, str]:
         "SecretsWorkerAwsCredentialsSecretName55556666": (
             "treadmill-test/worker-aws-credentials"
         ),
+        "SecretsApiAwsCredentialsSecretName77778888": (
+            "treadmill-test/api-aws-credentials"
+        ),
         # Observability (present but not consumed by build_deployment_config —
         # ADR-0016's YAML schema doesn't include the alarm topic; the test
         # asserts the extra outputs are ignored, not raised on).
@@ -249,6 +252,9 @@ def test_build_deployment_config_populates_every_yaml_key(synthetic_outputs):
         "github_pat_secret_name": "treadmill-test/github-pat",
         "worker_aws_credentials_secret_name": (
             "treadmill-test/worker-aws-credentials"
+        ),
+        "api_aws_credentials_secret_name": (
+            "treadmill-test/api-aws-credentials"
         ),
     }
 
@@ -545,6 +551,9 @@ def test_init_cli_end_to_end_writes_yaml(tmp_path: Path, patched_session):
             "SecretsWorkerAwsCredentialsSecretName55556666": {
                 "Value": "treadmill-test/worker-aws-credentials",
             },
+            "SecretsApiAwsCredentialsSecretName77778888": {
+                "Value": "treadmill-test/api-aws-credentials",
+            },
         },
     }
     cfn.create_stack(
@@ -583,6 +592,9 @@ def test_init_cli_end_to_end_writes_yaml(tmp_path: Path, patched_session):
     assert loaded["secrets"]["github_pat_secret_name"] == (
         "treadmill-test/github-pat"
     )
+    assert loaded["secrets"]["api_aws_credentials_secret_name"] == (
+        "treadmill-test/api-aws-credentials"
+    )
     assert loaded["local"]["database_url"].startswith("postgresql://")
 
 
@@ -605,6 +617,7 @@ def test_init_cli_overwrites_existing_yaml(tmp_path: Path, patched_session):
             "SecretsGithubWebhookSecretName11112222": {"Value": "secret1"},
             "SecretsGithubPatSecretName33334444": {"Value": "secret2"},
             "SecretsWorkerAwsCredentialsSecretName55556666": {"Value": "secret3"},
+            "SecretsApiAwsCredentialsSecretName77778888": {"Value": "secret4"},
         },
     }
     cfn.create_stack(
@@ -650,6 +663,7 @@ def test_init_cli_uses_default_stack_name(tmp_path: Path, patched_session):
             "SecretsGithubWebhookSecretNameX7": {"Value": "v7"},
             "SecretsGithubPatSecretNameX8": {"Value": "v8"},
             "SecretsWorkerAwsCredentialsSecretNameX9": {"Value": "v9"},
+            "SecretsApiAwsCredentialsSecretNameX10": {"Value": "v10"},
         },
     }
     # Stack name derived from deployment_id="personal".

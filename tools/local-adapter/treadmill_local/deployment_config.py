@@ -53,6 +53,7 @@ _SECRETS_OUTPUTS: tuple[tuple[str, str], ...] = (
     ("github_webhook_secret_name", "GithubWebhookSecretName"),
     ("github_pat_secret_name", "GithubPatSecretName"),
     ("worker_aws_credentials_secret_name", "WorkerAwsCredentialsSecretName"),
+    ("api_aws_credentials_secret_name", "ApiAwsCredentialsSecretName"),
 )
 """``secrets.*`` block — Secrets Manager names from the secrets construct."""
 
