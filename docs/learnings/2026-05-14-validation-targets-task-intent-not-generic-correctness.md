@@ -123,15 +123,36 @@ When authoring a **rule** (cross-project, in
   — both are about "the structural seam matters; don't conflate
   layers that should be distinct."
 
+## Operator framing (added 2026-05-14)
+
+Operator call after the first draft: **the ADR is fine.** The lever
+for applying this principle is **operator discipline when drafting
+plans**, not a change to ADR-0029's architecture or schema. The
+parser can't tell intent-targeted apart from generic at parse time;
+a human (or a future wf-plan role) does.
+
+What this means concretely:
+
+* **When I author a plan**, every task's `validation:` block names
+  the **specific** outcome that task delivers — not "tests pass."
+  Re-read the task's intent; phrase the check as the assertion
+  that intent obtains.
+* **When wf-plan eventually authors plans automatically**, its
+  prompt teaches the same discipline. The `validation:` block is
+  not boilerplate.
+* **The ADR-0029 starter rules** (`python-tests-resolve`,
+  `uv-lock-resolves`, `cdk-synth-passes`) stay as drafted — they
+  enforce a CLASS of bug (hallucinated APIs) across many tasks via
+  `applies_to:`. Class-of-bug rules are legitimate; CI-ape rules
+  named per-task are the antipattern.
+* **The plan I just authored** (ADR-0029 plan, `docs/plans/2026-05-13-ralph-loop-validation-runner.md`)
+  has a mix — some validation entries are intent-targeted ("subprocess
+  timeout maps to verdict='error'"); others lead with "tests pass"
+  and qualify after. Future plans I author should lean cleanly into
+  intent-targeted phrasing.
+
 ## Open items
 
-- Should the ADR-0029 starter rules be dropped (Reading A) or
-  reframed as stopgaps with a note pointing at CI (Reading B)?
-  Pending operator call.
-- The plan-doc parser doesn't currently enforce intent-targeting at
-  the schema level (it just requires `kind` + `description` + the
-  new `script`/`prompt`). An llm-judge rule named
-  `validation-targets-intent` could read each task's
-  `validation: description` against its `intent:` and surface
-  "looks generic" warnings. Worth adding to the starter rules if we
-  keep them.
+None — operator discipline owns the application. Future
+`/learning` invocations should reference this learning when an
+author drifts back toward "tests pass."
