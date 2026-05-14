@@ -7,6 +7,7 @@ convention; the registry + ``parse_payload`` / ``encode_payload`` helpers
 are the single seam between JSONB storage and typed application code.
 """
 
+from treadmill_api.events.architect_verdict import ArchitectVerdict
 from treadmill_api.events.base import EventPayload
 from treadmill_api.events.github import (
     GithubCheckRunCompleted,
@@ -60,6 +61,8 @@ __all__ = [
     "UnknownEventTypeError",
     "encode_payload",
     "parse_payload",
+    # Verdict envelopes (ADR-0027, ADR-0032)
+    "ArchitectVerdict",
     # Step output envelope (ADR-0012)
     "StepOutput",
     "Artifact",
