@@ -74,7 +74,26 @@ Skipping this section is a smell. Even when an option seems obviously dominant, 
 
 Include a Mermaid diagram when the decision describes a system interaction, data flow, or state machine. Skip when the decision is purely policy or scope.
 
-Use `sequenceDiagram` for actor-to-actor interactions over time. Use `flowchart` for static topology, dependencies, or layered architecture. Use `stateDiagram-v2` for lifecycle decisions.
+### Diagram type by decision class
+
+| Decision class | Diagram kind |
+|---|---|
+| Actor-to-actor interactions over time | `sequenceDiagram` |
+| Static topology / dependencies / layered architecture | `flowchart` |
+| Lifecycle and observable state transitions | `stateDiagram-v2` |
+
+### Conformance checklist (per ADR-0004)
+
+A conformant diagram uses named actors only, stays at the intent layer, and labels every interaction. Specifically:
+
+- **Named actors only** — every participant is named explicitly; no `?` participants, no anonymous boxes. "The human" is named.
+- **Labels every interaction** with the operation, event, or message name — not a verb. `step.completed` beats "publishes."
+- **Stays at the intent layer** — no function signatures, no class names, no return-value details. *What* and *between whom*, not *how*.
+- **Uses the right Mermaid kind** for the question, per the table above.
+- **Distinguishes synchronous from asynchronous** when it matters (`->>` solid for sync; `-->>` dashed for async/event).
+- **Names alternative branches** with `alt`/`else` blocks rather than burying them in prose.
+
+A non-conformant diagram is a defect of the artifact that contains it. Reviewers reject ADRs that ship with vague or decorative diagrams.
 
 \`\`\`mermaid
 sequenceDiagram

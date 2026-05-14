@@ -61,7 +61,28 @@ A short, ordered list of work units. Each unit is sized to roughly one day of fo
 
 ## Diagram (if applicable)
 
-A Mermaid sequence or flow diagram showing the intended end-state. Skip when the plan is purely organizational. When the diagram already exists in a related ADR, reference the ADR rather than duplicating it.
+A Mermaid diagram showing the intended end-state. Skip when the plan is purely organizational. When the diagram already exists in a related ADR, reference the ADR rather than duplicating it.
+
+### Diagram type by decision class
+
+| Plan class | Diagram kind |
+|---|---|
+| Workflow with actor handoffs over time | `sequenceDiagram` |
+| Static topology / dependencies / component layout | `flowchart` |
+| Lifecycle / state transitions of an artifact | `stateDiagram-v2` |
+
+### Conformance checklist (per ADR-0004)
+
+A conformant diagram uses named actors only, stays at the intent layer, and labels every interaction. Specifically:
+
+- **Named actors only** — every participant is named explicitly; no anonymous participants. Even "the operator" or "the worker" is named.
+- **Labels every interaction** with the operation, event, or message name — not just a verb. `pr_merged` beats "merges."
+- **Stays at the intent layer** — *what* and *between whom*, not function signatures or class names.
+- **Uses the right Mermaid kind** for the plan class, per the table above.
+- **Distinguishes synchronous from asynchronous** when it matters (`->>` solid; `-->>` dashed for async/event).
+- **Names alternative branches** with `alt`/`else` blocks.
+
+A non-conformant diagram is a defect; reviewers reject plans whose diagrams are vague or decorative.
 
 ## Risks / unknowns
 
