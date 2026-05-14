@@ -189,11 +189,11 @@ class LocalRuntime:
         # Per ADR-0019: dev-local credentials are fetched on the host and
         # injected into containers as env vars. The fetched values live in
         # memory on the runtime for the lifetime of the up-process; we
-        # never write them to disk. Both attrs are populated lazily by
+        # never write them to disk. All attrs are populated lazily by
         # ``_ensure_dev_local_credentials`` the first time we need to
         # build container env (``up`` or ``start_worker_once``).
         self._worker_aws_env: dict[str, str] | None = None
-        self._operator_aws_env: dict[str, str] | None = None
+        self._api_aws_env: dict[str, str] | None = None
         self._github_token: str | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -265,80 +265,53 @@ class LocalRuntime:
         self._report_up_dev_local(cfg)
 
     def _ensure_dev_local_credentials(self) -> None:
-        """Populate ``self._worker_aws_env`` + ``self._operator_aws_env``.
+        """Populate ``self._worker_aws_env`` + ``self._api_aws_env``.
 
-        Idempotent — both attributes are only fetched once per runtime
+        Idempotent — all attributes are only fetched once per runtime
         instance lifetime. Called from ``_up_dev_local`` (initial fetch)
         and ``start_worker_once`` (when the worker is launched from a
         fresh CLI process whose ``LocalRuntime`` has no in-memory state).
         """
         assert self.deployment_config is not None
         cfg = self.deployment_config
-        if self._operator_aws_env is None:
-            self._operator_aws_env = self._fetch_operator_sso_credentials(cfg)
+        if self._api_aws_env is None:
+            self._api_aws_env = self._fetch_api_credentials(cfg)
         if self._worker_aws_env is None:
             self._worker_aws_env = self._fetch_worker_credentials(cfg)
         if self._github_token is None:
             self._github_token = self._fetch_github_pat(cfg)
 
     @staticmethod
-    def _fetch_operator_sso_credentials(cfg: dict[str, Any]) -> dict[str, str]:
-        """Export the operator's SSO session as static credentials.
+    def _fetch_api_credentials(cfg: dict[str, Any]) -> dict[str, str]:
+        """Fetch the API's IAM-User keys from Secrets Manager.
 
-        Per ADR-0019 §"The API still uses the operator's SSO profile":
-        rather than mounting ``~/.aws`` into the API container (which
-        breaks on the cache-refresh SSO writeback path), we ask boto3
-        for the *frozen* credentials of the operator's profile here on
-        the host and inject them as env vars on the API container. The
-        container never sees the SSO cache.
+        Per ADR-0019: the local-adapter resolves the API credentials
+        once on the host (using the operator's profile) and injects
+        them as ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` env
+        vars on the API container. The API's boto3 reads them
+        via the standard env-var credential resolution — no Secrets
+        Manager call at startup, no SSO inside the container.
 
-        Implementation choice: we call ``boto3.Session(profile_name=...)
-        .get_credentials().get_frozen_credentials()`` rather than shelling
-        out to ``aws configure export-credentials``. Reasons:
-
-          * Avoids a hard dependency on AWS CLI ≥ 2.13 (a wart the ADR
-            flagged as worth flagging on the alternative path).
-          * One fewer subprocess hop; the same SSO token-resolution
-            logic runs in-process.
-          * Error handling is structured (``botocore.exceptions``)
-            instead of stderr-string parsing.
-
-        On ``ExpiredToken`` / ``UnauthorizedSSOTokenError`` we print a
-        clear remediation message and re-raise — see ADR-0019 §"Quirks":
-        proceeding with degraded creds is worse than failing the up.
+        The secret name comes from the deployment YAML's
+        ``secrets.api_aws_credentials_secret_name`` (populated by
+        ``treadmill-local init`` from the ``ApiAwsCredentialsSecretName``
+        CFN output). The secret payload is JSON of shape
+        ``{"aws_access_key_id": "...", "aws_secret_access_key": "..."}``.
         """
         profile = cfg["aws_profile"]
         region = cfg["aws_region"]
+        secret_name = cfg["secrets"]["api_aws_credentials_secret_name"]
+
+        session = boto3.Session(profile_name=profile, region_name=region)
+        secrets = session.client("secretsmanager")
         try:
-            session = boto3.Session(profile_name=profile, region_name=region)
-            creds = session.get_credentials()
-            if creds is None:
-                raise RuntimeError(
-                    f"no credentials available for profile {profile!r}; "
-                    f"run `aws sso login --profile {profile}` and re-try."
-                )
-            frozen = creds.get_frozen_credentials()
-        except (
-            botocore.exceptions.SSOTokenLoadError,
-            botocore.exceptions.UnauthorizedSSOTokenError,
-            botocore.exceptions.TokenRetrievalError,
-        ) as exc:
-            console.print(
-                f"[red]SSO token for profile {profile!r} is expired or missing: "
-                f"{exc}[/red]"
-            )
-            console.print(
-                f"[red]→ Run `aws sso login --profile {profile}` and re-run "
-                f"`treadmill-local up`.[/red]"
-            )
-            raise SystemExit(1) from exc
+            resp = secrets.get_secret_value(SecretId=secret_name)
         except botocore.exceptions.ClientError as exc:
-            # ExpiredToken / TokenRefreshRequired surface as ClientError
-            # when the underlying STS / SSO call fails mid-resolution.
             code = exc.response.get("Error", {}).get("Code", "")
-            if code in {"ExpiredToken", "ExpiredTokenException", "InvalidToken"}:
+            if code in {"ExpiredToken", "ExpiredTokenException"}:
                 console.print(
-                    f"[red]AWS credentials for profile {profile!r} have expired.[/red]"
+                    f"[red]AWS credentials for profile {profile!r} have expired "
+                    f"mid-fetch of {secret_name!r}.[/red]"
                 )
                 console.print(
                     f"[red]→ Run `aws sso login --profile {profile}` and re-run "
@@ -347,17 +320,27 @@ class LocalRuntime:
                 raise SystemExit(1) from exc
             raise
 
-        env: dict[str, str] = {
-            "AWS_ACCESS_KEY_ID": frozen.access_key,
-            "AWS_SECRET_ACCESS_KEY": frozen.secret_key,
+        raw = resp.get("SecretString")
+        if not raw:
+            raise RuntimeError(
+                f"API AWS credentials secret {secret_name!r} has no SecretString; "
+                f"run `aws iam create-access-key --user-name <api-user> && "
+                f"aws secretsmanager put-secret-value --secret-id {secret_name!r} "
+                f"--secret-string '{{\"aws_access_key_id\": \"...\", "
+                f"\"aws_secret_access_key\": \"...\"}}'` and re-try."
+            )
+        creds = json.loads(raw)
+        access_key = creds.get("aws_access_key_id")
+        secret_key = creds.get("aws_secret_access_key")
+        if not access_key or not secret_key:
+            raise RuntimeError(
+                f"API AWS credentials secret {secret_name!r} is missing "
+                f"aws_access_key_id / aws_secret_access_key"
+            )
+        return {
+            "AWS_ACCESS_KEY_ID": access_key,
+            "AWS_SECRET_ACCESS_KEY": secret_key,
         }
-        if frozen.token:
-            # SSO-derived credentials always carry a session token; STS-AssumeRole
-            # too. Long-lived IAM-User keys (which the operator could in
-            # principle use as their default profile) don't — in that case the
-            # API just gets access-key+secret with no session token.
-            env["AWS_SESSION_TOKEN"] = frozen.token
-        return env
 
     @staticmethod
     def _fetch_worker_credentials(cfg: dict[str, Any]) -> dict[str, str]:
@@ -551,18 +534,17 @@ class LocalRuntime:
         resolver.
 
         Per ADR-0019: ``AWS_PROFILE`` is **not** set; instead the
-        operator's SSO session is exported as ``AWS_ACCESS_KEY_ID`` /
-        ``AWS_SECRET_ACCESS_KEY`` / ``AWS_SESSION_TOKEN`` env vars on
-        the host before the container starts. Boto3's env-var
-        credential resolution picks them up and never touches a profile
-        / SSO cache inside the container.
+        API's IAM-User keys are exported as ``AWS_ACCESS_KEY_ID`` /
+        ``AWS_SECRET_ACCESS_KEY`` env vars on the host before the
+        container starts. Boto3's env-var credential resolution picks
+        them up and never touches a profile inside the container.
         """
         aws = cfg["aws"]
         secrets = cfg["secrets"]
         # The injected creds are required — _ensure_dev_local_credentials
         # populates them before any spec-build call site.
         self._ensure_dev_local_credentials()
-        assert self._operator_aws_env is not None
+        assert self._api_aws_env is not None
         env: dict[str, str] = {
             # Deployment-mode literal (read by ``Settings.deployment_mode``).
             "TREADMILL_DEPLOYMENT_MODE": "dev_local",
@@ -586,10 +568,10 @@ class LocalRuntime:
             "DATABASE_URL": _API_INTERNAL_DB_URL,
             "REDIS_URL": _API_INTERNAL_REDIS_URL,
         }
-        # Inject the operator's SSO-derived static creds last so the
+        # Inject the API's IAM-User keys last so the
         # env-var dict carries the credential keys the container's
         # boto3 will pick up via the standard env-var resolver.
-        env.update(self._operator_aws_env)
+        env.update(self._api_aws_env)
         # GITHUB_TOKEN: the API constructs an httpx.AsyncClient against
         # the GitHub API for ADR-0013's conflict-detection sweep AND
         # ADR-0021's plan-doc trigger handler. Without it the handler

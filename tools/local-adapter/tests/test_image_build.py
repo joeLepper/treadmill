@@ -93,6 +93,9 @@ def _valid_yaml_dict() -> dict[str, Any]:
             "worker_aws_credentials_secret_name": (
                 "treadmill-personal/worker-aws-credentials"
             ),
+            "api_aws_credentials_secret_name": (
+                "treadmill-personal/api-aws-credentials"
+            ),
         },
         "local": {
             "database_url": "postgresql://treadmill:treadmill@localhost:5432/treadmill",
@@ -312,9 +315,8 @@ def test_up_dev_local_calls_ensure_images_built_before_starting_services(
     # any spec env. Stub the fetch so unit tests don't hit real boto3.
     monkeypatch.setattr(rt, "_ensure_dev_local_credentials", lambda: None)
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
-    rt._operator_aws_env = {
+    rt._api_aws_env = {
         "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
-        "AWS_SESSION_TOKEN": "z",
     }
     rt._github_token = "ghp_test"
 
@@ -364,9 +366,8 @@ def test_start_worker_once_calls_ensure_images_built(
     # fetch so this test doesn't hit real boto3.
     monkeypatch.setattr(rt, "_ensure_dev_local_credentials", lambda: None)
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
-    rt._operator_aws_env = {
+    rt._api_aws_env = {
         "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
-        "AWS_SESSION_TOKEN": "z",
     }
     rt._github_token = "ghp_test"
 

@@ -86,6 +86,9 @@ def _valid_yaml_dict(deployment_id: str = "personal") -> dict[str, Any]:
             "worker_aws_credentials_secret_name": (
                 f"treadmill-{deployment_id}/worker-aws-credentials"
             ),
+            "api_aws_credentials_secret_name": (
+                f"treadmill-{deployment_id}/api-aws-credentials"
+            ),
         },
         "local": {
             "database_url": "postgresql://treadmill:treadmill@localhost:5432/treadmill",
@@ -235,7 +238,7 @@ def _runtime_with_injected_creds(
     *,
     cfg: dict[str, Any] | None = None,
     worker_creds: dict[str, str] | None = None,
-    operator_creds: dict[str, str] | None = None,
+    api_creds: dict[str, str] | None = None,
 ) -> LocalRuntime:
     """Build a LocalRuntime with pre-populated credential env dicts so
     the env-builder unit tests don't have to mock boto3 + Secrets Manager.
@@ -251,10 +254,9 @@ def _runtime_with_injected_creds(
         "AWS_ACCESS_KEY_ID": "AKIA-WORKER-TEST",
         "AWS_SECRET_ACCESS_KEY": "worker-secret-test",
     }
-    rt._operator_aws_env = operator_creds or {
-        "AWS_ACCESS_KEY_ID": "ASIA-OPERATOR-TEST",
-        "AWS_SECRET_ACCESS_KEY": "operator-secret-test",
-        "AWS_SESSION_TOKEN": "operator-session-token-test",
+    rt._api_aws_env = api_creds or {
+        "AWS_ACCESS_KEY_ID": "AKIA-API-TEST",
+        "AWS_SECRET_ACCESS_KEY": "api-secret-test",
     }
     rt._github_token = "ghp_test_token_placeholder"
     return rt
@@ -265,7 +267,7 @@ def test_dev_local_api_env_wires_aws_resources_from_yaml(
 ) -> None:
     """The API container's env carries every AWS ARN/URL from the YAML
     under the exact env-var names ``Settings`` reads, plus the
-    operator-SSO-derived static credentials injected per ADR-0019."""
+    API IAM-User credentials injected per ADR-0019."""
     cfg = _valid_yaml_dict()
     rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
     env = rt._dev_local_api_env(cfg)
@@ -282,10 +284,11 @@ def test_dev_local_api_env_wires_aws_resources_from_yaml(
     assert env["AWS_ACCOUNT_ID"] == "111111111111"
     assert "AWS_ENDPOINT_URL" not in env
 
-    # Operator-SSO-derived static creds (per ADR-0019).
-    assert env["AWS_ACCESS_KEY_ID"] == "ASIA-OPERATOR-TEST"
-    assert env["AWS_SECRET_ACCESS_KEY"] == "operator-secret-test"
-    assert env["AWS_SESSION_TOKEN"] == "operator-session-token-test"
+    # API IAM-User keys (per ADR-0019). No session token — IAM-User
+    # credentials are long-lived and don't carry a token.
+    assert env["AWS_ACCESS_KEY_ID"] == "AKIA-API-TEST"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "api-secret-test"
+    assert "AWS_SESSION_TOKEN" not in env
 
     # AWS resources — aliased Settings fields take the unprefixed name.
     assert env["EVENTS_TOPIC_ARN"] == cfg["aws"]["events_topic_arn"]
@@ -576,28 +579,30 @@ def test_fetch_worker_credentials_raises_when_secret_payload_malformed(
         LocalRuntime._fetch_worker_credentials(cfg)
 
 
-def test_fetch_operator_sso_credentials_returns_three_env_vars(
+def test_fetch_api_credentials_returns_env_var_dict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``_fetch_operator_sso_credentials`` calls
-    ``boto3.Session(profile_name=...).get_credentials().get_frozen_credentials()``
-    and returns a dict shaped for direct injection on the API container —
-    ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` + ``AWS_SESSION_TOKEN``.
+    """``_fetch_api_credentials`` fetches the API IAM-User keys
+    from Secrets Manager (using the operator's profile) and returns a
+    dict shaped for direct injection as env vars on the API
+    container — ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY``.
 
-    The session token is load-bearing for SSO-derived credentials:
-    without it, boto3 inside the container rejects the partial pair."""
+    The secret name comes from the deployment YAML's
+    ``secrets.api_aws_credentials_secret_name``; the payload is JSON
+    of shape ``{"aws_access_key_id": ..., "aws_secret_access_key": ...}``
+    (matching what ADR-0016 Q16.c standardizes for the IAM-User keys)."""
     cfg = _valid_yaml_dict()
 
-    frozen = MagicMock()
-    frozen.access_key = "ASIAFAKEOPERATOR"
-    frozen.secret_key = "operator-secret-from-sso"
-    frozen.token = "operator-sso-session-token"
-
-    creds = MagicMock()
-    creds.get_frozen_credentials.return_value = frozen
-
+    import json
+    fake_secrets_client = MagicMock()
+    fake_secrets_client.get_secret_value.return_value = {
+        "SecretString": json.dumps({
+            "aws_access_key_id": "AKIAFAKEAPI",
+            "aws_secret_access_key": "api-secret-from-secrets-manager",
+        }),
+    }
     fake_session = MagicMock()
-    fake_session.get_credentials.return_value = creds
+    fake_session.client.return_value = fake_secrets_client
 
     boto3_session_calls: list[dict[str, Any]] = []
 
@@ -607,45 +612,65 @@ def test_fetch_operator_sso_credentials_returns_three_env_vars(
 
     monkeypatch.setattr(runtime_module.boto3, "Session", _fake_boto3_session)
 
-    env = LocalRuntime._fetch_operator_sso_credentials(cfg)
+    env = LocalRuntime._fetch_api_credentials(cfg)
 
+    # Boto3 session was built using the operator's profile + region.
     assert boto3_session_calls == [
         {"profile_name": "treadmill-personal", "region_name": "us-east-1"},
     ]
-    # All three env vars present — boto3 rejects an SSO key/secret pair
-    # without the session token, so the test asserts on all three.
+    # Secrets Manager called with the secret name from the YAML.
+    fake_secrets_client.get_secret_value.assert_called_once_with(
+        SecretId="treadmill-personal/api-aws-credentials",
+    )
+    # The returned dict carries exactly the AWS env-var keys the
+    # API's boto3 reads via the standard env chain.
     assert env == {
-        "AWS_ACCESS_KEY_ID": "ASIAFAKEOPERATOR",
-        "AWS_SECRET_ACCESS_KEY": "operator-secret-from-sso",
-        "AWS_SESSION_TOKEN": "operator-sso-session-token",
+        "AWS_ACCESS_KEY_ID": "AKIAFAKEAPI",
+        "AWS_SECRET_ACCESS_KEY": "api-secret-from-secrets-manager",
     }
 
 
-def test_fetch_operator_sso_credentials_exits_on_expired_token(
+def test_fetch_api_credentials_raises_when_secret_has_no_secret_string(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """When the operator's SSO token is expired, we print a clear
-    remediation message (``aws sso login --profile <profile>``) and
-    exit non-zero — proceeding with degraded credentials is worse than
-    failing the ``up``. Per ADR-0019 §"Quirks worth flagging"."""
-    import botocore.exceptions
+    """When the API credentials secret has no SecretString (operator
+    forgot to populate it), raise a clear RuntimeError naming the secret
+    and the operator action needed."""
     cfg = _valid_yaml_dict()
+    fake_secrets_client = MagicMock()
+    fake_secrets_client.get_secret_value.return_value = {}
+    fake_session = MagicMock()
+    fake_session.client.return_value = fake_secrets_client
+    monkeypatch.setattr(
+        runtime_module.boto3, "Session", lambda **kw: fake_session,
+    )
 
-    def _raise_unauthorized(**kwargs: Any) -> Any:
-        session = MagicMock()
-        session.get_credentials.side_effect = (
-            botocore.exceptions.UnauthorizedSSOTokenError()
-        )
-        return session
+    with pytest.raises(RuntimeError) as exc_info:
+        LocalRuntime._fetch_api_credentials(cfg)
+    assert "has no SecretString" in str(exc_info.value)
+    assert "aws iam create-access-key" in str(exc_info.value)
+    assert "aws secretsmanager put-secret-value" in str(exc_info.value)
 
-    monkeypatch.setattr(runtime_module.boto3, "Session", _raise_unauthorized)
 
-    with pytest.raises(SystemExit) as excinfo:
-        LocalRuntime._fetch_operator_sso_credentials(cfg)
-    assert excinfo.value.code == 1
-    out = capsys.readouterr().out
-    assert "aws sso login --profile treadmill-personal" in out
+def test_fetch_api_credentials_raises_when_secret_payload_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret whose payload is missing one of the required keys must
+    fail loudly — degraded creds would let the container start with a
+    half-resolved boto3 chain and 403 later."""
+    cfg = _valid_yaml_dict()
+    fake_secrets_client = MagicMock()
+    fake_secrets_client.get_secret_value.return_value = {
+        "SecretString": '{"aws_access_key_id": "AKIAFAKE"}',  # missing secret
+    }
+    fake_session = MagicMock()
+    fake_session.client.return_value = fake_secrets_client
+    monkeypatch.setattr(
+        runtime_module.boto3, "Session", lambda **kw: fake_session,
+    )
+
+    with pytest.raises(RuntimeError, match="missing aws_access_key_id / aws_secret_access_key"):
+        LocalRuntime._fetch_api_credentials(cfg)
 
 
 # ── Dev-local up: skips moto + skips synth ────────────────────────────────────
@@ -684,11 +709,7 @@ def test_up_dev_local_skips_moto_and_synth(
     # Per ADR-0019: ``up`` fetches AWS credentials on the host. Stub
     # the fetch so we don't hit real boto3/Secrets Manager in unit tests.
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
-    rt._operator_aws_env = {
-        "AWS_ACCESS_KEY_ID": "x",
-        "AWS_SECRET_ACCESS_KEY": "y",
-        "AWS_SESSION_TOKEN": "z",
-    }
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._github_token = "ghp_test_token_placeholder"
 
     rt.up()
@@ -924,11 +945,7 @@ def test_up_dev_local_with_no_autoscaler_flag_skips_spawn(
     monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
     monkeypatch.setattr(rt, "_start_services", lambda: None)
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
-    rt._operator_aws_env = {
-        "AWS_ACCESS_KEY_ID": "x",
-        "AWS_SECRET_ACCESS_KEY": "y",
-        "AWS_SESSION_TOKEN": "z",
-    }
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._github_token = "ghp_test_token_placeholder"
 
     spawn_calls: list[Any] = []
