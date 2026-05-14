@@ -51,6 +51,7 @@ def _ctx(
     pr_number: int | None = None,
     role_id: str = "role-test",
     workflow_id: str = "wf-test",
+    task_validations: list | None = None,
 ) -> WorkerContext:
     return WorkerContext(
         step_id=str(uuid.uuid4()),
@@ -74,6 +75,7 @@ def _ctx(
         ),
         pr_number=pr_number,
         prior_steps=[],
+        task_validations=task_validations or [],
     )
 
 
@@ -103,6 +105,7 @@ def _disp_ctx(
     workflow_id: str = "wf-test",
     is_dry_run: bool = False,
     repo_mode: str = "local",
+    task_validations: list | None = None,
 ) -> DispositionContext:
     return DispositionContext(
         ctx=_ctx(
@@ -110,6 +113,7 @@ def _disp_ctx(
             pr_number=pr_number,
             role_id=role_id,
             workflow_id=workflow_id,
+            task_validations=task_validations,
         ),
         claude_result=CodeAuthorResult(summary=summary),
         repo_dir=repo_dir,
@@ -308,6 +312,165 @@ def test_code_handler_wf_feedback_skips_merged_deleted_branch(
     assert out.commit_sha
     # But no PR number because the branch is gone.
     assert "pr_number" not in out.payload
+
+
+# ── Author-side validation (2026-05-14 learning) ──────────────────────────────
+
+
+def test_code_handler_runs_passing_validation_and_pushes(tmp_path: Path) -> None:
+    """Per the 2026-05-14 learning, deterministic validation scripts are
+    run before pushing. A passing script → push proceeds normally."""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    # Task has a passing validation script.
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="test-check",
+                kind="deterministic",
+                description="always passes",
+                script="exit 0",
+                prompt=None,
+            )
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha
+    branches = [a.value for a in out.artifacts if a.kind == "branch"]
+    assert branches == ["task/x-add-thing"]
+
+
+def test_code_handler_fails_on_failing_validation_script(tmp_path: Path) -> None:
+    """A failing deterministic validation script → decision=fail, skip push."""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    # Task has a failing validation script.
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="test-check",
+                kind="deterministic",
+                description="always fails",
+                script="exit 1",
+                prompt=None,
+            )
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "fail"
+    assert out.commit_sha is None
+    assert out.artifacts == []
+    # Validation result is captured in payload.
+    assert "validation_results" in out.payload
+    results = out.payload["validation_results"]
+    assert len(results) == 1
+    assert results[0]["check_id"] == "test-check"
+    assert results[0]["verdict"] == "fail"
+
+
+def test_code_handler_fails_on_first_failing_check_of_many(tmp_path: Path) -> None:
+    """With multiple checks, the handler fails on the first failure."""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="check-1",
+                kind="deterministic",
+                description="passes",
+                script="exit 0",
+                prompt=None,
+            ),
+            TaskValidationInfo(
+                id="check-2",
+                kind="deterministic",
+                description="fails",
+                script="exit 1",
+                prompt=None,
+            ),
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "fail"
+    assert out.commit_sha is None
+    # Both checks ran, but the failure is captured.
+    results = out.payload["validation_results"]
+    assert len(results) == 2
+    assert results[0]["verdict"] == "pass"
+    assert results[1]["verdict"] == "fail"
+
+
+def test_code_handler_ignores_llm_judge_checks_at_author_time(
+    tmp_path: Path,
+) -> None:
+    """LLM-judge checks are deferred to wf-validate post-merge. Author
+    time only runs deterministic checks."""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="llm-check",
+                kind="llm-judge",
+                description="linter",
+                script=None,
+                prompt="check the code",
+            )
+        ])
+
+    # LLM-judge check is present but should not cause author-side failure.
+    # It just gets skipped.
+    out = handle_code(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha
+
+
+def test_code_handler_with_empty_validations_list(tmp_path: Path) -> None:
+    """Empty or missing validations list → normal push."""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[])
+
+    out = handle_code(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha
+
+
+def test_code_handler_captures_validation_stderr(tmp_path: Path) -> None:
+    """Validation script stderr is captured in the failure output."""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="test-check",
+                kind="deterministic",
+                description="test with stderr",
+                script="echo 'error message' >&2; exit 1",
+                prompt=None,
+            )
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "fail"
+    results = out.payload["validation_results"]
+    assert len(results) == 1
+    # stderr excerpt is captured.
+    assert "error message" in results[0]["log_excerpt"]
 
 
 # ── review handler ──────────────────────────────────────────────────────────

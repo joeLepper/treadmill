@@ -42,6 +42,7 @@ from treadmill_api.models import (
     Skill,
     Task,
     TaskPR,
+    TaskValidation,
     Workflow,
     WorkflowRun,
     WorkflowRunStep,
@@ -113,6 +114,14 @@ class _RoleBlock(BaseModel):
     hooks: list[_HookBlock]
 
 
+class _ValidationBlock(BaseModel):
+    id: uuid.UUID
+    kind: str
+    description: str
+    script: str | None
+    prompt: str | None
+
+
 class PriorStepBlock(BaseModel):
     """A completed prior step in the same run, returned as part of the
     worker context per ADR-0015.
@@ -161,6 +170,10 @@ class WorkerContextResponse(BaseModel):
     are intentionally **excluded** — the worker only consumes
     successfully-completed analyzer output.
     """
+    task_validations: list[_ValidationBlock] = []
+    """Task-specific validation checks defined in the plan-doc task spec.
+    Per the 2026-05-14 learning, the code disposition runs these scripts
+    before pushing to gate on self-validation."""
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -281,6 +294,17 @@ async def get_step_context(
         )
     ).scalars().all()
 
+    # Task-specific validation checks, ordered by position.
+    # Per the 2026-05-14 learning, the code disposition runs these
+    # scripts before pushing to gate on author-side self-validation.
+    validation_rows = (
+        await session.execute(
+            select(TaskValidation)
+            .where(TaskValidation.task_id == task.id)
+            .order_by(TaskValidation.position)
+        )
+    ).scalars().all()
+
     return WorkerContextResponse(
         step=_StepBlock(
             id=step.id, run_id=step.run_id, step_index=step.step_index,
@@ -325,5 +349,12 @@ async def get_step_context(
                 output=ps.output,
             )
             for ps in prior_step_rows
+        ],
+        task_validations=[
+            _ValidationBlock(
+                id=v.id, kind=v.kind, description=v.description,
+                script=v.script, prompt=v.prompt,
+            )
+            for v in validation_rows
         ],
     )

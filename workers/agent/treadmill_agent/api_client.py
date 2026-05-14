@@ -71,6 +71,22 @@ class PriorStep:
 
 
 @dataclass(frozen=True)
+class TaskValidationInfo:
+    """A validation check from the task's ``validation:`` block.
+
+    Per the 2026-05-14 learning, the code disposition runs deterministic
+    checks (via ``validation_runtime.run_deterministic``) before pushing
+    to gate on author-side self-validation.
+    """
+
+    id: str
+    kind: str
+    description: str
+    script: str | None
+    prompt: str | None
+
+
+@dataclass(frozen=True)
 class WorkerContext:
     """Decoded GET /api/v1/steps/{id} response."""
 
@@ -100,6 +116,10 @@ class WorkerContext:
     ``review``-kind steps; the dispatch handler raises
     ``MissingContextError`` when absent."""
     prior_steps: list[PriorStep]
+    task_validations: list[TaskValidationInfo]
+    """Task-specific validation checks from the plan-doc task spec.
+    Per the 2026-05-14 learning, the code disposition runs deterministic
+    checks before pushing to gate on author-side self-validation."""
 
 
 class ApiClient:
@@ -180,5 +200,15 @@ def _decode_context(body: dict[str, Any]) -> WorkerContext:
                 output=ps.get("output"),
             )
             for ps in body.get("prior_steps", [])
+        ],
+        task_validations=[
+            TaskValidationInfo(
+                id=v["id"],
+                kind=v["kind"],
+                description=v["description"],
+                script=v.get("script"),
+                prompt=v.get("prompt"),
+            )
+            for v in body.get("task_validations", [])
         ],
     )
