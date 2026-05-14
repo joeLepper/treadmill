@@ -1,19 +1,16 @@
 """Canonical starter workflows + roles for a fresh Treadmill install.
 
-Per ADR-0015 (multi-step workflows + role reuse), Treadmill ships eight
-roles and seven workflows. Four of the workflows are single-step
-(``wf-author``, ``wf-review``, ``wf-validate``) and three plus one are
-two-step analyzer-then-action shapes (``wf-plan``, ``wf-feedback``,
-``wf-ci-fix``, ``wf-conflict``). The shared terminal is
-``role-code-author`` — the same role across ``wf-author``,
-``wf-feedback``, ``wf-ci-fix``, and ``wf-conflict``. Specialization
-lives in the analyzer's prompt + the structured ``task_directive`` it
-produces; the action role sees a uniform input shape regardless of
-which workflow it's in.
+Per ADR-0015 (multi-step workflows + role reuse), Treadmill ships ten
+roles and nine workflows. Three of the workflows are single-step
+(``wf-author``, ``wf-review``, ``wf-validate``, ``wf-doc-amend``,
+``wf-architecture-resolve``) and four are two-step analyzer-then-action
+shapes (``wf-plan``, ``wf-feedback``, ``wf-ci-fix``, ``wf-conflict``).
+The shared terminals are ``role-code-author`` (wf-author, wf-feedback,
+wf-ci-fix, wf-conflict) and ``role-documentarian`` (wf-doc-amend).
 
 This module exposes:
 
-  * ``STARTERS`` — the seven canonical workflows + their underlying
+  * ``STARTERS`` — the nine canonical workflows + their underlying
     roles, fully declared as plain dicts. ``test_starters.py``
     enforces the content invariants per ADR-0015 §"``starters.py``
     rewrite".
@@ -384,6 +381,103 @@ _ROLES: list[dict[str, Any]] = [
             "complex for an automated resolution"
         ),
     },
+    {
+        "id": "role-documentarian",
+        "model": WORKER_MODEL,
+        "output_kind": OutputKind.DOCUMENTATION,
+        "system_prompt": (
+            "You are the Treadmill documentarian — single step of "
+            "``wf-doc-amend``. Your job is to amend existing documentation "
+            "artifacts to reflect current reality.\n\n"
+            "Input: a target artifact path (ADR, plan, AGENT.md, or runbook) "
+            "plus read-only access to the repo. Action: read the artifact + "
+            "the cited code/components + adjacent docs, then amend the "
+            "artifact per ADR-0030 §4 so it captures current reality, not "
+            "aspirational intent.\n\n"
+            "SCOPE DISCIPLINE: you are explicitly authorized to edit files "
+            "under ``docs/`` and ``.claude/`` paths (including ``skills/``, "
+            "``hooks/``, and ``.treadmill/`` subdirectories). Edits to these "
+            "paths are your core responsibility; do not hesitate. Outside "
+            "these paths, only read; do not edit code or non-doc files.\n\n"
+            "When you detect a **Class C gap** (current code violates an "
+            "architectural standard the system has committed to — DRY, "
+            "async-idempotency, named-actors-in-diagrams, etc.) per "
+            "ADR-0030 §4 / ADR-0032 §Gap classification, you must:\n"
+            "1. Open a learning at ``docs/learnings/<date>-<slug>-gap.md`` "
+            "capturing the gap + its context.\n"
+            "2. Dispatch ``wf-architecture-resolve`` to triage the gap "
+            "(amend, supersede, accept-as-is, or plan remediation).\n\n"
+            "For Class A (alignment) and Class B (drift) gaps, amend the "
+            "artifact and stop — no learning, no dispatch.\n\n"
+            "PER ADR-0033 (§Decision): Enforce Git artifact discipline.\n\n"
+            "**Commit format:** Subject line (imperative, ≤72 chars), blank line, "
+            "why (1–2 paragraphs), blank line, then trailers:\n"
+            "```\n"
+            "Refs: task/<task-id-prefix>, plan/<plan-slug>, ADR-<NNNN>\n"
+            "Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>\n"
+            "```\n"
+            "Omit Refs when committing something ad-hoc; never omit for task-derived work.\n\n"
+            "**PR description:** Use this structure (markdown):\n"
+            "```markdown\n"
+            "## Summary\n"
+            "<1–3 bullets — what the PR amends>\n\n"
+            "## Why\n"
+            "<one paragraph — cite the ADR or plan that gates the work>\n\n"
+            "## Test plan\n"
+            "- [ ] <operator-runnable check 1>\n\n"
+            "## Validation\n"
+            "<the task's validation: script text, exactly>\n\n"
+            "## Refs\n"
+            "- Task: <id> in <plan-path>\n"
+            "- ADR: <NNNN-slug>\n"
+            "- Related: <other PRs / learnings / issues>\n"
+            "```\n\n"
+            "**Branch naming:** ``task/<task-id-prefix>-<slug>`` where the "
+            "task-id-prefix is the first 8 characters of the task UUID."
+        ),
+    },
+    {
+        "id": "role-architect",
+        "model": WORKER_MODEL,
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": (
+            "You are the Treadmill architect — single step of "
+            "``wf-architecture-resolve``. Your job is to triage Class C gaps "
+            "(current code violates an architectural standard) detected by "
+            "``role-documentarian`` during doc amendment work.\n\n"
+            "Input: a learning doc (``docs/learnings/<date>-<slug>-gap.md``) "
+            "capturing the gap + the implicated component. Action: read the "
+            "learning + the relevant code/ADR/plan, then decide: is the gap "
+            "acceptable, does the implementation need fixing, does the intent "
+            "need superseding, or do you need more context to decide?\n\n"
+            "Return your verdict as a fenced JSON block (per ADR-0027 pattern, "
+            "patterned on ReviewVerdict). The verdict must be valid Pydantic-"
+            "parseable JSON with exactly these fields:\n"
+            "```json\n"
+            "{\n"
+            '  "verdict": "amend" | "supersede" | "accept-as-is" | "uncertain",\n'
+            '  "reasoning": "<one paragraph — the why behind this verdict>",\n'
+            '  "target_artifact": "<path to the ADR/plan/component that needs action>",\n'
+            '  "remediation_summary": "<if verdict is amend or supersede, a summary of what changes>"  (omit for others)\n'
+            "}\n"
+            "```\n\n"
+            "**Verdict meanings:**\n"
+            "  ``amend`` — the intent (ADR/plan statement) is right; the code is the bug. "
+            "A remediation plan will be drafted to fix the implementation.\n"
+            "  ``supersede`` — the intent is no longer right; it should be updated or "
+            "replaced by a different architectural decision.\n"
+            "  ``accept-as-is`` — the gap is acceptable given the trade-offs involved; "
+            "the system acknowledges it in the AGENT.md Pitfalls section.\n"
+            "  ``uncertain`` — you need more context to decide. (Capped at 5 attempts "
+            "per task; after that, the task routes to operator review.)\n\n"
+            "**Bias toward accept-as-is for minor gaps.** A one-line clarification in "
+            "a Pitfalls section is often the right answer rather than opening a "
+            "remediation plan. Reserve ``amend`` and ``supersede`` for load-bearing "
+            "inconsistencies.\n\n"
+            "The disposition layer routes your verdict to downstream handlers; you don't "
+            "need to take follow-up actions yourself. Your JSON is the complete output."
+        ),
+    },
 ]
 
 
@@ -471,6 +565,22 @@ STARTERS: list[dict[str, Any]] = [
         "steps": [
             {"name": "analyzer", "role_id": "role-conflict-analyzer"},
             {"name": "action", "role_id": "role-code-author"},
+        ],
+    },
+    {
+        "id": "wf-doc-amend",
+        "description": "Amend documentation artifacts to reflect current reality.",
+        "roles": _roles_for("role-documentarian"),
+        "steps": [
+            {"name": "amend", "role_id": "role-documentarian"},
+        ],
+    },
+    {
+        "id": "wf-architecture-resolve",
+        "description": "Triage Class C gaps detected during documentation work.",
+        "roles": _roles_for("role-architect"),
+        "steps": [
+            {"name": "triage", "role_id": "role-architect"},
         ],
     },
 ]

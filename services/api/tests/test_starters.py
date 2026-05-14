@@ -1,15 +1,14 @@
 """Content tests for the starter-workflow seed module.
 
-Per ADR-0015 §"``starters.py`` rewrite", every install ships with the
-canonical eight roles + seven workflows. Four workflows are single-step;
-three plus one (``wf-plan``, ``wf-feedback``, ``wf-ci-fix``,
-``wf-conflict``) are two-step analyzer-then-action shapes. These tests
-enforce the content invariants of the static ``STARTERS`` list — every
-step references a defined role, no slug appears twice, two-step shapes
-follow the analyzer-then-action pattern, ``role-code-author`` is reused
-by exactly four workflows. The integration test
-(``cli/tests/test_integration_cli_seed.py``) exercises seeding against
-a live API.
+Per ADR-0015 §"``starters.py`` rewrite" and ADR-0032, every install ships with the
+canonical ten roles + nine workflows. Five workflows are single-step;
+four (``wf-plan``, ``wf-feedback``, ``wf-ci-fix``, ``wf-conflict``) are
+two-step analyzer-then-action shapes. These tests enforce the content
+invariants of the static ``STARTERS`` list — every step references a
+defined role, no slug appears twice, two-step shapes follow the analyzer-
+then-action pattern, ``role-code-author`` is reused by exactly four workflows.
+The integration test (``cli/tests/test_integration_cli_seed.py``) exercises
+seeding against a live API.
 """
 
 from __future__ import annotations
@@ -28,8 +27,8 @@ from treadmill_api.starters import (
 
 
 # Expected workflow id-set + role id-set per ADR-0015 §"Role taxonomy"
-# and §"Per-workflow shape matrix". Kept as module-level constants so
-# the assertions below read declaratively.
+# and §"Per-workflow shape matrix", plus ADR-0032 (documentarian + architect).
+# Kept as module-level constants so the assertions below read declaratively.
 
 _EXPECTED_WORKFLOW_IDS = {
     "wf-author",
@@ -39,6 +38,8 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-feedback",
     "wf-ci-fix",
     "wf-conflict",
+    "wf-doc-amend",
+    "wf-architecture-resolve",
 }
 
 _EXPECTED_ROLE_IDS = {
@@ -50,6 +51,8 @@ _EXPECTED_ROLE_IDS = {
     "role-feedback-analyzer",
     "role-ci-analyzer",
     "role-conflict-analyzer",
+    "role-documentarian",
+    "role-architect",
 }
 
 # The two action-role ids that may appear as step 2 of a 2-step
@@ -61,15 +64,16 @@ _ACTION_ROLE_IDS = {"role-code-author", "role-doc-author"}
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 
-def test_starters_has_seven_canonical_workflows() -> None:
-    """The canonical seven, exactly. Future starters extend this list;
-    the count is asserted as a tripwire so additions are intentional."""
+def test_starters_has_nine_canonical_workflows() -> None:
+    """The canonical nine, exactly (per ADR-0015 + ADR-0032). Future starters
+    extend this list; the count is asserted as a tripwire so additions are
+    intentional."""
     ids = {wf["id"] for wf in STARTERS}
     assert ids == _EXPECTED_WORKFLOW_IDS
 
 
-def test_starters_declares_eight_canonical_roles() -> None:
-    """Per ADR-0015 §"Role taxonomy" — eight roles, exactly."""
+def test_starters_declares_ten_canonical_roles() -> None:
+    """Per ADR-0015 §"Role taxonomy" + ADR-0032 — ten roles, exactly."""
     ids = {role["id"] for role in _all_roles()}
     assert ids == _EXPECTED_ROLE_IDS
 
@@ -145,7 +149,7 @@ def test_every_role_has_required_fields() -> None:
         )
 
 
-# Per ADR-0022 §"Migration of seeded roles" — the canonical mapping of
+# Per ADR-0022 §"Migration of seeded roles" + ADR-0032 — the canonical mapping of
 # each seeded role to its declared output kind. The runner's dispatch
 # table reads this field; a drift here means the runner can't pick the
 # right disposition handler at run time.
@@ -158,6 +162,8 @@ _EXPECTED_OUTPUT_KINDS: dict[str, OutputKind] = {
     "role-feedback-analyzer": OutputKind.ANALYSIS,
     "role-ci-analyzer": OutputKind.ANALYSIS,
     "role-conflict-analyzer": OutputKind.ANALYSIS,
+    "role-documentarian": OutputKind.DOCUMENTATION,
+    "role-architect": OutputKind.ANALYSIS,
 }
 
 
@@ -411,6 +417,72 @@ def test_role_doc_author_prompt_teaches_adr_0033_branch_naming() -> None:
     )
 
 
+def test_role_documentarian_prompt_teaches_adr_0033_commit_format() -> None:
+    """Per ADR-0033 §Decision, role-documentarian must teach the standardized
+    commit message format: subject ≤72, why, Refs: and Co-Authored-By
+    trailers."""
+    documentarian = next(r for r in _all_roles() if r["id"] == "role-documentarian")
+    prompt = documentarian["system_prompt"]
+    assert "ADR-0033" in prompt, (
+        "role-documentarian prompt must reference ADR-0033 for commit discipline"
+    )
+    assert "Refs:" in prompt and "Co-Authored-By:" in prompt, (
+        "role-documentarian prompt must teach Refs: and Co-Authored-By: trailers"
+    )
+    assert "≤72" in prompt or "72 chars" in prompt, (
+        "role-documentarian prompt must specify subject line ≤72 chars"
+    )
+
+
+def test_role_documentarian_prompt_teaches_adr_0033_pr_format() -> None:
+    """Per ADR-0033 §Decision, role-documentarian must teach the standardized
+    PR description structure: Summary / Why / Test plan / Validation / Refs."""
+    documentarian = next(r for r in _all_roles() if r["id"] == "role-documentarian")
+    prompt = documentarian["system_prompt"]
+    required_sections = ["## Summary", "## Why", "## Test plan", "## Validation", "## Refs"]
+    for section in required_sections:
+        assert section in prompt, (
+            f"role-documentarian prompt must include {section!r} in PR description template"
+        )
+
+
+def test_role_documentarian_prompt_teaches_adr_0033_branch_naming() -> None:
+    """Per ADR-0033 §Decision, role-documentarian must teach the standardized
+    branch naming convention: task/<task-id-prefix>-<slug> with 8-char UUID."""
+    documentarian = next(r for r in _all_roles() if r["id"] == "role-documentarian")
+    prompt = documentarian["system_prompt"]
+    assert "task/" in prompt and "task-id-prefix" in prompt, (
+        "role-documentarian prompt must teach task/<task-id-prefix>-<slug> "
+        "branch naming per ADR-0033"
+    )
+    assert "8" in prompt, (
+        "role-documentarian prompt must specify 8-char UUID prefix length"
+    )
+
+
+def test_role_architect_prompt_teaches_json_envelope() -> None:
+    """Per ADR-0032 Q32.d, the architect role must return a Pydantic-validated
+    ArchitectVerdict JSON envelope, patterned on ADR-0027's ReviewVerdict.
+    The prompt must teach the JSON envelope convention with the four verdict
+    values: amend / supersede / accept-as-is / uncertain."""
+    architect = next(r for r in _all_roles() if r["id"] == "role-architect")
+    prompt = architect["system_prompt"]
+    assert "json" in prompt.lower(), (
+        "role-architect prompt must teach the JSON envelope (ADR-0032 Q32.d). "
+        "The runner parses the last ```json fenced block to extract the verdict."
+    )
+    assert "```json" in prompt, (
+        "role-architect prompt should include a literal ```json fence "
+        "example so the model has a concrete template."
+    )
+    # Architect must teach all four verdict values.
+    for value in ("amend", "supersede", "accept-as-is", "uncertain"):
+        assert value in prompt, (
+            f"role-architect prompt must reference verdict value {value!r}; "
+            "the runner won't recognize verdicts the prompt doesn't teach."
+        )
+
+
 # Note: the prior contract tests asserted that every prompt mentioned
 # the ``StepOutput`` envelope, listed decision values, and named
 # ``task_directive`` for analyzer roles. Those tests encoded the
@@ -499,13 +571,14 @@ def test_every_role_is_referenced_by_at_least_one_workflow() -> None:
     assert not orphans, f"orphan roles (defined but unused): {sorted(orphans)}"
 
 
-def test_single_step_workflows_match_adr_0015_matrix() -> None:
-    """Tripwire — the three single-step workflows are wf-author,
-    wf-review, wf-validate. ``wf-author`` deliberately stays single-step
-    per ADR-0015 §"Why ``wf-author`` stays single-step" — its input is
-    already structured."""
+def test_single_step_workflows_match_adr_0015_and_0032_matrix() -> None:
+    """Tripwire — the five single-step workflows are wf-author, wf-review,
+    wf-validate, wf-doc-amend, and wf-architecture-resolve. Per ADR-0015,
+    ``wf-author`` deliberately stays single-step because its input is already
+    structured. Per ADR-0032, ``wf-doc-amend`` and ``wf-architecture-resolve``
+    are single-step (verdict routing in disposition, not a second step)."""
     ids = {wf["id"] for wf in STARTERS if len(wf["steps"]) == 1}
-    assert ids == {"wf-author", "wf-review", "wf-validate"}
+    assert ids == {"wf-author", "wf-review", "wf-validate", "wf-doc-amend", "wf-architecture-resolve"}
 
 
 # ── seed() behavior ──────────────────────────────────────────────────────────
