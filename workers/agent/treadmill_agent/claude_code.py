@@ -44,6 +44,78 @@ class CodeAuthorError(RuntimeError):
     """Surface non-zero exit codes from the Claude Code CLI."""
 
 
+def run_claude(
+    *,
+    prompt: str,
+    model: str,
+    timeout_seconds: int = 30,
+) -> str:
+    """Invoke Claude with a prompt and model, returning raw output.
+
+    Lightweight wrapper for simple Claude invocations that don't need
+    the full role machinery. Used by validation_runtime for LLM-judge
+    checks and other simple evaluation tasks.
+
+    Args:
+        prompt: The prompt to send to Claude
+        model: Model ID (e.g., 'claude-haiku-4-5-20251001')
+        timeout_seconds: Timeout for Claude execution
+
+    Returns:
+        Raw stdout output from Claude
+
+    Raises:
+        CodeAuthorError: If Claude exits non-zero or times out
+    """
+    binary = _find_binary()
+    cmd = [
+        binary, "--print",
+        "--model", model,
+        prompt,
+    ]
+    logger.info("running claude: model=%s", model)
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_thread = threading.Thread(
+        target=_pump_stream,
+        args=(proc.stdout, stdout_lines, logging.INFO, "stdout", {}),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_pump_stream,
+        args=(proc.stderr, stderr_lines, logging.WARNING, "stderr", {}),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        raise CodeAuthorError(f"Claude timed out after {timeout_seconds}s")
+    stdout_thread.join()
+    stderr_thread.join()
+
+    stdout_text = "".join(stdout_lines)
+    if returncode != 0:
+        stderr_text = "".join(stderr_lines)
+        raise CodeAuthorError(
+            f"claude exited {returncode}\n"
+            f"stdout:\n{stdout_text}\nstderr:\n{stderr_text}"
+        )
+    return stdout_text
+
+
 def run_claude_code(
     *,
     repo_dir: Path,
