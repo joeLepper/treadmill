@@ -31,22 +31,42 @@ We decided to introduce two new roles and two new workflows.
 
 ### role-documentarian + wf-doc-amend (descriptive)
 
-`role-documentarian` authors amendments to existing documentation artifacts — ADR diagrams, AGENT.md updates, runbook repair. Its `output_kind` extends the `plan_doc` taxonomy to a broader `documentation` kind (Q32.a). The role is dispatched by `wf-doc-amend`, a single-step workflow:
+`role-documentarian` authors amendments to existing documentation artifacts — ADR diagrams, AGENT.md updates, runbook repair. We added a new `documentation` value to ADR-0022's `output_kind` taxonomy for this role (Q32.a). Distinct from `plan_doc` because `plan_doc`'s merge fires ADR-0021's plan-creation trigger; `documentation` merges do not — they amend existing artifacts without spawning new tasks.
+
+`wf-doc-amend` is a single-step workflow:
 
 > Step 1: `role-documentarian` reads the target artifact + the cited code/components + adjacent docs, then amends the artifact to reflect current reality per ADR-0030 §4. If a Class C gap is detected, the disposition opens a learning at `docs/learnings/<date>-<slug>-gap.md` and dispatches `wf-architecture-resolve` against the same task.
 
-`wf-doc-amend` is the right vehicle for the ADR-0030 backfill: 33 tasks redirected to it once this ADR's plan lands.
+**Dispatch sources for v1** (Q32.b):
+
+1. **Operator/CLI** — explicit dispatch for backfill work (the ADR-0030 33-task plan re-fires through this path).
+2. **Validator remediation** — when ADR-0030's `docs-current-with-pr` rule fails on a PR, the consumer dispatches `wf-doc-amend` against the affected component's docs. Mirrors ADR-0029's third dispatch path (`wf-validate.fail → wf-feedback`) but with `wf-doc-amend` as the remediation target instead of `wf-feedback`.
+3. **Periodic audit** — *deferred to a future scheduling ADR* (Q32.f). Treadmill is event-driven today; a periodic dispatch primitive requires a scheduler that does not exist yet.
+
+Authors continue to ship documentation alongside their code — `role-code-author` keeps the AGENT.md ownership ADR-0030 §2 assigned to it. `role-documentarian` is supplementary, not a replacement. The distinction: `role-code-author` updates docs *as part of shipping a feature*; `role-documentarian` updates docs *because docs have drifted from reality*.
 
 ### role-architect + wf-architecture-resolve (prescriptive)
 
-`role-architect` triages Class C gaps. Its `output_kind` is `analysis`. The role returns one of four verdicts:
+`role-architect` triages Class C gaps. Its `output_kind` is `analysis`. The role returns a Pydantic-validated `ArchitectVerdict` envelope (Q32.d), patterned on ADR-0027's `ReviewVerdict`:
 
-- **`amend`** — the ADR's stated intent is right; the code is the bug. Open a remediation plan.
-- **`supersede`** — the ADR's stated intent is no longer right. Author a superseding ADR.
-- **`accept-as-is`** — the gap is acceptable. Capture in the relevant AGENT.md's Pitfalls section.
-- **`uncertain`** — block; route back for rework with more context (no human paging in v1 per ADR-0031 Q31.b).
+```
+class ArchitectVerdict(BaseModel):
+    verdict: Literal["amend", "supersede", "accept-as-is", "uncertain"]
+    reasoning: str                                  # the why
+    target_artifact: str                            # path to ADR/plan/component
+    remediation_summary: str | None = None          # populated for amend / supersede
+```
 
-`wf-architecture-resolve` is a two-step workflow: step 1 dispatches the architect; step 2 routes to the appropriate downstream role based on the verdict (`role-code-author` for remediation, `role-documentarian` for amend/supersede authoring, no-op for accept-as-is).
+The four verdicts route as follows:
+
+- **`amend`** — the ADR's stated intent is right; the code is the bug. Open a remediation plan via `role-doc-author` + dispatch its tasks through `wf-author`/`role-code-author`.
+- **`supersede`** — the ADR's stated intent is no longer right. Author a superseding ADR via `role-documentarian` (which writes the new doc) + update the original's status header.
+- **`accept-as-is`** — the gap is acceptable. Append to the relevant AGENT.md's Pitfalls section via `role-documentarian`.
+- **`uncertain`** — block; route back for rework with more context (no human paging in v1 per ADR-0031 Q31.b). Capped at 5 rework attempts per task (Q32.e, matching ADR-0029 Q29.e).
+
+`wf-architecture-resolve` is a two-step workflow: step 1 dispatches the architect; step 2 routes the verdict to the appropriate downstream workflow.
+
+**Dispatch source** (Q32.c): auto-dispatched by `wf-doc-amend`'s disposition when the documentarian detects a Class C gap. No manual trigger required in v1.
 
 ## Alternatives considered
 
@@ -116,19 +136,26 @@ sequenceDiagram
 
 ## Follow-ups
 
-Open Questions for the associated plan:
+Open Questions resolved 2026-05-14 by operator review of this ADR:
 
-- **Q32.a — `output_kind` for documentarian.** Add `documentation` to the ADR-0022 taxonomy, or extend `plan_doc` to cover both?
-- **Q32.b — AGENT.md ownership going forward.** ADR-0030 §2 says `role-code-author` updates AGENT.md when surfaces change. Does that stay, or does documentarian take exclusive ownership? (Lean: stays with code-author; documentarian only repairs drift.)
-- **Q32.c — architect trigger.** Auto on Class C learning detection (current draft), or operator-dispatched only for v1? (Lean: auto, so hands-free works.)
-- **Q32.d — verdict schema.** Should architect verdicts be a structured JSON envelope like ADR-0027's ReviewVerdict, or text the disposition parses?
-- **Q32.e — cap on rework loops.** 5 per task (matching ADR-0029 Q29.e) — confirm.
+- **Q32.a — `output_kind` for documentarian.** Add `documentation` as a new value in ADR-0022's `output_kind` taxonomy. Distinct from `plan_doc` because they route differently (only `plan_doc` merges trigger plan-creation per ADR-0021).
+- **Q32.b — AGENT.md ownership + documentarian dispatch sources.** Code-author keeps AGENT.md ownership (ADR-0030 §2) — authors ship docs alongside their code. Documentarian dispatch in v1: operator/CLI (for backfill) + validator remediation (when `docs-current-with-pr` rule fails). Periodic audit deferred (Q32.f).
+- **Q32.c — architect trigger.** Auto-dispatched by `wf-doc-amend`'s disposition on Class C detection. No manual trigger required in v1.
+- **Q32.d — verdict schema.** Pydantic envelope (`ArchitectVerdict`) patterned on ADR-0027's `ReviewVerdict`. Schema defined in §Decision above.
+- **Q32.e — cap on rework loops.** 5 attempts per task, matching ADR-0029 Q29.e.
+
+Remaining open:
+
+- **Q32.f — periodic documentarian audit.** Treadmill is event-driven; no scheduling primitive exists. Periodic doc-drift audit ("triage docs every Monday") needs a scheduler ADR before this dispatch source can ship. Captured as a follow-up; documentarian's other two dispatch sources work without it.
+- The associated plan's first phase verifies ADR-0022 taxonomy can accept the new `documentation` kind without breaking existing routing.
 
 ## References
 
 - ADR-0004 — diagrams as contract of intent (the conformance criteria documentarian applies).
 - ADR-0022 — role output_kind taxonomy (this ADR adds `documentation`).
+- ADR-0027 — Structured JSON envelope for review-kind step output (the pattern `ArchitectVerdict` follows).
 - ADR-0028 — DB-authoritative role configs (the new roles' prompts ship via `treadmill role update`, not code-side edits to `starters.py`).
+- ADR-0029 — Ralph-loop validation runner (architect verdict cap mirrors Q29.e; dispatch-source #2 mirrors the third-source convergence trigger).
 - ADR-0030 — federated context + §4 backfill discipline (the motivating constraint).
 - ADR-0031 — auto-merge (this ADR's roles are a prerequisite).
 - Tasks #125, #126 — the captured surface this ADR formalizes.
