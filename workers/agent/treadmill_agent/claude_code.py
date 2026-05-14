@@ -124,10 +124,20 @@ def run_claude_code(
     task_description: str | None,
     plan_intent: str | None,
     prior_steps: list[PriorStep] | None = None,
-    timeout_seconds: int = 600,
+    timeout_seconds: int = 1800,
     log_context: dict[str, Any] | None = None,
 ) -> CodeAuthorResult:
     """Drive Claude Code in ``repo_dir`` and return the captured summary.
+
+    Timeout: 30 minutes (1800s) — sonnet 4.6 (operator-bumped 2026-05-14
+    for role-code-author) thinks silently with ``--print`` mode and only
+    flushes output at the end, so the worker sees no incremental
+    progress. 600s was insufficient for substantive code-author tasks
+    (e.g. authoring a disposition module + its tests); workers timed out
+    mid-think and the SIGKILL killed real progress. 1800s buys headroom
+    without unbounding runaway cost — combined with the per-task
+    ``validation`` block (task #121) the operator still gets the
+    failure surface, just on a longer wall-clock.
 
     The prompt bundles plan intent + task title + description + role's
     system_prompt + skill content + (for multi-step workflows) prior
