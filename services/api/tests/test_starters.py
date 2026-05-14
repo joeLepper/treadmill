@@ -201,14 +201,30 @@ def test_seeded_roles_output_kinds_match_adr_0022() -> None:
         )
 
 
-def test_planner_uses_opus_other_roles_use_haiku() -> None:
-    """Cost discipline — the planner is the only role on the expensive
-    model. Every other role (including the analyzers) shares the cheap
-    haiku tier."""
+def test_role_model_tier_invariant() -> None:
+    """Cost / capability discipline — each role is on the right model tier:
+
+    * ``role-planner``     → opus (deliberative; expensive)
+    * ``role-code-author`` → sonnet (load-bearing implementation across four
+      workflows; operator-bumped 2026-05-14 from haiku after the
+      ADR-0032 disposition tasks produced plausible prose with no
+      deliverable. Sonnet's higher capability is worth the 10× cost
+      for this specific role.)
+    * everyone else        → haiku (analyzers, reviewer, validator,
+      doc-author, documentarian, architect — cheap tier; rules
+      override per ADR-0029 Q29.b when an llm-judge needs more
+      capability.)
+    """
     roles_by_id = {r["id"]: r for r in _all_roles()}
-    assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL
+    assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
+        f"role-planner must use {PLANNER_MODEL!r}"
+    )
+    assert roles_by_id["role-code-author"]["model"] == "claude-sonnet-4-6", (
+        "role-code-author must use sonnet 4.6 (operator bump 2026-05-14); "
+        f"got {roles_by_id['role-code-author']['model']!r}"
+    )
     for role_id, role in roles_by_id.items():
-        if role_id == "role-planner":
+        if role_id in {"role-planner", "role-code-author"}:
             continue
         assert role["model"] == WORKER_MODEL, (
             f"role {role_id!r} should be on {WORKER_MODEL!r}, got {role['model']!r}"
