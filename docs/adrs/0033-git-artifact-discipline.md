@@ -81,7 +81,12 @@ Machine-readable signals (event-bus pubs, dedup keys, mergeability VIEW updates)
 
 ### Branch naming
 
-Branches follow `task/<task-id-prefix>-<slug>` (already in use, now codified). The task-id-prefix is the first 8 characters of the task UUID. This enables the branch-name fallback in task #124's reconciliation flow.
+Branches follow ADR-0010's two-pattern convention, now codified:
+
+- **Task-execution branches**: `task/<task-id-prefix>-<slug>` — used by role-code-author when wf-author / wf-feedback / wf-ci-fix / wf-conflict opens a PR against an existing task.
+- **Plan-author branches**: `plan/<plan-id-prefix>-<slug>` — used by role-doc-author when wf-plan authors a plan doc.
+
+The id-prefix is the first 8 characters of the entity UUID. Both patterns enable the branch-name fallback in task #124's reconciliation flow.
 
 ## Alternatives considered
 
