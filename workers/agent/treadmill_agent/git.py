@@ -49,6 +49,7 @@ fault.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -201,36 +202,59 @@ def open_pr(
     repo: str,
     mode: str,
 ) -> tuple[int | None, str | None]:
-    """Open a PR.
+    """Open a PR, idempotent for re-author workflows.
 
     ``local`` mode is a no-op (no remote service to host a PR); the
     branch itself is the artifact.
 
-    ``github`` mode shells to ``gh pr create``. Auth comes from the
-    ``gh`` keyring populated at worker startup — we do **not** set
+    ``github`` mode is idempotent: if a PR for ``branch`` already exists,
+    returns its number/URL. Otherwise shells to ``gh pr create``. Auth comes
+    from the ``gh`` keyring populated at worker startup — we do **not** set
     ``GH_TOKEN`` in env (which would route the PAT through every
     child process's environment). The command runs with ``cwd=repo_dir``
     so ``gh`` discovers the upstream from the cloned repo's
-    ``origin``. The created PR's URL is the last line of ``gh``'s
-    stdout; the PR number is the trailing path segment of that URL.
+    ``origin``.
+
+    When the branch no longer exists on the remote (merged+deleted case),
+    logs a warning and returns (None, None) rather than raising.
     """
     if mode == "local":
         # The branch is the artifact in local mode. The events table records
         # the branch via ``output.branch``; pr_number/url stay null.
         return None, None
     if mode == "github":
-        stdout = _capture(
-            [
-                "gh", "pr", "create",
-                "--title", title,
-                "--body", body,
-                "--head", branch,
-            ],
-            cwd=repo_dir,
-        )
-        pr_url = _last_url(stdout)
-        pr_number = _pr_number_from_url(pr_url) if pr_url else None
-        return pr_number, pr_url
+        # Check if a PR already exists for this branch.
+        existing = _get_existing_pr(repo_dir, branch)
+        if existing is not None:
+            pr_number, pr_url = existing
+            logger.info(
+                "PR %s already exists for branch %s; returning existing PR",
+                pr_number, branch
+            )
+            return pr_number, pr_url
+
+        # Try to create a new PR. If the branch doesn't exist on the remote
+        # (merged+deleted case), log and skip rather than raising.
+        try:
+            stdout = _capture(
+                [
+                    "gh", "pr", "create",
+                    "--title", title,
+                    "--body", body,
+                    "--head", branch,
+                ],
+                cwd=repo_dir,
+            )
+            pr_url = _last_url(stdout)
+            pr_number = _pr_number_from_url(pr_url) if pr_url else None
+            return pr_number, pr_url
+        except GitOpsError as e:
+            # If the branch doesn't exist or the create fails, log and skip.
+            logger.warning(
+                "Failed to create PR for branch %s (may be merged+deleted): %s",
+                branch, str(e)
+            )
+            return None, None
     raise GitOpsError(f"unknown REPO_MODE: {mode!r}")
 
 
@@ -263,6 +287,33 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> None:
         )
     if result.stdout:
         logger.debug(result.stdout)
+
+
+def _get_existing_pr(repo_dir: Path, branch: str) -> tuple[int, str] | None:
+    """Check if a PR already exists for the given branch.
+
+    Uses ``gh pr list --head <branch>`` to check for existing PRs.
+    Returns (pr_number, pr_url) if found, None otherwise.
+    """
+    try:
+        stdout = _capture(
+            ["gh", "pr", "list", "--head", branch, "--json", "number,url"],
+            cwd=repo_dir,
+        )
+        # The output is JSON array. Empty array means no PRs exist.
+        prs = json.loads(stdout)
+        if not prs:
+            return None
+        # Return the first (should be only one) PR.
+        pr = prs[0]
+        pr_number = pr.get("number")
+        pr_url = pr.get("url")
+        if pr_number and pr_url:
+            return int(pr_number), pr_url
+    except (GitOpsError, json.JSONDecodeError, KeyError):
+        # If the command fails or JSON is malformed, assume no PR exists.
+        pass
+    return None
 
 
 def _last_url(stdout: str) -> str | None:

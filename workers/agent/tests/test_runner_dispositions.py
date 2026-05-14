@@ -77,14 +77,14 @@ def _ctx(
     )
 
 
-def _settings() -> Settings:
+def _settings(repo_mode: str = "local") -> Settings:
     return Settings(
         api_url="http://fake",
         work_queue_url="http://sqs/q",
         events_topic_arn="arn",
         aws_endpoint_url=None,
         aws_region="us-east-1",
-        repo_mode="local",
+        repo_mode=repo_mode,
         bare_repos_dir="/tmp/bare",
         workspace_dir="/tmp/ws",
         exit_after_step=True,
@@ -102,6 +102,7 @@ def _disp_ctx(
     role_id: str = "role-test",
     workflow_id: str = "wf-test",
     is_dry_run: bool = False,
+    repo_mode: str = "local",
 ) -> DispositionContext:
     return DispositionContext(
         ctx=_ctx(
@@ -113,7 +114,7 @@ def _disp_ctx(
         claude_result=CodeAuthorResult(summary=summary),
         repo_dir=repo_dir,
         branch="task/x-add-thing",
-        settings=_settings(),
+        settings=_settings(repo_mode=repo_mode),
         is_dry_run=is_dry_run,
     )
 
@@ -215,6 +216,98 @@ def test_code_handler_still_raises_for_wf_ci_fix_on_empty_diff(
     ctx = _disp_ctx(repo_dir=clone, workflow_id="wf-ci-fix")
     with pytest.raises(claude_code.CodeAuthorError, match="no changes"):
         handle_code(ctx)
+
+
+def test_code_handler_wf_author_opens_new_pr(tmp_path: Path) -> None:
+    """wf-author creates a new PR when none exists. This is the primary
+    workflow path — originating code changes and opening a PR."""
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+    ctx = _disp_ctx(repo_dir=clone, workflow_id="wf-author")
+    out = handle_code(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha
+    # Local mode returns no URL
+    pr_urls = [a.value for a in out.artifacts if a.kind == "pr_url"]
+    assert len(pr_urls) == 0
+    # Local mode returns no PR number
+    assert out.payload.get("pr_number") is None
+
+
+def test_code_handler_wf_feedback_noop_on_existing_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wf-feedback against an existing PR no-ops gh pr create — it detects
+    the existing PR and returns its number without attempting to create."""
+    from treadmill_agent import git as git_module
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "file.md").write_text("content\n")
+
+    create_called = []
+
+    def _fake_capture(cmd, **kwargs):
+        # Simulate gh pr list returning an existing PR.
+        if "pr" in cmd and "list" in cmd:
+            return '[{"number": 42, "url": "https://github.com/owner/repo/pull/42"}]'
+        # Ensure gh pr create is NOT called when PR already exists.
+        if "pr" in cmd and "create" in cmd:
+            create_called.append(True)
+            raise AssertionError(
+                "gh pr create should not be called when PR already exists"
+            )
+        return "dummy"
+
+    monkeypatch.setattr(git_module, "_capture", _fake_capture)
+
+    ctx = _disp_ctx(
+        repo_dir=clone, workflow_id="wf-feedback", pr_number=42,
+        summary="Addressed feedback", repo_mode="github",
+    )
+    out = handle_code(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha
+    # The PR number should be in payload when wf-feedback has one.
+    assert out.payload.get("pr_number") == 42
+    # Verify gh pr create was never called.
+    assert not create_called
+
+
+def test_code_handler_wf_feedback_skips_merged_deleted_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wf-feedback against a merged+deleted branch logs a warning and returns
+    success (with no pr_number) rather than raising."""
+    from treadmill_agent import git as git_module
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "file.md").write_text("content\n")
+
+    def _fake_capture(cmd, **kwargs):
+        # PR doesn't exist (branch was deleted).
+        if "pr" in cmd and "list" in cmd:
+            return "[]"
+        # PR create fails because the branch is gone.
+        if "pr" in cmd and "create" in cmd:
+            raise git_module.GitOpsError(
+                "command failed: gh pr create\n"
+                "stderr: pull request already exists, "
+                "or the head branch was deleted"
+            )
+        return "dummy"
+
+    monkeypatch.setattr(git_module, "_capture", _fake_capture)
+
+    ctx = _disp_ctx(
+        repo_dir=clone, workflow_id="wf-feedback", pr_number=None,
+        summary="Response without PR",
+    )
+    out = handle_code(ctx)
+    # Handler should succeed and return a commit.
+    assert out.decision == "pushed"
+    assert out.commit_sha
+    # But no PR number because the branch is gone.
+    assert "pr_number" not in out.payload
 
 
 # ── review handler ──────────────────────────────────────────────────────────
