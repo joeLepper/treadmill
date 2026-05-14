@@ -1,0 +1,48 @@
+name: adr-and-plan-has-diagram
+description: >
+  ADRs and plans must embed a Mermaid diagram as the binding intent for
+  interactions, topologies, or state transitions they describe. Per ADR-0004,
+  the diagram is the contract that implementation must conform to. This rule
+  enforces that every ADR and plan document contains a conformant Mermaid block.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - ADR-0004
+  - 2026-05-14-adr-0030-federated-in-repo-context
+
+applies_to:
+  - 'docs/adrs/*.md'
+  - 'docs/plans/*.md'
+
+checks:
+  - id: diagram-block-present
+    type: deterministic
+    description: >
+      Every changed file under docs/adrs/ or docs/plans/ must contain a
+      Mermaid diagram block (``` ```mermaid ... ``` ```). The closing fence
+      must appear on its own line at column 0 to avoid false positives where
+      the document only mentions "mermaid" in prose.
+    script: tools/rule-checks/adr-and-plan-has-diagram/check.sh
+    severity: blocking
+
+remediations:
+  - "on": diagram-block-present:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR changes an ADR or plan file but does not include a Mermaid
+      diagram block. Per ADR-0004 and rule:adr-and-plan-has-diagram, diagrams
+      are the binding contract of intent for interactions, topologies, and
+      state transitions. Add a conformant Mermaid diagram following the
+      checklist in ADR-0004: named actors, labeled interactions, intent layer
+      (not implementation detail), correct Mermaid kind (sequenceDiagram,
+      flowchart, or stateDiagram-v2), sync vs. async distinction, and named
+      alt/else branches. See `.claude/skills/decide/SKILL.md` and
+      `.claude/skills/plan/SKILL.md` for diagram-type guidance by decision
+      class.
+
+references:
+  - ADR-0004  # diagrams as contract of intent; conformance checklist
+  - ADR-0030  # enforcement infrastructure for diagrams
