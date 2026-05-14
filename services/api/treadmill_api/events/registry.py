@@ -41,7 +41,7 @@ from treadmill_api.events.step import (
     StepReady,
     StepStarted,
 )
-from treadmill_api.events.task import TaskCancelled, TaskReady, TaskRegistered
+from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
 
 
 # Single registry of all known event payload classes. Keep this list
@@ -51,6 +51,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     TaskRegistered,
     TaskReady,
     TaskCancelled,
+    TaskAutoMerged,
     # Plan events
     PlanRegistered,
     PlanPlanningStarted,

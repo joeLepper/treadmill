@@ -334,6 +334,66 @@ def test_wf_doc_amend_in_dedup_key_builders() -> None:
     assert "wf-doc-amend" in DEDUP_KEY_BUILDERS
 
 
+def test_wf_auto_merge_builder_emits_repo_and_task_id() -> None:
+    """``wf-auto-merge:<repo>:auto-merge=<task_id>`` — one auto-merge
+    dispatch per task; task_id is the UUID of the task whose PR is
+    being merged."""
+    key = build_dedup_key(
+        "wf-auto-merge",
+        {
+            "repo": "joeLepper/treadmill",
+            "task_id": "11111111-2222-3333-4444-555555555555",
+        },
+    )
+    assert key == (
+        "wf-auto-merge:joeLepper/treadmill:"
+        "auto-merge=11111111-2222-3333-4444-555555555555"
+    )
+
+
+def test_wf_auto_merge_builder_returns_none_when_task_id_missing() -> None:
+    """When ``task_id`` is absent, the builder gracefully opts out
+    to unconditional dispatch."""
+    assert build_dedup_key("wf-auto-merge", {"repo": "x/y"}) is None
+
+
+def test_wf_auto_merge_builder_returns_none_when_repo_missing() -> None:
+    """Repo is required; missing repo → None."""
+    assert build_dedup_key(
+        "wf-auto-merge",
+        {"task_id": "11111111-2222-3333-4444-555555555555"},
+    ) is None
+
+
+def test_wf_auto_merge_in_dedup_key_builders() -> None:
+    """wf-auto-merge must be registered in DEDUP_KEY_BUILDERS — a missing
+    entry would silently fall back to unconditional dispatch and allow
+    duplicate auto-merges to race."""
+    assert "wf-auto-merge" in DEDUP_KEY_BUILDERS
+
+
+def test_wf_auto_merge_namespace_distinct_from_other_workflows() -> None:
+    """The wf-auto-merge dedup key cannot collide with other workflow
+    keys even when they share repo and a UUID discriminator."""
+    auto_merge_key = build_dedup_key(
+        "wf-auto-merge",
+        {
+            "repo": "x/y",
+            "task_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+    doc_amend_key = build_dedup_key(
+        "wf-doc-amend",
+        {
+            "repo": "x/y",
+            "docs_amend_run_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+    assert auto_merge_key is not None
+    assert doc_amend_key is not None
+    assert auto_merge_key != doc_amend_key
+
+
 def test_wf_doc_amend_namespace_distinct_from_wf_feedback() -> None:
     """The wf-doc-amend dedup key uses a different workflow prefix than
     wf-feedback so the two cannot collide on the dedup table even when

@@ -35,6 +35,7 @@ Per the ADR's "Discriminator parts" table:
   | wf-feedback   | review=<review_id>         |
   | wf-ci-fix     | check_run=<check_run_id>   |
   | wf-conflict   | pr=<N>,sha=<base_sha>      |
+  | wf-auto-merge | auto-merge=<task_id>       |
   | wf-author     | (opts out — None)          |
   | wf-plan       | (opts out — None)          |
 
@@ -159,6 +160,20 @@ def _build_wf_conflict_key(payload: dict[str, Any]) -> str | None:
     return f"wf-conflict:{repo}:pr={pr_number},sha={base_sha}"
 
 
+def _build_wf_auto_merge_key(payload: dict[str, Any]) -> str | None:
+    """``wf-auto-merge:<repo>:auto-merge=<task_id>``.
+
+    One auto-merge dispatch per task. ``task_id`` is the UUID of the
+    task whose PR is being merged; guarantees at most one auto-merge
+    fires per task regardless of re-delivery or concurrent triggers.
+    """
+    repo = payload.get("repo")
+    task_id = payload.get("task_id")
+    if not repo or not task_id:
+        return None
+    return f"wf-auto-merge:{repo}:auto-merge={task_id}"
+
+
 def _build_wf_doc_amend_key(payload: dict[str, Any]) -> str | None:
     """``wf-doc-amend:<repo>:docs-amend-run=<run_id>``
     (wf-validate ``docs-current-with-pr`` failure trigger).
@@ -191,6 +206,7 @@ DEDUP_KEY_BUILDERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
     "wf-feedback": _build_wf_feedback_key,
     "wf-ci-fix": _build_wf_ci_fix_key,
     "wf-conflict": _build_wf_conflict_key,
+    "wf-auto-merge": _build_wf_auto_merge_key,
     "wf-doc-amend": _build_wf_doc_amend_key,
 }
 

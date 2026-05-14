@@ -50,7 +50,7 @@ from treadmill_api.events.step_output import (
     Metadata,
     StepOutput,
 )
-from treadmill_api.events.task import TaskCancelled, TaskReady, TaskRegistered
+from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
 
 
 __all__ = [
@@ -71,6 +71,7 @@ __all__ = [
     "TaskRegistered",
     "TaskReady",
     "TaskCancelled",
+    "TaskAutoMerged",
     # Plan events
     "PlanRegistered",
     "PlanPlanningStarted",

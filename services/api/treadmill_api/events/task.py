@@ -43,3 +43,15 @@ class TaskCancelled(EventPayload):
     ACTION: ClassVar[str] = "cancelled"
 
     reason: str | None = None
+
+
+class TaskAutoMerged(EventPayload):
+    """Emitted when a task's PR is successfully auto-merged via the
+    cooling-off trigger (ADR-0031)."""
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "auto_merged"
+
+    merged_sha: str
+    pr_number: int
+    repo: str
