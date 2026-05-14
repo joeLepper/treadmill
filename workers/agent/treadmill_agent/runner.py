@@ -40,6 +40,7 @@ from treadmill_agent.observability import get_tracer
 from treadmill_agent.runner_dispositions import (
     handle_analysis,
     handle_code,
+    handle_documentation,
     handle_plan_doc,
     handle_review,
     handle_validation,
@@ -102,6 +103,7 @@ DISPOSITIONS: dict[str, Callable[[DispositionContext], StepOutput]] = {
     "review": handle_review,
     "analysis": handle_analysis,
     "plan_doc": handle_plan_doc,
+    "documentation": handle_documentation,
 }
 
 

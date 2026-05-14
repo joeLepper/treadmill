@@ -26,6 +26,7 @@ from treadmill_agent.config import Settings
 from treadmill_agent.runner_dispositions import (
     handle_analysis,
     handle_code,
+    handle_documentation,
     handle_plan_doc,
     handle_review,
     handle_validation,
@@ -1178,14 +1179,16 @@ def test_validation_handler_dry_run_skips_gh_pr_comment(
 # ── runner-level dispatch ────────────────────────────────────────────────────
 
 
-def test_runner_dispatch_table_covers_all_four_v0_kinds() -> None:
-    """The dispatch table has exactly the four ADR-0022 v0 kinds.
-    Per ADR-0029, validation dispatches by workflow_id (not in the
-    output_kind table), so it's not counted here.
-    This test is the tripwire for new kinds."""
+def test_runner_dispatch_table_covers_all_five_kinds() -> None:
+    """The dispatch table has exactly the five ADR-0022 kinds (code,
+    review, analysis, plan_doc, documentation).  Per ADR-0029,
+    validation dispatches by workflow_id (not in the output_kind table),
+    so it's not counted here.  This test is the tripwire for new kinds."""
     from treadmill_agent.runner import DISPOSITIONS
 
-    assert set(DISPOSITIONS) == {"code", "review", "analysis", "plan_doc"}
+    assert set(DISPOSITIONS) == {
+        "code", "review", "analysis", "plan_doc", "documentation"
+    }
 
 
 def test_runner_dispatch_unknown_kind_raises_at_execute(
@@ -1219,3 +1222,87 @@ def test_runner_dispatch_unknown_kind_raises_at_execute(
     )
     with pytest.raises(UnknownOutputKindError, match="something_unknown"):
         runner._execute(ctx, settings)
+
+
+# ── documentation handler ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("gap_class", ["A", "B"])
+def test_documentation_handler_class_ab_no_escalation(
+    gap_class: str, tmp_path: Path,
+) -> None:
+    """Class A/B summaries: handler commits, pushes, opens PR.
+
+    No learning file is written and no ``escalate`` key appears in the
+    payload — there is no JSON envelope with ``gap_class`` in the summary.
+    """
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "docs" / "adrs").mkdir(parents=True, exist_ok=True)
+    (clone / "docs" / "adrs" / "0001-amended.md").write_text("# ADR-0001 (amended)\n")
+    summary = f"Amended ADR-0001 diagram to reflect current reality. Gap class: {gap_class}."
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        output_kind="documentation",
+        summary=summary,
+        workflow_id="wf-doc-amend",
+    )
+    out = handle_documentation(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha
+    branches = [a.value for a in out.artifacts if a.kind == "branch"]
+    assert branches == ["task/x-add-thing"]
+    assert "escalate" not in out.payload
+    # No gap learning file should exist.
+    learning_dir = clone / "docs" / "learnings"
+    if learning_dir.exists():
+        assert list(learning_dir.glob("*-gap.md")) == []
+
+
+def test_documentation_handler_class_c_writes_learning_and_escalates(
+    tmp_path: Path,
+) -> None:
+    """Class C gap: learning file committed alongside amended doc,
+    ``escalate`` key in payload points at ``wf-architecture-resolve``.
+    """
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "docs" / "adrs").mkdir(parents=True, exist_ok=True)
+    (clone / "docs" / "adrs" / "0010-amended.md").write_text("# ADR-0010 (amended)\n")
+    summary = (
+        "Amended ADR-0010 sequence diagram. Detected a sub-optimality gap.\n\n"
+        "```json\n"
+        '{"gap_class": "C", "gap_slug": "async-violation", '
+        '"gap_summary": "Current code violates async idempotency contract."}\n'
+        "```\n"
+    )
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        output_kind="documentation",
+        summary=summary,
+        workflow_id="wf-doc-amend",
+    )
+    out = handle_documentation(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha
+    # escalate payload present and correct.
+    assert "escalate" in out.payload
+    assert out.payload["escalate"]["workflow_id"] == "wf-architecture-resolve"
+    assert out.payload["escalate"]["gap_slug"] == "async-violation"
+    assert out.payload["escalate"]["task_id"] == ctx.ctx.task_id
+    # Learning file was written into the repo (and committed).
+    learning_files = list(
+        (clone / "docs" / "learnings").glob("*-async-violation-gap.md")
+    )
+    assert len(learning_files) == 1
+    content = learning_files[0].read_text()
+    assert "**Class:** C" in content
+    assert "async idempotency" in content
+
+
+def test_documentation_handler_raises_on_empty_diff(tmp_path: Path) -> None:
+    """Empty diff → ``CodeAuthorError``; the documentarian produced no amendments."""
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    ctx = _disp_ctx(
+        repo_dir=clone, output_kind="documentation", workflow_id="wf-doc-amend",
+    )
+    with pytest.raises(claude_code.CodeAuthorError, match="no changes"):
+        handle_documentation(ctx)
