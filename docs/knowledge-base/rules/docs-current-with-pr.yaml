@@ -1,0 +1,111 @@
+name: docs-current-with-pr
+description: >
+  When a PR changes a component's externally-visible surface (APIs, configuration
+  schemas, workflows, interfaces), relevant documentation must be updated in the
+  same session. This rule prevents code-documentation drift by checking that
+  affected AGENT.md files, ADRs, plans, and adjacent docs stay current with
+  implementation changes.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - ADR-0030-Q30.d  # maintenance trigger: llm-judge reads local docs and decides should-have-been-updated AND was-updated
+
+# applies_to omitted — defaults to all Treadmill-managed projects.
+
+checks:
+  - id: surface-changes-have-doc-updates
+    type: llm-judge
+    description: >
+      Evaluates whether a PR that changes a component's externally-visible
+      surface has corresponding updates to documentation. The judge reads
+      the touched component's AGENT.md, any ADRs or plans cited in the PR
+      description or changed files, and adjacent documentation, then decides:
+      (1) Did this PR change a surface that warranted doc updates?
+      (2) If yes, were they made? Both conditions must hold for pass.
+    severity: blocking
+    prompt: |
+      You are evaluating whether a code change satisfies the rule
+      "docs-current-with-pr": when a PR changes a component's externally-visible
+      surface, documentation must be updated in the same session.
+
+      Inputs you receive:
+        DIFF — the full unified diff of the change.
+        AGENT_MD — the relevant component's AGENT.md file(s), if they exist
+                   and are in the touched files.
+        CITED_ADRS — any ADRs referenced in the PR description or changed files.
+        CITED_PLANS — any plans referenced in the PR description or changed files.
+        ADJACENT_DOCS — documentation files adjacent to the changed code
+                        (e.g., docs/ subdirectories, README files, runbooks).
+
+      Determine what kind of change occurred:
+
+        **Externally-visible surface change** — changes that affect how the
+        component is used, called, configured, or understood from outside:
+          - API endpoints, function signatures, or method names (breaking or new)
+          - Configuration schemas, command-line flags, or YAML structures
+          - Workflow inputs, outputs, or behavior contract
+          - Data schemas or wire formats
+          - Error messages or status codes that callers depend on
+          - Role responsibilities or capabilities
+          - Integration points with other components
+
+        **Internal changes that do NOT require doc updates**:
+          - Refactoring that preserves the surface
+          - Bug fixes that correct unintended behavior
+          - Performance improvements with no behavioral change
+          - Internal test additions
+          - Internal dependency updates
+
+      Decide one of three outcomes:
+
+        pass — no surface changes in the diff, OR surface changes exist AND
+               relevant documentation was updated (AGENT.md "Key surfaces" or
+               "Recent changes" sections, ADRs, plans, adjacent docs, or
+               API/config/workflow documentation as appropriate).
+
+        fail — surface changed in a way that warranted documentation updates,
+               but no corresponding doc changes are present in the diff.
+
+        uncertain — it is unclear whether a change constitutes a surface change,
+                    or whether the documentation updates present are adequate
+                    for the surface change observed; flag for human review.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"result": "pass" | "fail" | "uncertain",
+         "rationale": "<one to three sentences explaining your judgment, citing
+                       specific changed files and which docs should have been
+                       updated>"}
+
+      Be concrete. If you find a surface change, name the specific file or
+      interface that changed and which documentation should reflect it.
+
+remediations:
+  - "on": surface-changes-have-doc-updates:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR changes a component's externally-visible surface but does not
+      update relevant documentation. Per rule:docs-current-with-pr (from
+      ADR-0030 §3, the drift-prevention surface), surface changes must ship
+      with doc updates in the same session. Check the judge's rationale on
+      the PR to see which docs need updating (AGENT.md, ADRs, plans, or
+      adjacent documentation). Update the docs and push again.
+
+  - "on": surface-changes-have-doc-updates:uncertain
+    action: warn
+    target: pr-author
+    message: >
+      The LLM judge could not confidently determine whether documentation
+      changes in this PR are adequate for the code changes observed. Please
+      review the judge's rationale and verify that the following docs are
+      current: the touched component's AGENT.md (especially "Key surfaces"
+      and "Recent changes" sections), any cited ADRs or plans, and adjacent
+      documentation. Update as needed or respond if the judge is mistaken.
+
+references:
+  - ADR-0030  # federated in-repo agent context (this rule is §3 drift-prevention)
+  - ADR-0006  # rules + remediations primitive
+  - ADR-0003  # three-layer documentation model
+  - ADR-0004  # diagrams as contract of intent (related commitment to live docs)
