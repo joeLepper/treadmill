@@ -169,6 +169,12 @@ sequence_of_work:
         - services/api/treadmill_api/routers/plans.py
         - services/api/tests/test_parsers_plan_doc.py
         - services/api/tests/test_integration_plans_router.py
+    validation:
+      - kind: deterministic
+        description: |
+          parser tests pass: a YAML block with script + prompt
+          fields round-trips; the model_validator rejects
+          deterministic-without-script and llm-judge-without-prompt.
 
   - id: validation-runtime-module
     title: Worker validation_runtime — deterministic + llm-judge primitives
@@ -219,6 +225,13 @@ sequence_of_work:
         - workers/agent/treadmill_agent/validation_runtime.py
         - workers/agent/treadmill_agent/runner_dispositions/_validation_verdict.py
         - workers/agent/tests/test_validation_runtime.py
+    validation:
+      - kind: deterministic
+        description: |
+          test_validation_runtime.py passes: subprocess timeout
+          maps to verdict='error'; non-zero exit maps to 'fail';
+          exit 0 maps to 'pass'; LLM-judge happy path parses
+          ValidationVerdict; parse failure maps to 'error'.
 
   - id: validation-disposition-handler
     title: validation.py disposition handler — gather, run, aggregate
@@ -276,6 +289,14 @@ sequence_of_work:
         - workers/agent/treadmill_agent/runner.py
         - workers/agent/treadmill_agent/api_client.py
         - workers/agent/tests/test_runner_dispositions.py
+    validation:
+      - kind: deterministic
+        description: |
+          test_runner_dispositions.py passes: aggregate worst-wins
+          across mixed blocking/warning/advisory verdicts; routing
+          by workflow_id == 'wf-validate' is exercised; rule
+          loading from docs/knowledge-base/rules/ matches applicable
+          rules to PR scope.
 
   - id: convergence-trigger-third-source
     title: wf-validate.fail → wf-feedback as the third dispatch source
@@ -322,6 +343,13 @@ sequence_of_work:
         - services/api/treadmill_api/starters.py
         - services/api/tests/test_consumer_unit.py
         - services/api/tests/test_dispatch_dedup.py
+    validation:
+      - kind: deterministic
+        description: |
+          test_consumer_unit.py + test_dispatch_dedup.py pass:
+          validation fail dispatches wf-feedback via validate-run=
+          namespace; 5-attempt cap holds; dedup builder for the
+          new namespace is correctly keyed.
 
   - id: role-validator-reclassify
     title: role-validator becomes a structural artifact, not a Claude role
@@ -360,6 +388,12 @@ sequence_of_work:
         - services/api/treadmill_api/starters.py
         - services/api/tests/test_starters.py
         - docs/runbooks/edit-a-role-prompt.md
+    validation:
+      - kind: deterministic
+        description: |
+          test_starters.py passes; role-validator's new prompt
+          does not contain the word 'placeholder'; the prompt
+          explains the runtime routing.
 
   - id: treadmill-self-hosting-rules
     title: First Treadmill-specific rules in docs/knowledge-base/rules/
@@ -426,6 +460,12 @@ sequence_of_work:
         - tools/rule-checks/uv-lock-resolves/check.sh
         - tools/rule-checks/cdk-synth-passes/check.sh
         - services/api/tests/test_rules_schema.py
+    validation:
+      - kind: deterministic
+        description: |
+          test_rules_schema.py passes for all 5 starter rules;
+          each rule YAML parses against ADR-0006's schema;
+          referenced check.sh scripts exist with executable bit.
 
   - id: smoke-validation
     title: End-to-end smoke — deliberately reintroduce a bug; watch loop converge
@@ -459,7 +499,13 @@ sequence_of_work:
       Document the cycle count + token spend so we know the
       Ralph-loop's economics under real conditions.
     scope:
-      files: []
+      files:
+        - docs/handoffs/2026-05-14-ralph-loop-first-smoke.md
+    validation:
+      - kind: deterministic
+        description: |
+          The handoff doc exists at the named path and contains
+          the cycle count + observed token spend.
 ```
 
 ## Operator action items (post-implementation)
