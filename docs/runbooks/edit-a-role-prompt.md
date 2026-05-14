@@ -169,8 +169,25 @@ rationale.
 
 ---
 
+## Note: ADR-0029 and role-validator
+
+Per ADR-0029 (the Ralph-loop validation architecture), the
+`role-validator` becomes a structural artifact: its `system_prompt`
+exists only to satisfy the workflow→role schema and is never invoked
+at runtime. The `wf-validate` worker dispatches validation tasks
+directly to subprocess (for deterministic checks) and separate Claude
+Code calls (per llm-judge entry), bypassing the role entirely.
+
+Editing `role-validator`'s prompt via `treadmill role update` remains
+possible but has no effect on validation behavior. If you're
+implementing validator customization, consult ADR-0029 for the
+subprocess/llm-judge dispatch mechanism.
+
+---
+
 ## Related
 
 * [ADR-0028 — DB-authoritative workflow/role configs](../adrs/0028-db-authoritative-workflow-configs.md)
+* [ADR-0029 — Ralph-loop validation runner + rule engine](../adrs/0029-ralph-loop-validation-runner-and-rule-engine.md)
 * [In-session sequencing plan](../plans/2026-05-13-in-session-sequencing.md)
 * `treadmill role --help` for the CLI surface

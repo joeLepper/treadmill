@@ -154,7 +154,7 @@ _EXPECTED_OUTPUT_KINDS: dict[str, OutputKind] = {
     "role-doc-author": OutputKind.PLAN_DOC,
     "role-planner": OutputKind.ANALYSIS,
     "role-reviewer": OutputKind.REVIEW,
-    "role-validator": OutputKind.ANALYSIS,  # placeholder per ADR-0022
+    "role-validator": OutputKind.ANALYSIS,  # structural artifact per ADR-0029
     "role-feedback-analyzer": OutputKind.ANALYSIS,
     "role-ci-analyzer": OutputKind.ANALYSIS,
     "role-conflict-analyzer": OutputKind.ANALYSIS,

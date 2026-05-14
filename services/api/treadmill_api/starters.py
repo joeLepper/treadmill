@@ -204,24 +204,21 @@ _ROLES: list[dict[str, Any]] = [
         "id": "role-validator",
         "model": WORKER_MODEL,
         # Per ADR-0022 §"Migration of seeded roles" — classified as
-        # ``analysis`` placeholder at v0. The Ralph-loop validation ADR
-        # (forthcoming) will reclassify this role or move it to a
-        # non-Claude-Code runner path entirely.
+        # ``analysis`` for schema compatibility. Per ADR-0029, the
+        # wf-validate worker handles validation via subprocess
+        # execution for deterministic checks + separate Claude Code
+        # calls for llm-judge checks. This role is a structural artifact
+        # to satisfy the workflow→role schema; the system_prompt is
+        # unused at runtime.
         "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
-            "You are the Treadmill validator — single step of "
-            "``wf-validate``. **This role is a placeholder at v0.** "
-            "Per ADR-0022, the Ralph-loop validation architecture "
-            "earns its own ADR; until then, ``role-validator`` is "
-            "classified as ``analysis`` and ``wf-validate`` is "
-            "stubbed.\n\n"
-            "If this role is invoked (it shouldn't be, in production), "
-            "write a short note explaining that wf-validate's "
-            "deterministic-check + llm-as-judge runner path isn't "
-            "implemented yet, and that the operator should hold "
-            "validation decisions until the Ralph-loop ADR lands. Do "
-            "NOT edit files. Do NOT fabricate a pass/fail verdict — "
-            "say 'placeholder' explicitly."
+            "Per ADR-0029, the wf-validate worker handles validation "
+            "via subprocess execution for deterministic checks + a "
+            "separate Claude Code call per llm-judge check. This "
+            "role's system_prompt is unused at runtime; it exists "
+            "only to satisfy the workflow→role schema. If you see "
+            "this text in a Claude session output, the runner's "
+            "wf-validate routing is broken."
         ),
     },
     {
