@@ -1,0 +1,202 @@
+name: implementation-conforms-to-diagram
+description: >
+  When a PR implements code that conforms to a diagram in an ADR or plan, the
+  implementation must honor the diagram's declared interactions, actors, and
+  control flow. This rule ensures that diagrams remain binding contracts of
+  intent rather than decorative artifacts. Drift between diagram and code is
+  caught and remediated according to ADR-0004's amendment protocol.
+
+status: active
+created: 2026-05-14
+
+crystallized_from:
+  - ADR-0004  # diagrams as contract of intent (follow-up: author this rule)
+  - ADR-0030  # federated in-repo agent context (§3 enforcement)
+
+# applies_to omitted — defaults to all Treadmill-managed projects.
+
+checks:
+  - id: implementation-conforms
+    type: llm-judge
+    description: >
+      Evaluates whether a PR's code implementation conforms to the diagram
+      declared in the cited ADR or plan. The judge receives the diagram source
+      (Mermaid text), the PR diff, and returns one of four outcomes: pass,
+      fail-implementation, fail-diagram, or uncertain. The outcomes encode
+      different remediation paths per ADR-0004's amendment protocol.
+    severity: blocking
+    prompt: |
+      You are evaluating whether a code change satisfies the rule
+      "implementation-conforms-to-diagram": when a PR implements code that
+      corresponds to a diagram in an ADR or plan, the implementation must honor
+      the diagram's declared interactions, actors, and control flow.
+
+      Inputs you receive:
+        DIAGRAM_SOURCE — Mermaid diagram text (sequenceDiagram, flowchart, or
+                         stateDiagram-v2) from a cited ADR or plan.
+        ADR_OR_PLAN_TEXT — the surrounding prose in the ADR or plan that
+                           explains the diagram's intent and context.
+        DIFF — the unified diff of the PR implementation.
+        DIAGRAM_CITATION — how the PR description or changed files reference
+                           the diagram (e.g., "ADR-0004 figure 5", "plan
+                           2026-05-14-x-y-z.md").
+
+      Your evaluation follows these steps:
+
+      ### Step 1: Understand the diagram
+
+      Parse the Mermaid source to extract:
+        - **Actors** — all named participants (for sequenceDiagram)
+                      or all named nodes (for flowchart / stateDiagram).
+        - **Interactions** — all labeled arrows or state transitions. Each
+                            interaction has a source, target, label, and
+                            synchrony (sync `->>` vs async `-->>`).
+        - **Control flow** — the intended sequence of interactions (in
+                            sequenceDiagram, the order is explicit; in flowchart,
+                            edges define the order; in stateDiagram, states and
+                            transitions define lifecycle).
+        - **Branches and conditions** — alt/else blocks and their labels.
+
+      If the diagram is missing actors, unlabeled interactions, or is too
+      vague to extract intent, return `uncertain` with an explanation of why.
+
+      ### Step 2: Examine the implementation diff
+
+      In the diff, identify:
+        - **New or modified functions, methods, endpoints, or state machines**
+          that implement the interaction or actor roles described in the
+          diagram.
+        - **Calls between modules, services, or actors** — these are the
+          code-level parallels to diagram interactions.
+        - **Control flow and branching** — conditionals, loops, and exception
+          handling that correspond to diagram branches.
+        - **Actors in the code** — modules, services, tasks, or endpoints that
+          play the roles named in the diagram.
+
+      ### Step 3: Compare diagram to implementation
+
+      For each interaction in the diagram, ask:
+
+      1. **Is there a code path that implements this interaction?**
+         - Does the implementation call the right function/method/endpoint?
+         - Is the source actor (code module/service) calling the target?
+         - Is the label (operation name, event name, message type) present?
+         - For sequenceDiagram, is the synchrony (sync vs async) honored?
+
+      2. **Are there code paths NOT in the diagram?**
+         - Implementation has branches, calls, or side effects the diagram
+           does not declare.
+         - Example: diagram shows A→B→C, but code also has A→C or A→B→D.
+
+      3. **Are all diagram actors represented in the code?**
+         - Each named actor in the diagram plays a role (makes calls, receives
+           calls, transitions state).
+         - Is that role implemented?
+
+      4. **Is the control flow respected?**
+         - Diagram shows ordering (sequence of interactions) or dependencies
+           (flowchart edges). Is the code's control flow consistent?
+         - Example: if diagram shows A→B before C→D, code should not allow
+           C→D to happen before A→B completes (unless async is explicitly
+           declared).
+
+      ### Step 4: Assign outcome
+
+      **pass** — all diagram interactions are implemented with corresponding
+                 code paths; no code paths implement interactions not in the
+                 diagram; all named actors play defined roles; control flow
+                 matches the diagram's declared sequence and branches.
+
+      **fail-implementation** — the code has interactions the diagram does not
+                                declare (undeclared side effects, extra calls, or
+                                branches), OR the code omits interactions the
+                                diagram requires, OR actors are missing or misnamed,
+                                OR control flow contradicts the diagram.
+                                **Remediation:** update the implementation to
+                                conform, or (if intent has legitimately changed)
+                                update the diagram and cite the amendment in the
+                                PR description.
+
+      **fail-diagram** — the implementation is reasonable and internally
+                         consistent, but the diagram no longer reflects current
+                         intent. The code diverges from the diagram in a way that
+                         suggests intent has shifted, not that the code is wrong.
+                         **Remediation:** update the diagram in its source ADR or
+                         plan, add a note explaining what changed and why, and
+                         cite the amendment in the PR description.
+                         **Example:** diagram shows synchronous request-reply; code
+                         implements async pub-sub. This is not a bug — it's a
+                         legitimate design shift. The diagram should be updated to
+                         reflect that shift.
+
+      **uncertain** — the diagram is too vague to extract clear intent (unlabeled
+                      interactions, anonymous actors, unclear control flow), OR the
+                      code is complex enough that mapping it to the diagram is
+                      ambiguous, OR there is partial overlap but it is unclear
+                      whether discrepancies are omissions or legitimate drift.
+                      **Remediation:** flag for human review. The PR author and
+                      reviewer should clarify the diagram or the code.
+
+      ### Step 5: Return your judgment
+
+      Return JSON exactly matching this shape, no prose around it:
+        {
+          "result": "pass" | "fail-implementation" | "fail-diagram" | "uncertain",
+          "rationale": "<one to three sentences. If fail-*, cite the specific
+                        diagram interactions that are missing, extra, or unclear
+                        in the code. If uncertain, explain what is ambiguous.>",
+          "diagram_actors": ["actor1", "actor2", ...],
+          "diagram_interactions_count": <number>,
+          "code_paths_examined": "<brief summary of which functions/endpoints
+                                  or modules in the diff were checked>"
+        }
+
+      Be concrete and specific. A passing judgment should demonstrate that you
+      traced a diagram interaction to code. A failing judgment should name which
+      interaction is missing or extra.
+
+remediations:
+  - "on": implementation-conforms:fail-implementation
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR's implementation diverges from its cited diagram (ADR or plan).
+      Per rule:implementation-conforms-to-diagram (enforcing ADR-0004), when code
+      implements a diagrammed interaction, the code must honor the diagram's
+      declared actors, interactions, and control flow. Check the judge's rationale
+      on the PR to see which interactions are missing, extra, or misaligned. Either
+      update the implementation to conform, or (if intent has legitimately changed)
+      update the diagram in its source ADR or plan, add a note explaining the
+      change, and cite the amendment in the PR description. See ADR-0004's
+      "Amendment protocol" section for guidance.
+
+  - "on": implementation-conforms:fail-diagram
+    action: warn
+    target: pr-author
+    message: >
+      The judge detected that this PR's implementation does not match the diagram
+      it cites, but the code is reasonable and suggests that intent has shifted
+      rather than the code being wrong. Per ADR-0004's amendment protocol, update
+      the diagram in its source ADR or plan with a note explaining what changed
+      and why, then cite the amendment in the PR description. For example, if the
+      code implements async pub-sub but the diagram shows sync request-reply, the
+      diagram should be amended to match the new design. This is not a code error —
+      it is a documentation update to keep intent current.
+
+  - "on": implementation-conforms:uncertain
+    action: warn
+    target: pr-author
+    message: >
+      The LLM judge could not confidently determine whether this PR's
+      implementation conforms to its cited diagram. This may be because the
+      diagram is ambiguous (unlabeled interactions, anonymous actors, unclear
+      control flow), or the code is complex enough that the mapping is unclear.
+      Please review the judge's rationale and clarify either the diagram or the
+      code so that conformance is unambiguous. A diagram that is clear enough to
+      validate against is clear enough to guide implementation — if the diagram
+      cannot be validated, it is not specific enough.
+
+references:
+  - ADR-0004  # diagrams as contract of intent; defines conformance criteria and amendment protocol
+  - ADR-0030  # federated in-repo agent context; embeds this rule as §3 enforcement
+  - ADR-0006  # rules + remediations primitive

@@ -223,11 +223,19 @@ class TestRulesSchema:
         for remediation in remediations:
             on = remediation.get("on")
             assert on, f"{rule_file.name}: remediation missing 'on' field"
-            # Parse 'on' as '<check-id>:fail' or '<check-id>:uncertain'
-            match = re.match(r"^([a-z0-9-]+):(fail|uncertain)$", on)
+            # Parse 'on' as '<check-id>:<outcome>'. The four-outcome contract
+            # from ADR-0004 (pass / fail-implementation / fail-diagram / uncertain)
+            # is the ceiling; simpler rules use just 'fail' / 'uncertain' as the
+            # failure variants. 'pass' is never an actionable outcome here so
+            # it's excluded.
+            match = re.match(
+                r"^([a-z0-9-]+):(fail|fail-implementation|fail-diagram|uncertain)$",
+                on,
+            )
             assert match, (
                 f"{rule_file.name}: remediation 'on' field invalid format: '{on}' "
-                "(expected '<check-id>:fail' or '<check-id>:uncertain')"
+                "(expected '<check-id>:fail', '<check-id>:fail-implementation', "
+                "'<check-id>:fail-diagram', or '<check-id>:uncertain')"
             )
             check_id = match.group(1)
             assert (
