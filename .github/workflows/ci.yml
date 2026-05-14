@@ -1,0 +1,47 @@
+name: CI
+
+# Runs the Treadmill test suite on every PR and on push to main.
+# Per ADR-0031 §Prerequisites + task #127, this is the gate that
+# auto-merge layers on top of — task-intent validation (wf-validate)
+# is necessary but not sufficient; existing-test-suite still has to
+# pass before mergeability flips to mergeable.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: services/api
+          - component: workers/agent
+          - component: tools/local-adapter
+          - component: infra
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync workspace deps
+        run: uv sync --frozen --all-packages
+
+      - name: Run ${{ matrix.component }} tests
+        working-directory: ${{ matrix.component }}
+        run: uv run pytest tests/ -q
