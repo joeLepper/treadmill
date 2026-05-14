@@ -28,6 +28,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # per-role (Opus / Sonnet / Haiku). Pinned 2026-05-11.
 RUN npm install -g @anthropic-ai/claude-code@2.1.138
 
+# uv — needed for author-side validation scripts that use ``uv run pytest``
+# against the cloned workspace (per task #121 + the 2026-05-14 learning).
+# Without uv on PATH inside the worker, every validation script that uses
+# the standard ``cd <pkg> && uv run pytest`` pattern exits 127 and the
+# code disposition refuses to push.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
 WORKDIR /app
 
 # Copy the API package first because the agent's pyproject declares
