@@ -493,14 +493,20 @@ def test_parse_verdict_marker_picks_request_changes() -> None:
     )
 
 
-def test_parse_verdict_marker_picks_comment() -> None:
-    assert _parse_verdict_marker("blah\nVERDICT: comment\n") == "comment"
+def test_parse_verdict_marker_treats_legacy_comment_as_default() -> None:
+    """``comment`` was retired 2026-05-15. A stale ``VERDICT: comment``
+    line no longer matches the inner regex, so the marker is treated as
+    absent and the function returns its default (``request_changes``)."""
+    assert (
+        _parse_verdict_marker("blah\nVERDICT: comment\n") == "request_changes"
+    )
 
 
-def test_parse_verdict_marker_defaults_to_comment_when_absent() -> None:
-    """The safe default — no marker means ``comment``, never accidentally
-    approves a PR Treadmill can't actually evaluate."""
-    assert _parse_verdict_marker("just text, no marker") == "comment"
+def test_parse_verdict_marker_defaults_to_request_changes_when_absent() -> None:
+    """The safe default — no marker means ``request_changes``, never
+    accidentally approves a PR Treadmill can't actually evaluate. Pre
+    2026-05-15 this defaulted to ``comment`` which was a black hole."""
+    assert _parse_verdict_marker("just text, no marker") == "request_changes"
 
 
 def test_parse_verdict_marker_takes_last_match_when_ambiguous() -> None:
@@ -571,7 +577,7 @@ def test_parse_verdict_marker_rejects_unknown_verb() -> None:
     """Tolerance widens decorations, NOT the verdict vocabulary —
     ``VERDICT: lgtm`` is still nonsense and must fall through to the
     safe default rather than silently rewriting to e.g. ``approve``."""
-    assert _parse_verdict_marker("VERDICT: lgtm") == "comment"
+    assert _parse_verdict_marker("VERDICT: lgtm") == "request_changes"
 
 
 def test_parse_verdict_marker_last_wins_across_decorated_lines() -> None:
@@ -743,21 +749,23 @@ def test_parse_review_envelope_logs_warning_on_json_failure(
 
 
 def test_parse_review_envelope_safe_default_when_both_paths_fail() -> None:
-    """No JSON, no VERDICT line → safe default ``comment``."""
+    """No JSON, no VERDICT line → safe default ``request_changes``.
+    Comment was retired 2026-05-15; the conservative fallback is now
+    request_changes (forces a productive next step, never silently
+    approves)."""
     verdict, rationale = _parse_review_envelope("Just prose, no marker at all.")
-    assert verdict == "comment"
+    assert verdict == "request_changes"
     assert rationale is None
 
 
-def test_parse_review_envelope_regex_explicit_comment() -> None:
-    """The regex tourniquet can return ``comment`` explicitly. The
-    envelope parser distinguishes 'model explicitly said comment'
-    from 'we fell to the safe default' but both yield the same
-    verdict — the rationale is None either way (regex path
-    can't recover one)."""
+def test_parse_review_envelope_legacy_comment_marker_falls_to_default() -> None:
+    """A stale ``VERDICT: comment`` line (e.g. from a pre-2026-05-15
+    role prompt cached somewhere) does not match the inner regex
+    anymore — the envelope falls through to the request_changes
+    default."""
     text = "Some notes.\nVERDICT: comment\n"
     verdict, rationale = _parse_review_envelope(text)
-    assert verdict == "comment"
+    assert verdict == "request_changes"
     assert rationale is None
 
 

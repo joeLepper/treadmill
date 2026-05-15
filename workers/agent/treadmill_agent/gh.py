@@ -48,13 +48,12 @@ class GhCliError(RuntimeError):
     the message so the operator can debug from the worker logs alone."""
 
 
-Verdict = Literal["approve", "request_changes", "comment"]
+Verdict = Literal["approve", "request_changes"]
 
 
 _VERDICT_FLAG: dict[str, str] = {
     "approve": "--approve",
     "request_changes": "--request-changes",
-    "comment": "--comment",
 }
 
 

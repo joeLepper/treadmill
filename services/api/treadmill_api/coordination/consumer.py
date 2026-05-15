@@ -1062,10 +1062,22 @@ class CoordinationConsumer:
             return
         from treadmill_api.coordination.triggers import (
             maybe_dispatch_feedback_on_review_changes_requested,
+            maybe_dispatch_feedback_on_terminal_failure,
         )
         try:
             await maybe_dispatch_feedback_on_review_changes_requested(
                 session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+            # 2026-05-15: the reviewer's ``comment`` verdict was retired
+            # at the source (review disposition + role prompt). Defensive
+            # net: if a stale role config or test fixture somehow emits
+            # ``needs-more-info`` anyway, route to wf-feedback rather
+            # than letting the task stall in a black hole.
+            await maybe_dispatch_feedback_on_terminal_failure(
+                session, self.dispatcher,
+                step_id=step_id, typed=typed,
+                workflow_id="wf-review",
+                fail_decision="needs-more-info",
             )
         except Exception:
             logger.exception(

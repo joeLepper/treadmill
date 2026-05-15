@@ -69,7 +69,11 @@ class ReviewVerdict(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    verdict: Literal["approve", "request_changes", "comment"]
+    # ``comment`` was retired 2026-05-15: in a hands-free world the
+    # reviewer must drive forward motion. Either the PR is good enough
+    # to merge (``approve``) or it isn't (``request_changes``). An
+    # ambiguous verdict yields an ambiguous downstream state.
+    verdict: Literal["approve", "request_changes"]
     rationale: str = Field(..., max_length=4000)
 
 
@@ -101,7 +105,7 @@ class MissingContextError(RuntimeError):
 # JSON envelope (ADR-0027); this widening is the tourniquet that lets
 # the running loop survive until that lands.
 _VERDICT_INNER_RE = re.compile(
-    r"^VERDICT:\s*(approve|request_changes|comment)$",
+    r"^VERDICT:\s*(approve|request_changes)$",
 )
 _LEADING_MARKER_RE = re.compile(r"^\s*(?:[-*+>]\s+|>\s*)*")
 _SURROUNDING_DECORATION_RE = re.compile(r"^[*_`]+|[*_`]+$")
@@ -130,7 +134,7 @@ def _normalize_verdict_line(line: str) -> str:
     return s
 
 
-def _parse_verdict_marker(summary: str, *, default: str = "comment") -> str:
+def _parse_verdict_marker(summary: str, *, default: str = "request_changes") -> str:
     """Return the last ``VERDICT: ...`` line's value, or ``default``.
 
     Per ADR-0022 Q22.c: if Claude is ambiguous (multiple VERDICT
@@ -138,8 +142,10 @@ def _parse_verdict_marker(summary: str, *, default: str = "comment") -> str:
     teaches a single-line marker convention; multiple lines is a
     prompt-engineering bug, not a runner bug.
 
-    The default — ``comment`` — is the benign fallback so a missing /
-    malformed marker never accidentally approves a PR.
+    The default — ``request_changes`` — is conservative: a missing /
+    malformed marker never accidentally approves a PR, and the
+    request_changes verdict gives the system a productive next step
+    (wf-feedback) instead of the legacy ``comment`` black hole.
 
     Per ADR-0027 this regex-driven path is the tourniquet fallback
     behind the JSON-envelope parser. Kept until 10 consecutive runs
@@ -203,7 +209,12 @@ def _parse_review_envelope(summary: str) -> tuple[str, str | None]:
          ``_parse_verdict_marker``. Returns ``(verdict, None)`` —
          the regex path can't recover a rationale.
       3. **Safe default.** If both paths fail, return
-         ``("comment", None)``.
+         ``("request_changes", None)`` — never silently approve.
+
+    ``comment`` was retired 2026-05-15 (hands-free has no use for an
+    ambiguous verdict). If the model emits ``"comment"`` in the JSON
+    block, model_validate rejects it and the regex tourniquet returns
+    the request_changes default.
 
     Per Q27.d's resolution, this function ALWAYS runs (dry-run path
     included); the dry-run only skips the ``gh pr comment`` call,
@@ -221,21 +232,18 @@ def _parse_review_envelope(summary: str) -> tuple[str, str | None]:
                 "review.json_parse_failed",
                 extra={"reason": str(exc), "block_excerpt": block[:200]},
             )
-    # Fallback: regex tourniquet. Returns the default ``comment`` if
-    # no marker line matches.
-    verdict = _parse_verdict_marker(summary)
-    if verdict != "comment" or _has_verdict_marker(summary):
-        return (verdict, None)
-    return ("comment", None)
+    # Fallback: regex tourniquet. Returns ``request_changes`` if no
+    # marker line matches.
+    return (_parse_verdict_marker(summary), None)
 
 
 def _has_verdict_marker(summary: str) -> bool:
     """Return True if the regex tourniquet found a literal VERDICT:
-    line whose value was ``comment``. Used by
-    ``_parse_review_envelope`` to distinguish "the model explicitly
-    said ``comment``" from "we fell to the safe default" — the two
-    look identical at the verdict-string level but differ
-    semantically for the always-parse-always-log drift signal."""
+    line. No longer load-bearing for verdict resolution after the
+    2026-05-15 comment-retirement (``request_changes`` is now the
+    safe default whether or not a marker was present); retained as
+    a hook for drift-signal tests in case the JSON-envelope path
+    degrades."""
     for line in (summary or "").splitlines():
         normalized = _normalize_verdict_line(line)
         if _VERDICT_INNER_RE.match(normalized):
@@ -246,7 +254,6 @@ def _has_verdict_marker(summary: str) -> bool:
 _VERDICT_HEADER_VERB: dict[str, str] = {
     "approve": "approve",
     "request_changes": "request changes",
-    "comment": "comment",
 }
 
 
@@ -315,5 +322,4 @@ def handle(ctx: DispositionContext) -> StepOutput:
 _DECISION_FOR_VERDICT: dict[str, str] = {
     "approve": "approved",
     "request_changes": "changes_requested",
-    "comment": "needs-more-info",
 }
