@@ -275,6 +275,7 @@ class MergeabilityFixtureBuilder:
         decision: str,
         commit_sha: str,
         role_id: str = "role-author",
+        checks: list[dict] | None = None,
     ) -> uuid.UUID:
         """Insert a completed workflow_run_step with a StepOutput envelope.
 
@@ -282,13 +283,23 @@ class MergeabilityFixtureBuilder:
         ``commit_sha`` (ADR-0012 promotion). We persist exactly the
         envelope shape — ``summary`` + ``decision`` + ``commit_sha`` —
         and fill in empty defaults for the rest.
+
+        ``checks`` is the per-rule array consumed by the severity-aware
+        validate aggregate in ADR-0029 Q29.f / ADR-0036 / migration 0013.
+        When omitted, ``payload`` stays empty and the VIEW falls through
+        to the legacy ``decision`` field (severity-blind). Pass a list of
+        dicts each carrying at least ``{verdict, severity}`` to exercise
+        the severity-aware path.
         """
+        payload: dict = {}
+        if checks is not None:
+            payload["checks"] = checks
         envelope = {
             "summary": f"{workflow_slug} at {commit_sha}",
             "decision": decision,
             "commit_sha": commit_sha,
             "artifacts": [],
-            "payload": {},
+            "payload": payload,
             "metadata": {},
         }
         with self.engine.begin() as conn:
@@ -488,6 +499,83 @@ def test_mergeability_blocked_on_validate_fail(
     assert row is not None
     assert row.validate_decision == "fail"
     assert row.derived_mergeability == "blocked-on-validate"
+
+
+def test_mergeability_severity_warning_fail_does_not_block(
+    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+) -> None:
+    """ADR-0029 Q29.f / ADR-0036 / migration 0013: a wf-validate run
+    where the only failing check is ``severity=warning`` must NOT flip
+    ``validate_decision`` to ``'fail'``. The aggregate is computed
+    from the per-check array, considering blocking severity only."""
+    plan_id = fixtures.make_plan()
+    task_id = fixtures.make_task(plan_id)
+    fixtures.add_task_pr(task_id)
+    fixtures.add_pr_opened(head_sha="sha-1")
+    fixtures.add_step_envelope(
+        task_id,
+        "wf-validate",
+        decision="fail",  # worker's severity-blind aggregate
+        commit_sha="sha-1",
+        checks=[
+            {"check_id": "blocking-ok", "verdict": "pass", "severity": "blocking"},
+            {"check_id": "warn-fail", "verdict": "fail", "severity": "warning"},
+        ],
+    )
+    row = _mergeability_row(engine, task_id)
+    assert row is not None
+    # VIEW's severity-aware aggregate ignores the warning fail.
+    assert row.validate_decision == "pass"
+
+
+def test_mergeability_severity_blocking_fail_blocks(
+    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+) -> None:
+    """Blocking-severity verdict=fail must propagate to the aggregate
+    and block merge — the inverse of the warning test above."""
+    plan_id = fixtures.make_plan()
+    task_id = fixtures.make_task(plan_id)
+    fixtures.add_task_pr(task_id)
+    fixtures.add_pr_opened(head_sha="sha-1")
+    fixtures.add_step_envelope(
+        task_id,
+        "wf-validate",
+        decision="pass",  # worker's severity-blind aggregate disagrees
+        commit_sha="sha-1",
+        checks=[
+            {"check_id": "blocking-bad", "verdict": "fail", "severity": "blocking"},
+            {"check_id": "warn-ok", "verdict": "pass", "severity": "warning"},
+        ],
+    )
+    row = _mergeability_row(engine, task_id)
+    assert row is not None
+    assert row.validate_decision == "fail"
+    assert row.derived_mergeability == "blocked-on-validate"
+
+
+def test_mergeability_severity_blocking_error_blocks(
+    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+) -> None:
+    """A ``verdict='error'`` from a blocking check is treated the same
+    as ``'fail'`` — both flip the aggregate to ``'fail'``. Errors are
+    typically LLM-judge parse failures, but they still indicate the
+    gate was not satisfied."""
+    plan_id = fixtures.make_plan()
+    task_id = fixtures.make_task(plan_id)
+    fixtures.add_task_pr(task_id)
+    fixtures.add_pr_opened(head_sha="sha-1")
+    fixtures.add_step_envelope(
+        task_id,
+        "wf-validate",
+        decision="pass",
+        commit_sha="sha-1",
+        checks=[
+            {"check_id": "blocking-judge", "verdict": "error", "severity": "blocking"},
+        ],
+    )
+    row = _mergeability_row(engine, task_id)
+    assert row is not None
+    assert row.validate_decision == "fail"
 
 
 def test_mergeability_blocked_on_ci_failure(
