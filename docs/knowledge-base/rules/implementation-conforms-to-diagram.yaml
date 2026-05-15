@@ -13,7 +13,13 @@ crystallized_from:
   - ADR-0004  # diagrams as contract of intent (follow-up: author this rule)
   - ADR-0030  # federated in-repo agent context (§3 enforcement)
 
-# applies_to omitted — defaults to all Treadmill-managed projects.
+applies_to:
+  - 'services/**/*.py'
+  - 'workers/**/*.py'
+  - 'tools/**/*.py'
+  - 'infra/**/*.py'
+  - 'docs/adrs/*.md'
+  - 'docs/plans/*.md'
 
 checks:
   - id: implementation-conforms

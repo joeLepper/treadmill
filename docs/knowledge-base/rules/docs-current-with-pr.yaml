@@ -12,7 +12,14 @@ created: 2026-05-14
 crystallized_from:
   - ADR-0030-Q30.d  # maintenance trigger: llm-judge reads local docs and decides should-have-been-updated AND was-updated
 
-# applies_to omitted — defaults to all Treadmill-managed projects.
+applies_to:
+  - 'services/**/*.py'
+  - 'workers/**/*.py'
+  - 'tools/**/*.py'
+  - 'infra/**/*.py'
+  - '**/AGENT.md'
+  - 'docs/adrs/*.md'
+  - 'docs/plans/*.md'
 
 checks:
   - id: surface-changes-have-doc-updates

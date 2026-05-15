@@ -10,7 +10,11 @@ created: 2026-05-07
 crystallized_from:
   - 2026-05-07-features-ship-with-tests
 
-# applies_to omitted — defaults to all Treadmill-managed projects.
+applies_to:
+  - 'services/**/*.py'
+  - 'workers/**/*.py'
+  - 'tools/**/*.py'
+  - 'infra/**/*.py'
 
 checks:
   - id: test-files-changed
