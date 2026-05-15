@@ -13,13 +13,12 @@ from typing import Any
 
 _tracer_provider: Any = None
 _meter_provider: Any = None
-_logger_handler: Any = None
 _initialized = False
 
 
 def _configure_otel() -> None:
     """Configure OpenTelemetry SDK when OTEL_EXPORTER_OTLP_ENDPOINT is set."""
-    global _tracer_provider, _meter_provider, _logger_handler, _initialized
+    global _tracer_provider, _meter_provider, _initialized
 
     if _initialized:
         return
@@ -32,9 +31,10 @@ def _configure_otel() -> None:
         _setup_noop()
         return
 
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry import metrics, trace
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
         OTLPSpanExporter,
     )
@@ -52,14 +52,20 @@ def _configure_otel() -> None:
     resource = Resource(attributes={SERVICE_NAME: service_name})
 
     _tracer_provider = TracerProvider(resource=resource)
-    otlp_exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
-    _tracer_provider.add_span_processor(SimpleSpanProcessor(otlp_exporter))
+    _tracer_provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True))
+    )
+    trace.set_tracer_provider(_tracer_provider)
 
-    metric_exporter = OTLPMetricExporter(endpoint=endpoint, insecure=True)
     _meter_provider = MeterProvider(
         resource=resource,
-        metric_readers=[PeriodicExportingMetricReader(metric_exporter)],
+        metric_readers=[
+            PeriodicExportingMetricReader(
+                OTLPMetricExporter(endpoint=endpoint, insecure=True)
+            )
+        ],
     )
+    metrics.set_meter_provider(_meter_provider)
 
     FastAPIInstrumentor().instrument()
     SQLAlchemyInstrumentor().instrument()
