@@ -64,6 +64,8 @@ class ReviewVerdict(BaseModel):
     Pydantic rejects anything outside the value-set;
     ``rationale`` is required + capped at 4000 chars per Q27.b
     (cheap insurance against a runaway model, ample for substantive
+    rationale). Optional ``issues`` list provides explicit asks for
+    request_changes verdicts (else derived by sentence-split from
     rationale).
     """
 
@@ -75,6 +77,7 @@ class ReviewVerdict(BaseModel):
     # ambiguous verdict yields an ambiguous downstream state.
     verdict: Literal["approve", "request_changes"]
     rationale: str = Field(..., max_length=4000)
+    issues: list[str] | None = Field(default=None)
 
 
 # JSON fence regex per ADR-0027. Tolerates ``json``, ``json5``, mixed
@@ -195,26 +198,21 @@ def _strip_json_block(summary: str) -> str:
     return text[:last.start()] + text[last.end():]
 
 
-def _parse_review_envelope(summary: str) -> tuple[str, str | None]:
-    """Parse the review-kind output into ``(verdict, rationale)``.
+def _parse_review_verdict_object(summary: str) -> ReviewVerdict | None:
+    """Parse the review-kind JSON envelope into a ReviewVerdict object.
+
+    Returns the typed ReviewVerdict if parsing succeeds, or None if the
+    JSON envelope is missing/invalid (falls back to regex tourniquet).
 
     Three-tier parser per ADR-0027:
 
       1. **JSON envelope (primary).** ``_extract_json_block`` →
          ``json.loads`` → ``ReviewVerdict.model_validate``. On
-         success, returns the typed verdict + rationale.
+         success, returns the typed verdict object.
       2. **Regex tourniquet (fallback).** On ``JSONDecodeError`` /
          ``ValidationError``, emit a structured
-         ``review.json_parse_failed`` warning and fall through to
-         ``_parse_verdict_marker``. Returns ``(verdict, None)`` —
-         the regex path can't recover a rationale.
-      3. **Safe default.** If both paths fail, return
-         ``("request_changes", None)`` — never silently approve.
-
-    ``comment`` was retired 2026-05-15 (hands-free has no use for an
-    ambiguous verdict). If the model emits ``"comment"`` in the JSON
-    block, model_validate rejects it and the regex tourniquet returns
-    the request_changes default.
+         ``review.json_parse_failed`` warning and return None.
+      3. **Safe default.** None return means fall back to regex parsing.
 
     Per Q27.d's resolution, this function ALWAYS runs (dry-run path
     included); the dry-run only skips the ``gh pr comment`` call,
@@ -226,12 +224,39 @@ def _parse_review_envelope(summary: str) -> tuple[str, str | None]:
         try:
             data = json.loads(block)
             parsed = ReviewVerdict.model_validate(data)
-            return (parsed.verdict, parsed.rationale)
+            return parsed
         except (json.JSONDecodeError, ValidationError) as exc:
             logger.warning(
                 "review.json_parse_failed",
                 extra={"reason": str(exc), "block_excerpt": block[:200]},
             )
+    return None
+
+
+def _parse_review_envelope(summary: str) -> tuple[str, str | None]:
+    """Parse the review-kind output into ``(verdict, rationale)``.
+
+    Three-tier parser per ADR-0027 — returns tuple of (verdict_str, rationale_str).
+    This is the backward-compatible interface; use _parse_review_verdict_object
+    for the full typed envelope with issues.
+
+      1. **JSON envelope (primary).** Returns (parsed.verdict, parsed.rationale).
+      2. **Regex tourniquet (fallback).** Returns (verdict, None).
+      3. **Safe default.** Returns ("request_changes", None).
+
+    ``comment`` was retired 2026-05-15 (hands-free has no use for an
+    ambiguous verdict). If the model emits ``"comment"`` in the JSON
+    block, model_validate rejects it and the regex tourniquet returns
+    the request_changes default.
+
+    Per Q27.d's resolution, this function ALWAYS runs (dry-run path
+    included); the dry-run only skips the ``gh pr comment`` call,
+    not the parsing. The drift signal from the warning log is the
+    point of the always-parse-always-log discipline.
+    """
+    parsed = _parse_review_verdict_object(summary)
+    if parsed is not None:
+        return (parsed.verdict, parsed.rationale)
     # Fallback: regex tourniquet. Returns ``request_changes`` if no
     # marker line matches.
     return (_parse_verdict_marker(summary), None)
@@ -257,6 +282,51 @@ _VERDICT_HEADER_VERB: dict[str, str] = {
 }
 
 
+def _extract_issues_from_rationale(rationale: str) -> list[str]:
+    """Derive concrete issue asks from rationale by simple sentence-split.
+
+    Splits rationale on sentence boundaries (. ! ?) and returns non-empty
+    trimmed sentences. Used when ReviewVerdict.issues is not provided.
+    """
+    # Split on sentence-ending punctuation followed by space
+    sentences = re.split(r'[.!?]\s+', rationale)
+    # Trim and filter empty strings, stripping trailing punctuation
+    issues = [s.strip().rstrip('.!?') for s in sentences if s.strip()]
+    return issues
+
+
+def _synthesize_prose_body(verdict: ReviewVerdict) -> str:
+    """Generate structured prose from a ReviewVerdict for gh pr comment.
+
+    Template:
+      ## Treadmill review verdict: <approve|request changes>
+
+      <rationale>
+
+      <if request_changes:
+        ## Issues
+
+        - <issue 1>
+        - <issue 2>
+        ...
+      >
+
+    The rationale is a single paragraph. Issues are explicit if provided
+    via ReviewVerdict.issues, else derived by sentence-split from rationale.
+    """
+    verb = _VERDICT_HEADER_VERB.get(verdict.verdict, verdict.verdict)
+    body = f"## Treadmill review verdict: {verb}\n\n{verdict.rationale}"
+
+    if verdict.verdict == "request_changes":
+        # Use explicit issues if provided, else derive from rationale
+        issues = verdict.issues if verdict.issues is not None else _extract_issues_from_rationale(verdict.rationale)
+        if issues:
+            body += "\n\n## Issues\n\n"
+            for issue in issues:
+                body += f"- {issue}\n"
+    return body
+
+
 def _compose_comment_body(verdict: str, summary: str) -> str:
     """Prepend a verdict header to the model's review body so a human
     reader scanning the PR page sees the verdict immediately.
@@ -277,9 +347,10 @@ def handle(ctx: DispositionContext) -> StepOutput:
     structured drift warning surfaces even when no PR comment lands.
     Only ``gh pr comment`` itself is dry-run-gated.
 
-    Per Q27.c: the JSON fence is stripped from the body before
-    posting so the PR-page reader sees clean prose. The verdict's
-    mergeability-VIEW effect is the operator-visible signal already.
+    When a ReviewVerdict is successfully parsed from the JSON envelope,
+    the disposition synthesizes a structured prose body from the verdict
+    + rationale + optional issues list. The JSON fence is stripped from
+    the raw summary before synthesis to keep the posted body clean.
     """
     if ctx.ctx.pr_number is None:
         raise MissingContextError(
@@ -288,14 +359,29 @@ def handle(ctx: DispositionContext) -> StepOutput:
             "a review can be posted"
         )
     summary = ctx.claude_result.summary
-    verdict, rationale = _parse_review_envelope(summary)
-    stripped_body = _strip_json_block(summary)
+    # Try to parse the full ReviewVerdict object for synthesis.
+    verdict_obj = _parse_review_verdict_object(summary)
+
+    if verdict_obj is not None:
+        # Primary path: JSON envelope parsed successfully.
+        # Synthesize structured prose body from the verdict object.
+        comment_body = _synthesize_prose_body(verdict_obj)
+        verdict = verdict_obj.verdict
+        rationale = verdict_obj.rationale
+    else:
+        # Fallback path: regex tourniquet or safe default.
+        # Use the legacy tuple-based parser for verdict + rationale.
+        verdict, rationale = _parse_review_envelope(summary)
+        stripped_body = _strip_json_block(summary)
+        # Old behavior: prepend header to the model's prose.
+        comment_body = _compose_comment_body(verdict, stripped_body)
+
     # Dry-run path: skip the gh CLI invocation; tests assert the
     # parsed verdict + envelope shape without a live GitHub.
     if not ctx.is_dry_run:
         gh.pr_comment(
             ctx.ctx.pr_number,
-            body=_compose_comment_body(verdict, stripped_body),
+            body=comment_body,
             cwd=ctx.repo_dir,
         )
     payload: dict[str, object] = {

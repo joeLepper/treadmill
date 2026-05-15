@@ -779,13 +779,13 @@ def _stub_head_sha(monkeypatch: pytest.MonkeyPatch) -> str:
     return sha
 
 
-def test_review_handler_strips_json_fence_from_posted_body(
+def test_review_handler_synthesizes_structured_body_from_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_head_sha: str,
 ) -> None:
-    """Q27.c: the JSON fence is stripped from the body sent to gh
-    pr comment so the PR-page reader sees clean prose. The verdict
-    + rationale flow through the StepOutput envelope, not through
-    the comment body."""
+    """ADR-0036: the disposition synthesizes a structured body from the
+    ReviewVerdict envelope rather than passing the model's free-form prose.
+    The body is generated from a template with header + rationale + issues
+    (if request_changes)."""
     captured: list[str] = []
     monkeypatch.setattr(
         gh, "pr_comment",
@@ -806,13 +806,12 @@ def test_review_handler_strips_json_fence_from_posted_body(
     assert len(captured) == 1
     # The JSON fence is gone from the body.
     assert "```json" not in captured[0]
-    # The JSON key is gone (the header line contains the bare word
-    # "verdict" by design, but the fenced ``"verdict":`` form does
-    # not survive the strip).
-    assert '"verdict"' not in captured[0]
-    assert '"rationale"' not in captured[0]
-    # The surrounding prose survives.
-    assert "merge-key logic" in captured[0]
+    # The synthesized body has the structured header + rationale.
+    assert "## Treadmill review verdict: request changes" in captured[0]
+    assert "fix the merge key" in captured[0]
+    # Issues section is generated from the single-sentence rationale.
+    assert "## Issues" in captured[0]
+    assert "- fix the merge key" in captured[0]
     # The verdict + rationale travel via the StepOutput envelope.
     assert out.decision == "changes_requested"
     assert out.payload["verdict"] == "request_changes"
