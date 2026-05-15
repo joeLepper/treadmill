@@ -122,11 +122,16 @@ FAILURE_CONCLUSIONS: frozenset[str] = frozenset(
 )
 
 
-# Per-event extra fan-out: ``pr_synchronize`` fires ``wf-review`` (via the
-# event_triggers row) AND ``wf-validate``. The table only supports one
-# workflow per (repo, event_type), so the second workflow is named here.
-# Empty for every other event_type.
+# Per-event extra fan-out: ``pr_opened`` and ``pr_synchronize`` both fire
+# ``wf-review`` (via the event_triggers row) AND ``wf-validate``. The
+# event_triggers table only supports one workflow per (repo, event_type),
+# so the second workflow is named here. Symmetric across the two PR
+# verbs because auto-merge (ADR-0031) requires ``validate_decision='pass'``
+# and that VIEW projection only sees runs that actually executed — so a
+# first-cycle PR with no pr_synchronize was structurally unable to
+# auto-merge before 2026-05-15 (surfaced by the first end-to-end smoke).
 _EXTRA_FANOUT_WORKFLOWS: dict[str, list[str]] = {
+    "pr_opened": ["wf-validate"],
     "pr_synchronize": ["wf-validate"],
 }
 

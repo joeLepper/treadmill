@@ -49,7 +49,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from treadmill_agent import gh
+from treadmill_agent import gh, git
 from treadmill_agent.events import Artifact, Metadata, StepOutput
 from treadmill_agent.runner_dispositions._context import DispositionContext
 
@@ -304,11 +304,15 @@ def handle(ctx: DispositionContext) -> StepOutput:
     }
     if rationale is not None:
         payload["rationale"] = rationale
+    # ADR-0013 mergeability VIEW joins wf-review steps on
+    # commit_sha = head.head_sha. Without this, ``approved`` verdicts
+    # never reach the VIEW and auto-merge never sees them.
+    review_sha = git.head_sha(ctx.repo_dir)
     return StepOutput(
         summary=summary,
         # Map verdict → ADR-0012's wf-review decision value-set.
         decision=_DECISION_FOR_VERDICT[verdict],
-        commit_sha=None,
+        commit_sha=review_sha,
         artifacts=[Artifact(kind="pr_review", value=verdict)],
         payload=payload,
         metadata=Metadata(),

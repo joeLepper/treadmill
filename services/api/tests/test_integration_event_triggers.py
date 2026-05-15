@@ -419,6 +419,28 @@ async def test_pr_synchronize_fires_review_and_validate_concurrently(
 
 
 @pytest.mark.asyncio
+async def test_pr_opened_fires_review_and_validate_concurrently(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """2026-05-15: extended fan-out so first-cycle PRs also run wf-validate.
+    Before this, only ``pr_synchronize`` fanned out, which meant a PR
+    opened once and never re-pushed had no ``validate_decision`` in the
+    mergeability VIEW — auto-merge (ADR-0031) was structurally unable to
+    fire on the first cycle. Surfaced by the first end-to-end smoke."""
+    task_id, _, _ = _seed_world(engine)
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer(session_factory, publisher, sqs)
+
+    await consumer.handle(_github_event_record(action="pr_opened"))
+
+    assert _count_runs_for_workflow(engine, task_id, "wf-review") == 1
+    assert _count_runs_for_workflow(engine, task_id, "wf-validate") == 1
+
+
+@pytest.mark.asyncio
 async def test_pr_review_submitted_changes_requested_fires_feedback(
     session_factory: async_sessionmaker[AsyncSession],
     truncate: None,

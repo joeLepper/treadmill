@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from treadmill_agent import claude_code, gh
+from treadmill_agent import claude_code, gh, git
 from treadmill_agent.api_client import Role, WorkerContext
 from treadmill_agent.claude_code import CodeAuthorResult
 from treadmill_agent.config import Settings
@@ -769,8 +769,18 @@ def test_parse_review_envelope_legacy_comment_marker_falls_to_default() -> None:
     assert rationale is None
 
 
+@pytest.fixture
+def _stub_head_sha(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Stub ``git.head_sha`` for review-handler tests that use a
+    bare ``tmp_path`` (not a real git repo). Returns a fixed sha so
+    assertions on ``out.commit_sha`` are deterministic."""
+    sha = "deadbeef00000000000000000000000000000000"
+    monkeypatch.setattr(git, "head_sha", lambda _repo_dir: sha)
+    return sha
+
+
 def test_review_handler_strips_json_fence_from_posted_body(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_head_sha: str,
 ) -> None:
     """Q27.c: the JSON fence is stripped from the body sent to gh
     pr comment so the PR-page reader sees clean prose. The verdict
@@ -810,7 +820,7 @@ def test_review_handler_strips_json_fence_from_posted_body(
 
 
 def test_review_handler_dry_run_still_parses_per_q27d(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_head_sha: str,
 ) -> None:
     """Q27.d resolution: the parser runs unconditionally even on
     dry-run, so the drift warning surfaces in tests + dev exploration.
@@ -849,7 +859,7 @@ def test_review_handler_raises_without_pr_number(tmp_path: Path) -> None:
 
 
 def test_review_handler_invokes_gh_pr_comment_with_verdict_header(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_head_sha: str,
 ) -> None:
     """The review handler shells out to ``gh.pr_comment`` (NOT
     ``gh.pr_review`` — GitHub blocks same-author reviews; task #108
@@ -885,8 +895,8 @@ def test_review_handler_invokes_gh_pr_comment_with_verdict_header(
     assert out.payload["verdict"] == "approve"
 
 
-def test_review_handler_comment_header_uses_human_verb_for_request_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_review_handler_request_changes_header_uses_human_verb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_head_sha: str,
 ) -> None:
     """``request_changes`` reads naturally in prose as
     ``request changes`` — the header verb is the human-facing form,
@@ -906,7 +916,7 @@ def test_review_handler_comment_header_uses_human_verb_for_request_changes(
 
 
 def test_review_handler_skips_gh_in_dry_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_head_sha: str,
 ) -> None:
     """Dry-run path doesn't touch the gh CLI — the envelope still
     reflects the parsed verdict so tests can exercise the marker

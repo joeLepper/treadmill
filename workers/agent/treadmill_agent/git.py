@@ -347,6 +347,19 @@ def _pr_number_from_url(url: str) -> int | None:
         return None
 
 
+def head_sha(repo_dir: Path) -> str:
+    """Return the full SHA of HEAD in ``repo_dir``.
+
+    Used by the review and validate dispositions to attach the
+    canonical commit_sha to their StepOutput envelopes — the
+    mergeability VIEW joins reviews + validations on this SHA, so
+    a missing value silently breaks auto-merge eligibility.
+    """
+    return _capture(
+        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+    ).strip()
+
+
 def _capture(cmd: list[str], *, cwd: Path | None = None) -> str:
     logger.info("$ %s", " ".join(cmd))
     result = subprocess.run(
