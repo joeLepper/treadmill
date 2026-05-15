@@ -553,13 +553,12 @@ def test_mergeability_severity_blocking_fail_blocks(
     assert row.derived_mergeability == "blocked-on-validate"
 
 
-def test_mergeability_severity_blocking_error_blocks(
+def test_mergeability_severity_blocking_error_does_not_block(
     engine: Engine, fixtures: MergeabilityFixtureBuilder,
 ) -> None:
-    """A ``verdict='error'`` from a blocking check is treated the same
-    as ``'fail'`` — both flip the aggregate to ``'fail'``. Errors are
-    typically LLM-judge parse failures, but they still indicate the
-    gate was not satisfied."""
+    """Per ADR-0039, a ``verdict='error'`` from a blocking check does
+    not flip the aggregate — errors indicate the validator failed, not
+    the code. Only ``verdict='fail'`` gates merge."""
     plan_id = fixtures.make_plan()
     task_id = fixtures.make_task(plan_id)
     fixtures.add_task_pr(task_id)
@@ -575,7 +574,7 @@ def test_mergeability_severity_blocking_error_blocks(
     )
     row = _mergeability_row(engine, task_id)
     assert row is not None
-    assert row.validate_decision == "fail"
+    assert row.validate_decision == "pass"
 
 
 def test_mergeability_blocked_on_ci_failure(

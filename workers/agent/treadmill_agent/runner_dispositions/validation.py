@@ -322,10 +322,10 @@ def _compose_task_spec(ctx: DispositionContext) -> str:
 def _aggregate_decision(results: list[validation_runtime.CheckResult]) -> str:
     """Aggregate check results with worst-wins logic.
 
-    Only ``severity=blocking`` checks affect the decision:
-      - all pass → 'pass'
-      - any fail → 'fail'
-      - any error (and no fails) → 'error'
+    Per ADR-0039, only ``verdict='fail'`` with ``severity='blocking'``
+    gates merge. Errors are logged but do not flip the aggregate.
+      - any blocking fail → 'fail'
+      - all pass (errors logged separately) → 'pass'
 
     Warning and advisory checks are ignored for aggregation.
     """
@@ -335,14 +335,16 @@ def _aggregate_decision(results: list[validation_runtime.CheckResult]) -> str:
         # No blocking checks; aggregate only considers their presence
         return "pass"
 
-    # Check verdicts
+    # Log any errored checks for observability (ADR-0020)
+    for r in blocking:
+        if r.verdict == "error":
+            logger.warning("rule.error", extra={"rule_id": r.check_id, "reason": r.rationale})
+
+    # Only fail verdicts gate merge; errors are surfaced but don't flip decision
     has_fail = any(r.verdict == "fail" for r in blocking)
-    has_error = any(r.verdict == "error" for r in blocking)
 
     if has_fail:
         return "fail"
-    if has_error:
-        return "error"
     return "pass"
 
 

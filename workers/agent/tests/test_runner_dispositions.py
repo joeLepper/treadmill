@@ -1132,6 +1132,58 @@ def test_validation_handler_fails_on_blocking_failure(
     assert out.decision == "fail"
 
 
+def test_validation_handler_passes_on_blocking_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per ADR-0039, when only blocking errors are present, the aggregate
+    flips to pass. Errors indicate the validator failed, not the code."""
+
+    def _fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "rev-parse" in cmd and "HEAD" in cmd:
+            result.stdout = "abc123def456\n"
+        else:
+            result.stdout = "src/main.py\n"
+        result.returncode = 0
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(gh, "pr_comment", lambda *a, **kw: None)
+
+    from treadmill_agent import validation_runtime
+
+    def _fake_deterministic(check, repo_dir, timeout_seconds, pr_number=None):
+        return validation_runtime.CheckResult(
+            check_id=check.id,
+            kind="deterministic",
+            severity=check.severity,
+            verdict="error",
+            rationale="Judge timeout",
+            log_excerpt="",
+        )
+
+    monkeypatch.setattr(
+        "treadmill_agent.validation_runtime.run_deterministic", _fake_deterministic
+    )
+
+    class FakeCheck:
+        def __init__(self, check_id, severity):
+            self.id = check_id
+            self.severity = severity
+            self.kind = "deterministic"
+            self.description = ""
+
+    checks = [FakeCheck("block1", "blocking")]
+
+    import treadmill_agent.runner_dispositions.validation as val_module
+
+    monkeypatch.setattr(val_module, "_load_checks", lambda ctx: checks)
+
+    ctx = _disp_ctx(repo_dir=tmp_path, pr_number=42, workflow_id="wf-validate")
+    out = handle_validation(ctx)
+    assert out.decision == "pass"
+
+
 def test_validation_handler_raises_without_pr_number(tmp_path: Path) -> None:
     """The validation handler requires pr_number; absent context raises."""
     ctx = _disp_ctx(repo_dir=tmp_path, pr_number=None, workflow_id="wf-validate")
