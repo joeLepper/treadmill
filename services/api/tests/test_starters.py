@@ -211,19 +211,31 @@ def test_role_model_tier_invariant() -> None:
     """Cost / capability discipline — each role is on the right model tier:
 
     * ``role-planner``     → opus (deliberative; expensive)
+    * ``role-architect``   → sonnet (rarely-dispatched arbiter; cost is
+      not a concern, structured-output reliability is — bumped 2026-05-15
+      after haiku failed to emit the required JSON envelope on a
+      deadlock arbitration)
     * everyone else        → haiku (analyzers, reviewer, validator,
-      code-author, doc-author, documentarian, architect — cheap tier;
-      rules override per ADR-0029 Q29.b when an llm-judge needs more
+      code-author, doc-author, documentarian — cheap tier; rules
+      override per ADR-0029 Q29.b when an llm-judge needs more
       capability. role-code-author was briefly on sonnet 2026-05-14 but
       reverted same-day after the bump didn't address the actual failure
       modes, which turned out to be harness gaps not model quality.)
     """
+    SONNET_MODEL = "claude-sonnet-4-6"
+    SONNET_ROLES = {"role-architect"}
     roles_by_id = {r["id"]: r for r in _all_roles()}
     assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
         f"role-planner must use {PLANNER_MODEL!r}"
     )
     for role_id, role in roles_by_id.items():
         if role_id == "role-planner":
+            continue
+        if role_id in SONNET_ROLES:
+            assert role["model"] == SONNET_MODEL, (
+                f"role {role_id!r} should be on {SONNET_MODEL!r}, "
+                f"got {role['model']!r}"
+            )
             continue
         assert role["model"] == WORKER_MODEL, (
             f"role {role_id!r} should be on {WORKER_MODEL!r}, got {role['model']!r}"
