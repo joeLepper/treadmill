@@ -54,9 +54,16 @@ class PlanFrontmatter(BaseModel):
     bare YAML ``true`` / ``false`` / ``yes`` / ``no`` / ``on`` / ``off``
     are parsed to real Python booleans by PyYAML before pydantic sees
     them, so they're accepted (correctly).
+
+    Tolerates unrelated fields (``status``, ``trigger``, ``parent``, ...)
+    because plan-doc frontmatter is conventionally used for several
+    things beyond auto-merge. Typos in ``auto_merge`` therefore silently
+    default to enabled — a deliberate trade-off until we either model
+    the full frontmatter shape or grow a separate auto-merge-specific
+    key path.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     auto_merge: StrictBool | None = None
 

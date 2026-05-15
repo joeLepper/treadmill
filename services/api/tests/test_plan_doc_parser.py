@@ -531,11 +531,20 @@ def test_parse_plan_doc_frontmatter_rejects_integer() -> None:
         parse_plan_doc_frontmatter("---\nauto_merge: 0\n---\n")
 
 
-def test_parse_plan_doc_frontmatter_rejects_unknown_field() -> None:
-    """``extra="forbid"`` — typos in field names fail loudly."""
-    md = "---\nauto_merg: true\n---\n\n# Plan: Test\n"
-    with pytest.raises(ValidationError, match="auto_merg"):
-        parse_plan_doc_frontmatter(md)
+def test_parse_plan_doc_frontmatter_ignores_unrelated_fields() -> None:
+    """Tolerates conventional frontmatter (status, trigger, parent, ...).
+    Typos in ``auto_merge`` silently default to enabled — see model docstring."""
+    md = (
+        "---\n"
+        "status: drafting\n"
+        "trigger: some justification\n"
+        "parent: docs/adrs/0099-foo.md\n"
+        "auto_merge: false\n"
+        "---\n\n"
+        "# Plan: Test\n"
+    )
+    fm = parse_plan_doc_frontmatter(md)
+    assert fm.auto_merge is False
 
 
 def test_parse_plan_doc_frontmatter_empty_block_returns_defaults() -> None:
