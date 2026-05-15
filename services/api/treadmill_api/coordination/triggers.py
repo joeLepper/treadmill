@@ -541,22 +541,37 @@ async def maybe_dispatch_arbitration_on_deadlock(
     typed: StepCompleted,
 ) -> uuid.UUID | None:
     """Dispatch ``wf-architecture-resolve`` when a ralph-loop deadlock fires
-    (ADR-0038).
+    (ADR-0038, widened 2026-05-15 to a two-axis gate predicate).
 
     The deadlock signal is: a ``wf-feedback`` step.completed with
     ``decision='responded-without-change'`` against a task whose
-    most-recent ``wf-review`` decision is ``changes_requested``. The
-    feedback role examined the diff + the reviewer's rationale and
-    declined to author any change; the reviewer's verdict still gates
-    merge. Two LLM roles disagree about the same diff; neither has
-    authority over the other.
+    most-recent gate-bearing workflow returned a blocking verdict:
+
+      * ``wf-review.decision == 'changes_requested'`` — original
+        ADR-0038 predicate; reviewer disagrees with author + feedback
+        declines to act.
+      * ``wf-validate.decision == 'fail'`` — added 2026-05-15 after
+        observing task ``c5438ed1`` hit functionally the same shape
+        (validator said work was incomplete, reviewer said approved,
+        feedback declined to author the missing pieces).
+
+    Either way the feedback role examined the gate's rationale and
+    declined to author any change while a load-bearing gate still
+    blocks merge. Two or more LLM roles disagree about the same diff;
+    no role has authority over the other.
 
     Architect's verdict (per ADR-0032 ``ArchitectVerdict``) drives the
     next move:
 
       * ``accept-as-is`` → architect disposition emits a
-        ``review.override`` event; mergeability VIEW (post-0016 migration)
-        projects ``review_decision='approved'``; auto-merge proceeds.
+        ``review.override`` event; mergeability VIEW (post-0016
+        migration) projects ``review_decision='approved'``; auto-merge
+        proceeds. **Limitation:** today's override mechanism covers
+        only the review axis. For a validate-fail-driven deadlock the
+        architect's ``accept-as-is`` won't unblock the merge — the
+        architect should use ``amend`` (route to wf-plan to author the
+        missing pieces) instead. A future ADR can add a
+        ``validate.override`` mirror.
       * ``amend`` → dispatcher routes to ``wf-plan`` (handled elsewhere).
       * ``supersede`` → dispatcher routes to ``wf-doc-amend`` (handled
         elsewhere).
@@ -565,8 +580,8 @@ async def maybe_dispatch_arbitration_on_deadlock(
     Skips cleanly when:
       * The completed step isn't ``wf-feedback`` or its decision isn't
         ``responded-without-change``.
-      * The most-recent ``wf-review`` decision for this task is not
-        ``changes_requested`` (no deadlock).
+      * Neither blocking gate signal is present on the most-recent run
+        (no deadlock).
       * The task has already dispatched
         ``wf-architecture-resolve`` >= 5 times (cap per ADR-0029 Q29.e /
         ADR-0038).
@@ -602,38 +617,59 @@ async def maybe_dispatch_arbitration_on_deadlock(
     if row is None or row.workflow_id != FEEDBACK_WORKFLOW_ID:
         return None
 
-    # Look up the most-recent wf-review step for this task. Deadlock
-    # only fires if its decision was ``changes_requested``.
-    review_result = await session.execute(
-        select(WorkflowRunStep.output)
-        .join(WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id)
-        .join(
-            WorkflowVersion,
-            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+    # Look up the most-recent terminal-blocking signal for this task on
+    # EITHER gate-bearing workflow. Two-axis predicate per the 2026-05-15
+    # widening (the original ADR-0038 was review-centric; we observed
+    # c5438ed1 hit the same disagreement shape with the *validator*
+    # saying ``fail`` while the reviewer said ``approved`` and feedback
+    # declined to act — functionally identical deadlock, missed by the
+    # review-only predicate):
+    #
+    #   * latest ``wf-review.step.completed.output.decision == 'changes_requested'``
+    #   * OR latest ``wf-validate.step.completed.output.decision == 'fail'``
+    #
+    # Either is grounds to dispatch the architect for arbitration.
+    blocking_signal: str | None = None
+    for gate_workflow_id, blocking_decision in (
+        ("wf-review", "changes_requested"),
+        ("wf-validate", "fail"),
+    ):
+        gate_result = await session.execute(
+            select(WorkflowRunStep.output)
+            .join(WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id)
+            .join(
+                WorkflowVersion,
+                WorkflowVersion.id == WorkflowRun.workflow_version_id,
+            )
+            .where(
+                WorkflowRun.task_id == row.task_id,
+                WorkflowVersion.workflow_id == gate_workflow_id,
+                WorkflowRunStep.status == "completed",
+            )
+            .order_by(WorkflowRunStep.completed_at.desc().nulls_last())
+            .limit(1)
         )
-        .where(
-            WorkflowRun.task_id == row.task_id,
-            WorkflowVersion.workflow_id == "wf-review",
-            WorkflowRunStep.status == "completed",
-        )
-        .order_by(WorkflowRunStep.completed_at.desc().nulls_last())
-        .limit(1)
-    )
-    review_step = review_result.first()
-    if review_step is None:
+        gate_step = gate_result.first()
+        if gate_step is None:
+            continue
+        decision = (gate_step.output or {}).get("decision")
+        if decision == blocking_decision:
+            blocking_signal = f"{gate_workflow_id}={decision}"
+            break
+
+    if blocking_signal is None:
         logger.debug(
-            "arbitration trigger: no wf-review history for task %s; skipping",
+            "arbitration trigger: no blocking gate signal for task %s "
+            "(neither wf-review=changes_requested nor wf-validate=fail "
+            "on latest run); no deadlock",
             row.task_id,
         )
         return None
-    latest_review_decision = (review_step.output or {}).get("decision")
-    if latest_review_decision != "changes_requested":
-        logger.debug(
-            "arbitration trigger: latest review decision is %r (not "
-            "changes_requested) for task %s; no deadlock",
-            latest_review_decision, row.task_id,
-        )
-        return None
+    logger.info(
+        "arbitration trigger: deadlock signal %r for task %s; dispatching "
+        "wf-architecture-resolve",
+        blocking_signal, row.task_id,
+    )
 
     # Cap: 5 architecture-resolve dispatches per task across all sources.
     if await _is_capped(session, row.task_id, ARCHITECTURE_RESOLVE_WORKFLOW_ID):
