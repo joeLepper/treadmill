@@ -47,6 +47,7 @@ from treadmill_api.parsers import (
     PlanDocFormatError,
     TaskSpec,
     parse_plan_doc,
+    parse_plan_doc_frontmatter,
 )
 from treadmill_api.parsers.plan_doc import validate_unique_task_ids
 
@@ -389,12 +390,14 @@ async def create_plan_from_doc(
     """
     specs = parse_plan_doc(doc_content)
     validate_unique_task_ids(specs)
+    frontmatter = parse_plan_doc_frontmatter(doc_content)
 
     plan_kwargs: dict[str, object] = {
         "repo": repo,
         "intent": None,
         "doc_path": doc_path,
         "created_by": created_by,
+        "auto_merge": frontmatter.auto_merge,
     }
     if plan_id is not None:
         plan_kwargs["id"] = plan_id
@@ -475,10 +478,14 @@ async def create_plan(
     logged warning. With ``doc_content`` present, the flag is a no-op —
     the standard path already produces an active plan.
     """
+    frontmatter_auto_merge: bool | None = None
     if body.doc_content is not None:
         try:
             specs = parse_plan_doc(body.doc_content)
             validate_unique_task_ids(specs)
+            frontmatter_auto_merge = parse_plan_doc_frontmatter(
+                body.doc_content
+            ).auto_merge
         except (PlanDocFormatError, ValidationError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -502,6 +509,7 @@ async def create_plan(
         intent=body.intent,
         doc_path=body.doc_path,
         created_by=body.created_by,
+        auto_merge=frontmatter_auto_merge,
     )
     session.add(plan)
     await session.flush()
@@ -645,6 +653,7 @@ async def submit_plan_doc(
     try:
         specs = parse_plan_doc(body.doc_content)
         validate_unique_task_ids(specs)
+        frontmatter = parse_plan_doc_frontmatter(body.doc_content)
     except (PlanDocFormatError, ValidationError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -652,6 +661,7 @@ async def submit_plan_doc(
         ) from exc
 
     plan.doc_path = body.doc_path
+    plan.auto_merge = frontmatter.auto_merge
     # Activating an existing drafting plan — emit PlanActivated then
     # spawn + dispatch. Mirrors Scenario 1 ordering inside create_plan.
     await dispatcher.persist_and_publish(

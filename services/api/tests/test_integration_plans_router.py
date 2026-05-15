@@ -231,6 +231,59 @@ def test_create_plan_with_doc_spawns_tasks(
     assert "Second task" in titles
 
 
+def test_create_plan_with_doc_reads_auto_merge_false_frontmatter(
+    client: httpx.Client,
+    truncate: None,
+    seed_wf_author: None,
+    engine: Engine,
+) -> None:
+    """ADR-0031 Q31.c per-plan opt-out wires from frontmatter to Plan row."""
+    doc = "---\nauto_merge: false\n---\n\n" + _PLAN_DOC_TEMPLATE
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "test/repo",
+            "doc_path": "docs/plans/opt-out.md",
+            "doc_content": doc,
+        },
+    )
+    assert response.status_code == 201, response.text
+    plan_id = response.json()["id"]
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT auto_merge FROM plans WHERE id = :id"),
+            {"id": plan_id},
+        ).scalar_one()
+    assert row is False
+
+
+def test_create_plan_with_doc_no_frontmatter_leaves_auto_merge_null(
+    client: httpx.Client,
+    truncate: None,
+    seed_wf_author: None,
+    engine: Engine,
+) -> None:
+    """No frontmatter → auto_merge stays NULL → enabled by default."""
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "test/repo",
+            "doc_path": "docs/plans/default.md",
+            "doc_content": _PLAN_DOC_TEMPLATE,
+        },
+    )
+    assert response.status_code == 201, response.text
+    plan_id = response.json()["id"]
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT auto_merge FROM plans WHERE id = :id"),
+            {"id": plan_id},
+        ).scalar_one()
+    assert row is None
+
+
 def test_create_plan_with_unknown_workflow_returns_400(
     client: httpx.Client,
     truncate: None,
