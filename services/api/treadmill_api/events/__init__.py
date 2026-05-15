@@ -9,6 +9,7 @@ are the single seam between JSONB storage and typed application code.
 
 from treadmill_api.events.architect_verdict import ArchitectVerdict
 from treadmill_api.events.base import EventPayload
+from treadmill_api.events.crystallization_verdict import CrystallizationVerdict
 from treadmill_api.events.github import (
     GithubCheckRunCompleted,
     GithubPrConflict,
@@ -63,6 +64,7 @@ __all__ = [
     "parse_payload",
     # Verdict envelopes (ADR-0027, ADR-0032)
     "ArchitectVerdict",
+    "CrystallizationVerdict",
     # Step output envelope (ADR-0012)
     "StepOutput",
     "Artifact",
