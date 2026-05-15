@@ -1,5 +1,5 @@
 ---
-status: active
+status: completed
 trigger: |
   Mega-plan re-fire iteration 2. First trim was blocked by missing
   uv (fixed in 75ce71e). Second iteration tasks went "done" with
@@ -391,8 +391,12 @@ sequence_of_work:
 
 ## Decisions captured during execution
 
-(empty)
+- 2026-05-14 — reverted `role-code-author` from sonnet back to haiku after the bump turned out to address symptoms not causes (commit `14ce8d4`).
+- 2026-05-15 — wrote ADR-0036 (hands-free review and validation discipline) after the first end-to-end smoke surfaced gate misfires that the parent plan's smoke task didn't anticipate.
 
 ## Post-mortem
 
-Filled in on transition to `completed`/`abandoned`.
+- **What worked.** Phases 1–3 plus four of five Phase 4 tasks landed cleanly: prereq snapshot, auto-merge cooling-off trigger (PR #64), dedup namespace + `task.<id>.auto_merged` event (PR #65), and the per-plan opt-out parser (PRs #66 + #67 + #68). Author-side validation per task #121 caught broken parser tests before they reached the PR.
+- **What surprised us.** Three architectural gaps that ADR-0031's design assumed away: (a) `task_validations.script` is snapshotted at task-creation time, so plan-doc patches don't reach mid-flight tasks (operator workaround: direct DB UPDATE); (b) `validation_runtime.log_excerpt` captured stderr only, hiding pytest stdout failures across three parser re-fires (fixed in `33d9f4f`); (c) `wf-author.decision='fail'` from author-side validation has no remediation dispatch — silent stall (captured at `docs/learnings/2026-05-14-author-side-fail-no-remediation.md`).
+- **What this plan teaches us about future plans.** The Phase 4 smoke task assumed the gates would converge once the auto-merge predicate landed. The first real smoke exposed gate misfires — channel divergence between reviewer prose and verdict, plus rule-set misfit on trivial bot PRs. That work moved into ADR-0036 + `docs/plans/2026-05-15-hands-free-convergence.md`, which subsumes the smoke task here. The trim2 phase-4 task `smoke-validation` is intentionally **superseded**, not abandoned — the new convergence plan re-runs it with broader scope (severity + applicability + synthesis).
+- **Follow-ups.** ADR-0036 + the convergence plan are the immediate continuation. Held plans (observability, ADR-0034 crystallization, ADR-0035 scheduler) queue behind convergence.
