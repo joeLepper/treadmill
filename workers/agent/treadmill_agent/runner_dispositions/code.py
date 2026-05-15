@@ -88,7 +88,7 @@ def handle(ctx: DispositionContext) -> StepOutput:
         repo_dir=ctx.repo_dir,
         branch=ctx.branch,
         title=ctx.ctx.title,
-        body=ctx.claude_result.summary or ctx.ctx.title,
+        body=_synthesize_pr_body(ctx),
         repo=ctx.ctx.repo,
         mode=ctx.settings.repo_mode,
     )
@@ -118,6 +118,73 @@ def handle(ctx: DispositionContext) -> StepOutput:
         payload=payload,
         metadata=Metadata(),
     )
+
+
+def _synthesize_pr_body(ctx: DispositionContext) -> str:
+    """Produce the 5-section PR body from task context per ADR-0033.
+
+    Sections:
+      ## Summary — task title + first line of model summary
+      ## Why — plan_doc_path + task description
+      ## Test plan — bulleted checklist from validation scripts
+      ## Validation — fenced block of each validation script
+      ## Refs — task id, plan path, branch
+    """
+    lines: list[str] = []
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    lines.append("## Summary")
+    summary_first_line = (ctx.claude_result.summary or "").split('\n')[0].strip()
+    if summary_first_line:
+        lines.append(f"- {ctx.ctx.title} — {summary_first_line}")
+    else:
+        lines.append(f"- {ctx.ctx.title}")
+    lines.append("")
+
+    # ── Why ──────────────────────────────────────────────────────────────
+    lines.append("## Why")
+    if ctx.ctx.plan_doc_path:
+        lines.append(f"Plan: `{ctx.ctx.plan_doc_path}`")
+    if ctx.ctx.description:
+        lines.append(ctx.ctx.description)
+    lines.append("")
+
+    # ── Test plan ────────────────────────────────────────────────────────
+    lines.append("## Test plan")
+    # Deterministic checks are the ones that should appear in the test plan
+    deterministic_checks = [
+        v for v in ctx.ctx.task_validations
+        if v.kind == "deterministic" and v.description
+    ]
+    if deterministic_checks:
+        for check in deterministic_checks:
+            lines.append(f"- [ ] {check.description}")
+    else:
+        lines.append("- [ ] Verify changes locally")
+    lines.append("")
+
+    # ── Validation ───────────────────────────────────────────────────────
+    lines.append("## Validation")
+    validation_scripts = [
+        v for v in ctx.ctx.task_validations
+        if v.script
+    ]
+    if validation_scripts:
+        for check in validation_scripts:
+            lines.append(f"### {check.id}")
+            lines.append(f"```bash\n{check.script}\n```")
+    else:
+        lines.append("No validation scripts defined.")
+    lines.append("")
+
+    # ── Refs ─────────────────────────────────────────────────────────────
+    lines.append("## Refs")
+    lines.append(f"- Task: {ctx.ctx.task_id}")
+    if ctx.ctx.plan_doc_path:
+        lines.append(f"- Plan: {ctx.ctx.plan_doc_path}")
+    lines.append(f"- Branch: {ctx.branch}")
+
+    return "\n".join(lines)
 
 
 def _run_author_validations(ctx: DispositionContext) -> StepOutput | None:
