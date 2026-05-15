@@ -155,3 +155,53 @@ investigation (ADR-?? — output-format JSON across all kinds).
 4. Run a smoke; collect drift-warning counts for the first 10+
    review runs.
 5. After Q27.a's bar is met, delete the tourniquet regex.
+
+## Diagram
+
+The role-reviewer prompt instructs Claude to end its output with a fenced JSON block matching the `ReviewVerdict` Pydantic model. The disposition handler tries (1) JSON fence parse → Pydantic validate, (2) tourniquet regex on the prose, then (3) safe default `comment`. The fenced block is stripped before the prose body is posted via `gh pr review`; the JSON is internal-only.
+
+```mermaid
+sequenceDiagram
+    participant Runner as Worker runner (review disposition)
+    participant Claude as Claude Code (role-reviewer)
+    participant Parser as review.py disposition handler
+    participant Pydantic as ReviewVerdict.model_validate
+    participant Regex as Tourniquet regex (transitional)
+    participant Log as Structured log
+    participant GH as gh pr review
+    participant Envelope as StepOutput envelope (ADR-0011/0012)
+
+    Runner->>Claude: role-reviewer prompt (instructs JSON fence)
+    Claude-->>Runner: prose review body + ```json {verdict, rationale} ```
+    Runner->>Parser: parse(claude_output)
+    Parser->>Parser: find last ```json ... ``` block
+    alt JSON fence found
+        Parser->>Pydantic: model_validate(json.loads(block))
+        alt validate succeeded
+            Pydantic-->>Parser: ReviewVerdict(verdict, rationale)
+            Parser->>Parser: strip fence from prose body (no marker)
+            Parser->>GH: gh pr review --body <clean prose> --<verdict>
+            Parser->>Envelope: StepOutput.payload + decision + Artifact("pr_review", verdict)
+        else validate failed (closed-set violation / length cap / shape drift)
+            Pydantic-->>Parser: ValidationError
+            Parser->>Log: warn review.json_parse_failed
+            Parser->>Regex: match VERDICT: <verb> on prose
+            alt regex matched
+                Regex-->>Parser: verdict
+                Parser->>GH: gh pr review --body <prose as-is> --<verdict>
+                Parser->>Envelope: StepOutput.payload + decision + Artifact("pr_review", verdict)
+            else regex fell through
+                Regex-->>Parser: no match
+                Parser->>Log: warn review.regex_fallthrough
+                Parser->>GH: gh pr review --body <prose as-is> --comment (safe default)
+                Parser->>Envelope: StepOutput.payload + decision=comment
+            end
+        end
+    else no JSON fence
+        Parser->>Log: warn review.json_parse_failed (missing fence)
+        Parser->>Regex: match VERDICT: <verb> on prose
+        Regex-->>Parser: verdict or no-match (same branches as above)
+    end
+```
+
+Note: parsing is unconditional even under `--dry-run` (Q27.d resolved 2026-05-13) — only `gh pr review` itself is skipped in dry-run. The `review.json_parse_failed` warning is the trip-wire that gates Q27.a's tourniquet-removal bar (10 consecutive clean JSON-path runs).

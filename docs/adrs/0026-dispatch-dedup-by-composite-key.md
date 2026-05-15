@@ -296,3 +296,51 @@ new pattern.
 - **Phase 2 self-driving criterion**: a PR can accrue arbitrary
   pr_review / pr_synchronize webhook traffic without producing
   duplicate wf-review or wf-feedback runs.
+
+## Diagram
+
+The trigger evaluator builds a deterministic `dedup_key` from the event (per-workflow builder in `DEDUP_KEY_BUILDERS`). Insert-first / dispatch-second: the dedup row's PK on `dedup_key` is the source-of-truth gate — `IntegrityError` is the signal that a concurrent transaction already won. Workflows whose builder returns `None` (wf-author, wf-plan) opt out and always dispatch.
+
+```mermaid
+sequenceDiagram
+    participant SQS as Coordination SQS queue
+    participant Consumer as Trigger evaluator (coordination/consumer.py)
+    participant Builders as DEDUP_KEY_BUILDERS
+    participant DB as Postgres (workflow_dispatch_dedup + workflow_runs)
+    participant SNS as Work SNS topic
+    participant Worker as Worker (downstream)
+
+    SQS-->>Consumer: event {repo, pr_number, head_sha, review_id, ...}
+    Consumer->>Builders: dedup_key_for(workflow_id, event)
+    alt builder returns None (wf-author / wf-plan opt-out)
+        Builders-->>Consumer: None
+        Consumer->>DB: INSERT workflow_runs(...)
+        Consumer->>SNS: publish work message
+        SNS-->>Worker: dispatch (no dedup)
+    else builder returns dedup_key
+        Builders-->>Consumer: "wf-review:repo:pr=10,sha=b89360c1..."
+        Consumer->>DB: SELECT FROM workflow_dispatch_dedup WHERE dedup_key=?
+        alt row exists (optimistic pre-check hit)
+            DB-->>Consumer: existing row
+            Consumer-->>Consumer: log "dispatch_dedup: skipping duplicate"
+            Consumer->>SQS: delete_message (ack)
+        else row absent
+            DB-->>Consumer: none
+            Consumer->>DB: BEGIN; INSERT workflow_dispatch_dedup(dedup_key, workflow_run_id)
+            alt INSERT succeeded (PK gate held)
+                DB-->>Consumer: ok
+                Consumer->>DB: INSERT workflow_runs(id=workflow_run_id, ...)
+                Consumer->>DB: COMMIT
+                Consumer->>SNS: publish work message
+                SNS-->>Worker: dispatch
+            else INSERT raised IntegrityError (concurrent race lost)
+                DB-->>Consumer: IntegrityError on workflow_dispatch_dedup_pkey
+                Consumer->>DB: ROLLBACK
+                Consumer-->>Consumer: log "concurrent dispatch detected; deferring to the winner"
+                Consumer->>SQS: delete_message (ack — winner already dispatched)
+            end
+        end
+    end
+```
+
+Note: the insert-first ordering means no orphan `workflow_runs` row is ever created when a race is lost. The `workflow_run_id` column on `workflow_dispatch_dedup` is FK-relaxed in v0 (kept as a reference without enforced FK) so the dedup row can be inserted before the run row in the same transaction.

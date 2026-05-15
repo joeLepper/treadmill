@@ -261,3 +261,51 @@ toward the RAMJAC pattern.
   redelivery; dedup prevents legitimate-but-redundant dispatches.
 - **Phase 2 self-driving criterion**: workers running Claude Code
   jobs for >2 minutes no longer cause duplicate runs.
+
+## Diagram
+
+Each in-flight SQS message gets a dedicated daemon heartbeat thread that extends visibility every 30s by 120s. Base queue visibility is intentionally short (60s) so a worker that dies mid-job stops heartbeating and the lease expires quickly. On worker error, the message is NOT deleted — visibility expiry drives re-delivery; after `maxReceiveCount=5` it lands in the DLQ. On success, `_delete` happens in the same `finally` block that stops + joins the heartbeat.
+
+```mermaid
+sequenceDiagram
+    participant SQS as AWS SQS (work queue, visibility=60s)
+    participant Runner as Worker runner (one-shot container)
+    participant Heartbeat as Heartbeat daemon thread
+    participant Disposition as Disposition handler (code / review / analysis / plan_doc)
+    participant Claude as Claude Code (long-running)
+    participant DLQ as Work-queue DLQ
+
+    Runner->>SQS: receive_message (wait long-poll)
+    SQS-->>Runner: message {receipt_handle, payload}
+    Runner->>Heartbeat: start daemon thread (stop_event, receipt_handle)
+    Runner->>Disposition: dispatch (per ADR-0022 output_kind)
+    Disposition->>Claude: claude code <invocation>
+    loop every 30s while work in flight
+        Heartbeat->>SQS: change_message_visibility(120s)
+        alt extend succeeded
+            SQS-->>Heartbeat: ok
+        else extend failed (transient)
+            SQS-->>Heartbeat: ClientError
+            Heartbeat-->>Heartbeat: log warning, continue
+        end
+    end
+    alt disposition succeeded
+        Claude-->>Disposition: result
+        Disposition-->>Runner: ok
+        Runner->>SQS: delete_message(receipt_handle)
+        Runner->>Heartbeat: stop_event.set() + join(timeout=5)
+    else disposition raised
+        Claude-->>Disposition: error
+        Disposition-->>Runner: exception (do NOT delete)
+        Runner->>Heartbeat: stop_event.set() + join(timeout=5)
+        Runner-->>SQS: heartbeat stops; visibility expires after 60s
+        SQS-->>SQS: redeliver up to maxReceiveCount=5
+        SQS-->>DLQ: message moves to DLQ
+    else worker process died (segfault / OOM / container exit)
+        Heartbeat-->>Heartbeat: thread dies with process (daemon=True)
+        SQS-->>SQS: no more heartbeats; visibility expires (~60s)
+        SQS-->>SQS: redeliver to a fresh worker
+    end
+```
+
+Note: the heartbeat lives in the shared prefix of the runner — before the per-kind disposition dispatch — so all output kinds (ADR-0022) inherit it without per-kind variation. The `receipt_handle` and `sqs_client` are read-only after thread creation; that's the thread-safety contract.

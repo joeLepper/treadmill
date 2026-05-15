@@ -282,3 +282,55 @@ scoped.
   PRs that the o11y plan produces can be merged in sequence without
   the operator needing to cycle the stack between merges. Treadmill
   builds Treadmill, hands-off.
+
+## Diagram
+
+A `pr_merged` event fans out from the events SNS topic to a new SQS queue dedicated to deploy events. The host-side `deploy-watcher` subprocess (sibling to the autoscaler) consumes that queue, categorizes the merged PR's changed files against the dispatch table, and either rebuilds + cycles the relevant container, notifies the operator (for `infra/` or `tools/local-adapter/` changes), or no-ops. Idempotency: the watcher writes the last-applied SHA per category to a local state file and skips re-deliveries.
+
+```mermaid
+sequenceDiagram
+    actor Operator as Operator
+    participant GH as GitHub (PR merged to main)
+    participant Webhook as Webhook receiver (ADR-0017)
+    participant SNS as Events SNS topic
+    participant DeployQ as deploy-events SQS queue
+    participant Watcher as deploy-watcher (host subprocess)
+    participant State as deploy-watcher-state.json
+    participant Docker as Local Docker daemon
+    participant DLQ as deploy-events DLQ
+
+    GH-->>Webhook: pr_merged webhook
+    Webhook->>SNS: publish pr_merged event (entity_type=github)
+    SNS-->>DeployQ: fanout (filter: action=pr_merged)
+    Watcher->>DeployQ: receive_message (10s poll)
+    DeployQ-->>Watcher: pr_merged {merge_sha, pr_number}
+    Watcher->>GH: gh api pulls/<n>/files
+    GH-->>Watcher: changed_files[]
+    Watcher->>State: read last_applied_sha[category]
+    alt SHA already applied for category
+        State-->>Watcher: same merge_sha
+        Watcher->>DeployQ: delete_message (no-op ack)
+    else changed_files match services/api/**
+        Watcher->>Docker: docker build treadmill-api:dev
+        Watcher->>Docker: docker restart treadmill-api
+        Docker-->>Watcher: build+restart ok
+        Watcher->>State: write last_applied_sha[api]=merge_sha
+        Watcher->>DeployQ: delete_message
+    else changed_files match workers/agent/**
+        Watcher->>Docker: docker build treadmill-agent:dev
+        Docker-->>Watcher: build ok (no restart; workers are one-shot)
+        Watcher->>State: write last_applied_sha[agent]=merge_sha
+        Watcher->>DeployQ: delete_message
+    else changed_files match infra/** or tools/local-adapter/**
+        Watcher-->>Operator: log "manual cycle required" (notify-only)
+        Watcher->>DeployQ: delete_message
+    else docs/cli/markdown only
+        Watcher->>DeployQ: delete_message (no-op)
+    else build or restart failed
+        Docker-->>Watcher: non-zero exit
+        Watcher-->>DLQ: message moves after maxReceiveCount
+        Watcher-->>Operator: log error (operator-investigates)
+    end
+```
+
+Note: the `tools/local-adapter/**` case is intentionally notify-only — the watcher can't rebuild itself live without dying mid-restart, so it defers to operator-mediated `treadmill-local down + up`. The watcher itself runs on the host (not in a container) so it can shell out to the local Docker daemon, sharing the autoscaler's execution context.
