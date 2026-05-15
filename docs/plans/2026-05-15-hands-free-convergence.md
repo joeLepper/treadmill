@@ -235,6 +235,47 @@ sequence_of_work:
         script: |
           cd workers/agent && uv run pytest tests/test_runner_dispositions.py -q
 
+  - id: author-side-fail-dispatches-feedback
+    title: wf-author.fail dispatches wf-feedback (ADR-0037)
+    workflow: wf-author
+    intent: |
+      Per ADR-0037, when a code-emitting step (wf-author /
+      wf-feedback / wf-ci-fix / wf-conflict) completes with
+      ``decision='fail'`` because the task's author-side
+      validation script returned non-zero, dispatch
+      ``wf-feedback`` for the same task. Cap applies per
+      ADR-0029 Q29.e (shared 5-attempt budget across all
+      wf-feedback sources).
+
+      Implementation: extend
+      ``coordination/consumer._maybe_fire_validate_feedback``
+      (rename to ``_maybe_fire_step_feedback`` or add a
+      sibling) and ``coordination/triggers.maybe_dispatch_feedback_on_terminal_failure``
+      to recognize the (wf-author, fail) pair. Dedup
+      namespace ``wf-feedback:<repo>:author-fail-run=<run_id>``
+      per ADR-0026.
+
+      Tests: integration test that a wf-author step.completed
+      with decision=fail (from author-side validation)
+      dispatches wf-feedback exactly once and respects the
+      shared 5-attempt cap.
+
+      Companion learning ``docs/learnings/2026-05-14-author-side-fail-no-remediation.md``
+      transitions to ``crystallized-into-ADR-0037``.
+    scope:
+      files:
+        - services/api/treadmill_api/coordination/consumer.py
+        - services/api/treadmill_api/coordination/triggers.py
+        - services/api/treadmill_api/coordination/dispatch_dedup.py
+        - services/api/tests/test_integration_event_triggers.py
+    validation:
+      - kind: deterministic
+        description: |
+          Tests pass; dispatch helpers recognize the new pair.
+        script: |
+          ( cd services/api && uv run pytest tests/test_integration_event_triggers.py -q ) \
+            && grep -q "author-fail-run\|wf-author.*fail" services/api/treadmill_api/coordination/triggers.py
+
   - id: hands-free-convergence-smoke
     title: End-to-end smoke proves auto-merge converges on bot trivial PRs
     workflow: wf-validate
@@ -242,6 +283,7 @@ sequence_of_work:
       - task.severity-gating-in-view.pr_merged
       - task.rule-manifest-applicability.pr_merged
       - task.review-prose-synthesis.pr_merged
+      - task.author-side-fail-dispatches-feedback.pr_merged
       - task.code-disposition-pr-body-synthesis.pr_merged
     intent: |
       Submit two trivial plans:

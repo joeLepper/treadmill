@@ -1,7 +1,7 @@
 ---
 date: 2026-05-14
 trigger: surprise
-status: captured
+status: crystallized-into-ADR-0037
 related: ADR-0029, plan-2026-05-14-hands-free-driving-trim2
 ---
 

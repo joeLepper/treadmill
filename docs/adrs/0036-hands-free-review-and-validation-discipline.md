@@ -1,6 +1,6 @@
 # ADR-0036: Hands-free review and validation discipline
 
-- **Status:** accepted
+- **Status:** amended by ADR-0037
 - **Date:** 2026-05-15
 - **Related:** ADR-0006 (rules + remediations primitive), ADR-0013 (mergeability VIEW), ADR-0027 (structured review envelope), ADR-0029 (validator + rule engine — esp. Q29.f), ADR-0031 (auto-merge predicate), ADR-0033 (git artifact discipline)
 
