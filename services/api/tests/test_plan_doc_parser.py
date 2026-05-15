@@ -7,11 +7,13 @@ from pydantic import ValidationError
 
 from treadmill_api.parsers import (
     PlanDocFormatError,
+    PlanFrontmatter,
     TaskScope,
     TaskSpec,
     TaskValidationCheck,
     extract_sequence_yaml,
     parse_plan_doc,
+    parse_plan_doc_frontmatter,
 )
 from treadmill_api.parsers.plan_doc import validate_unique_task_ids
 
@@ -481,3 +483,75 @@ def test_parse_plan_doc_rejects_llm_judge_with_script():
 """
     with pytest.raises(ValidationError, match="llm-judge forbids script"):
         parse_plan_doc(_wrap_plan_md(yaml_body))
+
+
+# ── Frontmatter tests (ADR-0031 Q31.c) ────────────────────────────────────────
+
+
+def test_parse_plan_doc_frontmatter_absent_returns_defaults() -> None:
+    """No leading ``---`` block → empty PlanFrontmatter (auto_merge=None)."""
+    md = "# Plan: Test\n\nProse only.\n"
+    fm = parse_plan_doc_frontmatter(md)
+    assert fm.auto_merge is None
+
+
+def test_parse_plan_doc_frontmatter_auto_merge_true() -> None:
+    md = "---\nauto_merge: true\n---\n\n# Plan: Test\n"
+    fm = parse_plan_doc_frontmatter(md)
+    assert fm.auto_merge is True
+
+
+def test_parse_plan_doc_frontmatter_auto_merge_false() -> None:
+    md = "---\nauto_merge: false\n---\n\n# Plan: Test\n"
+    fm = parse_plan_doc_frontmatter(md)
+    assert fm.auto_merge is False
+
+
+def test_parse_plan_doc_frontmatter_yaml_yes_no_coerce_to_bool() -> None:
+    """PyYAML 1.1 coerces bare ``yes`` / ``no`` to Python booleans BEFORE
+    pydantic sees them. StrictBool then accepts them correctly."""
+    assert parse_plan_doc_frontmatter("---\nauto_merge: yes\n---\n").auto_merge is True
+    assert parse_plan_doc_frontmatter("---\nauto_merge: no\n---\n").auto_merge is False
+
+
+def test_parse_plan_doc_frontmatter_rejects_quoted_string() -> None:
+    """Quoted strings remain strings through the YAML layer; StrictBool
+    rejects them so authors who quoted by accident fail loudly."""
+    for quoted in ('"true"', "'true'", '"false"', "'no'", '"1"'):
+        md = f"---\nauto_merge: {quoted}\n---\n\n# Plan: Test\n"
+        with pytest.raises(ValidationError, match="auto_merge"):
+            parse_plan_doc_frontmatter(md)
+
+
+def test_parse_plan_doc_frontmatter_rejects_integer() -> None:
+    """Integer ``1`` / ``0`` stay ints through YAML; StrictBool rejects."""
+    with pytest.raises(ValidationError, match="auto_merge"):
+        parse_plan_doc_frontmatter("---\nauto_merge: 1\n---\n")
+    with pytest.raises(ValidationError, match="auto_merge"):
+        parse_plan_doc_frontmatter("---\nauto_merge: 0\n---\n")
+
+
+def test_parse_plan_doc_frontmatter_rejects_unknown_field() -> None:
+    """``extra="forbid"`` — typos in field names fail loudly."""
+    md = "---\nauto_merg: true\n---\n\n# Plan: Test\n"
+    with pytest.raises(ValidationError, match="auto_merg"):
+        parse_plan_doc_frontmatter(md)
+
+
+def test_parse_plan_doc_frontmatter_empty_block_returns_defaults() -> None:
+    """``---\\n---`` with no body is harmless, not an error."""
+    md = "---\n---\n\n# Plan: Test\n"
+    fm = parse_plan_doc_frontmatter(md)
+    assert fm.auto_merge is None
+
+
+def test_parse_plan_doc_frontmatter_non_mapping_raises_format_error() -> None:
+    md = "---\n- just a list\n---\n\n# Plan: Test\n"
+    with pytest.raises(PlanDocFormatError, match="mapping"):
+        parse_plan_doc_frontmatter(md)
+
+
+def test_parse_plan_doc_frontmatter_invalid_yaml_raises_format_error() -> None:
+    md = "---\nauto_merge: [unclosed\n---\n\n# Plan: Test\n"
+    with pytest.raises(PlanDocFormatError, match="failed to parse"):
+        parse_plan_doc_frontmatter(md)

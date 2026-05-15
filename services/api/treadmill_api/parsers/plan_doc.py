@@ -30,11 +30,35 @@ import re
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
 
 
 class PlanDocFormatError(ValueError):
     """Raised when a plan doc does not contain a parseable sequence_of_work."""
+
+
+# ── Frontmatter schema (ADR-0031 §Decision Q31.c) ────────────────────────────
+
+
+class PlanFrontmatter(BaseModel):
+    """Optional YAML frontmatter block at the top of a plan markdown doc.
+
+    Currently a single field — ``auto_merge`` — controlling whether the
+    plan's PRs are eligible for the ADR-0031 auto-merge cooling-off
+    trigger. ``None`` (omitted) and ``True`` both mean enabled; ``False``
+    is an explicit opt-out.
+
+    ``StrictBool`` rejects string-coerced values like ``"true"`` /
+    ``"false"`` / ``"1"`` so a plan author who quoted the value by
+    accident fails loudly instead of silently opting in or out. Note:
+    bare YAML ``true`` / ``false`` / ``yes`` / ``no`` / ``on`` / ``off``
+    are parsed to real Python booleans by PyYAML before pydantic sees
+    them, so they're accepted (correctly).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_merge: StrictBool | None = None
 
 
 # ── Pydantic schemas (strict) ─────────────────────────────────────────────────
@@ -105,6 +129,39 @@ class _PlanDocSequenceContainer(BaseModel):
 
 _HEADING_RE = re.compile(r"^##\s+sequence[_\s]of[_\s]work\s*$", re.MULTILINE | re.IGNORECASE)
 _YAML_BLOCK_RE = re.compile(r"```ya?ml\s*\n(.*?)\n```", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
+
+
+def parse_plan_doc_frontmatter(markdown_text: str) -> PlanFrontmatter:
+    """Parse the optional ``---``-delimited YAML frontmatter at the top
+    of a plan doc.
+
+    Returns a ``PlanFrontmatter`` whose fields are ``None`` when absent.
+    If there is no frontmatter block, returns an empty ``PlanFrontmatter``.
+
+    Raises:
+        PlanDocFormatError: if the frontmatter delimiters are present but
+            the YAML body fails to parse or is not a mapping.
+        pydantic.ValidationError: if the parsed mapping contains unknown
+            keys or values that violate the strict types.
+    """
+    m = _FRONTMATTER_RE.match(markdown_text)
+    if m is None:
+        return PlanFrontmatter()
+    try:
+        raw = yaml.safe_load(m.group(1))
+    except yaml.YAMLError as exc:
+        raise PlanDocFormatError(
+            f"plan frontmatter YAML failed to parse: {exc}"
+        ) from exc
+    if raw is None:
+        return PlanFrontmatter()
+    if not isinstance(raw, dict):
+        raise PlanDocFormatError(
+            "plan frontmatter must be a YAML mapping; "
+            f"got {type(raw).__name__}"
+        )
+    return PlanFrontmatter.model_validate(raw)
 
 
 def extract_sequence_yaml(markdown_text: str) -> str:

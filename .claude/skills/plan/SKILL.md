@@ -26,6 +26,23 @@ Plans live at `docs/plans/<date>-<slug>.md` where `<date>` is the authoring date
 
 Plans are not numbered. They are scoped by date and slug. Multiple plans on the same day are fine — date plus slug should be unique.
 
+### Optional frontmatter
+
+A plan may carry a leading YAML frontmatter block delimited by `---`. Fields are optional; omit the whole block when there's nothing to set. Currently supported:
+
+- `auto_merge: bool` — opt out of the ADR-0031 auto-merge cooling-off trigger by setting `auto_merge: false`. Default (omitted / unset / `true`) is **enabled**: PRs from this plan's tasks become eligible for auto-merge after CI is green and the cooling-off window elapses. Set `false` when a plan wants a human to merge each PR manually — e.g. high-blast-radius migrations, plans touching shared schemas, or plans where review nuance matters more than throughput.
+
+Example:
+
+```markdown
+---
+auto_merge: false
+---
+
+# Plan: Title
+...
+```
+
 ## Template
 
 ```markdown
