@@ -259,7 +259,13 @@ def _run_all_checks(
                     diff=pr_diff,
                     task_spec=task_spec,
                     model=ctx.ctx.role.model,
-                    timeout_seconds=60,
+                    # 2026-05-15: bumped 60s → 120s. Haiku judge
+                    # runs against non-trivial diffs commonly take
+                    # 60-90s; the prior limit produced spurious
+                    # timeouts. Per ADR-0039 a timeout is already
+                    # non-gating (verdict=error), but reducing the
+                    # rate makes the o11y signal more meaningful.
+                    timeout_seconds=120,
                 )
             else:
                 logger.warning("unknown check kind %s for %s", check.kind, check.id)
