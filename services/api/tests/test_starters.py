@@ -40,6 +40,7 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-conflict",
     "wf-doc-amend",
     "wf-architecture-resolve",
+    "wf-crystallize-learning",
 }
 
 _EXPECTED_ROLE_IDS = {
@@ -53,27 +54,31 @@ _EXPECTED_ROLE_IDS = {
     "role-conflict-analyzer",
     "role-documentarian",
     "role-architect",
+    "role-crystallization-judge",
 }
 
-# The two action-role ids that may appear as step 2 of a 2-step
-# workflow. Per ADR-0015, the analyzer-then-action shape always
-# terminates in one of these.
-_ACTION_ROLE_IDS = {"role-code-author", "role-doc-author"}
+# Action-role ids that may appear as step 2 of a 2-step workflow. Per
+# ADR-0015, the analyzer-then-action shape always terminates in one
+# of these. Per ADR-0034, ``role-architect`` is the step-2 action for
+# ``wf-crystallize-learning`` — it authors the rule YAML + check.sh
+# when the judge verdict is ``ready``.
+_ACTION_ROLE_IDS = {"role-code-author", "role-doc-author", "role-architect"}
 
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 
-def test_starters_has_nine_canonical_workflows() -> None:
-    """The canonical nine, exactly (per ADR-0015 + ADR-0032). Future starters
-    extend this list; the count is asserted as a tripwire so additions are
-    intentional."""
+def test_starters_has_ten_canonical_workflows() -> None:
+    """The canonical workflows, exactly (per ADR-0015 + ADR-0032 +
+    ADR-0034). Future starters extend this list; the count is asserted
+    as a tripwire so additions are intentional."""
     ids = {wf["id"] for wf in STARTERS}
     assert ids == _EXPECTED_WORKFLOW_IDS
 
 
-def test_starters_declares_ten_canonical_roles() -> None:
-    """Per ADR-0015 §"Role taxonomy" + ADR-0032 — ten roles, exactly."""
+def test_starters_declares_eleven_canonical_roles() -> None:
+    """Per ADR-0015 §"Role taxonomy" + ADR-0032 + ADR-0034 — eleven
+    roles, exactly."""
     ids = {role["id"] for role in _all_roles()}
     assert ids == _EXPECTED_ROLE_IDS
 
@@ -164,6 +169,7 @@ _EXPECTED_OUTPUT_KINDS: dict[str, OutputKind] = {
     "role-conflict-analyzer": OutputKind.ANALYSIS,
     "role-documentarian": OutputKind.DOCUMENTATION,
     "role-architect": OutputKind.ANALYSIS,
+    "role-crystallization-judge": OutputKind.ANALYSIS,
 }
 
 
@@ -508,31 +514,41 @@ def test_role_architect_prompt_teaches_json_envelope() -> None:
 def _two_step_workflows() -> list[dict]:
     """Helper — every workflow with exactly two steps. Per ADR-0015's
     matrix this is ``wf-plan``, ``wf-feedback``, ``wf-ci-fix``,
-    ``wf-conflict``."""
+    ``wf-conflict``; ADR-0034 adds ``wf-crystallize-learning``."""
     return [wf for wf in STARTERS if len(wf["steps"]) == 2]
 
 
 def test_two_step_workflows_match_adr_0015_matrix() -> None:
-    """Tripwire — exactly four workflows are 2-step, per ADR-0015's
-    matrix. If this changes, the matrix moved and the test should
-    update intentionally."""
+    """Tripwire — the 2-step workflows are exactly those in ADR-0015's
+    matrix plus ADR-0034's ``wf-crystallize-learning``. If this changes,
+    the matrix moved and the test should update intentionally."""
     ids = {wf["id"] for wf in _two_step_workflows()}
-    assert ids == {"wf-plan", "wf-feedback", "wf-ci-fix", "wf-conflict"}
+    assert ids == {
+        "wf-plan",
+        "wf-feedback",
+        "wf-ci-fix",
+        "wf-conflict",
+        "wf-crystallize-learning",
+    }
 
 
 def test_two_step_workflows_step_1_is_an_analyzer_class_role() -> None:
     """Per ADR-0015 — every 2-step workflow's step 1 is an analyzer-class
-    role: either a ``-analyzer`` suffix (feedback / ci / conflict) or
-    ``role-planner`` (the wf-plan exception). This is the analyzer-then-
-    action shape's structural guarantee."""
+    role: a ``-analyzer`` suffix (feedback / ci / conflict),
+    ``role-planner`` (wf-plan), or a ``-judge`` suffix (wf-crystallize-
+    learning per ADR-0034). This is the analyzer-then-action shape's
+    structural guarantee."""
     for wf in _two_step_workflows():
         step_1_role = wf["steps"][0]["role_id"]
         analyzer_class = (
-            step_1_role.endswith("-analyzer") or step_1_role == "role-planner"
+            step_1_role.endswith("-analyzer")
+            or step_1_role.endswith("-judge")
+            or step_1_role == "role-planner"
         )
         assert analyzer_class, (
             f"workflow {wf['id']!r} step 1 role {step_1_role!r} is not "
-            "analyzer-class (must end in '-analyzer' or be 'role-planner')"
+            "analyzer-class (must end in '-analyzer' or '-judge', or be "
+            "'role-planner')"
         )
 
 

@@ -466,6 +466,63 @@ _ROLES: list[dict[str, Any]] = [
         ),
     },
     {
+        "id": "role-crystallization-judge",
+        "model": WORKER_MODEL,
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": (
+            "You are the Treadmill crystallization judge — step 1 of "
+            "``wf-crystallize-learning``. Your job is to decide whether a "
+            "captured learning has matured to the point where it should be "
+            "crystallized into a deterministic rule (per ADR-0034).\n\n"
+            "Input: a candidate learning doc "
+            "(``docs/learnings/<date>-<slug>.md``) plus read-only access to "
+            "the repo. Read the learning's Observation, Generalization, "
+            "Proposed rule, and Proposed remediation. Then weigh two factors "
+            "(per ADR-0034 Q34.b):\n\n"
+            "  1. **Frequency** — how often is this pattern surfacing? "
+            "Count other learnings under ``docs/learnings/`` that cite the "
+            "same trigger class, recent PR comments mentioning the failure "
+            "mode, or repeated incidents. A learning that's already produced "
+            "two or more siblings is high-frequency.\n"
+            "  2. **Ease of deterministic remediation** — how effortless is "
+            "the proposed remediation? Deterministic checks (a grep, a "
+            "script exit code, a Pydantic-validated schema) get more weight "
+            "than llm-judge checks because they're closer to one-shot "
+            "enforceability.\n\n"
+            "Rough framing: *how often are we suffering from this, and how "
+            "effortless is it to avoid?* High frequency × easy remediation = "
+            "``ready``. Either dimension weak = ``not-ready`` (or ``defer`` "
+            "if the learning is fresh and the signal hasn't accumulated).\n\n"
+            "Return your verdict as a fenced JSON block (per ADR-0027 "
+            "pattern, patterned on ``ArchitectVerdict``). The verdict must "
+            "be valid Pydantic-parseable JSON with exactly these fields:\n"
+            "```json\n"
+            "{\n"
+            '  "verdict": "ready" | "not-ready" | "defer",\n'
+            '  "reasoning": "<one paragraph — the why behind this verdict>",\n'
+            '  "learning_slug": "<the candidate learning slug, e.g. 2026-05-14-authors-must-run-validation-before-submitting>",\n'
+            '  "proposed_rule_slug": "<kebab-case slug for the proposed rule, if verdict is ready; omit otherwise>"\n'
+            "}\n"
+            "```\n\n"
+            "**Verdict meanings:**\n"
+            "  ``ready`` — the learning has crossed the frequency × "
+            "ease-of-remediation threshold. ``role-architect`` (step 2) will "
+            "author the rule YAML + matching check.sh.\n"
+            "  ``not-ready`` — the learning's signal is too weak or its "
+            "remediation too speculative. The disposition layer applies "
+            "exponential backoff (1d, 3d, 7d, 14d, 30d) before re-evaluating.\n"
+            "  ``defer`` — the learning is too fresh or context-dependent "
+            "to decide. Re-evaluated on the next crystallize run.\n\n"
+            "**Bias toward not-ready / defer for marginal cases.** False "
+            "positives produce noise rules that fire on legitimate work; "
+            "false negatives just delay enforcement. Cost is asymmetric.\n\n"
+            "The disposition layer reads your verdict and either dispatches "
+            "step 2 (on ``ready``) or updates the learning's frontmatter "
+            "with backoff state (on ``not-ready``/``defer``). Your JSON is "
+            "the complete output."
+        ),
+    },
+    {
         "id": "role-architect",
         "model": WORKER_MODEL,
         "output_kind": OutputKind.ANALYSIS,
@@ -610,6 +667,24 @@ STARTERS: list[dict[str, Any]] = [
         "roles": _roles_for("role-architect"),
         "steps": [
             {"name": "triage", "role_id": "role-architect"},
+        ],
+    },
+    {
+        # ADR-0034 wf-crystallize-learning: judge → architect. Step 1's
+        # CrystallizationVerdict gates step 2; the disposition layer
+        # (handled in workers/agent/runner_dispositions/crystallization.py
+        # — separate task) only dispatches step 2 when verdict='ready'.
+        # ``not-ready`` and ``defer`` short-circuit at step 1 and update
+        # the learning's frontmatter backoff state.
+        "id": "wf-crystallize-learning",
+        "description": (
+            "Judge a captured learning for crystallization readiness and "
+            "(if ready) author the rule YAML + check.sh."
+        ),
+        "roles": _roles_for("role-crystallization-judge", "role-architect"),
+        "steps": [
+            {"name": "judge", "role_id": "role-crystallization-judge"},
+            {"name": "crystallize", "role_id": "role-architect"},
         ],
     },
 ]
