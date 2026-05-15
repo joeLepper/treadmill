@@ -58,6 +58,7 @@ def _ctx(
     role_id: str = "role-test",
     workflow_id: str = "wf-test",
     task_validations: list | None = None,
+    trigger: str = "registered",
 ) -> WorkerContext:
     return WorkerContext(
         step_id=str(uuid.uuid4()),
@@ -74,7 +75,7 @@ def _ctx(
         plan_doc_path=None,
         workflow_id=workflow_id,
         workflow_version=1,
-        trigger="registered",
+        trigger=trigger,
         role=Role(
             id=role_id, model="m", system_prompt="p",
             output_kind=output_kind, skills=[], hooks=[],
@@ -112,6 +113,7 @@ def _disp_ctx(
     is_dry_run: bool = False,
     repo_mode: str = "local",
     task_validations: list | None = None,
+    trigger: str = "registered",
 ) -> DispositionContext:
     return DispositionContext(
         ctx=_ctx(
@@ -120,6 +122,7 @@ def _disp_ctx(
             role_id=role_id,
             workflow_id=workflow_id,
             task_validations=task_validations,
+            trigger=trigger,
         ),
         claude_result=CodeAuthorResult(summary=summary),
         repo_dir=repo_dir,
@@ -1390,6 +1393,7 @@ def _arch_ctx(
     summary: str,
     *,
     role_id: str = "role-architect",
+    trigger: str = "registered",
 ) -> DispositionContext:
     """Build a DispositionContext for the architect handler.
 
@@ -1405,6 +1409,7 @@ def _arch_ctx(
         role_id=role_id,
         workflow_id="wf-architecture-resolve",
         summary=summary,
+        trigger=trigger,
     )
     return ctx
 
@@ -1469,6 +1474,34 @@ def test_architecture_handler_accept_as_is_emits_pr_comment(
     # PR comment for operator confirmation per ADR-0033.
     assert "pr_comment" in out.payload
     assert out.payload["pr_comment"]["signal"] == "accept-as-is"
+
+
+def test_architecture_handler_accept_as_is_on_deadlock_emits_review_override(
+    tmp_path: Path,
+) -> None:
+    """ADR-0038: when the architect was dispatched with
+    trigger=self:wf-feedback-deadlock, ``accept-as-is`` flips the
+    dispatch payload from wf-doc-amend (the ADR-0032 Class C path) to a
+    no-dispatch + review_override marker. The consumer projects this
+    marker to a ``review.override`` Event row that the mergeability VIEW
+    reads as ``review_decision='approved'``."""
+    summary = (
+        '```json\n'
+        '{"verdict": "accept-as-is", "reasoning": "Reviewer was wrong; '
+        'work is fine.", '
+        '"target_artifact": "services/api/treadmill_api/coordination/'
+        'consumer.py"}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary, trigger="self:wf-feedback-deadlock")
+    out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
+    # No wf-doc-amend dispatch — the deadlock variant has no pitfall to
+    # append; ``accept-as-is`` here means "reviewer was wrong" not
+    # "the gap is acceptable, learn from it."
+    assert out.payload["dispatch"]["workflow_id"] is None
+    assert out.payload["dispatch"]["review_override"] is True
+    assert out.payload["dispatch"]["task_id"] == ctx.ctx.task_id
 
 
 def test_architecture_handler_uncertain_redispatches_with_attempt_counter(

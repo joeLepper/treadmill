@@ -395,6 +395,25 @@ class CoordinationConsumer:
             # dispatch wf-feedback directly (convergence trigger).
             if action == "completed":
                 await self._maybe_fire_author_feedback(session, step_id, typed)
+            # ADR-0038: ralph-loop deadlock arbitration. When a
+            # wf-feedback step completes with ``responded-without-change``
+            # while the underlying review still says ``changes_requested``,
+            # dispatch ``wf-architecture-resolve`` so role-architect
+            # adjudicates. The helper short-circuits cleanly for any
+            # other shape.
+            if action == "completed":
+                await self._maybe_fire_deadlock_arbitration(
+                    session, step_id, typed,
+                )
+            # ADR-0038: companion to the dispatch helper above — when an
+            # architect step.completed carries
+            # ``payload.dispatch.review_override``, emit the
+            # ``review.override`` Event the mergeability VIEW reads as
+            # ``review_decision='approved'``.
+            if action == "completed":
+                await self._maybe_emit_review_override(
+                    session, step_id, typed,
+                )
             # ADR-0031: when a wf-validate or wf-review step completes,
             # set/push the auto-merge cooling-off deadline in Redis. The
             # 5s poll loop (``_auto_merge_loop``) fires the merge when
@@ -1086,6 +1105,80 @@ class CoordinationConsumer:
         except Exception:
             logger.exception(
                 "_maybe_fire_review_feedback: dispatch failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    # ── Self-trigger: ralph-loop deadlock → wf-architecture-resolve (ADR-0038)
+
+    async def _maybe_fire_deadlock_arbitration(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """ADR-0038 ralph-loop deadlock detector.
+
+        Fires ``wf-architecture-resolve`` against the same task when a
+        ``wf-feedback.step.completed`` arrives with
+        ``decision='responded-without-change'`` while the latest
+        ``wf-review`` decision is ``'changes_requested'``. The helper
+        short-circuits cleanly for any other shape and applies its own
+        5-attempt cap + dedup.
+
+        Failures are logged but do not propagate; the prior projection
+        has already committed and rolling back on a dispatch failure
+        would lose progress.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_arbitration_on_deadlock,
+        )
+        try:
+            await maybe_dispatch_arbitration_on_deadlock(
+                session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_deadlock_arbitration: dispatch failed for "
+                "step %s; prior projection committed, will retry on "
+                "redelivery",
+                step_id,
+            )
+
+    # ── Side-effect: emit review.override on architect accept-as-is ───────
+
+    async def _maybe_emit_review_override(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """ADR-0038 architect override emitter.
+
+        Delegates to ``triggers.maybe_emit_review_override_on_architect_completion``.
+        Failures are logged but do not propagate — the prior projection
+        has already committed and rolling back on an emission failure
+        would lose the architect's verdict. The architect's own
+        ``ON CONFLICT (id) DO NOTHING`` makes redelivery safe; the
+        SQS retry on the original step.completed will rerun this
+        helper on the next pass.
+        """
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_emit_review_override_on_architect_completion,
+        )
+        try:
+            await maybe_emit_review_override_on_architect_completion(
+                session, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_emit_review_override: emission failed for step %s; "
                 "prior projection committed, will retry on redelivery",
                 step_id,
             )

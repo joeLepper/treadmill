@@ -79,9 +79,12 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.models import (
+    Event,
     EventTrigger,
     Task,
     TaskPR,
@@ -103,10 +106,12 @@ CI_FIX_WORKFLOW_ID = "wf-ci-fix"
 CONFLICT_WORKFLOW_ID = "wf-conflict"
 FEEDBACK_WORKFLOW_ID = "wf-feedback"
 DOC_AMEND_WORKFLOW_ID = "wf-doc-amend"
+ARCHITECTURE_RESOLVE_WORKFLOW_ID = "wf-architecture-resolve"
 CI_FIX_MAX_ATTEMPTS = 3
 CONFLICT_RESOLVE_MAX_ATTEMPTS = 3
 FEEDBACK_MAX_ATTEMPTS = 5
 DOC_AMEND_MAX_ATTEMPTS = 5
+ARCHITECTURE_RESOLVE_MAX_ATTEMPTS = 5
 
 # The check_id that routes wf-validate failures to wf-doc-amend instead
 # of wf-feedback. Any other check failure still dispatches wf-feedback.
@@ -526,6 +531,264 @@ async def maybe_dispatch_feedback_on_review_changes_requested(
         workflow_id="wf-review",
         fail_decision="changes_requested",
     )
+
+
+async def maybe_dispatch_arbitration_on_deadlock(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """Dispatch ``wf-architecture-resolve`` when a ralph-loop deadlock fires
+    (ADR-0038).
+
+    The deadlock signal is: a ``wf-feedback`` step.completed with
+    ``decision='responded-without-change'`` against a task whose
+    most-recent ``wf-review`` decision is ``changes_requested``. The
+    feedback role examined the diff + the reviewer's rationale and
+    declined to author any change; the reviewer's verdict still gates
+    merge. Two LLM roles disagree about the same diff; neither has
+    authority over the other.
+
+    Architect's verdict (per ADR-0032 ``ArchitectVerdict``) drives the
+    next move:
+
+      * ``accept-as-is`` → architect disposition emits a
+        ``review.override`` event; mergeability VIEW (post-0016 migration)
+        projects ``review_decision='approved'``; auto-merge proceeds.
+      * ``amend`` → dispatcher routes to ``wf-plan`` (handled elsewhere).
+      * ``supersede`` → dispatcher routes to ``wf-doc-amend`` (handled
+        elsewhere).
+      * ``uncertain`` → surfaced to operator via the cap below.
+
+    Skips cleanly when:
+      * The completed step isn't ``wf-feedback`` or its decision isn't
+        ``responded-without-change``.
+      * The most-recent ``wf-review`` decision for this task is not
+        ``changes_requested`` (no deadlock).
+      * The task has already dispatched
+        ``wf-architecture-resolve`` >= 5 times (cap per ADR-0029 Q29.e /
+        ADR-0038).
+
+    Dedup key per ADR-0026:
+        ``wf-architecture-resolve:<repo>:deadlock-feedback-run=<wf_feedback_run_id>``
+
+    Distinct from the existing
+    ``wf-architecture-resolve:<repo>:class-c-learning=<learning_slug>``
+    used for ADR-0032's Class C learnings — different trigger sources,
+    different namespaces.
+    """
+    if typed.output.decision != "responded-without-change":
+        return None
+
+    # Resolve workflow + run + task + repo for the completing step.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None or row.workflow_id != FEEDBACK_WORKFLOW_ID:
+        return None
+
+    # Look up the most-recent wf-review step for this task. Deadlock
+    # only fires if its decision was ``changes_requested``.
+    review_result = await session.execute(
+        select(WorkflowRunStep.output)
+        .join(WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .where(
+            WorkflowRun.task_id == row.task_id,
+            WorkflowVersion.workflow_id == "wf-review",
+            WorkflowRunStep.status == "completed",
+        )
+        .order_by(WorkflowRunStep.completed_at.desc().nulls_last())
+        .limit(1)
+    )
+    review_step = review_result.first()
+    if review_step is None:
+        logger.debug(
+            "arbitration trigger: no wf-review history for task %s; skipping",
+            row.task_id,
+        )
+        return None
+    latest_review_decision = (review_step.output or {}).get("decision")
+    if latest_review_decision != "changes_requested":
+        logger.debug(
+            "arbitration trigger: latest review decision is %r (not "
+            "changes_requested) for task %s; no deadlock",
+            latest_review_decision, row.task_id,
+        )
+        return None
+
+    # Cap: 5 architecture-resolve dispatches per task across all sources.
+    if await _is_capped(session, row.task_id, ARCHITECTURE_RESOLVE_WORKFLOW_ID):
+        logger.warning(
+            "arbitration trigger: %s capped for task %s "
+            "(>=%d prior runs); operator must intervene",
+            ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            row.task_id,
+            ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {"repo": row.repo, "deadlock_feedback_run_id": str(row.run_id)}
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            trigger="self:wf-feedback-deadlock",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
+_REVIEW_OVERRIDE_NAMESPACE = uuid.UUID("8e16f4c0-2c4c-4f4f-9b9a-7c3d6f1a5e10")
+
+
+async def maybe_emit_review_override_on_architect_completion(
+    session: AsyncSession,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """ADR-0038: emit a ``review.override`` Event row when an architect
+    step.completed carries ``payload.dispatch.review_override == True``.
+
+    The mergeability VIEW (post-0016 migration) reads ``review.override``
+    events at HEAD as ``review_decision='approved'``, unblocking
+    auto-merge for ralph-loop deadlocks the architect resolved with
+    ``verdict='accept-as-is'``.
+
+    The architect doesn't know the PR's HEAD sha. We look it up via the
+    most-recent ``pr_opened``/``pr_synchronize`` event for the task's
+    PR — the same join the VIEW uses. If the PR has since advanced past
+    the HEAD the architect adjudicated, the override naturally targets
+    the new HEAD; that's acceptable because the architect's
+    ``accept-as-is`` verdict applies to the state of the diff it saw,
+    and a later sync would have re-fired wf-review.
+
+    Idempotency: the Event row's ``id`` is a deterministic UUIDv5 of
+    ``(task_id, commit_sha)`` so re-delivery of the same step is a
+    no-op via ``ON CONFLICT (id) DO NOTHING``.
+
+    Returns the emitted Event id, or ``None`` if no emission happened.
+    """
+    output = typed.output
+    payload = output.payload if isinstance(output.payload, dict) else {}
+    dispatch = payload.get("dispatch") if isinstance(payload, dict) else None
+    if not isinstance(dispatch, dict) or not dispatch.get("review_override"):
+        return None
+
+    # Confirm this step belongs to wf-architecture-resolve. Any other
+    # workflow setting ``review_override`` is malformed; skip defensively.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.task_id,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None or row.workflow_id != ARCHITECTURE_RESOLVE_WORKFLOW_ID:
+        logger.warning(
+            "review_override emission skipped: step %s is not "
+            "wf-architecture-resolve (workflow=%s)",
+            step_id, row.workflow_id if row else None,
+        )
+        return None
+
+    # Resolve task PR + latest HEAD sha. Mirrors the
+    # ``task_mergeability`` VIEW's head LATERAL: latest pr_opened or
+    # pr_synchronize event for the task's (repo, pr_number) wins.
+    pr_result = await session.execute(
+        select(TaskPR.repo, TaskPR.pr_number).where(
+            TaskPR.task_id == row.task_id,
+        )
+    )
+    pr_row = pr_result.first()
+    if pr_row is None:
+        logger.warning(
+            "review_override emission skipped: no task_pr for task %s",
+            row.task_id,
+        )
+        return None
+
+    head_result = await session.execute(
+        select(Event.payload).where(
+            Event.entity_type == "github",
+            Event.action.in_(("pr_opened", "pr_synchronize")),
+            Event.payload["repo"].astext == pr_row.repo,
+            Event.payload["pr_number"].astext == str(pr_row.pr_number),
+        )
+        .order_by(Event.created_at.desc())
+        .limit(1)
+    )
+    head_row = head_result.first()
+    if head_row is None or not (head_row.payload or {}).get("head_sha"):
+        logger.warning(
+            "review_override emission skipped: no pr_opened/pr_synchronize "
+            "event for task %s (repo=%s pr=%s)",
+            row.task_id, pr_row.repo, pr_row.pr_number,
+        )
+        return None
+    head_sha = head_row.payload["head_sha"]
+
+    reasoning = payload.get("reasoning") or ""
+
+    event_id = uuid.uuid5(
+        _REVIEW_OVERRIDE_NAMESPACE,
+        f"{row.task_id}:{head_sha}",
+    )
+    stmt = (
+        pg_insert(Event)
+        .values(
+            id=event_id,
+            entity_type="review",
+            action="override",
+            task_id=row.task_id,
+            commit_sha=head_sha,
+            payload={"commit_sha": head_sha, "reasoning": reasoning},
+        )
+        .on_conflict_do_nothing(index_elements=["id"])
+    )
+    await session.execute(stmt)
+    logger.info(
+        "review.override emitted: task=%s commit_sha=%s event_id=%s",
+        row.task_id, head_sha, event_id,
+    )
+    return event_id
 
 
 def is_docs_current_check_failure(output: Any) -> bool:

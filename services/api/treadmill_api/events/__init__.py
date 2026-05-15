@@ -51,6 +51,7 @@ from treadmill_api.events.step_output import (
     Metadata,
     StepOutput,
 )
+from treadmill_api.events.review import ReviewOverride
 from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
 
 
@@ -96,6 +97,8 @@ __all__ = [
     "GithubPrReviewSubmitted",
     "GithubCheckRunCompleted",
     "GithubPrConflict",
+    # Review override (ADR-0038)
+    "ReviewOverride",
     # Internal control-plane events
     "DispatchPublishFailed",
     "DispatchPublishReplayed",

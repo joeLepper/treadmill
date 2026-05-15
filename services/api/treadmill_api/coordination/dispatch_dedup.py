@@ -200,6 +200,28 @@ def _build_wf_doc_amend_key(payload: dict[str, Any]) -> str | None:
     return f"wf-doc-amend:{repo}:docs-amend-run={docs_amend_run_id}"
 
 
+def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
+    """``wf-architecture-resolve:<repo>:deadlock-feedback-run=<run_id>``
+    (ADR-0038 ralph-loop deadlock arbitration trigger).
+
+    One arbitration dispatch per wf-feedback run that resolved with
+    ``responded-without-change`` while wf-review still says
+    ``changes_requested``. ``deadlock_feedback_run_id`` is the UUID of
+    the wf-feedback run that surfaced the deadlock; using the feedback
+    run id as the discriminator ensures at most one arbitration is
+    dispatched per deadlock cycle regardless of re-delivery. Distinct
+    namespace from ADR-0032's ``class-c-learning`` trigger source.
+    """
+    repo = payload.get("repo")
+    deadlock_feedback_run_id = payload.get("deadlock_feedback_run_id")
+    if not repo or not deadlock_feedback_run_id:
+        return None
+    return (
+        f"wf-architecture-resolve:{repo}:"
+        f"deadlock-feedback-run={deadlock_feedback_run_id}"
+    )
+
+
 # Per-workflow dedup-key builders. Workflows not in this dict implicitly
 # opt out (the helper treats a missing entry as "return None"). Per
 # ADR-0026's table, wf-author and wf-plan have no natural dedup key:
@@ -213,6 +235,7 @@ def _build_wf_doc_amend_key(payload: dict[str, Any]) -> str | None:
 DEDUP_KEY_BUILDERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
     "wf-review": _build_wf_review_key,
     "wf-feedback": _build_wf_feedback_key,
+    "wf-architecture-resolve": _build_wf_architecture_resolve_key,
     "wf-ci-fix": _build_wf_ci_fix_key,
     "wf-conflict": _build_wf_conflict_key,
     "wf-auto-merge": _build_wf_auto_merge_key,

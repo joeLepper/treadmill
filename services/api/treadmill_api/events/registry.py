@@ -41,6 +41,7 @@ from treadmill_api.events.step import (
     StepReady,
     StepStarted,
 )
+from treadmill_api.events.review import ReviewOverride
 from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
 
 
@@ -74,6 +75,9 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     GithubPrReviewSubmitted,
     GithubCheckRunCompleted,
     GithubPrConflict,
+    # Review override (ADR-0038): architect's accept-as-is on a
+    # ralph-loop deadlock flips review_decision in the mergeability VIEW.
+    ReviewOverride,
     # Internal control-plane events
     DispatchPublishFailed,
     DispatchPublishReplayed,

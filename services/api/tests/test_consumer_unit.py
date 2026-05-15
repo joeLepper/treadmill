@@ -1112,3 +1112,90 @@ async def test_wf_doc_amend_dedup_key_includes_docs_amend_run() -> None:
         "wf-doc-amend:example/repo:"
         "docs-amend-run=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     )
+
+
+# ── review.override emission (ADR-0038) ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_consumer_routes_step_completed_to_review_override_helper() -> None:
+    """The consumer must call ``_maybe_emit_review_override`` after each
+    step.completed so the architect's accept-as-is verdict on a ralph-loop
+    deadlock can be projected into a ``review.override`` Event."""
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    override_calls: list[dict] = []
+
+    async def _stub(*args: object, **kwargs: object) -> None:
+        override_calls.append({"args": args, "kwargs": kwargs})
+
+    consumer._maybe_emit_review_override = _stub  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(uuid.uuid4()),
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "completed_at": "2026-05-15T19:00:00+00:00",
+            "output": {
+                "summary": "architect verdict",
+                "decision": "accept-as-is",
+                "commit_sha": None,
+                "artifacts": [],
+                "payload": {
+                    "verdict": "accept-as-is",
+                    "reasoning": "reviewer was wrong",
+                    "dispatch": {
+                        "workflow_id": None,
+                        "review_override": True,
+                    },
+                },
+                "metadata": {},
+            },
+        },
+    })
+
+    assert len(override_calls) == 1, (
+        "consumer must invoke _maybe_emit_review_override on every "
+        "step.completed; the helper filters out non-architect / "
+        "non-override shapes internally"
+    )
+
+
+@pytest.mark.asyncio
+async def test_maybe_emit_review_override_short_circuits_without_flag() -> None:
+    """The override helper must early-return (no DB work) when the
+    architect payload doesn't carry ``dispatch.review_override``. This
+    is the common path: amend / supersede / non-deadlock accept-as-is
+    must not poison the mergeability VIEW."""
+    from treadmill_api.coordination.triggers import (
+        maybe_emit_review_override_on_architect_completion,
+    )
+    from treadmill_api.events.step import StepCompleted
+    from treadmill_api.events.step_output import Metadata, StepOutput
+
+    session = _StubSession()
+    typed = StepCompleted(
+        completed_at="2026-05-15T19:00:00+00:00",
+        output=StepOutput(
+            summary="amend verdict",
+            decision="amend",
+            payload={
+                "verdict": "amend",
+                "dispatch": {"workflow_id": "wf-plan"},
+            },
+            metadata=Metadata(),
+        ),
+    )
+
+    result = await maybe_emit_review_override_on_architect_completion(
+        session, step_id=str(uuid.uuid4()), typed=typed,  # type: ignore[arg-type]
+    )
+
+    assert result is None
+    assert session.execute.await_count == 0, (
+        "helper must short-circuit before any DB query when "
+        "dispatch.review_override is absent"
+    )

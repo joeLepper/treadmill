@@ -86,6 +86,9 @@ def _extract_verdict_envelope(summary: str) -> dict[str, Any]:
     return envelope
 
 
+_DEADLOCK_TRIGGER = "self:wf-feedback-deadlock"
+
+
 def _build_dispatch_payload(
     *,
     verdict: str,
@@ -93,9 +96,11 @@ def _build_dispatch_payload(
     remediation_summary: str | None,
     task_id: str,
     rework_attempt: int,
+    trigger: str,
 ) -> dict[str, Any]:
     """Build the routing payload the consumer reads to dispatch the
-    downstream workflow. Shape per ADR-0032 §Decision."""
+    downstream workflow. Shape per ADR-0032 §Decision + ADR-0038
+    semantics for deadlock-triggered runs."""
     if verdict == "amend":
         return {
             "workflow_id": "wf-plan",
@@ -112,6 +117,19 @@ def _build_dispatch_payload(
             "intent": "author-superseding-adr",
         }
     if verdict == "accept-as-is":
+        # ADR-0038: when the architect was dispatched to arbitrate a
+        # ralph-loop deadlock, ``accept-as-is`` means "the work is fine;
+        # the reviewer was wrong." Skip wf-doc-amend (no pitfall to
+        # append) and let the consumer emit a ``review.override`` event
+        # so the mergeability VIEW projects ``review_decision=approved``.
+        if trigger == _DEADLOCK_TRIGGER:
+            return {
+                "workflow_id": None,
+                "task_id": task_id,
+                "review_override": True,
+            }
+        # ADR-0032 (Class C learning trigger): the original semantics
+        # — append a pitfall to the component's AGENT.md.
         return {
             "workflow_id": "wf-doc-amend",
             "task_id": task_id,
@@ -211,6 +229,7 @@ def handle(ctx: DispositionContext) -> StepOutput:
         remediation_summary=remediation_summary,
         task_id=ctx.ctx.task_id,
         rework_attempt=rework_attempt,
+        trigger=ctx.ctx.trigger,
     )
     capped = bool(dispatch_payload.get("capped"))
     pr_comment_payload = _build_pr_comment_payload(

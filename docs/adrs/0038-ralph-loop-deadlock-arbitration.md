@@ -61,9 +61,9 @@ The 5-attempt cap from ADR-0029 Q29.e applies to architect dispatches as well, s
 
 ## Follow-ups
 
-- Define the `review.override` synthetic event shape so the mergeability VIEW projects `review_decision='approved'` deterministically (probably a new `review_decisions` audit trail row alongside the existing wf-review step output).
 - Add an integration test that exercises the full deadlock → architect → accept-as-is → auto-merge cycle on a fixture.
-- Decide whether ADR-0032's `wf-architecture-resolve` needs a new `trigger` value to distinguish "deadlock arbitration" from "Class C drift" (probably yes for telemetry; one new constant in `coordination/triggers.py`).
+- **Fifth verdict: `rework`** — captured in conversation 2026-05-15 while implementing this ADR. The four verdicts above resolve disagreement by (a) authoring a remediation plan (`amend`), (b) authoring a superseding ADR (`supersede`), (c) flipping the reviewer's vote (`accept-as-is`), or (d) escalating to operator (`uncertain`). They do not let the architect say "the executor was right that the diff needs work, but the feedback role's first-pass response was inadequate — send it back to feedback with these explicit instructions." That path needs (1) a new verdict literal in `ArchitectVerdict`, (2) a consumer trigger that dispatches `wf-feedback` from `architect.step.completed` when `verdict='rework'`, and (3) a way to surface the architect's `remediation_summary` into the feedback role's prompt. (3) is the real design cost — the candidates are a `task_directive` event the feedback worker queries on startup, a dispatcher-injected synthetic `prior_step`, or a `wf-feedback` context-fetch step. To be authored separately as ADR-0040 to keep this PR scoped to the deadlock-resolution machinery already in flight.
+- Decide whether ADR-0032's `wf-architecture-resolve` needs a new `trigger` value to distinguish "deadlock arbitration" from "Class C drift" beyond the `self:wf-feedback-deadlock` trigger string introduced here (probably yes for richer telemetry; today the trigger string is the only signal).
 
 ## References
 
