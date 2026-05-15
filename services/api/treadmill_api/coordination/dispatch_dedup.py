@@ -87,9 +87,10 @@ def _build_wf_review_key(payload: dict[str, Any]) -> str | None:
 def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
     """``wf-feedback:<repo>:review=<review_id>`` (human-submitted review)
     or ``wf-feedback:<repo>:review-run=<run_id>`` (wf-review self-trigger)
-    or ``wf-feedback:<repo>:validate-run=<run_id>`` (wf-validate failure trigger).
+    or ``wf-feedback:<repo>:validate-run=<run_id>`` (wf-validate failure trigger)
+    or ``wf-feedback:<repo>:author-fail-run=<run_id>`` (wf-author failure trigger).
 
-    Three trigger sources fire wf-feedback:
+    Four trigger sources fire wf-feedback:
 
       * ``pr_review_submitted`` webhook (human reviewer outside
         Treadmill) — payload carries ``review_id`` (GitHub node-id like
@@ -107,10 +108,15 @@ def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
         ``maybe_dispatch_feedback_on_terminal_failure``).
         Payload carries ``validate_run_id`` (UUID of the wf-validate run).
 
-    Different namespaces (``review=`` vs ``review-run=`` vs ``validate-run=``)
-    intentionally so trigger sources do not collide on the dedup table — if
-    multiple sources fire against the same task, both/all wf-feedback runs
-    are legitimate (different intent sources).
+      * ``wf-author.step.completed`` with ``decision='fail'``
+        (ADR-0037 — author failure trigger via
+        ``maybe_dispatch_feedback_on_terminal_failure``).
+        Payload carries ``author_run_id`` (UUID of the wf-author run).
+
+    Different namespaces (``review=`` vs ``review-run=`` vs ``validate-run=`` vs
+    ``author-fail-run=``) intentionally so trigger sources do not collide on the
+    dedup table — if multiple sources fire against the same task, both/all wf-feedback
+    runs are legitimate (different intent sources).
     """
     repo = payload.get("repo")
     if not repo:
@@ -124,6 +130,9 @@ def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
     validate_run_id = payload.get("validate_run_id")
     if validate_run_id:
         return f"wf-feedback:{repo}:validate-run={validate_run_id}"
+    author_run_id = payload.get("author_run_id")
+    if author_run_id:
+        return f"wf-feedback:{repo}:author-fail-run={author_run_id}"
     return None
 
 

@@ -394,17 +394,19 @@ async def maybe_dispatch_feedback_on_terminal_failure(
     """Fire ``wf-feedback`` when a step completes with a terminal verdict
     that should trigger analysis + resolution.
 
-    Handles three scenarios:
+    Handles four scenarios:
       1. ``wf-review`` with ``decision='changes_requested'`` (task #108 path 1)
       2. ``wf-validate`` with ``decision='fail'`` (ADR-0029)
       3. ``wf-validate`` with ``decision='error'`` (ADR-0029)
+      4. ``wf-author`` with ``decision='fail'`` (ADR-0037)
 
     Companion to the github-webhook-driven ``evaluate_triggers``: that
     function fires ``wf-feedback`` on a ``pr_review_submitted`` event
     with ``state='changes_requested'`` (human reviewer outside Treadmill).
     This function fires it on Treadmill's own verdicts (self-review via
     ``wf-review`` which no longer emits ``pr_review_submitted`` webhook,
-    and validation failures via ``wf-validate``).
+    validation failures via ``wf-validate``, and author failures via
+    ``wf-author``).
 
     Skips cleanly when:
       * The completed step's workflow doesn't match ``workflow_id``.
@@ -416,6 +418,7 @@ async def maybe_dispatch_feedback_on_terminal_failure(
     Dedup is gated by ADR-0026's ``WorkflowDispatchDedup`` table keyed on:
       * ``wf-feedback:<repo>:review-run=<wf_review_run_id>`` for wf-review
       * ``wf-feedback:<repo>:validate-run=<wf_validate_run_id>`` for wf-validate
+      * ``wf-feedback:<repo>:author-fail-run=<wf_author_run_id>`` for wf-author
 
     Different namespaces prevent different trigger sources from colliding
     on the dedup table — multiple legitimate sources can fire feedback
@@ -475,6 +478,9 @@ async def maybe_dispatch_feedback_on_terminal_failure(
     elif workflow_id == "wf-validate":
         payload = {"repo": row.repo, "validate_run_id": str(row.run_id)}
         trigger = f"self:wf-validate-{fail_decision}"
+    elif workflow_id == "wf-author":
+        payload = {"repo": row.repo, "author_run_id": str(row.run_id)}
+        trigger = "self:wf-author-fail"
     else:
         logger.warning(
             "feedback trigger: unexpected workflow_id %s for step %s; skipping",

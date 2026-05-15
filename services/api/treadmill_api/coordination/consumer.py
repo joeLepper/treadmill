@@ -391,6 +391,10 @@ class CoordinationConsumer:
             # or 'error', dispatch wf-feedback directly (convergence trigger).
             if action == "completed":
                 await self._maybe_fire_validate_feedback(session, step_id, typed)
+            # ADR-0037: when a wf-author step completes with decision='fail',
+            # dispatch wf-feedback directly (convergence trigger).
+            if action == "completed":
+                await self._maybe_fire_author_feedback(session, step_id, typed)
             # ADR-0031: when a wf-validate or wf-review step completes,
             # set/push the auto-merge cooling-off deadline in Redis. The
             # 5s poll loop (``_auto_merge_loop``) fires the merge when
@@ -1148,6 +1152,45 @@ class CoordinationConsumer:
         except Exception:
             logger.exception(
                 "_maybe_fire_validate_feedback: dispatch failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    # ── Self-trigger: wf-author failure → wf-feedback (ADR-0037) ─────────────
+
+    async def _maybe_fire_author_feedback(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """Fire wf-feedback when a ``wf-author.step.completed`` arrives with
+        ``decision='fail'`` (ADR-0037).
+
+        Skips cleanly when ``self.dispatcher`` is ``None`` (narrow tests
+        that don't exercise dispatch). Failures are logged but do not
+        propagate — the prior step's projection has already committed;
+        rolling that back on a dispatch failure would lose progress. The
+        dispatch helper's own retry / dedup logic handles transient errors
+        on the next event delivery.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_feedback_on_terminal_failure,
+        )
+        try:
+            await maybe_dispatch_feedback_on_terminal_failure(
+                session, self.dispatcher,
+                step_id=step_id, typed=typed,
+                workflow_id="wf-author",
+                fail_decision="fail",
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_author_feedback: dispatch failed for step %s; "
                 "prior projection committed, will retry on redelivery",
                 step_id,
             )
