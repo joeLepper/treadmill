@@ -189,3 +189,82 @@ The current `starters.py` declares seven workflows, all single-step. Rewrite as 
 - The Week-3 plan doc (`docs/plans/2026-05-12-week-3-mergeable-and-multi-step.md`) sequences the work: starters rewrite, prior_steps API extension, cross-step dispatch in consumer, then the per-role prompt authoring (which is the bulk of the actual work).
 - ADR-0010's plan state machine and task hierarchy are unchanged; this ADR is purely a workflow-shape decision.
 - A future very-large ADR addresses long-running ML tasks (step timeouts, checkpointing, polling). Out of scope here.
+
+## Diagram
+
+The analyzer-then-action handoff. The dispatcher fires only step 1; the coordination consumer takes over as cross-step orchestrator on `step.completed`, queries `prior_steps` shape via the API, and dispatches step 2 with the analyzer's `task_directive` riding in the envelope's `payload`.
+
+```mermaid
+sequenceDiagram
+    participant Dispatcher
+    participant SQS as SQS work queue
+    participant Analyzer as Step 1 — analyzer role<br/>(role-feedback-analyzer /<br/>role-ci-analyzer /<br/>role-conflict-analyzer)
+    participant API as Treadmill API<br/>(GET /steps/{id})
+    participant Consumer as Coordination consumer<br/>(cross_step.py)
+    participant Action as Step 2 — role-code-author
+    participant GitHub
+
+    Dispatcher->>SQS: claim for step 1
+    SQS->>Analyzer: receive claim
+    Analyzer->>API: GET /steps/{id}<br/>(read inbound signal +<br/>task + plan)
+    Analyzer-->>Consumer: step.completed<br/>(payload.task_directive,<br/>decision ∈ {plan-ready,<br/>no-action-needed, blocked})
+    Consumer->>Consumer: read workflow_version_steps<br/>by step_index; next step pending?
+    alt next step exists
+        Consumer->>SQS: claim for step 2<br/>(same shape as dispatcher)
+        SQS->>Action: receive claim
+        Action->>API: GET /steps/{id}<br/>(prior_steps includes step 1<br/>output envelope)
+        alt task_directive present and<br/>step 1 decision = plan-ready
+            Action->>GitHub: edit + commit + push +<br/>open PR (or update PR)
+            Action-->>Consumer: step.completed<br/>(decision = code-change-dispatched /<br/>fix-pushed / resolved)
+        else step 1 decision = no-action-needed
+            Action->>GitHub: gh pr comment<br/>(responded-without-change)
+            Action-->>Consumer: step.completed<br/>(decision = responded-without-change)
+        else step 1 decision = blocked<br/>(task_directive = None)
+            Action-->>Consumer: step.completed<br/>(decision = blocked,<br/>no GitHub action)
+        end
+    else single-step workflow
+        Note over Consumer: run terminates after step 1
+    end
+```
+
+Role topology: eight roles, one shared terminal (`role-code-author`) reused across four workflows.
+
+```mermaid
+flowchart TB
+    subgraph Analyzers
+        Planner["role-planner"]
+        FeedbackAnalyzer["role-feedback-analyzer"]
+        CiAnalyzer["role-ci-analyzer"]
+        ConflictAnalyzer["role-conflict-analyzer"]
+    end
+    subgraph Actions
+        DocAuthor["role-doc-author"]
+        CodeAuthor["role-code-author<br/>(shared terminal)"]
+        Reviewer["role-reviewer"]
+        Validator["role-validator"]
+    end
+    Planner -->|task_directive| DocAuthor
+    FeedbackAnalyzer -->|task_directive| CodeAuthor
+    CiAnalyzer -->|task_directive| CodeAuthor
+    ConflictAnalyzer -->|task_directive| CodeAuthor
+
+    Plan["wf-plan"] --> Planner
+    Plan --> DocAuthor
+    Author["wf-author<br/>(single-step)"] --> CodeAuthor
+    Feedback["wf-feedback"] --> FeedbackAnalyzer
+    Feedback --> CodeAuthor
+    CiFix["wf-ci-fix"] --> CiAnalyzer
+    CiFix --> CodeAuthor
+    Conflict["wf-conflict"] --> ConflictAnalyzer
+    Conflict --> CodeAuthor
+    Review["wf-review<br/>(single-step)"] --> Reviewer
+    Validate["wf-validate<br/>(single-step)"] --> Validator
+```
+
+## References
+
+- ADR-0004 — diagrams as contract of intent.
+- ADR-0010 — plan-rooted task hierarchy + `TaskSpec` shape that `task_directive` mirrors.
+- ADR-0011 — consumer as projector + cross-step orchestrator.
+- ADR-0012 — envelope is the contract for `prior_steps[i].output`; `task_directive` lives in `payload`.
+- ADR-0013 — mergeability VIEW reads `output.decision` per the value-sets in this ADR.

@@ -160,3 +160,45 @@ Workers tolerate `commit_sha = null` for the first `wf-author` step of a task (n
 - The dispatcher's SQS claim body grows by one field. Workers update the claim parser.
 - The coordination consumer's `step.completed` handler copies `commit_sha` from envelope → Event row column. Already idempotent (the existing `_persist_event` already uses ON CONFLICT DO NOTHING per event_id); no race.
 - A future production-deploy ADR captures the backfill requirement.
+
+## Diagram
+
+`commit_sha` flows along two paths: the inbound webhook path (GitHub push → `pr_synchronize` Event row with `commit_sha = head_sha`) and the outbound dispatch path (dispatcher resolves HEAD at dispatch time, stamps it on `step.ready` + the SQS claim, worker echoes it back through the envelope, consumer projects it into the Event row).
+
+```mermaid
+sequenceDiagram
+    actor Author as role-code-author
+    participant GitHub
+    participant Webhook as Webhook receiver<br/>(normalize.py)
+    participant Events as events table<br/>(commit_sha column)
+    participant Dispatcher as Dispatcher<br/>(dispatch.py)
+    participant SQS as SQS work queue
+    participant Worker as Worker<br/>(treadmill-agent runner)
+    participant Consumer as Coordination consumer
+    participant View as task_mergeability VIEW
+
+    Note over GitHub,Events: Inbound path — webhook stamps commit_sha
+    Author->>GitHub: git push
+    GitHub->>Webhook: pull_request.synchronize<br/>(payload.pull_request.head.sha)
+    Webhook->>Webhook: normalize → GithubPrSynchronize<br/>(head_sha, before_sha)
+    Webhook->>Events: insert github.pr_synchronize<br/>(commit_sha = head_sha)
+
+    Note over Dispatcher,Events: Outbound path — dispatcher resolves HEAD
+    Dispatcher->>Events: _resolve_head_sha(task)<br/>SELECT latest pr_opened or pr_synchronize
+    Events-->>Dispatcher: head_sha (or NULL)
+    Dispatcher->>Events: insert step.ready<br/>(commit_sha = head_sha)
+    Dispatcher->>SQS: claim body<br/>{step_id, task_id, run_id, commit_sha}
+    SQS->>Worker: receive claim
+    Worker->>Worker: stamp StepOutput.commit_sha<br/>(from claim or fresh commit)
+    Worker-->>Consumer: step.completed<br/>(output.commit_sha)
+    Consumer->>Events: insert step.completed<br/>(commit_sha lifted from output.commit_sha)
+    View-->>Events: read events.commit_sha<br/>(partial indexes accelerate)
+```
+
+## References
+
+- ADR-0004 — diagrams as contract of intent.
+- ADR-0007 — webhook normalization layer.
+- ADR-0011 — append-only events table.
+- ADR-0012 — envelope `commit_sha` top-level field (the source consumer copies from).
+- ADR-0013 — `task_mergeability` VIEW (the primary reader of `events.commit_sha`).

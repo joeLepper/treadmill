@@ -206,3 +206,59 @@ Out of scope for this ADR; documented for shape verification. A future `wf-auto-
 - **ADR-0012**'s envelope `commit_sha` top-level field is the join target for the review / validate subqueries. The two ADRs must agree on the placement; this ADR's correctness depends on ADR-0012's choice.
 - The Week-3 plan doc sequences the migration after the envelope work (since the VIEW's review / validate joins read `output->>'commit_sha'` per ADR-0012's promotion).
 - A future auto-merge orchestrator is the user-visible value of this ADR. Until it ships, the VIEW serves as the operator-visible "is this ready to merge?" answer.
+
+## Diagram
+
+The VIEW resolves `derived_mergeability` by walking a fixed priority cascade over four commit-keyed signals at the current HEAD. Most-severe-blocker wins; `mergeable` is the conjunction of every green signal.
+
+```mermaid
+flowchart TD
+    Start["GET /tasks/{id}/mergeability<br/>(VIEW evaluated)"] --> ResolveHead["Resolve head_sha:<br/>latest pr_opened or pr_synchronize<br/>for (repo, pr_number)"]
+    ResolveHead --> HasHead{head_sha<br/>present?}
+    HasHead -->|No| Pending["derived_mergeability = pending"]
+    HasHead -->|Yes| Conflict{"conflict.is_conflicting<br/>at head_sha?"}
+    Conflict -->|Yes| BlockedConflict["derived_mergeability =<br/>blocked-on-conflict"]
+    Conflict -->|No| CI{"any check_run_completed<br/>at head_sha = failure /<br/>timed_out / action_required?"}
+    CI -->|Yes| BlockedCI["derived_mergeability =<br/>blocked-on-ci"]
+    CI -->|No| Review{"latest wf-review.decision<br/>at head_sha?"}
+    Review -->|"changes_requested or<br/>needs-more-info"| BlockedReview["derived_mergeability =<br/>blocked-on-review"]
+    Review -->|approved| Validate{"latest wf-validate.decision<br/>at head_sha?"}
+    Review -->|null / other| FallbackPending["derived_mergeability = pending"]
+    Validate -->|fail| BlockedValidate["derived_mergeability =<br/>blocked-on-validate"]
+    Validate -->|pass| AllGreen["derived_mergeability =<br/>mergeable"]
+    Validate -->|null / error| FallbackPending
+```
+
+The per-commit invalidation flow: a new push to the PR moves `head_sha` forward; signal subqueries filtered by `commit_sha = head_sha` return NULL until fresh runs land outputs against the new HEAD.
+
+```mermaid
+sequenceDiagram
+    actor Author as role-code-author
+    participant GitHub
+    participant Webhook as Webhook receiver
+    participant Events as events table
+    participant Trigger as Trigger evaluator
+    participant Review as wf-review
+    participant Validate as wf-validate
+    participant View as task_mergeability VIEW
+    actor Operator
+
+    Author->>GitHub: git push (new commit)
+    GitHub->>Webhook: pull_request.synchronize
+    Webhook->>Events: insert github.pr_synchronize<br/>(commit_sha = new head_sha)
+    Trigger->>View: read mergeability (now pending —<br/>no signals at new head_sha)
+    Trigger->>Review: dispatch wf-review<br/>against new head_sha
+    Trigger->>Validate: dispatch wf-validate<br/>against new head_sha
+    Review-->>Events: step.completed<br/>(output.commit_sha = new head_sha,<br/>decision = approved)
+    Validate-->>Events: step.completed<br/>(output.commit_sha = new head_sha,<br/>decision = pass)
+    Operator->>View: GET /tasks/{id}/mergeability
+    View-->>Operator: derived_mergeability = mergeable
+```
+
+## References
+
+- ADR-0004 — diagrams as contract of intent.
+- ADR-0011 — state is append-only; status is derived (VIEW, not mutable column).
+- ADR-0012 — envelope `commit_sha` top-level field; VIEW joins on it.
+- ADR-0014 — `events.commit_sha` column + `pr_synchronize` payload class.
+- ADR-0031 — auto-merge orchestrator (downstream consumer of this VIEW).

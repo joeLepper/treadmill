@@ -144,3 +144,38 @@ The convention surface bunkhouse uses is fully covered by Treadmill's envelope. 
 - ADR-0015 builds on this envelope's `payload` convention for the `task_directive` analyzer→action contract.
 - A future lint rule (`rule:step-payload-conforms-to-workflow`) will validate convention adherence post-hoc.
 - The Week-3 plan doc (`docs/plans/2026-05-12-week-3-mergeable-and-multi-step.md`) sequences the worker + consumer rewrite as the first item after this ADR lands.
+
+## Diagram
+
+The envelope's lifecycle across actors: the worker constructs a `StepOutput`, publishes it on `step.completed`, the consumer persists it (lifting `commit_sha` from envelope top-level into the Event row), and downstream readers (mergeability VIEW, future UI) consult the same shape regardless of workflow.
+
+```mermaid
+sequenceDiagram
+    actor Role as Role (analyzer or action)
+    participant Worker as Worker (treadmill-agent)
+    participant SNS as SNS event-bus
+    participant Consumer as Coordination consumer
+    participant DB as Postgres<br/>(events + workflow_run_steps)
+    participant View as task_mergeability VIEW
+    participant UI as Future UI / operator
+
+    Role->>Worker: produce summary + decision +<br/>commit_sha + artifacts + payload + metadata
+    Worker->>Worker: validate StepOutput<br/>(Pydantic extra="forbid")
+    Worker->>SNS: step.completed (output: StepOutput)
+    SNS->>Consumer: step.completed
+    Consumer->>DB: persist event row<br/>(commit_sha lifted from output.commit_sha)
+    Consumer->>DB: persist workflow_run_steps.output<br/>(full envelope as JSONB)
+    alt wf-author completed
+        Consumer->>DB: upsert task_prs<br/>(pr_number from payload,<br/>branch from artifacts,<br/>commit_sha from top-level)
+    end
+    View-->>DB: join output->>'commit_sha' = head_sha<br/>+ output->>'decision'
+    UI-->>DB: read summary + decision + artifacts<br/>(uniform render path)
+```
+
+## References
+
+- ADR-0004 — diagrams as contract of intent.
+- ADR-0011 — append-only event-driven runtime.
+- ADR-0013 — per-commit mergeability VIEW (reads envelope `commit_sha` + `decision`).
+- ADR-0015 — multi-step workflows (reads envelope `payload.task_directive`).
+- `learning:2026-05-11-uniform-output-shape-over-per-workflow-typing` — the bunkhouse precedent that ratified the uniform-envelope shape.
