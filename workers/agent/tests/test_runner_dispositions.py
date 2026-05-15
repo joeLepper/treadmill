@@ -11,6 +11,8 @@ exercised in ``test_runner.py``.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import subprocess
 import uuid
 from pathlib import Path
@@ -1571,3 +1573,210 @@ def test_architecture_handler_takes_last_verdict_block(
     ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
     assert out.decision == "accept-as-is"
+
+
+# ── crystallization handler (wf-crystallize-learning) ─────────────────────────
+
+
+from treadmill_agent.runner_dispositions.crystallization import (
+    CrystallizationVerdictParseError,
+    handle as handle_crystallization,
+    _find_learning_file,
+    _parse_frontmatter,
+)
+
+
+def _crystal_summary(
+    verdict: str,
+    learning_slug: str,
+    proposed_rule_slug: str | None = "my-rule",
+    reasoning: str = "test reasoning",
+) -> str:
+    envelope: dict[str, Any] = {
+        "verdict": verdict,
+        "reasoning": reasoning,
+        "learning_slug": learning_slug,
+    }
+    if proposed_rule_slug is not None:
+        envelope["proposed_rule_slug"] = proposed_rule_slug
+    return f"Judge output.\n\n```json\n{json.dumps(envelope)}\n```\n"
+
+
+def _crystal_ctx(
+    tmp_path: Path,
+    summary: str,
+    *,
+    role_id: str = "role-crystallization-judge",
+    workflow_id: str = "wf-crystallize-learning",
+) -> DispositionContext:
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    return _disp_ctx(
+        repo_dir=clone,
+        output_kind="analysis",
+        role_id=role_id,
+        workflow_id=workflow_id,
+        summary=summary,
+    )
+
+
+def test_crystallization_judge_ready_verdict(tmp_path: Path) -> None:
+    """``ready`` verdict emits dispatch payload to step 2; no git side effects."""
+    summary = _crystal_summary("ready", "my-learning", "my-rule")
+    ctx = _crystal_ctx(tmp_path, summary)
+    out = handle_crystallization(ctx)
+    assert out.decision == "ready"
+    assert out.commit_sha is None
+    assert out.payload["verdict"] == "ready"
+    assert out.payload["learning_slug"] == "my-learning"
+    assert out.payload["proposed_rule_slug"] == "my-rule"
+    dispatch = out.payload["dispatch"]
+    assert dispatch["workflow_id"] == "wf-crystallize-learning"
+    assert dispatch["step"] == "crystallize"
+    assert dispatch["learning_slug"] == "my-learning"
+    assert dispatch["proposed_rule_slug"] == "my-rule"
+    assert dispatch["task_id"] == ctx.ctx.task_id
+
+
+def test_crystallization_judge_not_ready_verdict(tmp_path: Path) -> None:
+    """``not-ready`` updates the learning's frontmatter with backoff dates
+    and appends the reasoning to the Notes section, then commits + pushes."""
+    _bare, clone = _init_bare_and_clone(tmp_path)
+
+    # Write a learning file in the repo.
+    learning_dir = clone / "docs" / "learnings"
+    learning_dir.mkdir(parents=True)
+    learning_file = learning_dir / "2026-05-01-my-learning.md"
+    learning_file.write_text(
+        "---\ndate: 2026-05-01\nstatus: captured\n---\n\n# My Learning\n\nBody.\n"
+    )
+
+    summary = _crystal_summary("not-ready", "my-learning", reasoning="needs more evidence")
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        output_kind="analysis",
+        role_id="role-crystallization-judge",
+        workflow_id="wf-crystallize-learning",
+        summary=summary,
+    )
+    out = handle_crystallization(ctx)
+    assert out.decision == "not-ready"
+    assert out.commit_sha is not None  # committed the frontmatter update
+    assert out.payload["verdict"] == "not-ready"
+    assert out.payload["learning_slug"] == "my-learning"
+
+    # Frontmatter updated with backoff fields.
+    updated = learning_file.read_text()
+    fm, body = _parse_frontmatter(updated)
+    assert "last_crystallization_check" in fm
+    assert "next_crystallization_check" in fm
+    assert fm["crystallization_check_count"] == "1"
+
+    # Reasoning captured in Notes.
+    assert "needs more evidence" in body
+    assert "## Notes" in body
+
+
+def test_crystallization_judge_defer_verdict(tmp_path: Path) -> None:
+    """``defer`` is a no-op: no git side effects, decision == 'defer'."""
+    summary = _crystal_summary("defer", "my-learning", proposed_rule_slug=None)
+    ctx = _crystal_ctx(tmp_path, summary)
+    out = handle_crystallization(ctx)
+    assert out.decision == "defer"
+    assert out.commit_sha is None
+    assert out.payload["verdict"] == "defer"
+    assert out.payload["learning_slug"] == "my-learning"
+
+
+def test_crystallization_judge_missing_envelope(tmp_path: Path) -> None:
+    """No JSON block with a valid verdict → CrystallizationVerdictParseError."""
+    ctx = _crystal_ctx(tmp_path, "I thought about it but didn't decide.")
+    with pytest.raises(CrystallizationVerdictParseError, match="JSON block"):
+        handle_crystallization(ctx)
+
+
+def test_crystallization_crystallize_writes_rule_yaml(tmp_path: Path) -> None:
+    """Step 2: architect output → rule YAML + check.sh written to repo,
+    learning status updated, commit + push."""
+    _bare, clone = _init_bare_and_clone(tmp_path)
+
+    # Place a learning file the crystallize step will update.
+    learning_dir = clone / "docs" / "learnings"
+    learning_dir.mkdir(parents=True)
+    learning_file = learning_dir / "2026-05-01-my-learning.md"
+    learning_file.write_text(
+        "---\ndate: 2026-05-01\nstatus: captured\n---\n\n# My Learning\n"
+    )
+
+    rule_yaml_text = "name: my-rule\ndescription: test rule\nstatus: active\n"
+    check_sh_text = "#!/usr/bin/env bash\necho ok"
+    architect_summary = (
+        "Here is the rule:\n\n"
+        f"```yaml\n{rule_yaml_text}```\n\n"
+        "And the check:\n\n"
+        f"```bash\n{check_sh_text}\n```\n"
+    )
+
+    # Simulate prior judge step output in prior_steps.
+    prior_output: dict[str, Any] = {
+        "summary": "judge output",
+        "decision": "ready",
+        "commit_sha": None,
+        "artifacts": [],
+        "payload": {
+            "verdict": "ready",
+            "learning_slug": "my-learning",
+            "proposed_rule_slug": "my-rule",
+        },
+        "metadata": {},
+    }
+
+    from treadmill_agent.api_client import PriorStep
+
+    ctx = DispositionContext(
+        ctx=_ctx(
+            output_kind="analysis",
+            role_id="role-architect",
+            workflow_id="wf-crystallize-learning",
+        ),
+        claude_result=CodeAuthorResult(summary=architect_summary),
+        repo_dir=clone,
+        branch="task/x-add-thing",
+        settings=_settings(),
+        is_dry_run=False,
+    )
+    # Patch prior_steps onto the WorkerContext (frozen dataclass).
+    ctx = dataclasses.replace(
+        ctx,
+        ctx=dataclasses.replace(
+            ctx.ctx,
+            prior_steps=[
+                PriorStep(
+                    step_index=0,
+                    step_name="judge",
+                    role_id="role-crystallization-judge",
+                    status="completed",
+                    output=prior_output,
+                )
+            ],
+        ),
+    )
+
+    out = handle_crystallization(ctx)
+    assert out.decision == "pushed"
+    assert out.commit_sha is not None
+    assert out.payload["rule_slug"] == "my-rule"
+    assert out.payload["learning_slug"] == "my-learning"
+
+    # Rule YAML written.
+    rule_path = clone / "docs" / "knowledge-base" / "rules" / "my-rule.yaml"
+    assert rule_path.exists()
+    assert "my-rule" in rule_path.read_text()
+
+    # check.sh written and executable.
+    check_sh_path = clone / "tools" / "rule-checks" / "my-rule" / "check.sh"
+    assert check_sh_path.exists()
+    assert check_sh_path.stat().st_mode & 0o111  # executable
+
+    # Learning status updated.
+    updated_fm, _ = _parse_frontmatter(learning_file.read_text())
+    assert updated_fm["status"] == "crystallized-into-rule-my-rule"

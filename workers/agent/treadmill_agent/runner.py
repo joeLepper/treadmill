@@ -41,6 +41,7 @@ from treadmill_agent.runner_dispositions import (
     handle_analysis,
     handle_architecture,
     handle_code,
+    handle_crystallization,
     handle_documentation,
     handle_plan_doc,
     handle_review,
@@ -393,6 +394,17 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
             settings=settings,
             is_dry_run=dry_run,
         )
+        # role-crystallization-judge routes to the crystallization handler
+        # for CrystallizationVerdict envelope parsing (step 1 of
+        # wf-crystallize-learning). role-architect from
+        # wf-crystallize-learning routes to the same handler for the
+        # rule-authoring step (step 2). Both branches on role.id /
+        # workflow_id keep the output_kind schema stable.
+        if ctx.role.id == "role-crystallization-judge":
+            return handle_crystallization(disposition_ctx)
+        if ctx.role.id == "role-architect" and ctx.workflow_id == "wf-crystallize-learning":
+            return handle_crystallization(disposition_ctx)
+
         # ADR-0032 §wf-architecture-resolve: role-architect uses
         # output_kind=analysis but routes to a dedicated disposition
         # (architecture.py) for verdict-envelope parsing + downstream
