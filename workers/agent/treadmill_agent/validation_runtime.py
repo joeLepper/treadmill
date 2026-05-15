@@ -60,6 +60,7 @@ def run_deterministic(
     check: Any,
     repo_dir: Path,
     timeout_seconds: int,
+    pr_number: int | None = None,
 ) -> CheckResult:
     """Execute a deterministic (shell script) validation check.
 
@@ -75,11 +76,19 @@ def run_deterministic(
         check: object with .id, .kind, .severity, .script attributes
         repo_dir: working directory for the subprocess
         timeout_seconds: timeout for subprocess execution
+        pr_number: when set, exported as ``PR_NUMBER`` in the subprocess
+            env so rule scripts can resolve the active PR without having
+            to auto-detect from the working tree (which is unreliable in
+            worker containers).
 
     Returns:
         CheckResult with verdict, rationale, and log excerpt
     """
     try:
+        env = None
+        if pr_number is not None:
+            import os
+            env = {**os.environ, "PR_NUMBER": str(pr_number)}
         result = subprocess.run(
             check.script,
             shell=True,
@@ -87,6 +96,7 @@ def run_deterministic(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=env,
         )
         combined = ""
         if result.stdout:

@@ -247,7 +247,8 @@ def _run_all_checks(
         try:
             if check.kind == "deterministic":
                 result = validation_runtime.run_deterministic(
-                    check, ctx.repo_dir, timeout_seconds=30
+                    check, ctx.repo_dir, timeout_seconds=30,
+                    pr_number=ctx.ctx.pr_number,
                 )
             elif check.kind == "llm-judge":
                 # For LLM-judge, we need task spec

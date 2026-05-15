@@ -1022,7 +1022,7 @@ def test_validation_handler_aggregates_worst_wins_with_blocking_only(
     monkeypatch.setattr(gh, "pr_comment", _fake_comment)
 
     # Stub validation_runtime to return deterministic results
-    def _fake_deterministic(check, repo_dir, timeout_seconds):
+    def _fake_deterministic(check, repo_dir, timeout_seconds, pr_number=None):
         from treadmill_agent import validation_runtime
 
         # blocking:pass, warning:fail, advisory:fail
@@ -1100,7 +1100,7 @@ def test_validation_handler_fails_on_blocking_failure(
 
     from treadmill_agent import validation_runtime
 
-    def _fake_deterministic(check, repo_dir, timeout_seconds):
+    def _fake_deterministic(check, repo_dir, timeout_seconds, pr_number=None):
         return validation_runtime.CheckResult(
             check_id=check.id,
             kind="deterministic",
@@ -1163,7 +1163,7 @@ def test_validation_handler_dry_run_skips_gh_pr_comment(
 
     from treadmill_agent import validation_runtime
 
-    def _fake_deterministic(check, repo_dir, timeout_seconds):
+    def _fake_deterministic(check, repo_dir, timeout_seconds, pr_number=None):
         return validation_runtime.CheckResult(
             check_id=check.id,
             kind="deterministic",

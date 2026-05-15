@@ -28,12 +28,17 @@ declare -a required_sections=(
     "## Refs"
 )
 
-# Read PR body from stdin if available, otherwise fetch via gh pr view
-if [ -t 0 ]; then
-    # stdin is a terminal (no piped input), fetch from gh
+# Resolution order for PR body:
+#   1. PR_NUMBER env var (set by the validation runtime in a worker
+#      container — most reliable when ``gh pr view`` without args can't
+#      auto-detect the PR from the working tree).
+#   2. Piped stdin (operator/local-test invocation).
+#   3. ``gh pr view`` with no args (interactive operator use only).
+if [ -n "${PR_NUMBER:-}" ]; then
+    pr_body=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || echo "")
+elif [ -t 0 ]; then
     pr_body=$(gh pr view --json body --jq '.body' 2>/dev/null || echo "")
 else
-    # Read from stdin
     pr_body=$(cat)
 fi
 
