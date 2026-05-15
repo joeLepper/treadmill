@@ -6,10 +6,15 @@ ADR-0008 ships an auto-capture skill that drops candidate entries into
 matches. The ADR's follow-up flagged a risk: candidates accumulate
 silently if the operator forgets to sweep before stopping. This hook
 closes the loop — when the session is about to end, we read the queue,
-count entries still ``status == "open"``, and inject a summary into the
-final assistant turn via ``hookSpecificOutput.additionalContext``. The
-orchestrator then has the cue (and the slugs) to either author a
-``/learning`` for each or dismiss them with a ``notes`` entry.
+count entries still ``status == "open"``, and surface a summary to the
+operator via the Stop-hook ``systemMessage`` field. The orchestrator
+then has the cue (and the slugs) to either author a ``/learning`` for
+each or dismiss them with a ``notes`` entry.
+
+Note on payload shape: Stop hooks must conform to Claude Code's
+hook-output schema, which restricts ``hookSpecificOutput.additionalContext``
+to ``UserPromptSubmit`` / ``PostToolUse`` / ``PostToolBatch``. For
+Stop hooks the valid surfacing channel is ``systemMessage``.
 
 Reads no stdin — Claude Code invokes Stop hooks with an event payload
 on stdin, but we ignore it; the only relevant state is the queue file.
@@ -94,20 +99,12 @@ def main() -> int:
             return 0
 
         slugs = ", ".join(_slug(str(rec.get("matched", ""))) for rec in open_entries)
-        context = (
+        message = (
             f"[treadmill stop-hook] {len(open_entries)} open learning candidates remain. "
             f"Sweep before ending. Candidate slugs: {slugs}. Open via /learning or "
             f"skim with: cat .treadmill-local/learning-candidates.jsonl"
         )
-        json.dump(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "Stop",
-                    "additionalContext": context,
-                }
-            },
-            sys.stdout,
-        )
+        json.dump({"systemMessage": message}, sys.stdout)
         return 0
     except Exception as exc:  # noqa: BLE001 — hook must never block
         print(f"[review_candidates_at_stop] error: {exc}", file=sys.stderr)

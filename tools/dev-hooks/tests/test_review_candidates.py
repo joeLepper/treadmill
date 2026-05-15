@@ -82,8 +82,10 @@ def test_one_open_candidate_emits_additional_context(tmp_path: Path) -> None:
     assert proc.returncode == 0
     assert proc.stdout != ""
     out = json.loads(proc.stdout)
-    assert out["hookSpecificOutput"]["hookEventName"] == "Stop"
-    context = out["hookSpecificOutput"]["additionalContext"]
+    # Per Claude Code's Stop-hook schema, the operator-facing channel is
+    # ``systemMessage`` — ``hookSpecificOutput.additionalContext`` is only
+    # valid for UserPromptSubmit / PostToolUse / PostToolBatch.
+    context = out["systemMessage"]
     assert "1 open" in context
     # The slug for "I actually meant" lower-cases + hyphenates.
     assert "i-actually-meant" in context
@@ -113,7 +115,7 @@ def test_multiple_open_candidates_lists_each_slug(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     out = json.loads(proc.stdout)
-    context = out["hookSpecificOutput"]["additionalContext"]
+    context = out["systemMessage"]
     assert "2 open" in context
     assert "i-don-t-think" in context
     assert "that-s-wrong" in context
@@ -132,4 +134,4 @@ def test_malformed_lines_skipped_not_fatal(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     out = json.loads(proc.stdout)
-    assert "1 open" in out["hookSpecificOutput"]["additionalContext"]
+    assert "1 open" in out["systemMessage"]
