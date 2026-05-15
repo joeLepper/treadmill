@@ -150,3 +150,44 @@ Bunkhouse uses GitHub webhooks for PR-state events but doesn't drive *plan submi
 - **Test surface**: integration test against moto + a synthetic merge event with a synthetic plan doc. Asserts: (a) Plan + tasks created, (b) dispatch fires, (c) parse failure persists a `parse_failed` event, (d) inactive status persists an `observed_inactive` event.
 - **Tracks task #95** (bootstrap non-Treadmilled repos): this ADR assumes one repo (Treadmill's own). When the second repo joins, the handler's "is this repo authorized" check becomes load-bearing.
 - **Test the failure mode in CI**: a malformed plan doc merging to main should NOT crash the consumer (the existing exception-handling pattern in the consumer should absorb it; verify).
+
+## Diagram
+
+The merge of a `docs/plans/*.md` file to `main` is the submission. A `pull_request:closed:merged` webhook fans through the existing ingestion path (ADR-0017), the normalizer emits `plan_doc_merged`, the trigger handler fetches the doc, parses frontmatter, and either creates the plan via the same code path as `POST /plans` or records why it didn't.
+
+```mermaid
+sequenceDiagram
+    actor Operator as Operator (PR reviewer)
+    participant GitHub as GitHub
+    participant APIGW as API Gateway + webhook Lambda
+    participant Inbox as SQS webhook-inbox
+    participant API as Treadmill API (poller + normalizer)
+    participant Normalizer as Normalizer (webhooks/normalize.py)
+    participant Handler as Trigger handler (plan_doc_merged)
+    participant Plans as plans table + dispatcher
+    participant Events as events table
+
+    Operator->>GitHub: merge PR (squash/merge button)
+    GitHub-->>APIGW: pull_request:closed (merged=true, changed_files)
+    APIGW->>Inbox: sqs.send_message (raw webhook payload)
+    API->>Inbox: sqs.receive_message (long-poll)
+    API->>Normalizer: normalize(payload)
+    alt any changed file matches docs/plans/*.md
+        Normalizer-->>API: emit plan_doc_merged{repo, path, merge_commit_sha, pr_number, author}
+        API->>Handler: dispatch plan_doc_merged
+        Handler->>GitHub: gh api /repos/<owner>/<repo>/contents/<path>?ref=<merge_commit_sha>
+        GitHub-->>Handler: doc content
+        alt frontmatter status == "active"
+            Handler->>Plans: create_plan(plan_id=uuid5(repo:path@sha), parse_plan_doc, spawn tasks)
+            Plans-->>Events: plan.registered + plan.activated + task.dispatched
+        else status != "active"
+            Handler-->>Events: plan_doc.observed_inactive
+        else parse failure
+            Handler-->>Events: plan_doc.parse_failed{error, error_type}
+        end
+    else no plan-doc paths touched
+        Normalizer-->>API: drop (no event emitted)
+    end
+```
+
+The CLI path (`treadmill plan submit --doc <path>`) survives as a backstop and enters the same `create_plan` code path; the trigger is a different *door* into identical machinery. Plan ID derivation from `repo:path@merge_commit_sha` makes SQS redelivery, webhook replay, and CLI-submission-of-the-same-merged-doc all converge on the same row via `ON CONFLICT DO NOTHING`.

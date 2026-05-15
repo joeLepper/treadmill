@@ -152,3 +152,54 @@ Treadmill cribs RAMJAC's pattern in full: one stack per deployment, identical sh
 - **New CLI subcommand**: `treadmill observe {dashboard,logs,traces,metrics,status,open}` per the RAMJAC pattern. Lives in `cli/treadmill_cli/observe.py` (sibling to `cli.py`).
 - **Dashboard v0**: one dashboard with three rows — worker logs (Loki, filterable by `task_id`), worker run rate + duration (Prometheus), and a task lineage view (Tempo). Token usage on a sidebar panel if path (1) above works.
 - This ADR is **not blocked** by ADR-0019 or ADR-0018. The observability stack can be added incrementally — for instance, the OTel SDK in workers + API can ship before the deployed Grafana stack exists (operators run with `OTEL_EXPORTER_OTLP_ENDPOINT` unset and silent emission until the stack lands).
+
+## Diagram
+
+The observability stack is a layered topology: emit-side (workers + API) is identical across deployments; collect-side (OTel Collector + Loki + Prometheus + Tempo + Grafana) is one stack per deployment, deployed identically. The CLI is a read-only access layer. `fully_local` mode emits silently when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset.
+
+```mermaid
+flowchart LR
+    subgraph Emit["Emit side (identical per deployment)"]
+        Worker["treadmill-agent worker"]
+        API["Treadmill API"]
+        ClaudeCode["claude (subprocess)"]
+        Worker -->|Popen + stream stdout| ClaudeCode
+        ClaudeCode -->|line-by-line stdout| Worker
+    end
+
+    subgraph CollectorEC2["Per-deployment AWS observability stack (one EC2 + docker compose)"]
+        Collector["OTel Collector<br/>:4317 gRPC / :4318 HTTP"]
+        Loki["Loki (logs)"]
+        Prometheus["Prometheus (metrics)"]
+        Tempo["Tempo (traces)"]
+        Grafana["Grafana UI<br/>(datasource UIDs: loki/prometheus/tempo)"]
+        S3Tempo["S3: tempo-traces bucket"]
+    end
+
+    subgraph Operator["Operator host"]
+        CLI["treadmill observe<br/>(dashboard/logs/traces/metrics/status)"]
+        Browser["Operator browser"]
+        SSM["aws ssm start-session<br/>port-forward localhost:3000"]
+    end
+
+    Worker -->|OTLP: log.record task_id/step_id/role + traceparent| Collector
+    Worker -->|OTLP: metric worker.runs.total / worker.run.duration_seconds / tokens.input / tokens.output| Collector
+    Worker -->|OTLP: span step.execute / claude_code.invoke / gh.cli| Collector
+    API -->|OTLP: log.record + span dispatcher.enqueue / sqs.send| Collector
+
+    Collector -->|loki.push| Loki
+    Collector -->|prometheus.remote_write| Prometheus
+    Collector -->|tempo.write_trace| Tempo
+    Tempo -->|s3.put_object| S3Tempo
+
+    Loki -->|datasource query| Grafana
+    Prometheus -->|datasource query| Grafana
+    Tempo -->|datasource query| Grafana
+
+    CLI -->|aws ssm start-session AWS-StartPortForwardingSessionToRemoteHost| SSM
+    SSM -.->|localhost:3000 -> EC2:3000| Grafana
+    CLI -->|construct Explore URL with datasource UID + task_id filter| Browser
+    Browser -->|HTTP GET| Grafana
+```
+
+In `fully_local` mode `OTEL_EXPORTER_OTLP_ENDPOINT` is unset; the OTel SDK's no-op path absorbs every emit call. No collector, no Grafana stack, no laptop overhead. In `dev_local` mode the per-deployment YAML carries the AWS-hosted collector endpoint, and the local-adapter injects it into the worker + API container env — same Grafana UI as production serves the laptop operator.

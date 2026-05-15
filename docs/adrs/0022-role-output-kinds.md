@@ -188,3 +188,45 @@ The DB migration adds `output_kind` as NOT NULL with no default; existing seeded
 - **wf-feedback**, **wf-conflict**, **wf-ci-fix** become functional for the first time with this ADR — their analysis steps had no valid runner path before.
 - **wf-validate stays stubbed** until the Ralph-loop validation ADR (forthcoming) defines its proper runner path. `role-validator` is classified as `analysis` as a placeholder; this is intentionally a "doesn't break anything, doesn't do anything new" state for it.
 - **A follow-up ADR is owed**: the Ralph-loop validation pattern — per-task validator (deterministic or LLM-as-judge), `wf-validate` workflow, verdict-driven loop back to wf-feedback. That ADR will likely reclassify `role-validator` and may introduce a fifth `OutputKind` value or a separate non-Claude-Code runner path entirely.
+
+## Diagram
+
+The runner shares a prefix across kinds (clone, checkout, run Claude Code) and dispatches a per-kind disposition handler keyed by `role.output_kind`. Each handler produces a `StepOutput` envelope (ADR-0012) with kind-appropriate artifacts; only `code` and `plan_doc` push diffs to the remote.
+
+```mermaid
+sequenceDiagram
+    participant Worker as treadmill-agent runner
+    participant API as Treadmill API (step context)
+    participant Repo as git working tree
+    participant Claude as claude (subprocess)
+    participant GH as gh CLI / GitHub
+    participant Envelope as StepOutput envelope
+
+    Worker->>API: GET /api/v1/steps/<id> (ctx incl. role.output_kind, pr_number?, head_sha?)
+    Worker->>Repo: git clone + checkout working branch
+    Worker->>Claude: invoke role prompt + task context
+    Claude-->>Worker: stdout summary (streamed per ADR-0020)
+
+    alt output_kind == code
+        Worker->>Repo: git diff (assert non-empty)
+        Worker->>Repo: git add -A + git commit + git push
+        Worker->>GH: gh pr create / gh pr edit
+        Worker->>Envelope: Artifact(kind="code", pr_number=<n>)
+    else output_kind == review
+        Worker->>Worker: _parse_verdict_marker(summary, default="comment")
+        Worker->>GH: gh pr review <pr_number> --verdict <verdict> --body <summary>
+        Worker->>Envelope: Artifact(kind="pr_review", value=<verdict>)
+    else output_kind == analysis
+        Worker->>Envelope: Artifact(kind="analysis", value=<summary>)
+        Note over Envelope: downstream step in same workflow run reads via ADR-0015 step-output composition
+    else output_kind == plan_doc
+        Worker->>Repo: _assert_diff_confined_to("docs/plans/")
+        Worker->>Repo: git add docs/plans/*.md + commit + push
+        Worker->>GH: gh pr create (PR review gates ADR-0021 merge-trigger)
+        Worker->>Envelope: Artifact(kind="plan_doc", pr_number=<n>)
+    else missing required ctx (e.g. review without pr_number)
+        Worker-->>Envelope: raise MissingContextError -> step.failed
+    end
+```
+
+`role-validator` is seeded as `analysis` at v0 (placeholder) because `wf-validate` is stubbed; the Ralph-loop validation ADR will reclassify it and may introduce a fifth `OutputKind` value or a separate non-Claude-Code runner path.

@@ -124,3 +124,39 @@ This ADR's IAM-user-key approach is the dev-local analog: the API runs on the la
 - **Operator runbook** (in the Week-4 plan + ADR-0016): document the post-deploy step "populate `api-aws-credentials`."
 - **ADR-0019 amendment**: §"The API still uses the operator's SSO profile" is superseded by this ADR; add a pointer.
 - **Phase 2 self-healing criterion**: the API can run indefinitely without operator intervention. The o11y plan-chain that bit us today can complete end-to-end without a forced cycle.
+
+## Diagram
+
+`treadmill-local up` is the only window where the operator's SSO must be fresh. The local-adapter uses SSO to fetch both `worker-aws-credentials` and `api-aws-credentials` from Secrets Manager, then injects them as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` on the respective containers. After `up`, neither container depends on operator-SSO; both run indefinitely on long-lived IAM-user keys.
+
+```mermaid
+sequenceDiagram
+    actor Operator as Operator
+    participant CLI as treadmill-local up
+    participant SSO as Operator SSO (AWS_PROFILE)
+    participant SM as AWS Secrets Manager
+    participant APICtr as API container
+    participant WorkerCtr as worker container
+    participant SQS as AWS SQS / SNS / Secrets Manager (runtime calls)
+
+    Operator->>CLI: treadmill-local up --deployment <id>
+    CLI->>SSO: boto3.Session(profile=...).get_credentials()
+    alt SSO session fresh
+        SSO-->>CLI: frozen credentials (1h TTL)
+        CLI->>SM: GetSecretValue treadmill-<id>/worker-aws-credentials
+        SM-->>CLI: {aws_access_key_id, aws_secret_access_key}
+        CLI->>SM: GetSecretValue treadmill-<id>/api-aws-credentials
+        SM-->>CLI: {aws_access_key_id, aws_secret_access_key}
+        CLI->>SM: GetSecretValue treadmill-<id>/github-pat
+        SM-->>CLI: {token}
+        CLI->>APICtr: docker run -e AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (api-aws-credentials, no AWS_SESSION_TOKEN)
+        CLI->>WorkerCtr: docker run -e AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (worker-aws-credentials)
+        APICtr-->>SQS: sqs.receive_message / sns.publish / secretsmanager.get_secret_value (long-lived IAM-user keys, no TTL)
+        WorkerCtr-->>SQS: sqs.receive_message / sns.publish (long-lived IAM-user keys, no TTL)
+    else SSO session expired at up time
+        SSO-->>CLI: ExpiredToken
+        CLI-->>Operator: SystemExit with remediation: aws sso login --profile treadmill-<id>
+    end
+```
+
+Note: the autoscaler subprocess (ADR-0018) stays on operator-SSO inherited env intentionally — operator-visible host-side process, operator runs `aws sso login` when polls start failing. Q23.b banks "give the autoscaler its own IAM user" as a follow-up if the friction reappears there.
