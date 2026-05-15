@@ -226,3 +226,71 @@ The first dev-local deployment surfaced three operator-facing steps that ADR-001
 - The existing `local: bool` setting → `DeploymentMode` enum migration touches every place that reads `settings.local`. Mostly mechanical; tests update in lockstep.
 - The `--dev` flag (existing) continues to gate on local-or-dev-local mode; semantics unchanged.
 - Phase 2 success criteria 2, 4, 5, 8 become satisfiable once this lands plus a real GitHub repo for Treadmill itself.
+
+## Diagram
+
+```mermaid
+flowchart LR
+    subgraph Operator["Operator host (laptop)"]
+        CLI["treadmill-local CLI"]
+        YAML["~/.treadmill/&lt;deployment_id&gt;.yaml"]
+        AWSProfile["~/.aws (SSO profile<br/>treadmill-&lt;deployment_id&gt;)"]
+        subgraph LocalContainers["Local containers (docker)"]
+            API["Treadmill API"]
+            Postgres["Postgres"]
+            Redis["Redis"]
+            Worker["treadmill-agent worker"]
+        end
+    end
+
+    subgraph AWS["AWS account (per deployment)"]
+        subgraph CloudLite["TreadmillCloudLite stack<br/>(Treadmill&lt;DeploymentId&gt;CloudLite)"]
+            APIGW["API Gateway HTTP API<br/>POST /webhook/github"]
+            WebhookLambda["webhook-receiver Lambda"]
+            WebhookInbox["SQS: webhook-inbox"]
+            EventsTopic["SNS: events topic"]
+            WorkQueue["SQS: work (FIFO)"]
+            CoordQueue["SQS: coordination"]
+            WorkerCreds["Secrets Manager:<br/>worker-aws-credentials"]
+            WebhookSecret["Secrets Manager:<br/>github-webhook-secret"]
+            PAT["Secrets Manager:<br/>github-pat"]
+            WorkerIAM["IAM User:<br/>treadmill-&lt;id&gt;-worker"]
+            BillingAlarm["CloudWatch:<br/>billing alarm $5/mo"]
+        end
+    end
+
+    GitHub["GitHub"]
+
+    CLI -->|cdk deploy --context deployment_id=&lt;id&gt;| CloudLite
+    CLI -->|aws cloudformation describe-stacks| CloudLite
+    CLI -->|writes resolved ARNs| YAML
+    CLI -->|aws sts get-caller-identity assert<br/>Account == aws_account_id| AWS
+    CLI -->|docker run with env from yaml| LocalContainers
+
+    AWSProfile -.->|AWS_PROFILE| CLI
+    YAML -.->|deployment_mode, ARNs, secret names| API
+    YAML -.->|deployment_mode, ARNs| Worker
+
+    GitHub -->|POST webhook| APIGW
+    APIGW -->|invoke| WebhookLambda
+    WebhookLambda -->|sqs.send_message| WebhookInbox
+    API -->|sqs.receive_message long-poll| WebhookInbox
+    API -->|secretsmanager.get-secret-value| WebhookSecret
+    API -->|sns.publish step.*/workflow.*| EventsTopic
+    EventsTopic -->|sqs.subscription| WorkQueue
+    EventsTopic -->|sqs.subscription| CoordQueue
+    Worker -->|sqs.receive_message claim| WorkQueue
+    Worker -->|sns.publish step.completed| EventsTopic
+    API -->|sqs.receive_message| CoordQueue
+
+    Worker -.->|access keys via env| WorkerCreds
+    WorkerIAM -.->|grants| WorkerCreds
+```
+
+## References
+
+- ADR-0002 — deployment-mode taxonomy precedent.
+- ADR-0007 — webhook endpoint canonicalization; superseded for `dev_local` by ADR-0017's AWS-side path.
+- ADR-0011 — "simplest viable shape" posture for messaging.
+- ADR-0017 — webhook-receiver internals (sibling decision).
+- ADR-0019 — supersedes Q16.c's host-mount delivery mechanism.

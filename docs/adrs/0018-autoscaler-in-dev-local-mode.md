@@ -111,3 +111,54 @@ A `--no-autoscaler` flag on `up` lets the operator suppress the autoscaler entir
 - The `Autoscaler` subprocess inherits `AWS_PROFILE` + `AWS_DEFAULT_REGION` from the operator's shell. Setting them correctly is part of the `up` precondition (already true).
 - This ADR's implementation is **blocked on task #97**. Until host-side credential injection lands, autoscaler-in-dev-local would silently break workers after the first hour. The Week-5 plan should sequence #97 then #92 (this ADR's implementation).
 - Phase 2 success criteria 4 + 5 ("end-to-end PRs" + "every workflow firing") move from manually-demonstrable to demonstrably-automated once this lands.
+
+## Diagram
+
+```mermaid
+sequenceDiagram
+    actor Operator as Operator
+    participant CLI as treadmill-local CLI
+    participant Runtime as LocalRuntime._up_dev_local
+    participant YAML as ~/.treadmill/&lt;id&gt;.yaml
+    participant Autoscaler as Autoscaler subprocess
+    participant WorkQueue as SQS work queue (real AWS)
+    participant Docker as Docker daemon (host)
+    participant Worker as treadmill-agent container
+
+    Operator->>CLI: treadmill-local up --deployment &lt;id&gt;
+    CLI->>Runtime: spawn dev-local
+    Runtime->>YAML: read autoscaler.{min,max,tick_seconds}<br/>+ aws.work_queue_url
+    YAML-->>Runtime: config
+    Runtime->>Autoscaler: spawn subprocess<br/>(inherits AWS_PROFILE, AWS_DEFAULT_REGION,<br/>injected AWS keys per ADR-0019)
+    Runtime->>Operator: PID written to STATE_DIR/autoscaler.pid
+
+    loop every tick_seconds (default 5s)
+        Autoscaler->>WorkQueue: sqs.GetQueueAttributes<br/>ApproximateNumberOfMessages
+        WorkQueue-->>Autoscaler: depth
+        Autoscaler->>Docker: docker ps --filter label=treadmill-family=treadmill-agent
+        Docker-->>Autoscaler: running worker count
+        alt depth &gt; 0 AND running &lt; max
+            Autoscaler->>Docker: docker run treadmill-agent<br/>EXIT_AFTER_STEP=true
+            Docker->>Worker: start
+            Worker->>WorkQueue: sqs.receive_message (claim)
+            WorkQueue-->>Worker: step message
+            Worker->>Worker: execute step
+            Worker-->>Docker: exit 0
+        else depth == 0 OR running &gt;= max
+            Autoscaler->>Autoscaler: no-op (scale-down by attrition)
+        end
+    end
+
+    Operator->>CLI: treadmill-local down --deployment &lt;id&gt;
+    CLI->>Autoscaler: SIGTERM (via PID file)
+    Autoscaler-->>CLI: exit
+    CLI->>Docker: stop containers
+```
+
+## References
+
+- ADR-0002 — local-adapter subprocess lifecycle precedent.
+- ADR-0015 — multi-step workflows; the autoscaler is what chains them without human cursor.
+- ADR-0016 — dev-local topology; this ADR fills the autoscaler gap D.2 named.
+- ADR-0017 — webhook ingestion that drives messages onto the work queue.
+- ADR-0019 — host-side credential injection; load-bearing prerequisite (task #97 before task #92).

@@ -84,3 +84,53 @@ ADR-0016 Q16.c's resolution stands as "long-lived IAM-User access keys per deplo
 - `workers/agent/treadmill_agent/startup_auth.py`'s `resolve_worker_aws_session` collapses from ~50 lines to a single `boto3.Session(region_name=settings.aws_region)`. Worker tests update in lockstep.
 - ADR-0016's Q16.c gets a "superseded by ADR-0019" note pointing here.
 - Once this lands, ADR-0018's autoscaler implementation becomes unblocked. The two together close Phase 2 success criterion 4 (end-to-end PRs without operator-loop assistance).
+
+## Diagram
+
+```mermaid
+sequenceDiagram
+    actor Operator as Operator
+    participant SSO as Host SSO cache (~/.aws)
+    participant CLI as treadmill-local CLI
+    participant Adapter as Local-adapter (up process)
+    participant STS as AWS STS
+    participant Secrets as Secrets Manager
+    participant Docker as Docker daemon
+    participant API as API container
+    participant Worker as Worker container (spawned)
+
+    Operator->>SSO: aws sso login --profile treadmill-&lt;id&gt;
+    Operator->>CLI: treadmill-local up --deployment &lt;id&gt;
+    CLI->>Adapter: start up-process
+
+    Adapter->>STS: sts.get-caller-identity (via AWS_PROFILE)
+    STS-->>Adapter: account assertion ok
+    Adapter->>Secrets: secretsmanager.get-secret-value<br/>treadmill-&lt;id&gt;/worker-aws-credentials
+    Secrets-->>Adapter: {aws_access_key_id, aws_secret_access_key}
+    Note over Adapter: hold values in process memory<br/>for lifetime of up
+
+    Adapter->>Adapter: aws configure export-credentials<br/>--profile treadmill-&lt;id&gt; (operator SSO -&gt; env vars)
+    Adapter->>Docker: docker run treadmill-api<br/>env=AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY<br/>+ AWS_SESSION_TOKEN (operator SSO)
+    Docker->>API: start (no ~/.aws mount)
+    API->>API: boto3.Session() picks up env vars
+
+    Adapter->>Docker: docker run treadmill-agent (per autoscaler)<br/>env=AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY<br/>(worker IAM-user keys)
+    Docker->>Worker: start (no ~/.aws mount)
+    Worker->>Worker: boto3.Session() picks up env vars<br/>(startup_auth collapses to one-liner)
+
+    alt operator SSO token expires (~1h)
+        API-->>Adapter: ExpiredTokenException on next AWS call
+        Operator->>SSO: aws sso login (refresh)
+        Operator->>CLI: treadmill-local up --deployment &lt;id&gt; (re-inject)
+    end
+
+    alt operator rotates worker keys
+        Operator->>Secrets: iam.create-access-key<br/>+ secretsmanager.put-secret-value<br/>+ iam.delete-access-key
+        Note over Worker: existing one-shot workers finish<br/>with old keys; next up re-fetches
+    end
+```
+
+## References
+
+- ADR-0016 — supersedes Q16.c's host-mount + bootstrap-session delivery mechanism; identity (IAM-User keys per deployment) is unchanged.
+- ADR-0018 — autoscaler-in-dev-local; this ADR is its load-bearing prerequisite.

@@ -201,3 +201,55 @@ The Lambda preserves exactly this set (`PRESERVE_HEADERS`). Adding a header to t
 - The local poller is new code at `services/api/treadmill_api/coordination/webhook_inbox.py` with its own integration test (live SQS + real-shape envelope). Gated on `TREADMILL_INTEGRATION=1` like other integration tests.
 - The existing `routers/webhooks.py:POST /api/v1/webhooks/github` route gains a guard: when `settings.deployment_mode == DEV_LOCAL` (or future `FULLY_REMOTE`), it returns 503 — the AWS-side path is canonical, the HTTP route is fully-local-only.
 - The Week-4 transition plan sequences this work: CDK construct + Lambda first, then poller, then end-to-end smoke against a real GitHub repo.
+
+## Diagram
+
+```mermaid
+sequenceDiagram
+    actor GitHub as GitHub
+    participant APIGW as API Gateway HTTP API
+    participant Lambda as webhook-receiver Lambda
+    participant Inbox as SQS webhook-inbox
+    participant DLQ as SQS webhook-inbox-dlq
+    participant Poller as Local API webhook-inbox poller
+    participant Secrets as Secrets Manager
+    participant DB as Postgres (events table)
+    participant Topic as SNS events topic
+
+    GitHub->>APIGW: POST /webhook/github<br/>headers + body + X-Hub-Signature-256
+    APIGW->>Lambda: invoke (event with headers + body)
+    Lambda->>Lambda: filter PRESERVE_HEADERS<br/>+ base64-decode body if needed
+    Lambda->>Inbox: sqs.send_message<br/>WebhookInboxEnvelope JSON
+    Lambda-->>APIGW: 202 queued
+    APIGW-->>GitHub: 202 queued
+
+    loop every WaitTimeSeconds=20
+        Poller->>Inbox: sqs.receive_message (long-poll)
+        Inbox-->>Poller: WebhookInboxEnvelope JSON
+        Poller->>Poller: WebhookInboxEnvelope.model_validate_json
+        alt validation fails
+            Poller->>Inbox: sqs.delete_message (poison-safe)
+        else validation passes
+            Poller->>Secrets: secretsmanager.get-secret-value<br/>github-webhook-secret (cached after first)
+            Secrets-->>Poller: secret value
+            Poller->>Poller: verify_github_signature(secret, body,<br/>x-hub-signature-256)
+            alt signature invalid
+                Poller->>Inbox: sqs.delete_message<br/>(log WARNING, no body)
+            else signature valid
+                Poller->>Poller: event_id = uuid5(NAMESPACE_OID,<br/>x-github-delivery)
+                Poller->>Poller: normalize.map(github_event, action)<br/>-> verb
+                Poller->>DB: INSERT events ON CONFLICT (id) DO NOTHING
+                Poller->>Topic: sns.publish (verb envelope)
+                Poller->>Inbox: sqs.delete_message
+            end
+        end
+    end
+
+    Inbox-->>DLQ: redrive after maxReceiveCount=5
+```
+
+## References
+
+- ADR-0007 — webhook endpoint contract; this ADR supersedes the canonical receiver in `dev_local` and `fully_remote` modes.
+- ADR-0011 — Pydantic-at-every-boundary rule; `WebhookInboxEnvelope` honors it.
+- ADR-0016 — dev-local topology; this ADR fills in `WebhookReceiverConstruct` inside `TreadmillCloudLite`.
