@@ -173,3 +173,70 @@ Sketched here; the durable plan lives at
    `starters.py` post-bootstrap.
 7. **Operator-facing doc** under `docs/runbooks/` explaining the
    new edit workflow. (Folds into task #107.)
+
+## Diagram
+
+```mermaid
+sequenceDiagram
+    actor Operator as Operator (human)
+    participant Code as starters.py (bootstrap fixture)
+    participant CLI as treadmill CLI
+    participant API as treadmill-api
+    participant DB as Postgres (roles, role_versions)
+    participant Runtime as consumer + worker (runtime)
+
+    rect rgb(240, 248, 255)
+    note over Operator, DB: Fresh deployment — bootstrap path (Q28.a — auto-seed on first startup)
+    Operator->>API: alembic upgrade + start
+    API->>DB: SELECT FOR UPDATE on alembic_version (race-safe sentinel)
+    API->>DB: SELECT count(*) FROM roles
+    alt roles table empty
+        API->>Code: read canonical role + workflow + version dicts
+        API->>DB: INSERT roles + workflows + workflow_versions from starters.seed()
+        DB-->>API: seeded
+    else roles already present
+        API-->>API: skip seed (no-op)
+    end
+    end
+
+    rect rgb(245, 255, 245)
+    note over Operator, DB: Running deployment — operator edit path (post-bootstrap)
+    Operator->>CLI: treadmill role update <id> --prompt-file ./prompt.md --notes "..."
+    CLI->>API: PUT /roles/<id> (new prompt + notes + optional pr_url)
+    API->>DB: INSERT role_versions (new row; bumps version)
+    DB-->>API: role_version_id
+    API-->>CLI: 200 OK + new version
+    CLI-->>Operator: "role <id> bumped to v<n>"
+    Runtime->>DB: SELECT roles.system_prompt at next task
+    DB-->>Runtime: latest prompt (DB is authoritative)
+    end
+
+    rect rgb(255, 248, 240)
+    note over Operator, DB: Inert edit — code-change-without-reseed failure mode (now disappears)
+    Operator->>Code: edit starters.py prompt + push
+    Code-->>Runtime: no effect (starters.py is bootstrap-only post-seed)
+    note over Operator, Runtime: Operator's reflex must now hit CLI, not the editor.
+    end
+
+    rect rgb(255, 240, 240)
+    note over Operator, DB: Recovery — explicit reset path (Q28's --reset-prompts-from-code)
+    Operator->>CLI: treadmill workflows seed-starters --reset-prompts-from-code
+    CLI->>Operator: loud confirmation prompt ("overwrite DB role prompts?")
+    alt operator confirms
+        CLI->>API: PUT /roles/<id> with code-side prompt (per role)
+        API->>DB: INSERT role_versions (bootstrap-shape restored)
+    else operator declines
+        CLI-->>Operator: aborted (no-op)
+    end
+    end
+
+    rect rgb(248, 240, 255)
+    note over Operator, DB: Audit — what-changed-when ledger
+    Operator->>CLI: treadmill role versions <id>
+    CLI->>API: GET /roles/<id>/versions
+    API->>DB: SELECT role_versions WHERE role_id=<id> ORDER BY created_at
+    DB-->>API: rows (created_at, created_by, notes, pr_url)
+    API-->>CLI: version list
+    CLI-->>Operator: rendered ledger
+    end
+```

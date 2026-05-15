@@ -407,3 +407,67 @@ unchanged — it already takes a task directive.
 7. **Smoke** — fire a known-broken PR (e.g., reintroduce one of
    the hallucinated-API bugs deliberately) and verify the loop
    converges via wf-validate.fail → wf-feedback → re-author.
+
+## Diagram
+
+```mermaid
+sequenceDiagram
+    participant GH as GitHub
+    participant Trigger as trigger evaluator
+    participant Worker as worker (runner_dispositions/validation.py)
+    participant DB as Postgres (task_validations, role_versions)
+    participant Rules as rules engine (docs/knowledge-base/rules/*.yaml)
+    participant Repo as cloned repo (worker container)
+    participant Claude as Claude Code (llm-judge)
+    participant Step as wf-validate.step.completed envelope
+    participant View as task_mergeability VIEW
+    participant Feedback as wf-feedback dispatcher
+
+    GH->>Trigger: pr_synchronize (PR sha=<head_sha>)
+    Trigger->>Worker: dispatch wf-validate (workflow_id-routed, not output_kind)
+
+    Worker->>DB: SELECT task_validations WHERE task_id=<id>
+    DB-->>Worker: N rows (kind, description, script | prompt)
+    Worker->>Rules: match applies_to: against PR diff + task spec
+    Rules-->>Worker: M matching rule checks (same shape: kind, description, script | prompt)
+
+    note over Worker, Repo: Iterate N + M checks; per-kind execution
+    loop for each check in (N + M)
+        alt kind == deterministic
+            Worker->>Repo: subprocess.run(check.script, cwd=repo, timeout=<check.timeout_seconds or 30s>)
+            alt exit code == 0
+                Repo-->>Worker: CheckResult(verdict=pass)
+            else exit code != 0
+                Repo-->>Worker: CheckResult(verdict=fail, log=stderr+stdout)
+            else subprocess crash / timeout / FileNotFound
+                Repo-->>Worker: CheckResult(verdict=error, log=exception)
+            end
+        else kind == llm-judge
+            Worker->>Claude: run_claude(prompt=check.prompt + diff + spec, model=<check.llm_model or WORKER_MODEL>)
+            Claude-->>Worker: stdout (must end with ValidationVerdict JSON envelope)
+            alt envelope parses + verdict=pass
+                Worker->>Worker: CheckResult(verdict=pass, rationale=...)
+            else envelope parses + verdict=fail
+                Worker->>Worker: CheckResult(verdict=fail, rationale=...)
+            else envelope unparseable
+                Worker->>Worker: CheckResult(verdict=error, log="JSON parse failed")
+            end
+        end
+    end
+
+    note over Worker: Aggregate worst-wins (error > fail > pass);<br/>severity=blocking only counts toward fail-aggregate (Q29.f)
+    Worker->>Step: emit StepOutput(decision=<pass | fail | error>, commit_sha=head_sha,<br/>payload.checks=[...verdicts])
+    Step->>View: read step.decision + commit_sha (ADR-0013 mergeability VIEW)
+
+    alt decision == pass
+        View-->>GH: task_mergeability flips toward mergeable (subject to wf-review + CI)
+    else decision == fail
+        Step->>Trigger: wf-validate.step.completed (decision=fail)
+        Trigger->>Feedback: maybe_dispatch_feedback_on_terminal_failure(workflow_id=wf-validate, fail_decision=fail)
+        note over Feedback: Dedup key namespace: validate-run=<wf_validate_run_id><br/>Per-task wf-feedback cap = 5 (Q29.e), shared across all sources
+        Feedback-->>GH: re-authored commit (next pr_synchronize → wf-validate re-fires fresh; no retry on same SHA)
+    else decision == error
+        Step-->>View: per ADR-0039, error is ignored for mergeability aggregate
+        note over Worker: error means runner / judge is busted, not the code;<br/>operator surfaces it via PR comment but it does not gate merge
+    end
+```
