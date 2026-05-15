@@ -1094,3 +1094,47 @@ async def test_wf_author_fail_dedup_prevents_double_dispatch(
     # Redelivery should hit the dedup gate and skip.
     await consumer.handle(record)
     assert _count_runs_for_workflow(engine, task_id, "wf-feedback") == 1
+
+
+@pytest.mark.asyncio
+async def test_pr_merged_sets_task_prs_closed_at(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """When a ``pr_merged`` event is handled, task_prs.closed_at is set
+    to the current timestamp if not already set (idempotent)."""
+    task_id, _, _ = _seed_world(engine, seed_triggers=False)
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer(session_factory, publisher, sqs)
+
+    # Verify task_prs exists and closed_at is NULL.
+    with engine.connect() as conn:
+        closed_at_before = conn.execute(sa.text(
+            "SELECT closed_at FROM task_prs "
+            "WHERE repo = :repo AND pr_number = :pr"
+        ), {"repo": "acme/myapp", "pr": 42}).scalar()
+    assert closed_at_before is None
+
+    # Send a pr_merged event.
+    await consumer.handle(_github_event_record(action="pr_merged"))
+
+    # Verify closed_at is now set.
+    with engine.connect() as conn:
+        closed_at_after = conn.execute(sa.text(
+            "SELECT closed_at FROM task_prs "
+            "WHERE repo = :repo AND pr_number = :pr"
+        ), {"repo": "acme/myapp", "pr": 42}).scalar()
+    assert closed_at_after is not None
+
+    # Verify idempotence: send another pr_merged event for the same PR.
+    await consumer.handle(_github_event_record(action="pr_merged"))
+
+    # closed_at should not change (stays the same timestamp).
+    with engine.connect() as conn:
+        closed_at_second = conn.execute(sa.text(
+            "SELECT closed_at FROM task_prs "
+            "WHERE repo = :repo AND pr_number = :pr"
+        ), {"repo": "acme/myapp", "pr": 42}).scalar()
+    assert closed_at_second == closed_at_after

@@ -177,11 +177,13 @@ async def test_handle_github_pr_merged_skips_sweep_when_github_client_unwired() 
             "merged_sha": "deadbeef" * 5,
         },
     })
-    # Two execute calls: the audit-row INSERT + the task_prs fallback's
-    # initial SELECT (task #124). The fallback's SELECT returns a truthy
-    # MagicMock by default, so the fallback returns early — no INSERT.
-    # commit fires once.
-    assert session.execute.await_count == 2
+    # Three execute calls: the audit-row INSERT + the task_prs fallback's
+    # initial SELECT (task #124) + the closed_at UPDATE (this PR's helper).
+    # The fallback's SELECT returns a truthy MagicMock by default, so the
+    # fallback returns early — no INSERT. The closed_at UPDATE always runs
+    # against a session.execute mock that no-ops, so it's safe. commit
+    # fires once.
+    assert session.execute.await_count == 3
     session.commit.assert_awaited()
 
 

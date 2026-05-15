@@ -549,6 +549,8 @@ class CoordinationConsumer:
                 # Task #124 — branch-name fallback for operator-completed PRs.
                 # Runs after the sweep so conflicts are resolved first.
                 await self._try_task_prs_fallback_on_pr_merged(session, typed)
+                # Set task_prs.closed_at when a PR merges.
+                await self._set_task_prs_closed_at_on_pr_merged(session, typed)
 
             await session.commit()
 
@@ -748,6 +750,31 @@ class CoordinationConsumer:
                     "repo=%s pr_number=%d task_id=%s; row still committed",
                     stored_repo, typed.pr_number, task_id,
                 )
+
+    async def _set_task_prs_closed_at_on_pr_merged(
+        self,
+        session: AsyncSession,
+        typed: Any,
+    ) -> None:
+        """Set task_prs.closed_at when a PR merges.
+
+        Idempotent: only updates if closed_at is NULL. Matches (repo, pr_number)
+        and sets closed_at to now().
+        """
+        stmt = (
+            update(TaskPR)
+            .where(
+                func.lower(TaskPR.repo) == func.lower(typed.repo),
+                TaskPR.pr_number == typed.pr_number,
+                TaskPR.closed_at.is_(None),
+            )
+            .values(closed_at=func.now())
+        )
+        await session.execute(stmt)
+        logger.info(
+            "task_prs.closed_at set for repo=%s pr=%d (no-op if already set)",
+            typed.repo, typed.pr_number,
+        )
 
     async def _handle_plan_doc_merged(self, typed: Any) -> None:
         """Run the ADR-0021 plan-merge trigger after a ``pr_merged`` event.
