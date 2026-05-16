@@ -1561,15 +1561,52 @@ def test_architecture_handler_raises_on_empty_summary(
 
 def test_architecture_handler_prose_fallback_defaults_to_uncertain(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """When the architect produces substantive prose but no specific
-    verdict cue matches, the fallback defaults to ``uncertain`` so the
-    task continues through the 5-attempt rework cap (ADR-0029 Q29.e)
-    rather than dead-ending on an unrecognized prose pattern."""
+    verdict cue matches AND the structured-output retry yields nothing
+    usable, the fallback defaults to ``uncertain`` so the task continues
+    through the 5-attempt rework cap (ADR-0029 Q29.e) rather than
+    dead-ending on an unrecognized prose pattern.
+
+    Monkeypatch the retry to a no-op so the cue/uncertain path is
+    exercised cleanly without making a real Claude call.
+    """
+    from treadmill_agent.runner_dispositions import architecture
+    monkeypatch.setattr(architecture, "_try_structured_retry", lambda *a, **kw: None)
     ctx = _arch_ctx(tmp_path, "I thought about this for a while but didn't decide.")
     out = handle_architecture(ctx)
     assert out.decision == "uncertain"
     assert out.payload.get("parsed_from_prose") is True
+
+
+def test_architecture_handler_structured_retry_yields_clean_verdict(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """The structured-output retry is the highest-fidelity fallback when
+    strict JSON parsing fails. Mock the retry helper to return a valid
+    envelope and confirm the disposition uses that verdict — neither
+    the prose-cue path nor the uncertain catch-all should be reached."""
+    from treadmill_agent.runner_dispositions import architecture
+
+    def _fake_retry(summary: str, model: str, log_context: Any = None) -> dict[str, Any]:
+        return {
+            "verdict": "amend",
+            "reasoning": "extracted via structured-output retry",
+            "target_artifact": "services/api/X.py",
+            "remediation_summary": "wire X to Y",
+            "parsed_via_retry": True,
+        }
+
+    monkeypatch.setattr(architecture, "_try_structured_retry", _fake_retry)
+    # Prose that would otherwise fall through to ``uncertain`` (no
+    # cue match), proving the retry path is what produces the verdict.
+    ctx = _arch_ctx(tmp_path, "Some prose without any specific verdict cue.")
+    out = handle_architecture(ctx)
+    assert out.decision == "amend"
+    assert out.payload.get("parsed_via_retry") is True
+    assert out.payload.get("parsed_from_prose") is None
 
 
 def test_architecture_handler_prose_fallback_extracts_accept_as_is(

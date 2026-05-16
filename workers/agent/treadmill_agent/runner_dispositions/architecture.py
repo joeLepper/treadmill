@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 from typing import Any
 
 from treadmill_agent.events import Artifact, Metadata, StepOutput
@@ -183,21 +184,141 @@ def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
     return None
 
 
-def _extract_verdict_envelope(summary: str) -> dict[str, Any]:
+_RETRY_PROMPT = (
+    "Below is your previous analysis as the Treadmill architect. "
+    "Reformat your verdict as a single fenced JSON block — nothing "
+    "else, no surrounding prose, no commentary. Use exactly these "
+    "fields:\n"
+    "```json\n"
+    "{\n"
+    '  "verdict": "amend" | "supersede" | "accept-as-is" | "uncertain",\n'
+    '  "reasoning": "<one paragraph distilling your prior analysis>",\n'
+    '  "target_artifact": "<path to the implicated artifact>",\n'
+    '  "remediation_summary": "<required for amend/supersede; omit for accept-as-is/uncertain>"\n'
+    "}\n"
+    "```\n\n"
+    "Reply with ONLY the fenced ```json block. No other text.\n\n"
+    "Previous analysis:\n"
+    "```\n"
+    "{prose}\n"
+    "```\n"
+)
+
+
+def _try_structured_retry(
+    summary: str, model: str, log_context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Re-prompt claude with a focused JSON-only extraction prompt.
+
+    Observed 2026-05-15→16: sonnet's architect often emits a usable
+    prose verdict but skips the JSON envelope at the close. Rather
+    than guess phrasings (the prose-cue path) or dead-end (the
+    pre-fallback behavior), we make one short follow-up Claude call
+    that ONLY asks for the structured envelope. This is higher
+    fidelity than cue-matching: the model gets to choose the verdict
+    explicitly instead of being guessed from prose.
+
+    Returns the parsed envelope on success, ``None`` on any failure
+    (claude unavailable, output un-parseable, model still produces
+    prose). Failures fall through to the prose-cue path, then the
+    uncertain catch-all. Keep the loop moving regardless.
+
+    Cost: one Claude call (~$0.05–0.10 on sonnet, ~5–30s). Only
+    fires when the strict JSON path failed.
+    """
+    binary = _find_claude_binary()
+    if binary is None:
+        return None
+    prompt = _RETRY_PROMPT.replace("{prose}", summary)
+    try:
+        result = subprocess.run(
+            [
+                binary, "--print",
+                "--output-format", "json",
+                "--model", model,
+                "--permission-mode", "acceptEdits",
+                prompt,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,  # 3 min cap — focused call, should be fast
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "structured-output retry: claude invocation failed: %s; "
+            "falling through to prose cues",
+            exc,
+        )
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            "structured-output retry: claude exited %d; stderr=%r",
+            result.returncode, result.stderr[:200],
+        )
+        return None
+    # claude --output-format json emits {"type":"result", ..., "result": "<text>"}
+    try:
+        cli_payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning(
+            "structured-output retry: claude stdout was not JSON: %r",
+            result.stdout[:200],
+        )
+        return None
+    retry_summary = cli_payload.get("result", "")
+    if not retry_summary:
+        return None
+    # Scan retry_summary for the JSON envelope using the same strict
+    # path as the primary parser.
+    for m in _JSON_BLOCK_RE.finditer(retry_summary):
+        try:
+            data = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data.get("verdict") in _VALID_VERDICTS:
+            data["parsed_via_retry"] = True
+            logger.info(
+                "structured-output retry: extracted verdict %r",
+                data.get("verdict"),
+            )
+            return data
+    logger.warning(
+        "structured-output retry: claude returned prose again "
+        "(%d chars); falling through to prose cues",
+        len(retry_summary),
+    )
+    return None
+
+
+def _find_claude_binary() -> str | None:
+    """Locate the ``claude`` CLI. Mirrors ``claude_code._find_binary``
+    but without raising — we want graceful fallback if the worker
+    image somehow lacks it."""
+    import shutil
+    return shutil.which("claude")
+
+
+def _extract_verdict_envelope(
+    summary: str, *, retry_model: str | None = None,
+) -> dict[str, Any]:
     """Return the last JSON block whose parsed object contains
-    ``"verdict"`` keyed at one of the four valid literals, OR a
-    prose-derived envelope when no JSON block is present.
+    ``"verdict"`` keyed at one of the four valid literals.
 
-    Following ADR-0027's review-envelope pattern for the strict path:
-    the LAST JSON block wins, so an architect that explored alternatives
-    in earlier blocks can converge to a final verdict in the closing
-    block.
+    Ordered chain (highest fidelity first):
+      1. Strict JSON parse from the original summary.
+      2. Structured-output retry — ask claude to reformat its prose
+         as a JSON envelope (when ``retry_model`` is supplied).
+      3. Prose-cue parsing — pattern-match the summary for verdict
+         phrasings.
+      4. Uncertain catch-all — if substantive prose exists but no
+         signal extracted, default to ``uncertain`` so the loop
+         continues through the rework-cap path.
+      5. Hard fail (empty summary only).
 
-    When no valid JSON block exists, the prose-fallback parser scans
-    the summary for verdict cues and synthesizes an envelope. This
-    keeps the task moving forward instead of dead-ending on a
-    structured-output omission (observed often enough on sonnet that
-    silent dead-ends were a top productivity bug).
+    Each step has lower fidelity but keeps things moving. The retry
+    closes the most common gap (sonnet skipping the JSON close)
+    without guessing phrasings.
     """
     envelope: dict[str, Any] | None = None
     for m in _JSON_BLOCK_RE.finditer(summary):
@@ -209,6 +330,11 @@ def _extract_verdict_envelope(summary: str) -> dict[str, Any]:
             envelope = data
     if envelope is not None:
         return envelope
+    # Structured retry before prose-cue fallback.
+    if retry_model:
+        retry_envelope = _try_structured_retry(summary, retry_model)
+        if retry_envelope is not None:
+            return retry_envelope
     fallback = _parse_verdict_from_prose(summary)
     if fallback is not None:
         return fallback
@@ -345,7 +471,12 @@ def handle(ctx: DispositionContext) -> StepOutput:
     envelope reminder.
     """
     summary = ctx.claude_result.summary or ""
-    envelope = _extract_verdict_envelope(summary)
+    # Pass the role's model so the structured-output retry can use the
+    # same model that produced the prose. Sonnet's prose is sonnet's to
+    # convert; haiku's is haiku's.
+    envelope = _extract_verdict_envelope(
+        summary, retry_model=ctx.ctx.role.model,
+    )
 
     verdict: str = envelope["verdict"]
     reasoning: str = envelope.get("reasoning", "")
@@ -386,6 +517,8 @@ def handle(ctx: DispositionContext) -> StepOutput:
     # track how often the strict-JSON path is missed.
     if envelope.get("parsed_from_prose"):
         payload["parsed_from_prose"] = True
+    if envelope.get("parsed_via_retry"):
+        payload["parsed_via_retry"] = True
 
     logger.info(
         "architect verdict=%s target=%s dispatch=%s capped=%s",
