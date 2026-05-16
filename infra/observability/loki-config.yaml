@@ -1,0 +1,47 @@
+# Loki configuration for Treadmill observability stack.
+#
+# Uses filesystem storage backed by the EBS volume mounted at /mnt/loki.
+# Retention: 7 days by default (configurable per Q20.a); at typical Claude
+# Code streaming rates (~200 lines/run, ~50 runs/day) this is ~70 MB/day
+# uncompressed — well within the 100 GB EBS volume budget.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+
+common:
+  path_prefix: /mnt/loki
+  storage:
+    filesystem:
+      chunks_directory: /mnt/loki/chunks
+      rules_directory: /mnt/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 168h  # 7 days
+
+compactor:
+  working_directory: /mnt/loki/compactor
+  retention_enabled: true
+  retention_delete_delay: 2h
+
+ruler:
+  alertmanager_url: http://localhost:9093
+
+analytics:
+  reporting_enabled: false

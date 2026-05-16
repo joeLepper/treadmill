@@ -1,0 +1,22 @@
+# Prometheus configuration for Treadmill observability stack.
+#
+# Scrapes the OTel Collector's internal metrics endpoint (:8888) so
+# collector health (dropped spans, queue depth, memory) is visible in
+# Grafana alongside the Treadmill application metrics the collector
+# forwards via remote-write.
+#
+# Remote-write from the OTel Collector (prometheusremotewrite exporter)
+# lands at /api/v1/write; Prometheus must have --web.enable-remote-write-receiver
+# set (passed via compose command flags).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: treadmill-observability
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+    metrics_path: /metrics

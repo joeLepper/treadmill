@@ -57,6 +57,21 @@ _SECRETS_OUTPUTS: tuple[tuple[str, str], ...] = (
 )
 """``secrets.*`` block — Secrets Manager names from the secrets construct."""
 
+_OBS_OUTPUTS: tuple[tuple[str, str], ...] = (
+    ("observability_collector_endpoint", "ObservabilityCollectorEndpoint"),
+    ("observability_grafana_host", "ObservabilityGrafanaHost"),
+    ("observability_ec2_id", "ObservabilityEc2InstanceId"),
+    # ARN → name conversion happens in ``build_deployment_config`` via
+    # ``_extract_secret_name_from_arn``.
+    ("observability_grafana_admin_secret_name", "ObservabilityGrafanaAdminSecretArn"),
+)
+"""``aws.*`` block — optional observability outputs from ``TreadmillObservabilityStack``.
+
+Present only when the operator deployed the observability stack with
+``--context include_observability=true``. All four keys are omitted from
+the YAML when the stack was not deployed (graceful no-op).
+"""
+
 
 # ── Local-side defaults (compute lives on the laptop) ────────────────────────
 #
@@ -90,6 +105,29 @@ _AUTOSCALER_DEFAULTS: dict[str, int] = {
     "max": 1,
     "tick_seconds": 5,
 }
+
+
+# ── Secrets Manager ARN → name ───────────────────────────────────────────────
+
+
+def _extract_secret_name_from_arn(arn: str) -> str:
+    """Parse a Secrets Manager ARN and return the secret name.
+
+    ARN format: ``arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME-SUFFIX``
+    where ``SUFFIX`` is a 6-character alphanumeric string appended by
+    Secrets Manager (e.g., ``treadmill-personal-grafana-admin-password-AbCdEf``).
+
+    Strips the ``-SUFFIX`` (7 chars: hyphen + 6 alphanum) when it matches
+    the pattern. If the tail doesn't look like a SM suffix, returns the raw
+    resource segment so callers are never silently truncated.
+    """
+    # Last colon-delimited segment is the resource: "NAME-SUFFIX"
+    resource = arn.rsplit(":", 1)[-1]
+    if len(resource) > 7:
+        suffix = resource[-7:]
+        if suffix[0] == "-" and suffix[1:].isalnum():
+            return resource[:-7]
+    return resource
 
 
 # ── boto3 + CloudFormation ────────────────────────────────────────────────────
@@ -210,6 +248,20 @@ def build_deployment_config(
         yaml_key: _find_output(outputs, suffix)
         for yaml_key, suffix in _SECRETS_OUTPUTS
     }
+
+    # ── Optional: observability stack outputs ─────────────────────────────
+    # Gracefully skipped when TreadmillObservabilityStack was not deployed.
+    # The ``observability_grafana_admin_secret_name`` entry receives the
+    # *name* extracted from the ARN that CDK outputs.
+    for yaml_key, suffix in _OBS_OUTPUTS:
+        try:
+            raw_value = _find_output(outputs, suffix)
+        except KeyError:
+            continue
+        # The ARN output needs to be converted to a secret name.
+        if yaml_key == "observability_grafana_admin_secret_name":
+            raw_value = _extract_secret_name_from_arn(raw_value)
+        aws_block[yaml_key] = raw_value
 
     return {
         "deployment_id": deployment_id,

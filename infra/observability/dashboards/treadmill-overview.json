@@ -1,0 +1,173 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "datasource", "id": "tempo", "name": "Tempo", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "Treadmill deployment overview — task logs, worker metrics, trace search.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "title": "Task Logs",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Live worker + API logs. Filter by task_id to follow a specific run.",
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 1},
+      "id": 2,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "loki"},
+          "expr": "{service_name=~\"treadmill.*\"} |= `${task_id}`",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Worker + API Logs (filter: task_id=$task_id)",
+      "type": "logs"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 11},
+      "id": 3,
+      "title": "Worker Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Worker runs completed per second, by outcome (success/failure).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "id": 4,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "rate(worker_runs_total[5m])",
+          "legendFormat": "{{outcome}} / {{role}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Worker Run Rate (runs/sec)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "P50/P95/P99 worker step duration in seconds.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, rate(worker_run_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50 {{role}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, rate(worker_run_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95 {{role}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, rate(worker_run_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99 {{role}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Worker Step Duration (p50/p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 20},
+      "id": 6,
+      "title": "Trace Search",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "tempo", "uid": "tempo"},
+      "description": "Search traces by service, duration, or tags. Click a trace to explore span lineage.",
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 21},
+      "id": 7,
+      "options": {
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "tempo", "uid": "tempo"},
+          "filters": [
+            {"id": "service-name", "operator": "=", "scope": "resource", "tag": "service.name", "value": "treadmill-worker", "valueType": "string"}
+          ],
+          "limit": 20,
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "Trace Search (treadmill-worker)",
+      "type": "traces"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["treadmill"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "", "value": ""},
+        "hide": 0,
+        "label": "Task ID",
+        "name": "task_id",
+        "options": [],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Treadmill Overview",
+  "uid": "treadmill-overview",
+  "version": 1
+}

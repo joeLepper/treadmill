@@ -1,0 +1,85 @@
+version: "3.8"
+
+# Treadmill observability stack — one compose unit per deployment.
+# All five services run on a single EC2 instance; EBS volumes back Loki
+# and Prometheus; an S3 bucket (${TEMPO_S3_BUCKET}) backs Tempo traces.
+#
+# Environment variables required (written by EC2 user-data from CFN outputs
+# and Secrets Manager):
+#   TEMPO_S3_BUCKET          — S3 bucket name for Tempo trace storage
+#   AWS_DEFAULT_REGION       — AWS region the bucket lives in
+#   GF_SECURITY_ADMIN_PASSWORD — Grafana admin password (from Secrets Manager)
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.103.0
+    container_name: treadmill-otel-collector
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8888:8888"   # OTel Collector internal metrics (scraped by Prometheus)
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: treadmill-loki
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - /mnt/loki:/mnt/loki
+    command: -config.file=/etc/loki/config.yaml
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: treadmill-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /mnt/prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-remote-write-receiver
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: treadmill-tempo
+    volumes:
+      - ./tempo-config.yaml:/etc/tempo/config.yaml:ro
+    command:
+      - -config.file=/etc/tempo/config.yaml
+      - -config.expand-env=true
+    environment:
+      - TEMPO_S3_BUCKET=${TEMPO_S3_BUCKET}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+    ports:
+      - "3200:3200"   # Tempo HTTP API + query frontend
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: treadmill-grafana
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SERVER_HTTP_PORT=3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - loki
+      - prometheus
+      - tempo
+    restart: unless-stopped

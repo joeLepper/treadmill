@@ -14,6 +14,7 @@ This directory contains the Treadmill-native local adapter, the bridge between C
 
 ## Recent changes
 
+- PR (this change) — Extended `treadmill-local init` to also try reading from `TreadmillObservabilityStack` CFN outputs (merged when deployed; gracefully skipped when absent). Extended `_dev_local_api_env` + `_dev_local_worker_env` in `runtime.py` to inject `OTEL_EXPORTER_OTLP_ENDPOINT` from `aws.observability_collector_endpoint` per ADR-0020.
 - [#36](https://github.com/anthropics/treadmill/pull/36) — Fetches API credentials at startup and injects them into the agent container environment.
 - [#34](https://github.com/anthropics/treadmill/pull/34) — Reads CDK synth output into the deployment config YAML so containers can discover each other.
 - [#2](https://github.com/anthropics/treadmill/pull/2) — Initial spike: moto + Docker Compose proof-of-concept (now evolved to docker run + autoscaler).

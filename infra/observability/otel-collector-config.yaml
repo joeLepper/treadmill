@@ -1,0 +1,71 @@
+# OTel Collector configuration for Treadmill observability stack.
+#
+# Receives OTLP on :4317 (gRPC) and :4318 (HTTP).
+# Routes:
+#   traces  → Tempo  (otlp/tempo exporter, gRPC to tempo:4317)
+#   metrics → Prometheus (prometheusremotewrite exporter)
+#   logs    → Loki    (loki exporter)
+#
+# The collector's own /metrics endpoint is on :8888 and is scraped by
+# the sibling Prometheus container (see prometheus.yml).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+
+exporters:
+  # Traces → Tempo (OTLP gRPC)
+  otlp/tempo:
+    endpoint: "tempo:4317"
+    tls:
+      insecure: true
+
+  # Metrics → Prometheus remote-write
+  prometheusremotewrite:
+    endpoint: "http://prometheus:9090/api/v1/write"
+    tls:
+      insecure_skip_verify: true
+
+  # Logs → Loki
+  loki:
+    endpoint: "http://loki:3100/loki/api/v1/push"
+    default_labels_enabled:
+      exporter: false
+      job: true
+
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+  pprof:
+    endpoint: "0.0.0.0:1888"
+
+service:
+  extensions: [health_check, pprof]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [loki]
+  telemetry:
+    metrics:
+      address: "0.0.0.0:8888"

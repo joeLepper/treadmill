@@ -6,13 +6,16 @@ This directory contains the Treadmill AWS CDK app, the single source of truth fo
 
 ## Key surfaces
 
-- `treadmill_infra/app.py` — root CDK app; orchestrates service and backing-service stacks, applies cross-cutting concerns (observability, networking).
-- `treadmill_infra/stacks/cloud_lite.py` — stacks for local and AWS targets; defines ECS task definitions, SQS queues with subscriptions, SNS topics, S3 buckets, Postgres RDS, Redis ElastiCache, monitoring.
-- `treadmill_infra/constructs/` — reusable CDK constructs: messaging (SNS/SQS), deploy_events (GitHub webhook receiver), secrets (AWS Secrets Manager), observability (OpenTelemetry + Grafana).
+- `treadmill_infra/app.py` — root CDK app; dispatches on `mode` + `deployment_id` + `include_observability` context flags to synthesize the right stacks.
+- `treadmill_infra/stacks/cloud_lite.py` — `TreadmillCloudLite`: messaging (SNS/SQS), secrets, webhook receiver, billing alarm.
+- `treadmill_infra/stacks/observability.py` — `TreadmillObservabilityStack`: EC2 + docker-compose Grafana/Tempo/Loki/Prometheus/OTel stack, one per deployment (ADR-0020). Synthesized alongside CloudLite when `--context include_observability=true`.
+- `treadmill_infra/constructs/` — reusable CDK constructs: messaging (SNS/SQS), deploy_events (GitHub webhook receiver), secrets (AWS Secrets Manager), observability (billing alarm).
+- `observability/` — docker-compose + config files for the Grafana ecosystem stack. Uploaded as an S3 asset by `TreadmillObservabilityStack`; the EC2 user-data downloads and runs it.
 - `cdk.json` — CDK configuration; specifies context values, output paths, and synthesis target.
 
 ## Recent changes
 
+- PR (this change) — Added `TreadmillObservabilityStack`: CDK stack that deploys Grafana + Tempo + Loki + Prometheus + OTel Collector on EC2 per ADR-0020. Added `observability/` compose dir. Extended `treadmill-local init` to merge observability CFN outputs and runtime.py to inject `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - [#34](https://github.com/anthropics/treadmill/pull/34) — treadmill-local init reads the new CFN output into the YAML per ADR-0016's deployment config schema.
 - ADR-0030 plan landed — federated in-repo agent context (this AGENT.md is part of that backfill).
 - [#19](https://github.com/anthropics/treadmill/pull/19) — Introduced host-side credential injection pattern for local development (ADR-0019).

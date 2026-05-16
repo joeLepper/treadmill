@@ -1,0 +1,18 @@
+# Grafana dashboard file-provider provisioning.
+#
+# Loads all *.json files from /var/lib/grafana/dashboards (bind-mounted
+# from ./dashboards/ by docker-compose). Add new dashboards by dropping
+# JSON files into infra/observability/dashboards/.
+
+apiVersion: 1
+
+providers:
+  - name: treadmill-dashboards
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -310,6 +310,15 @@ def _stack_name_for(deployment_id: str) -> str:
     return f"Treadmill{deployment_id.title().replace('_', '')}CloudLite"
 
 
+def _obs_stack_name_for(deployment_id: str) -> str:
+    """Compute the observability stack CFN name from *deployment_id*.
+
+    Mirrors ``infra/treadmill_infra/stacks/observability.py``.
+    ``personal`` → ``TreadmillPersonalObservability``.
+    """
+    return f"Treadmill{deployment_id.title().replace('_', '')}Observability"
+
+
 @app.command(name="init")
 def init(
     deployment_id: str = typer.Argument(
@@ -380,6 +389,28 @@ def init(
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
+
+    # ── Also read from the observability stack if it exists ───────────────────
+    # TreadmillObservabilityStack is optional (deployed with
+    # --context include_observability=true). When present, merge its outputs
+    # into the combined dict so build_deployment_config populates the
+    # aws.observability_* keys. When absent, the CloudLite outputs are used
+    # alone and the observability keys are gracefully omitted from the YAML.
+    obs_stack_name = _obs_stack_name_for(deployment_id)
+    try:
+        obs_outputs = read_stack_outputs(
+            obs_stack_name, profile=profile, region=region,
+        )
+        outputs = {**outputs, **obs_outputs}
+        console.print(
+            f"  [dim]Found observability stack {obs_stack_name} — "
+            "merged outputs.[/dim]"
+        )
+    except ValueError:
+        console.print(
+            f"  [dim]Observability stack {obs_stack_name} not deployed — "
+            "skipping observability outputs.[/dim]"
+        )
 
     # ── Build the YAML-shape dict ────────────────────────────────────────────
     try:

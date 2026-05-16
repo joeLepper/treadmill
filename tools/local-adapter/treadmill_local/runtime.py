@@ -579,6 +579,14 @@ class LocalRuntime:
         # same Secrets Manager entry the worker uses for git operations.
         assert self._github_token is not None
         env["GITHUB_TOKEN"] = self._github_token
+        # ADR-0020: inject OTLP endpoint when the observability stack is
+        # deployed. The OTel SDK no-ops silently when the var is unset
+        # (fully-local mode). Value from the deployment YAML under
+        # aws.observability_collector_endpoint (written by treadmill-local
+        # init from the ObservabilityCollectorEndpoint CFN output).
+        collector = cfg.get("aws", {}).get("observability_collector_endpoint")
+        if collector:
+            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"http://{collector}"
         return env
 
     def _dev_local_worker_env(self, cfg: dict[str, Any]) -> dict[str, str]:
@@ -617,6 +625,11 @@ class LocalRuntime:
         # Worker IAM-User keys, fetched once on the host (see
         # ``_fetch_worker_credentials``) and injected here.
         env.update(self._worker_aws_env)
+        # ADR-0020: inject OTLP endpoint when the observability stack is
+        # deployed. No-ops when unset (fully-local or obs stack absent).
+        collector = cfg.get("aws", {}).get("observability_collector_endpoint")
+        if collector:
+            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"http://{collector}"
         return env
 
     def _report_up_dev_local(self, cfg: dict[str, Any]) -> None:
