@@ -55,6 +55,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.eventbus import EventPublisher
+from treadmill_api.observability import inject_trace_context
 from treadmill_api.events import EventPayload
 from treadmill_api.events.internal import DispatchPublishFailed
 from treadmill_api.events.step import StepReady
@@ -629,6 +630,7 @@ class Dispatcher:
                         "run_id": str(run.id),
                     }),
                     MessageGroupId=str(run.id),
+                    MessageAttributes=inject_trace_context(),
                 )
             except Exception as exc:
                 logger.exception(

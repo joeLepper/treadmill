@@ -37,6 +37,7 @@ from botocore.exceptions import ClientError
 
 from treadmill_api.events import EventPayload, encode_payload
 from treadmill_api.models import Event
+from treadmill_api.observability import inject_trace_context
 
 logger = logging.getLogger("treadmill.eventbus")
 
@@ -72,6 +73,7 @@ def _build_attributes(event: Event) -> dict[str, dict[str, str]]:
     }
     if event.task_id is not None:
         attrs["task_id"] = {"DataType": "String", "StringValue": str(event.task_id)}
+    attrs.update(inject_trace_context())
     return attrs
 
 

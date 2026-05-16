@@ -36,7 +36,7 @@ from treadmill_agent.api_client import ApiClient, WorkerContext
 from treadmill_agent.config import Settings
 from treadmill_agent.events import StepOutput
 from treadmill_agent.eventbus import EventPublisher
-from treadmill_agent.observability import get_tracer
+from treadmill_agent.observability import extract_trace_context, get_tracer
 from treadmill_agent.runner_dispositions import (
     handle_analysis,
     handle_architecture,
@@ -131,6 +131,7 @@ class _Claim:
     plan_id: str
     run_id: str
     receipt_handle: str
+    trace_context: Any = None
 
 
 def run(
@@ -202,6 +203,7 @@ def _receive_one(sqs_client: Any, settings: Settings) -> _Claim | None:
         QueueUrl=settings.work_queue_url,
         MaxNumberOfMessages=1,
         WaitTimeSeconds=settings.poll_wait_seconds,
+        MessageAttributeNames=["All"],
     )
     msgs = resp.get("Messages", [])
     if not msgs:
@@ -217,9 +219,11 @@ def _receive_one(sqs_client: Any, settings: Settings) -> _Claim | None:
         logger.exception("malformed work-queue claim; deleting to prevent poison loop")
         _delete(sqs_client, settings.work_queue_url, msg["ReceiptHandle"])
         return None
+    trace_context = extract_trace_context(msg.get("MessageAttributes", {}))
     return _Claim(
         step_id=step_id, task_id=task_id, plan_id=plan_id, run_id=run_id,
         receipt_handle=msg["ReceiptHandle"],
+        trace_context=trace_context,
     )
 
 
@@ -248,7 +252,7 @@ def _handle_step(
     or DLQs the message.
     """
     tracer = get_tracer("treadmill.worker.step")
-    with tracer.start_as_current_span("treadmill.worker.step"):
+    with tracer.start_as_current_span("treadmill.worker.step", context=claim.trace_context):
         publisher.publish_step_started(
             task_id=claim.task_id, plan_id=claim.plan_id,
             run_id=claim.run_id, step_id=claim.step_id,

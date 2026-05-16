@@ -107,6 +107,43 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
+def inject_trace_context() -> dict[str, dict[str, str]]:
+    """Return SQS/SNS MessageAttributes carrying the current W3C traceparent.
+
+    Empty dict when there is no active span (no-op OTel or untraced code).
+    Callers spread the result into their MessageAttributes without guards.
+    """
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator,
+    )
+
+    carrier: dict[str, str] = {}
+    TraceContextTextMapPropagator().inject(carrier)
+    return {
+        key: {"DataType": "String", "StringValue": value}
+        for key, value in carrier.items()
+    }
+
+
+def extract_trace_context(message_attributes: dict[str, Any]) -> Any:
+    """Extract W3C trace context from SQS MessageAttributes.
+
+    Returns an OTel Context for ``tracer.start_as_current_span(context=...)``.
+    Returns the ambient context when attributes carry no traceparent (older
+    publishers or queues without propagation wired).
+    """
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator,
+    )
+
+    carrier = {
+        key: attrs.get("StringValue", "")
+        for key, attrs in (message_attributes or {}).items()
+        if key in ("traceparent", "tracestate")
+    }
+    return TraceContextTextMapPropagator().extract(carrier)
+
+
 def record_token_usage(
     *,
     model: str,

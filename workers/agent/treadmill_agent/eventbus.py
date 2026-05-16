@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from treadmill_agent.observability import inject_trace_context
 from treadmill_agent.events import (
     EventRecord,
     StepCompleted,
@@ -127,6 +128,7 @@ class EventPublisher:
                 "entity_type": {"DataType": "String", "StringValue": entity_type},
                 "action": {"DataType": "String", "StringValue": action},
                 "task_id": {"DataType": "String", "StringValue": task_id},
+                **inject_trace_context(),
             },
         )
         logger.info(

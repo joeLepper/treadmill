@@ -55,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from treadmill_api.eventbus import EventPublisher
 from treadmill_api.events import encode_payload, parse_payload
+from treadmill_api.observability import extract_trace_context, get_tracer
 from sqlalchemy import func, select
 from treadmill_api.models import Event, TaskPR
 from treadmill_api.webhooks.inbox_envelope import WebhookInboxEnvelope
@@ -278,6 +279,7 @@ class WebhookInboxPoller:
                         QueueUrl=self.queue_url,
                         MaxNumberOfMessages=self.max_messages,
                         WaitTimeSeconds=self.wait_time_seconds,
+                        MessageAttributeNames=["All"],
                     )
                 except asyncio.CancelledError:
                     raise
@@ -425,26 +427,31 @@ class WebhookInboxPoller:
             return
 
         # 6. Persist Event row + publish + delete.
-        try:
-            await self._persist_and_publish(
-                event_id=event_id,
-                normalized=normalized,
-                body_json=body_json,
-            )
-        except Exception:
-            # Per ADR-0017 §"The local poller", on persistence/publish
-            # failure we leave the SQS message visible (it will retry
-            # after the visibility timeout). The handler logs but does
-            # NOT delete — mirrors the consumer's "transient errors
-            # bubble back to the queue" contract.
-            logger.exception(
-                "webhook inbox: persist/publish failed; leaving message "
-                "for SQS retry (sqs message_id=%s event_id=%s)",
-                message_id, event_id,
-            )
-            return
+        trace_ctx = extract_trace_context(message.get("MessageAttributes", {}))
+        tracer = get_tracer("treadmill.webhook_inbox")
+        with tracer.start_as_current_span(
+            "treadmill.webhook_inbox.process", context=trace_ctx,
+        ):
+            try:
+                await self._persist_and_publish(
+                    event_id=event_id,
+                    normalized=normalized,
+                    body_json=body_json,
+                )
+            except Exception:
+                # Per ADR-0017 §"The local poller", on persistence/publish
+                # failure we leave the SQS message visible (it will retry
+                # after the visibility timeout). The handler logs but does
+                # NOT delete — mirrors the consumer's "transient errors
+                # bubble back to the queue" contract.
+                logger.exception(
+                    "webhook inbox: persist/publish failed; leaving message "
+                    "for SQS retry (sqs message_id=%s event_id=%s)",
+                    message_id, event_id,
+                )
+                return
 
-        await self._delete(message)
+            await self._delete(message)
 
     async def _persist_and_publish(
         self,

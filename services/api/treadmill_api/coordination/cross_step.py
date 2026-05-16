@@ -48,6 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.events.step import StepReady
+from treadmill_api.observability import inject_trace_context
 from treadmill_api.models import (
     Event,
     Task,
@@ -261,6 +262,7 @@ async def dispatch_next_step(
                 QueueUrl=dispatcher.work_queue_url,
                 MessageBody=json.dumps(body),
                 MessageGroupId=str(run_id),
+                MessageAttributes=inject_trace_context(),
             )
         except Exception as exc:
             logger.exception(

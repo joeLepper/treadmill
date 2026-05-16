@@ -82,6 +82,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
+from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.models import (
     Event,
@@ -1182,6 +1183,7 @@ async def _create_and_publish_run(
                     "run_id": str(run.id),
                 }),
                 MessageGroupId=str(run.id),
+                MessageAttributes=inject_trace_context(),
             )
         except Exception as exc:
             logger.exception(

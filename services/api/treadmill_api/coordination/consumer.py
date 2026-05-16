@@ -78,6 +78,7 @@ from treadmill_api.events.registry import (
     UnknownEventTypeError,
     parse_payload,
 )
+from treadmill_api.observability import extract_trace_context, get_tracer
 from treadmill_api.events.step import (
     StepCancelled,
     StepCompleted,
@@ -216,6 +217,7 @@ class CoordinationConsumer:
                         QueueUrl=self.queue_url,
                         MaxNumberOfMessages=self.max_messages,
                         WaitTimeSeconds=self.wait_time_seconds,
+                        MessageAttributeNames=["All"],
                     )
                 except asyncio.CancelledError:
                     raise
@@ -261,16 +263,21 @@ class CoordinationConsumer:
             logger.exception("malformed sqs message; deleting to prevent poison loop")
             await self._delete(message)
             return
-        try:
-            await self.handle(record)
-        except Exception:
-            logger.exception(
-                "coordination handler raised on %s.%s; leaving message for retry",
-                record.get("entity_type"),
-                record.get("action"),
-            )
-            return
-        await self._delete(message)
+        trace_ctx = extract_trace_context(message.get("MessageAttributes", {}))
+        tracer = get_tracer("treadmill.coordination")
+        with tracer.start_as_current_span(
+            "treadmill.coordination.consumer.message", context=trace_ctx,
+        ):
+            try:
+                await self.handle(record)
+            except Exception:
+                logger.exception(
+                    "coordination handler raised on %s.%s; leaving message for retry",
+                    record.get("entity_type"),
+                    record.get("action"),
+                )
+                return
+            await self._delete(message)
 
     async def _delete(self, message: dict[str, Any]) -> None:
         await asyncio.to_thread(
