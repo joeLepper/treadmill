@@ -510,6 +510,29 @@ def test_role_architect_prompt_teaches_json_envelope() -> None:
         )
 
 
+def test_role_architect_prompt_teaches_validator_tuning() -> None:
+    """When the deadlock trigger is wf-validate.fail and verdict is
+    accept-as-is, the architect must include a validator_tuning field in
+    its JSON envelope. The prompt must teach the three action literals,
+    the rule_slug field, and the proposed_patch shapes."""
+    architect = next(r for r in _all_roles() if r["id"] == "role-architect")
+    prompt = architect["system_prompt"]
+    assert "validator_tuning" in prompt, (
+        "role-architect prompt must teach the validator_tuning field "
+        "for validate-fail accept-as-is verdicts"
+    )
+    for action in ("demote_severity", "narrow_applies_to", "refine_prompt"):
+        assert action in prompt, (
+            f"role-architect prompt must reference validator_tuning action "
+            f"{action!r}; the disposition layer uses this literal to pick "
+            "the rule-tuning path"
+        )
+    assert "rule_slug" in prompt, (
+        "role-architect prompt must teach the rule_slug field so the "
+        "disposition layer can look up which rule to tune"
+    )
+
+
 # Note: the prior contract tests asserted that every prompt mentioned
 # the ``StepOutput`` envelope, listed decision values, and named
 # ``task_directive`` for analyzer roles. Those tests encoded the

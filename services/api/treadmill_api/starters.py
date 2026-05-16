@@ -573,6 +573,10 @@ _ROLES: list[dict[str, Any]] = [
             "When the spec lists specific files/symbols/behaviors that "
             "are not in the diff, the implementation is incomplete "
             "regardless of whether the reviewer approved.\n\n"
+            "**Detecting the deadlock axis:** When the dispatch context "
+            "mentions a validator check, a rule slug, or ``wf-validate="
+            "fail``, the deadlock is validate-gated. This matters for the "
+            "``validator_tuning`` field in the envelope (see below).\n\n"
             "Both triggers produce the same four-verdict envelope. "
             "Return your verdict as a fenced JSON block (per ADR-0027 "
             "pattern). The verdict must be valid Pydantic-parseable "
@@ -582,9 +586,30 @@ _ROLES: list[dict[str, Any]] = [
             '  "verdict": "amend" | "supersede" | "accept-as-is" | "uncertain",\n'
             '  "reasoning": "<one paragraph — the why behind this verdict>",\n'
             '  "target_artifact": "<path to the ADR/plan/component that needs action>",\n'
-            '  "remediation_summary": "<if verdict is amend or supersede, a summary of what changes>"  (omit for others)\n'
+            '  "remediation_summary": "<if verdict is amend or supersede, a summary of what changes>",\n'
+            '  "validator_tuning": {  // ONLY when trigger is wf-validate.fail AND verdict is accept-as-is\n'
+            '    "rule_slug": "<slug of the rule that fired, e.g. adr-and-plan-has-diagram>",\n'
+            '    "action": "demote_severity" | "narrow_applies_to" | "refine_prompt",\n'
+            '    "proposed_patch": {}  // shape depends on action — see below\n'
+            '  }\n'
             "}\n"
             "```\n\n"
+            "**``validator_tuning`` actions and ``proposed_patch`` shapes:**\n"
+            "  ``demote_severity`` — the check is semantically correct but "
+            "blocks merge on valid work. ``proposed_patch``: "
+            "``{\\\"severity\\\": \\\"warning\\\"}``. Prefer this when "
+            "uncertain (least invasive — the check still fires but no "
+            "longer blocks merge).\n"
+            "  ``narrow_applies_to`` — the rule fires on artifact shapes it "
+            "was never meant to cover. ``proposed_patch``: "
+            "``{\\\"applies_to\\\": \\\"<narrower glob, e.g. docs/adrs/**>\\\"}``. "
+            "Use when the check is correct for its intended targets but "
+            "the selector is too broad.\n"
+            "  ``refine_prompt`` — the check's LLM-judge prompt text is "
+            "producing incorrect verdicts. ``proposed_patch``: "
+            "``{\\\"prompt\\\": \\\"<revised LLM-judge prompt text>\\\"}``. "
+            "Reserve for when rule glob and severity are correct but the "
+            "judge prompt itself is the problem.\n\n"
             "**Verdict meanings:**\n"
             "  ``amend`` — the intent (ADR/plan statement) is right; "
             "the code is the bug. For Class C, a remediation plan will "
@@ -606,7 +631,11 @@ _ROLES: list[dict[str, Any]] = [
             "``review.override`` mechanism covers only the review axis; "
             "if the deadlock is driven by wf-validate=fail, prefer "
             "``amend`` over ``accept-as-is`` because the override "
-            "won't unblock the validate gate.\n"
+            "won't unblock the validate gate. **Exception:** when the "
+            "validate gate fires because the rule itself is miscalibrated "
+            "(the work satisfies the spec but the rule's "
+            "severity/scope/prompt is wrong), ``accept-as-is`` is correct "
+            "— and you MUST include ``validator_tuning`` in the envelope.\n"
             "  ``uncertain`` — you need more context. (Capped at 5 "
             "attempts per task; after that, the task routes to operator "
             "review.)\n\n"
@@ -619,6 +648,14 @@ _ROLES: list[dict[str, Any]] = [
             "those pieces are listed in the task spec's intent block, "
             "the implementation is genuinely incomplete and needs a "
             "remediation plan — not an override.\n\n"
+            "**When ``validator_tuning`` is required:** On a validate-fail "
+            "deadlock where ``accept-as-is`` is correct (the rule is "
+            "miscalibrated, not the work), omit ``remediation_summary`` "
+            "and include ``validator_tuning`` instead. Action preference "
+            "order: prefer ``demote_severity`` when uncertain (least "
+            "invasive); prefer ``narrow_applies_to`` when the rule fires "
+            "on shapes it shouldn't; reserve ``refine_prompt`` for when "
+            "the judge prompt text itself is the problem.\n\n"
             "The disposition layer routes your verdict to downstream "
             "handlers; you don't need to take follow-up actions "
             "yourself. **Your JSON envelope is the complete output. "
