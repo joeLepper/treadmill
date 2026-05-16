@@ -43,6 +43,7 @@ from treadmill_api.events.step import (
 )
 from treadmill_api.events.review import ReviewOverride
 from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
+from treadmill_api.events.validator_tuning import ValidatorTuning  # noqa: F401  re-exported
 
 
 # Single registry of all known event payload classes. Keep this list
