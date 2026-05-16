@@ -61,13 +61,101 @@ class ArchitectVerdictParseError(RuntimeError):
     with an explicit reminder to emit the envelope."""
 
 
+# Prose-fallback verdict cues. Ordered by precedence: the disposition
+# scans the model's summary for these phrases (lowercased) and assigns
+# the matching verdict. ``accept-as-is`` listed last so phrases like
+# "the work is complete; no amendment needed" don't fire ``amend``
+# before the "accept" check has a chance.
+#
+# Observed 2026-05-15: sonnet on the role-architect prompt frequently
+# produces a thorough prose verdict (e.g. "The implementation is
+# already complete. The recent commit X delivered everything the task
+# requires.") but omits the JSON envelope at the close — even after the
+# prompt's closing imperative. The strict parser raised
+# ``ArchitectVerdictParseError`` and the step.failed, burning attempts.
+# This fallback extracts the model's intended verdict from prose so the
+# system can act on it; the strict JSON path remains primary.
+_PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
+    ("amend", (
+        "verdict: amend",
+        "amend the implementation",
+        "needs amendment",
+        "remediation plan",
+        "implementation is incomplete",
+        "the code needs fixing",
+        "the work is incomplete",
+    )),
+    ("supersede", (
+        "verdict: supersede",
+        "supersede the adr",
+        "supersede the plan",
+        "intent is no longer right",
+        "intent has shifted",
+    )),
+    ("uncertain", (
+        "verdict: uncertain",
+        "need more context",
+        "cannot decide",
+        "ambiguous",
+        "insufficient evidence",
+    )),
+    ("accept-as-is", (
+        "verdict: accept-as-is",
+        "accept as is",
+        "accept-as-is",
+        "implementation is already complete",
+        "implementation is complete",
+        "the work is already complete",
+        "the work is complete",
+        "no issues found",
+        "no amendment needed",
+        "no changes required",
+        "all task requirements are implemented",
+    )),
+]
+
+
+def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
+    """Fallback verdict parser. Scans prose for phrase cues and
+    synthesizes a verdict envelope if one matches. Returns ``None`` if
+    no cue fires (caller falls back to the strict-parse error).
+
+    The synthesized envelope marks ``parsed_from_prose: true`` so the
+    dispatched downstream knows this verdict came from the lossy path
+    and the upstream prompt or model should be tightened — but the
+    system makes forward progress instead of dead-ending the task.
+    """
+    lower = summary.lower()
+    for verdict, cues in _PROSE_VERDICT_CUES:
+        for cue in cues:
+            if cue in lower:
+                return {
+                    "verdict": verdict,
+                    "reasoning": (
+                        "Extracted from architect prose (no JSON envelope "
+                        f"emitted). Matched cue: {cue!r}."
+                    ),
+                    "target_artifact": "",
+                    "parsed_from_prose": True,
+                }
+    return None
+
+
 def _extract_verdict_envelope(summary: str) -> dict[str, Any]:
     """Return the last JSON block whose parsed object contains
-    ``"verdict"`` keyed at one of the four valid literals.
+    ``"verdict"`` keyed at one of the four valid literals, OR a
+    prose-derived envelope when no JSON block is present.
 
-    Following ADR-0027's review-envelope pattern: the LAST block wins,
-    so an architect that explored alternatives in earlier blocks can
-    converge to a final verdict in the closing block.
+    Following ADR-0027's review-envelope pattern for the strict path:
+    the LAST JSON block wins, so an architect that explored alternatives
+    in earlier blocks can converge to a final verdict in the closing
+    block.
+
+    When no valid JSON block exists, the prose-fallback parser scans
+    the summary for verdict cues and synthesizes an envelope. This
+    keeps the task moving forward instead of dead-ending on a
+    structured-output omission (observed often enough on sonnet that
+    silent dead-ends were a top productivity bug).
     """
     envelope: dict[str, Any] | None = None
     for m in _JSON_BLOCK_RE.finditer(summary):
@@ -77,13 +165,16 @@ def _extract_verdict_envelope(summary: str) -> dict[str, Any]:
             continue
         if isinstance(data, dict) and data.get("verdict") in _VALID_VERDICTS:
             envelope = data
-    if envelope is None:
-        raise ArchitectVerdictParseError(
-            "architect summary contained no JSON block with a valid "
-            "``verdict`` field; expected one of: "
-            + ", ".join(sorted(_VALID_VERDICTS))
-        )
-    return envelope
+    if envelope is not None:
+        return envelope
+    fallback = _parse_verdict_from_prose(summary)
+    if fallback is not None:
+        return fallback
+    raise ArchitectVerdictParseError(
+        "architect summary contained no JSON block with a valid "
+        "``verdict`` field AND no prose cue matched; expected one of: "
+        + ", ".join(sorted(_VALID_VERDICTS))
+    )
 
 
 _DEADLOCK_TRIGGER = "self:wf-feedback-deadlock"
@@ -249,6 +340,10 @@ def handle(ctx: DispositionContext) -> StepOutput:
         payload["remediation_summary"] = remediation_summary
     if pr_comment_payload is not None:
         payload["pr_comment"] = pr_comment_payload
+    # Surface the prose-fallback marker so downstream telemetry can
+    # track how often the strict-JSON path is missed.
+    if envelope.get("parsed_from_prose"):
+        payload["parsed_from_prose"] = True
 
     logger.info(
         "architect verdict=%s target=%s dispatch=%s capped=%s",

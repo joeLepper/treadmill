@@ -1550,11 +1550,68 @@ def test_architecture_handler_uncertain_caps_at_5_and_emits_pr_comment(
 def test_architecture_handler_raises_on_missing_envelope(
     tmp_path: Path,
 ) -> None:
-    """No JSON block with a valid ``verdict`` → ArchitectVerdictParseError.
-    wf-feedback can re-run the architect with an envelope reminder."""
+    """No JSON block with a valid ``verdict`` AND no prose cue matches
+    → ArchitectVerdictParseError. wf-feedback can re-run the architect
+    with an envelope reminder."""
     ctx = _arch_ctx(tmp_path, "I thought about this for a while but didn't decide.")
-    with pytest.raises(ArchitectVerdictParseError, match="JSON block"):
+    with pytest.raises(ArchitectVerdictParseError, match="prose cue matched"):
         handle_architecture(ctx)
+
+
+def test_architecture_handler_prose_fallback_extracts_accept_as_is(
+    tmp_path: Path,
+) -> None:
+    """When the architect produces a clear prose verdict but omits the
+    JSON envelope (observed 2026-05-15 on sonnet — see PR for the
+    productivity-bug context), the disposition falls back to scanning
+    prose for verdict cues. ``accept-as-is`` cues include phrases like
+    'implementation is already complete' / 'no issues found' / 'all task
+    requirements are implemented'. Task progresses with the synthesized
+    verdict rather than dead-ending."""
+    summary = (
+        "I reviewed the diff carefully against the task spec.\n\n"
+        "The implementation is already complete. The recent commit "
+        "907b9c2 has delivered everything the task requires."
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
+    assert out.payload["verdict"] == "accept-as-is"
+    assert out.payload.get("parsed_from_prose") is True
+
+
+def test_architecture_handler_prose_fallback_extracts_amend(
+    tmp_path: Path,
+) -> None:
+    """Prose-fallback for ``amend`` — model says 'the implementation is
+    incomplete' or 'needs amendment' without a JSON envelope."""
+    summary = (
+        "Looking at the diff against the spec, the implementation is "
+        "incomplete. The cli.py wiring and custom spans are missing."
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "amend"
+    assert out.payload.get("parsed_from_prose") is True
+
+
+def test_architecture_handler_prose_fallback_yields_to_json_when_present(
+    tmp_path: Path,
+) -> None:
+    """When BOTH a JSON envelope AND prose cues are present, the JSON
+    envelope wins (strict path remains primary). The fallback is only
+    consulted when no valid JSON block exists."""
+    summary = (
+        "The implementation is already complete on this branch.\n\n"
+        '```json\n{"verdict": "amend", "reasoning": "but on closer '
+        'inspection a piece is missing", "target_artifact": "X.py", '
+        '"remediation_summary": "wire it up"}\n```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    # JSON envelope's ``amend`` wins over the prose's accept-as-is cue.
+    assert out.decision == "amend"
+    assert out.payload.get("parsed_from_prose") is None
 
 
 def test_architecture_handler_takes_last_verdict_block(
