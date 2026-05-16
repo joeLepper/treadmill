@@ -49,9 +49,14 @@ checks:
                        human review without blocking.
 
       Return JSON exactly matching this shape, no prose around it:
-        {"result": "pass" | "fail" | "uncertain",
+        {"verdict": "pass" | "fail",
          "rationale": "<one to three sentences explaining your judgment, citing
                        specific file paths and behaviors>"}
+      If you would have returned ``uncertain`` (ambiguous case), return
+      ``fail`` and use the rationale to explain the ambiguity so a human
+      can review. The ``ValidationVerdict`` Pydantic schema only accepts
+      pass/fail; ambiguity should not silently pass.
+
 
       Be terse and concrete. Cite at least one production file and one test
       file in the rationale.
@@ -77,13 +82,10 @@ remediations:
       the change. See the judge's rationale on the PR. Adjust tests or
       respond with reasoning if the judge is wrong.
 
-  - "on": tests-exercise-success-criteria:uncertain
-    action: warn
-    target: pr-author
-    message: >
-      The LLM judge could not confidently determine whether the tests in
-      this PR exercise the primary success criteria. Human review encouraged
-      before merge.
+  # 2026-05-16: uncertain remediation removed after ValidationVerdict
+  # schema alignment — the judge now returns pass/fail only.
+  # Operators still see the rationale at PR review.
+
 
 references:
   - ADR-0001                                               # opinion #6: learnings crystallize into rules

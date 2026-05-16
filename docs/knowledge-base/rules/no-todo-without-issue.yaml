@@ -44,8 +44,13 @@ checks:
                       a real issue; flag for human review.
 
       Return JSON exactly matching this shape, no prose around it:
-        {"result": "pass" | "fail" | "uncertain",
+        {"verdict": "pass" | "fail",
          "rationale": "<one to two sentences explaining your judgment>"}
+      If you would have returned ``uncertain`` (ambiguous case), return
+      ``fail`` and use the rationale to explain the ambiguity so a human
+      can review. The ``ValidationVerdict`` Pydantic schema only accepts
+      pass/fail; ambiguity should not silently pass.
+
 
       Be terse and cite specific line content if applicable.
 
@@ -59,13 +64,10 @@ remediations:
       a reference (e.g., TODO(#123) or TODO(task-name)) so follow-up work is
       tracked and discoverable.
 
-  - "on": todo-issue-reference:uncertain
-    action: warn
-    target: pr-author
-    message: >
-      The LLM judge could not confidently determine whether all TODO/FIXME/XXX
-      comments include valid issue references. Please review and verify, or
-      clarify the references in the comments.
+  # 2026-05-16: uncertain remediation removed after ValidationVerdict
+  # schema alignment — the judge now returns pass/fail only.
+  # Operators still see the rationale at PR review.
+
 
 references:
   - ADR-0006  # rules + remediations primitive

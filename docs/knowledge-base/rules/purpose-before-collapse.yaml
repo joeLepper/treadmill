@@ -45,9 +45,14 @@ checks:
                        human review is encouraged.
 
       Return JSON exactly matching this shape, no prose around it:
-        {"result": "pass" | "fail" | "uncertain",
+        {"verdict": "pass" | "fail",
          "rationale": "<one to three sentences citing specific lines from the
                        artifact and the structure it proposes to remove>"}
+      If you would have returned ``uncertain`` (ambiguous case), return
+      ``fail`` and use the rationale to explain the ambiguity so a human
+      can review. The ``ValidationVerdict`` Pydantic schema only accepts
+      pass/fail; ambiguity should not silently pass.
+
 
       Be terse and concrete. Quote at least one line from the artifact in the
       rationale.
@@ -65,13 +70,10 @@ remediations:
       confirm that the purpose has dissolved before proposing removal. Either
       add the analysis, or revise the proposal.
 
-  - "on": purpose-articulated-in-collapse-proposal:uncertain
-    action: warn
-    target: pr-author
-    message: >
-      The LLM judge could not confidently determine whether this collapse
-      proposal articulates the purpose served by the structure being removed.
-      Human review encouraged before merge.
+  # 2026-05-16: uncertain remediation removed after ValidationVerdict
+  # schema alignment — the judge now returns pass/fail only.
+  # Operators still see the rationale at PR review.
+
 
 references:
   - ADR-0001                                                  # opinion #6: learnings crystallize into rules

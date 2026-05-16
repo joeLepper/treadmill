@@ -164,61 +164,53 @@ checks:
       ### Step 5: Return your judgment
 
       Return JSON exactly matching this shape, no prose around it:
-        {
-          "result": "pass" | "fail-implementation" | "fail-diagram" | "uncertain",
-          "rationale": "<one to three sentences. If fail-*, cite the specific
-                        diagram interactions that are missing, extra, or unclear
-                        in the code. If uncertain, explain what is ambiguous.>",
-          "diagram_actors": ["actor1", "actor2", ...],
-          "diagram_interactions_count": <number>,
-          "code_paths_examined": "<brief summary of which functions/endpoints
-                                  or modules in the diff were checked>"
-        }
+        {"verdict": "pass" | "fail",
+         "rationale": "<one to three sentences>"}
+
+      Collapse the four logical outcomes to the two-literal schema:
+        - pass → ``verdict: pass``
+        - fail-implementation → ``verdict: fail`` with rationale citing the
+          specific diagram interactions that are missing, extra, or
+          misaligned in the code.
+        - fail-diagram → ``verdict: fail`` with rationale prefixed
+          "diagram drift:" so the operator at PR review can recognize
+          the diagram-needs-update case and amend the source ADR/plan.
+        - uncertain → ``verdict: fail`` with rationale explaining the
+          ambiguity. The ``ValidationVerdict`` Pydantic schema only
+          accepts pass/fail; ambiguity should not silently pass.
+
+      The 2026-05-15 → 2026-05-16 session showed that the four-literal
+      variant raised parse errors against the schema in 100% of runs
+      (``ValidationVerdict.model_validate`` requires the ``verdict``
+      field, rejects extras). Collapsing here is the simplest alignment.
+      The rationale text preserves the original distinction for
+      operator review.
 
       Be concrete and specific. A passing judgment should demonstrate that you
       traced a diagram interaction to code. A failing judgment should name which
       interaction is missing or extra.
 
 remediations:
-  - "on": implementation-conforms:fail-implementation
+  - "on": implementation-conforms:fail
     action: block-merge
     target: pr-author
     message: >
-      This PR's implementation diverges from its cited diagram (ADR or plan).
-      Per rule:implementation-conforms-to-diagram (enforcing ADR-0004), when code
-      implements a diagrammed interaction, the code must honor the diagram's
-      declared actors, interactions, and control flow. Check the judge's rationale
-      on the PR to see which interactions are missing, extra, or misaligned. Either
-      update the implementation to conform, or (if intent has legitimately changed)
+      This PR's implementation diverges from its cited diagram (ADR or plan)
+      OR the diagram itself has drifted from current intent (read the judge's
+      rationale to distinguish — "diagram drift:" prefix indicates the latter).
+      Per rule:implementation-conforms-to-diagram (enforcing ADR-0004), when
+      code implements a diagrammed interaction, the code must honor the
+      diagram's declared actors, interactions, and control flow. Either update
+      the implementation to conform, or (if intent has legitimately changed)
       update the diagram in its source ADR or plan, add a note explaining the
       change, and cite the amendment in the PR description. See ADR-0004's
       "Amendment protocol" section for guidance.
 
-  - "on": implementation-conforms:fail-diagram
-    action: warn
-    target: pr-author
-    message: >
-      The judge detected that this PR's implementation does not match the diagram
-      it cites, but the code is reasonable and suggests that intent has shifted
-      rather than the code being wrong. Per ADR-0004's amendment protocol, update
-      the diagram in its source ADR or plan with a note explaining what changed
-      and why, then cite the amendment in the PR description. For example, if the
-      code implements async pub-sub but the diagram shows sync request-reply, the
-      diagram should be amended to match the new design. This is not a code error —
-      it is a documentation update to keep intent current.
-
-  - "on": implementation-conforms:uncertain
-    action: warn
-    target: pr-author
-    message: >
-      The LLM judge could not confidently determine whether this PR's
-      implementation conforms to its cited diagram. This may be because the
-      diagram is ambiguous (unlabeled interactions, anonymous actors, unclear
-      control flow), or the code is complex enough that the mapping is unclear.
-      Please review the judge's rationale and clarify either the diagram or the
-      code so that conformance is unambiguous. A diagram that is clear enough to
-      validate against is clear enough to guide implementation — if the diagram
-      cannot be validated, it is not specific enough.
+  # 2026-05-16: fail-diagram and uncertain remediations removed after
+  # ValidationVerdict schema alignment — the judge now collapses all
+  # non-pass cases to ``verdict: fail`` with rationale preserving the
+  # original distinction (fail-implementation / fail-diagram /
+  # uncertain). Operators read the rationale at PR review.
 
 references:
   - ADR-0004  # diagrams as contract of intent; defines conformance criteria and amendment protocol

@@ -80,10 +80,15 @@ checks:
                     for the surface change observed; flag for human review.
 
       Return JSON exactly matching this shape, no prose around it:
-        {"result": "pass" | "fail" | "uncertain",
+        {"verdict": "pass" | "fail",
          "rationale": "<one to three sentences explaining your judgment, citing
                        specific changed files and which docs should have been
                        updated>"}
+      If you would have returned ``uncertain`` (ambiguous case), return
+      ``fail`` and use the rationale to explain the ambiguity so a human
+      can review. The ``ValidationVerdict`` Pydantic schema only accepts
+      pass/fail; ambiguity should not silently pass.
+
 
       Be concrete. If you find a surface change, name the specific file or
       interface that changed and which documentation should reflect it.
@@ -100,16 +105,10 @@ remediations:
       the PR to see which docs need updating (AGENT.md, ADRs, plans, or
       adjacent documentation). Update the docs and push again.
 
-  - "on": surface-changes-have-doc-updates:uncertain
-    action: warn
-    target: pr-author
-    message: >
-      The LLM judge could not confidently determine whether documentation
-      changes in this PR are adequate for the code changes observed. Please
-      review the judge's rationale and verify that the following docs are
-      current: the touched component's AGENT.md (especially "Key surfaces"
-      and "Recent changes" sections), any cited ADRs or plans, and adjacent
-      documentation. Update as needed or respond if the judge is mistaken.
+  # 2026-05-16: uncertain remediation removed after ValidationVerdict
+  # schema alignment — the judge now returns pass/fail only.
+  # Operators still see the rationale at PR review.
+
 
 references:
   - ADR-0030  # federated in-repo agent context (this rule is §3 drift-prevention)

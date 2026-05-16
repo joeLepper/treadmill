@@ -48,8 +48,13 @@ checks:
                       the citation pattern is ambiguous; flag for human review.
 
       Return JSON exactly matching this shape, no prose around it:
-        {"result": "pass" | "fail" | "uncertain",
+        {"verdict": "pass" | "fail",
          "rationale": "<one to two sentences explaining your judgment>"}
+
+      If you would have returned ``uncertain`` (ambiguous citation), return
+      ``fail`` and use the rationale to explain the ambiguity so a human can
+      review. The ``ValidationVerdict`` Pydantic schema only accepts pass/fail;
+      ambiguity should not silently pass.
 
       Be terse and cite specific ADR numbers if broken citations are found.
 
@@ -63,13 +68,10 @@ remediations:
       Check docs/adrs/ for the correct ADR number, or remove the citation if
       the ADR has not yet been written.
 
-  - "on": adr-references-exist:uncertain
-    action: warn
-    target: pr-author
-    message: >
-      The LLM judge could not confidently verify all ADR citations. Please
-      review the references and ensure they point to existing ADRs in
-      docs/adrs/ or docs/knowledge-base/adrs/.
+  # 2026-05-16: uncertain remediation removed after ValidationVerdict
+  # schema alignment — the judge now returns pass/fail only, with
+  # rationale capturing any ambiguity. Operators still see the rationale
+  # at PR review.
 
 references:
   - ADR-0006  # rules + remediations primitive
