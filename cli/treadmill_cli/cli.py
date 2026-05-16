@@ -13,6 +13,7 @@ Command groups:
   treadmill task show    TASK_ID
   treadmill task list    [--repo REPO] [--plan PLAN_ID] [--status STATUS]
   treadmill status       # API + dependencies
+  treadmill observe ...  # read-only Grafana access layer (ADR-0020)
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from rich.table import Table
 from treadmill_cli.api_client import ApiClient, ApiError
 from treadmill_cli.commands.learnings import learnings_app
 from treadmill_cli.config import load_config
+from treadmill_cli.observe import observe_app
 
 
 app = typer.Typer(
@@ -50,6 +52,7 @@ app.add_typer(task_app)
 app.add_typer(workflows_app)
 app.add_typer(role_app)
 app.add_typer(learnings_app)
+app.add_typer(observe_app)
 
 console = Console()
 err_console = Console(stderr=True)
