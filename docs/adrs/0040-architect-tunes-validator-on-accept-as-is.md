@@ -1,6 +1,6 @@
 # ADR-0040: Architect tunes the validator rule on accept-as-is verdicts
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-16
 - **Related:** ADR-0006 (rules + remediations primitive — the YAML format being tuned), ADR-0029 (validator + rule engine), ADR-0032 (role-architect's original triage scope — this ADR adds a third output dimension), ADR-0036 (severity gating — `demote_severity` interacts with this), ADR-0038 (deadlock arbitration — this ADR builds on the partnership), ADR-0039 (validate-fail predicates — `tune-rule` is the structural response to repeated validate false positives)
 
