@@ -524,31 +524,38 @@ def handle(ctx: DispositionContext) -> StepOutput:
 
     verdict: str = envelope["verdict"]
 
-    # Empty-diff safety: accept-as-is is meaningless when no work
-    # exists to accept. Force amend so the partnership (per ADR-0032
-    # / ADR-0038, with #113 wiring amend → wf-feedback) re-engages the
-    # author/feedback loop instead of pretending the work is done.
+    # Empty-diff safety: only ``amend`` makes sense on a branch with no
+    # commits against origin/main. ``accept-as-is`` is meaningless
+    # (nothing to accept), ``uncertain`` is also wrong (nothing to be
+    # uncertain about — there's no work), and ``supersede`` is
+    # unrelated. Force amend so the partnership (per ADR-0032 / ADR-0038,
+    # with #113 wiring amend → wf-feedback) re-engages the author /
+    # feedback loop. Observed 2026-05-16: architect verdicted uncertain
+    # on empty branches without firing the check; uncertain dead-ended
+    # silently. Widened to cover both verdicts.
     if (
-        verdict == "accept-as-is"
+        verdict in ("accept-as-is", "uncertain")
         and _branch_has_no_commits_against_main(ctx.repo_dir)
     ):
         logger.warning(
-            "architect verdicted accept-as-is on a branch with no commits "
-            "against origin/main — forcing verdict=amend (no work to accept). "
+            "architect verdicted %s on a branch with no commits against "
+            "origin/main — forcing verdict=amend (no work to %s). "
             "Architect's original prose: %r",
+            verdict, "accept" if verdict == "accept-as-is" else "consider",
             (envelope.get("reasoning") or "")[:200],
         )
+        original_verdict = verdict
         verdict = "amend"
         envelope["verdict"] = "amend"
         envelope["empty_diff_forced_amend"] = True
         envelope["remediation_summary"] = (
-            "The architect verdicted accept-as-is, but the task's branch has "
-            "no commits against origin/main — wf-author likely failed its "
-            "author-side validation gate (PR #121) and never pushed. There is "
-            "nothing to accept. Re-engage wf-feedback to author the missing "
-            "work (likely test files referenced by the task's validation "
-            "script). Original architect reasoning: "
-            + (envelope.get("reasoning") or "<empty>")
+            f"The architect verdicted {original_verdict}, but the task's "
+            "branch has no commits against origin/main — wf-author likely "
+            "failed its author-side validation gate (PR #121) and never "
+            "pushed. There is nothing to accept or be uncertain about. "
+            "Re-engage wf-feedback to author the missing work (likely test "
+            "files referenced by the task's validation script). Original "
+            "architect reasoning: " + (envelope.get("reasoning") or "<empty>")
         )
     reasoning: str = envelope.get("reasoning", "")
     target_artifact: str = envelope.get("target_artifact", "")

@@ -1670,6 +1670,22 @@ def test_architecture_handler_forces_amend_on_empty_diff_branch(
     )
 
 
+def test_architecture_handler_forces_amend_on_uncertain_empty_diff(
+    tmp_path: Path,
+) -> None:
+    """Same safety net, broader scope: ``uncertain`` on an empty branch
+    is also wrong — there's nothing to be uncertain about when no work
+    exists. Force amend so the feedback loop re-engages."""
+    summary = (
+        '```json\n{"verdict": "uncertain", "reasoning": "I am not sure what '
+        'to do here", "target_artifact": "services/api/X.py"}\n```'
+    )
+    ctx = _arch_ctx(tmp_path, summary, empty_branch=True)
+    out = handle_architecture(ctx)
+    assert out.decision == "amend"
+    assert out.payload.get("empty_diff_forced_amend") is True
+
+
 def test_architecture_handler_prose_fallback_catches_all_changes_in_place(
     tmp_path: Path,
 ) -> None:
