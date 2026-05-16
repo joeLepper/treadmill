@@ -1255,6 +1255,66 @@ def test_validation_handler_dry_run_skips_gh_pr_comment(
     assert out.summary is not None
 
 
+def test_validation_picks_up_new_rules_without_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule engine loads rules fresh on every invocation — no module-level
+    cache. A rule file written between two _load_applicable_rules calls
+    is visible to the second call without any restart (per ADR-0030)."""
+    import treadmill_agent.runner_dispositions.validation as val_module
+
+    def _fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "--name-only" in cmd:
+            result.stdout = "src/main.py\n"
+        elif "rev-parse" in cmd and "HEAD" in cmd:
+            result.stdout = "abc123def456\n"
+        else:
+            result.stdout = ""
+        result.returncode = 0
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    # Set up a rules dir with one initial rule (no applies_to → universal).
+    rules_dir = tmp_path / "docs" / "knowledge-base" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "rule-alpha.yaml").write_text(
+        "name: rule-alpha\n"
+        "description: first rule\n"
+        "checks:\n"
+        "  - id: alpha-check\n"
+        "    type: deterministic\n"
+        "    severity: advisory\n"
+        "    script: exit 0\n"
+    )
+
+    ctx = _disp_ctx(repo_dir=tmp_path, pr_number=42, workflow_id="wf-validate")
+
+    first_checks = val_module._load_applicable_rules(ctx)
+    first_ids = {c.id for c in first_checks}
+    assert "alpha-check" in first_ids
+    assert "beta-check" not in first_ids
+
+    # Crystallization lands a second rule mid-session (no restart).
+    (rules_dir / "rule-beta.yaml").write_text(
+        "name: rule-beta\n"
+        "description: freshly crystallized rule\n"
+        "checks:\n"
+        "  - id: beta-check\n"
+        "    type: deterministic\n"
+        "    severity: advisory\n"
+        "    script: exit 0\n"
+    )
+
+    second_checks = val_module._load_applicable_rules(ctx)
+    second_ids = {c.id for c in second_checks}
+    assert "alpha-check" in second_ids
+    assert "beta-check" in second_ids, (
+        "rule engine cached the corpus — new rules not visible without restart"
+    )
+
+
 # ── runner-level dispatch ────────────────────────────────────────────────────
 
 
