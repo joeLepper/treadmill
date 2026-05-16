@@ -215,15 +215,24 @@ sequence_of_work:
       Tests: synthesize a fresh rule file; trigger wf-validate;
       assert the new rule is in the evaluator's check set.
     scope:
+      # 2026-05-16: spec was authored speculatively — assumed the rule
+      # engine lived at services/api/treadmill_api/rules/engine.py, but
+      # it actually lives at
+      # workers/agent/treadmill_agent/runner_dispositions/validation.py.
+      # The role-code-author correctly authored the test in the matching
+      # workers/agent/tests/ tree (test_runner_dispositions.py); fixing
+      # the scope + validation here so author-side validation finds it.
       files:
-        - services/api/treadmill_api/rules/engine.py
-        - services/api/tests/test_rule_engine.py
+        - workers/agent/treadmill_agent/runner_dispositions/validation.py
+        - workers/agent/tests/test_runner_dispositions.py
     validation:
       - kind: deterministic
         description: |
-          New rule files load without API restart.
+          New rule files load without API restart (validation engine
+          test — currently lives in the worker's runner_dispositions
+          suite per the 2026-05-16 reconciliation).
         script: |
-          cd services/api && uv run pytest tests/test_rule_engine.py -q
+          cd workers/agent && uv run pytest tests/test_runner_dispositions.py -q -k validation
 
   - id: smoke-end-to-end
     title: Smoke — crystallize one captured learning end-to-end
