@@ -1,6 +1,10 @@
+---
+status: active
+---
+
 # Plan: ADR-0040 architect-tunes-validator implementation
 
-- **Status:** drafting
+- **Status:** active
 - **Date:** 2026-05-16
 - **Related ADRs:** ADR-0040 (parent), ADR-0006 (rules YAML format), ADR-0032 (role-architect), ADR-0036 (severity gating), ADR-0038 (deadlock arbitration)
 
