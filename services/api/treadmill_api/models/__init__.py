@@ -23,6 +23,7 @@ from treadmill_api.models.workflow import (
     WorkflowVersion,
     WorkflowVersionStep,
 )
+from treadmill_api.models.schedule import Schedule
 from treadmill_api.models.workflow_dispatch_dedup import WorkflowDispatchDedup
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "RoleHook",
     "RoleSkill",
     "RoleVersion",
+    "Schedule",
     "Skill",
     "Task",
     "TaskDependency",

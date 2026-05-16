@@ -19,6 +19,7 @@ from treadmill_api.models import (
     Role,
     RoleHook,
     RoleSkill,
+    Schedule,
     Skill,
     Task,
     TaskDependency,
@@ -52,6 +53,7 @@ def test_all_models_register_on_base_metadata():
         "role_hooks",
         "event_triggers",
         "events",
+        "schedules",
     }
     actual = set(Base.metadata.tables.keys())
     missing = expected - actual
@@ -162,9 +164,18 @@ def test_workflow_run_step_output_is_jsonb():
 
 
 def test_no_unexpected_jsonb_columns():
-    """ADR-0011 forbids JSONB anywhere except events.payload and
-    workflow_run_steps.output. This test enforces the rule."""
-    allowed = {("events", "payload"), ("workflow_run_steps", "output")}
+    """ADR-0011 restricts JSONB to explicit allowed sites only.
+
+    Allowed sites:
+    - events.payload (ADR-0011)
+    - workflow_run_steps.output (ADR-0011)
+    - schedules.payload_template (ADR-0035 exception)
+    """
+    allowed = {
+        ("events", "payload"),
+        ("workflow_run_steps", "output"),
+        ("schedules", "payload_template"),
+    }
     found = {
         (table.name, col.name)
         for table in Base.metadata.tables.values()
@@ -180,7 +191,7 @@ def test_no_unexpected_jsonb_columns():
 def test_uuid_primary_keys_use_postgres_uuid_type():
     """UUID PKs use the Postgres UUID type with as_uuid=True so the model
     layer hands real ``uuid.UUID`` objects, not strings."""
-    for model in (Plan, Task, TaskDependency, WorkflowVersion, WorkflowRun, WorkflowRunStep, Event, EventTrigger):
+    for model in (Plan, Task, TaskDependency, WorkflowVersion, WorkflowRun, WorkflowRunStep, Event, EventTrigger, Schedule):
         col = model.__table__.columns["id"]
         assert isinstance(col.type, UUID), f"{model.__name__}.id is not UUID"
 
