@@ -25,6 +25,7 @@ from rich.console import Console
 from rich.table import Table
 
 from treadmill_cli.api_client import ApiClient, ApiError
+from treadmill_cli.commands.learnings import learnings_app
 from treadmill_cli.config import load_config
 
 
@@ -48,6 +49,7 @@ app.add_typer(plan_app)
 app.add_typer(task_app)
 app.add_typer(workflows_app)
 app.add_typer(role_app)
+app.add_typer(learnings_app)
 
 console = Console()
 err_console = Console(stderr=True)
