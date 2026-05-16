@@ -714,6 +714,94 @@ async def maybe_dispatch_arbitration_on_deadlock(
     )
 
 
+async def maybe_dispatch_feedback_on_architect_amend(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """Fire ``wf-feedback`` when the architect verdicts ``amend``.
+
+    ADR-0032 / ADR-0038 partnership closure: the architect's ``amend``
+    verdict says "the intent is right; the code is the bug. A
+    remediation plan will be drafted to fix the implementation." The
+    architect emits a ``dispatch.workflow_id="wf-plan"`` hint in its
+    payload but historically no consumer trigger acted on that hint —
+    the verdict was decorative. This helper closes that gap with the
+    lighter path: re-engage ``wf-feedback`` against the same task so
+    the feedback role's analyzer + code-author can author the
+    remediation directly without the heavier wf-plan ceremony.
+
+    Skips cleanly when:
+      * The completed step isn't ``wf-architecture-resolve`` or its
+        decision isn't ``amend``.
+      * The task has already dispatched ``wf-feedback`` >= 5 times
+        (cap per ADR-0029 Q29.e).
+
+    Dedup namespace: ``wf-feedback:<repo>:architect-amend-run=<wf_architecture_resolve_run_id>``.
+    Each amend verdict from a distinct architect run produces at most
+    one feedback dispatch.
+
+    Returns the new ``wf-feedback`` run's id, or ``None`` if any skip
+    condition fired.
+    """
+    if typed.output.decision != "amend":
+        return None
+
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None or row.workflow_id != ARCHITECTURE_RESOLVE_WORKFLOW_ID:
+        return None
+
+    if await _is_capped(session, row.task_id, FEEDBACK_WORKFLOW_ID):
+        logger.warning(
+            "amend-feedback trigger: %s capped for task %s "
+            "(>=%d prior runs); operator must intervene",
+            FEEDBACK_WORKFLOW_ID, row.task_id, FEEDBACK_MAX_ATTEMPTS,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {
+        "repo": row.repo,
+        "architect_amend_run_id": str(row.run_id),
+    }
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=FEEDBACK_WORKFLOW_ID,
+            trigger="self:architect-amend",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=FEEDBACK_WORKFLOW_ID,
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
 _REVIEW_OVERRIDE_NAMESPACE = uuid.UUID("8e16f4c0-2c4c-4f4f-9b9a-7c3d6f1a5e10")
 
 

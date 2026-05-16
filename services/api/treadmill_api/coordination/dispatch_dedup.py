@@ -133,6 +133,9 @@ def _build_wf_feedback_key(payload: dict[str, Any]) -> str | None:
     author_run_id = payload.get("author_run_id")
     if author_run_id:
         return f"wf-feedback:{repo}:author-fail-run={author_run_id}"
+    architect_amend_run_id = payload.get("architect_amend_run_id")
+    if architect_amend_run_id:
+        return f"wf-feedback:{repo}:architect-amend-run={architect_amend_run_id}"
     return None
 
 

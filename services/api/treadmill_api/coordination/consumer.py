@@ -414,6 +414,15 @@ class CoordinationConsumer:
                 await self._maybe_emit_review_override(
                     session, step_id, typed,
                 )
+            # ADR-0032/ADR-0038 partnership closure: when the architect
+            # verdicts ``amend``, dispatch ``wf-feedback`` against the
+            # same task so the feedback role can author the
+            # remediation. The architect's payload carries a routing
+            # hint but historically nothing acted on it.
+            if action == "completed":
+                await self._maybe_fire_architect_amend_feedback(
+                    session, step_id, typed,
+                )
             # ADR-0031: when a wf-validate or wf-review step completes,
             # set/push the auto-merge cooling-off deadline in Redis. The
             # 5s poll loop (``_auto_merge_loop``) fires the merge when
@@ -1172,6 +1181,40 @@ class CoordinationConsumer:
             logger.exception(
                 "_maybe_fire_deadlock_arbitration: dispatch failed for "
                 "step %s; prior projection committed, will retry on "
+                "redelivery",
+                step_id,
+            )
+
+    # ── Self-trigger: architect amend → wf-feedback (ADR-0032/0038 closure) ─
+
+    async def _maybe_fire_architect_amend_feedback(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """Companion to the deadlock-arbitration helper: when the
+        architect verdicts ``amend``, dispatch ``wf-feedback`` against
+        the same task. Closes the routing-hint-but-no-action gap that
+        existed in ADR-0038 for amend verdicts.
+
+        Failures are logged but do not propagate.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_feedback_on_architect_amend,
+        )
+        try:
+            await maybe_dispatch_feedback_on_architect_amend(
+                session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_architect_amend_feedback: dispatch failed "
+                "for step %s; prior projection committed, will retry on "
                 "redelivery",
                 step_id,
             )
