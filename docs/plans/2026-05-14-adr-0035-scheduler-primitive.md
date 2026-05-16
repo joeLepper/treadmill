@@ -1,6 +1,6 @@
 ---
-status: drafting
-trigger: ADR-0035 accepted 2026-05-14. Drafted same-day. **Held — DO NOT submit via CLI** until ADR-0031 hands-free driving lands per memory/feedback_dont_compound_during_migration.md.
+status: active
+trigger: ADR-0035 accepted 2026-05-14. Drafted same-day, held until hands-free driving landed. Activated 2026-05-16 after the partnership stack (ADR-0031 auto-merge + ADR-0037 author-fail dispatch + ADR-0038 deadlock arbitration with twice-widened predicate + ADR-0040 architect-tunes-validator) closed the hands-free loop.
 parent: docs/adrs/0035-scheduler-primitive-for-periodic-agent-work.md
 ---
 
