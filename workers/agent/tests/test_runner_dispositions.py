@@ -1547,15 +1547,29 @@ def test_architecture_handler_uncertain_caps_at_5_and_emits_pr_comment(
     assert out.payload["pr_comment"]["signal"] == "capped"
 
 
-def test_architecture_handler_raises_on_missing_envelope(
+def test_architecture_handler_raises_on_empty_summary(
     tmp_path: Path,
 ) -> None:
-    """No JSON block with a valid ``verdict`` AND no prose cue matches
-    → ArchitectVerdictParseError. wf-feedback can re-run the architect
-    with an envelope reminder."""
-    ctx = _arch_ctx(tmp_path, "I thought about this for a while but didn't decide.")
-    with pytest.raises(ArchitectVerdictParseError, match="prose cue matched"):
+    """Empty / blank summary is the only path that still raises after
+    the prose fallback + uncertain default landed — there's no signal
+    at all to parse. The strict-parse error surfaces as a step.failure
+    that wf-feedback can re-run with an envelope reminder."""
+    ctx = _arch_ctx(tmp_path, "")
+    with pytest.raises(ArchitectVerdictParseError):
         handle_architecture(ctx)
+
+
+def test_architecture_handler_prose_fallback_defaults_to_uncertain(
+    tmp_path: Path,
+) -> None:
+    """When the architect produces substantive prose but no specific
+    verdict cue matches, the fallback defaults to ``uncertain`` so the
+    task continues through the 5-attempt rework cap (ADR-0029 Q29.e)
+    rather than dead-ending on an unrecognized prose pattern."""
+    ctx = _arch_ctx(tmp_path, "I thought about this for a while but didn't decide.")
+    out = handle_architecture(ctx)
+    assert out.decision == "uncertain"
+    assert out.payload.get("parsed_from_prose") is True
 
 
 def test_architecture_handler_prose_fallback_extracts_accept_as_is(
@@ -1577,6 +1591,24 @@ def test_architecture_handler_prose_fallback_extracts_accept_as_is(
     out = handle_architecture(ctx)
     assert out.decision == "accept-as-is"
     assert out.payload["verdict"] == "accept-as-is"
+    assert out.payload.get("parsed_from_prose") is True
+
+
+def test_architecture_handler_prose_fallback_catches_all_changes_in_place(
+    tmp_path: Path,
+) -> None:
+    """Observed 2026-05-16 on 472e3ddc: the architect opened with 'All
+    changes are in place. Here's a summary of what was changed across
+    6 files:' and enumerated each file. The cue list was extended to
+    catch this phrasing; the verdict resolves to accept-as-is."""
+    summary = (
+        "All changes are in place. Here's a summary of what was "
+        "changed across 6 files:\n\n"
+        "- services/api/treadmill_api/eventbus.py: added otel propagate"
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
     assert out.payload.get("parsed_from_prose") is True
 
 

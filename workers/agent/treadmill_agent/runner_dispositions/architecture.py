@@ -111,14 +111,42 @@ _PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
         "no amendment needed",
         "no changes required",
         "all task requirements are implemented",
+        "all changes are in place",
+        "changes are in place",
+        "the implementation matches",
+        "implementation matches the spec",
+        "everything the task requires",
+        "everything the spec requires",
+        "everything required by the spec",
+        "the work satisfies the spec",
+        "the diff covers everything",
     )),
 ]
 
 
+# Last-resort prose cues — if NOTHING matches, prefer `uncertain` over
+# raising. Uncertain re-dispatches the architect (up to ADR-0029 Q29.e's
+# 5-attempt cap), which surfaces to operator at the cap. Better than
+# dead-ending the task on an unrecognized prose pattern.
+_UNCERTAIN_FALLBACK_CUE = (
+    "(no recognized cue — defaulted to uncertain to keep loop moving)"
+)
+
+
 def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
     """Fallback verdict parser. Scans prose for phrase cues and
-    synthesizes a verdict envelope if one matches. Returns ``None`` if
-    no cue fires (caller falls back to the strict-parse error).
+    synthesizes a verdict envelope.
+
+    Ordered fallback chain:
+      1. Try the cue table (amend → supersede → uncertain → accept-as-is).
+      2. If nothing matches AND the summary has substantive content (not
+         empty / not just whitespace), default to ``uncertain`` so the
+         architect re-dispatches up to ADR-0029 Q29.e's 5-attempt cap.
+         Operator surfaces at the cap. Better than dead-ending on an
+         unrecognized prose pattern.
+      3. If the summary is empty / blank, return ``None`` so the
+         strict-parse error fires (this is the "model returned nothing
+         useful" path — worth surfacing as a hard failure).
 
     The synthesized envelope marks ``parsed_from_prose: true`` so the
     dispatched downstream knows this verdict came from the lossy path
@@ -138,6 +166,20 @@ def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
                     "target_artifact": "",
                     "parsed_from_prose": True,
                 }
+    # No specific cue matched but the model did produce substantive
+    # prose — default to uncertain to keep the loop moving.
+    if summary.strip():
+        return {
+            "verdict": "uncertain",
+            "reasoning": (
+                "Architect produced prose but no recognized verdict cue "
+                "matched; defaulted to ``uncertain`` so the task continues "
+                "through the rework-cap path rather than dead-ending. "
+                "Prompt or model may need tightening if this fires often."
+            ),
+            "target_artifact": "",
+            "parsed_from_prose": True,
+        }
     return None
 
 
