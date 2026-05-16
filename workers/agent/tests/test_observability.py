@@ -17,6 +17,7 @@ def _fresh_module():
     mod._tracer_provider = None
     mod._meter_provider = None
     mod._initialized = False
+    mod._token_counters.clear()
     return mod
 
 
@@ -99,3 +100,89 @@ def test_real_providers_registered_when_endpoint_set(monkeypatch):
     # Global registration is the key correctness invariant.
     mock_set_tracer.assert_called_once_with(mod._tracer_provider)
     mock_set_meter.assert_called_once_with(mod._meter_provider)
+
+
+# ── record_token_usage ────────────────────────────────────────────────────────
+
+
+def test_record_token_usage_does_not_raise_with_noop_provider(monkeypatch):
+    """record_token_usage succeeds silently when no endpoint is configured."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mod = _fresh_module()
+    mod.configure()
+
+    mod.record_token_usage(
+        model="claude-haiku-4-5-20251001",
+        role="role-author",
+        task_id="task-abc",
+        step_id="step-xyz",
+        input_tokens=100,
+        output_tokens=30,
+        cache_creation_tokens=5,
+        cache_read_tokens=10,
+    )
+    # No assertion needed — we're verifying it doesn't raise.
+
+
+def test_record_token_usage_creates_four_counters(monkeypatch):
+    """The first call to record_token_usage populates _token_counters with
+    the four expected instrument keys."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mod = _fresh_module()
+    mod.configure()
+
+    assert mod._token_counters == {}
+
+    mod.record_token_usage(
+        model="claude-haiku-4-5-20251001",
+        role="role-author",
+        task_id="task-1",
+        step_id="step-1",
+        input_tokens=10,
+        output_tokens=5,
+        cache_creation_tokens=0,
+        cache_read_tokens=0,
+    )
+
+    assert set(mod._token_counters) == {"input", "output", "cache_creation", "cache_read"}
+
+
+def test_record_token_usage_reuses_counters_across_calls(monkeypatch):
+    """Counter objects are created once and reused on subsequent calls
+    (OTel instrument identity is stable within a MeterProvider lifetime)."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mod = _fresh_module()
+    mod.configure()
+
+    mod.record_token_usage(
+        model="m", role="r", task_id="t1", step_id="s1",
+        input_tokens=1, output_tokens=1,
+        cache_creation_tokens=0, cache_read_tokens=0,
+    )
+    counter_after_first = mod._token_counters["input"]
+
+    mod.record_token_usage(
+        model="m", role="r", task_id="t2", step_id="s2",
+        input_tokens=2, output_tokens=2,
+        cache_creation_tokens=0, cache_read_tokens=0,
+    )
+    assert mod._token_counters["input"] is counter_after_first
+
+
+def test_record_token_usage_fresh_module_resets_counters(monkeypatch):
+    """_fresh_module() clears _token_counters; new configure() triggers
+    counter re-creation on the next record_token_usage call."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mod = _fresh_module()
+    mod.configure()
+
+    mod.record_token_usage(
+        model="m", role="r", task_id="t", step_id="s",
+        input_tokens=1, output_tokens=1,
+        cache_creation_tokens=0, cache_read_tokens=0,
+    )
+    assert "input" in mod._token_counters
+
+    # Simulate module re-init (as happens between test isolation calls).
+    _fresh_module()
+    assert mod._token_counters == {}

@@ -14,6 +14,7 @@ from typing import Any
 _tracer_provider: Any = None
 _meter_provider: Any = None
 _initialized = False
+_token_counters: dict[str, Any] = {}
 
 
 def _configure_otel() -> None:
@@ -24,6 +25,7 @@ def _configure_otel() -> None:
         return
 
     _initialized = True
+    _token_counters.clear()
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name = os.getenv("OTEL_SERVICE_NAME", "treadmill-worker")
 
@@ -103,3 +105,52 @@ def get_meter(name: str) -> Any:
 def get_logger(name: str) -> logging.Logger:
     """Get a logger by name."""
     return logging.getLogger(name)
+
+
+def record_token_usage(
+    *,
+    model: str,
+    role: str,
+    task_id: str,
+    step_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+) -> None:
+    """Emit OTel counters for one Claude Code invocation's token usage.
+
+    Four counters per call:
+      treadmill.claude.tokens.input
+      treadmill.claude.tokens.output
+      treadmill.claude.tokens.cache_creation
+      treadmill.claude.tokens.cache_read
+
+    Each carries attributes model, role, task_id, step_id.
+    Counters are created lazily on the first call and reused thereafter.
+    The function is a no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset
+    (no-op MeterProvider absorbs all calls silently).
+    """
+    if not _initialized:
+        _configure_otel()
+
+    if "input" not in _token_counters:
+        meter = _meter_provider.get_meter("treadmill.claude")
+        _token_counters["input"] = meter.create_counter(
+            "treadmill.claude.tokens.input",
+        )
+        _token_counters["output"] = meter.create_counter(
+            "treadmill.claude.tokens.output",
+        )
+        _token_counters["cache_creation"] = meter.create_counter(
+            "treadmill.claude.tokens.cache_creation",
+        )
+        _token_counters["cache_read"] = meter.create_counter(
+            "treadmill.claude.tokens.cache_read",
+        )
+
+    attrs = {"model": model, "role": role, "task_id": task_id, "step_id": step_id}
+    _token_counters["input"].add(input_tokens, attrs)
+    _token_counters["output"].add(output_tokens, attrs)
+    _token_counters["cache_creation"].add(cache_creation_tokens, attrs)
+    _token_counters["cache_read"].add(cache_read_tokens, attrs)

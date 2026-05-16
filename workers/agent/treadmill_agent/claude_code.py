@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from treadmill_agent.api_client import PriorStep, Role
+from treadmill_agent import observability
 
 logger = logging.getLogger("treadmill.agent.claude_code")
 
@@ -169,6 +170,14 @@ def run_claude_code(
 
     cmd = [
         binary, "--print",
+        # JSON output mode: claude emits a single JSON object on stdout
+        # once the run completes. We parse it for token usage metrics
+        # (ADR-0020 §"Token tracking"). Trade-off: the real-time
+        # line-by-line text streaming visible in Grafana during the run
+        # is replaced by one JSON blob at the end — the Popen+threads
+        # code structure from ADR-0020 phase 2 is preserved, but the
+        # incremental output doesn't arrive until the run finishes.
+        "--output-format", "json",
         "--model", role.model,
         # ``acceptEdits`` is the permission mode that lets Claude Code's
         # Edit / Write tools land changes without a TTY prompt. Without
@@ -235,7 +244,30 @@ def run_claude_code(
             f"claude exited {returncode}\n"
             f"stdout:\n{stdout_text}\nstderr:\n{stderr_text}"
         )
-    return CodeAuthorResult(summary=stdout_text.strip() or "(no summary)")
+
+    summary, usage = _try_parse_json_output(stdout_text)
+    if usage is not None:
+        ctx = log_context or {}
+        try:
+            observability.record_token_usage(
+                model=role.model,
+                role=role.id,
+                task_id=str(ctx.get("task_id", "")),
+                step_id=str(ctx.get("step_id", "")),
+                **usage,
+            )
+        except Exception:
+            logger.debug(
+                "token usage metric emission failed (non-fatal)",
+                extra=base_extra,
+            )
+    else:
+        logger.debug(
+            "claude stdout is not JSON; token metrics not emitted",
+            extra=base_extra,
+        )
+
+    return CodeAuthorResult(summary=summary.strip() or "(no summary)")
 
 
 def _pump_stream(
@@ -266,6 +298,62 @@ def _pump_stream(
             logger.log(level, line.rstrip("\n"), extra=extra)
     finally:
         stream.close()
+
+
+def _try_parse_json_output(
+    text: str,
+) -> tuple[str, dict[str, int] | None]:
+    """Parse claude's JSON output (``--output-format json``) and extract
+    the result text plus token usage counters.
+
+    Returns ``(summary, usage)`` where ``usage`` is a dict with keys
+    ``input_tokens``, ``output_tokens``, ``cache_creation_tokens``,
+    ``cache_read_tokens`` (all ``int``), or ``None`` when the stdout is
+    not JSON (e.g. stub binaries in unit tests) or lacks a ``usage``
+    block.
+
+    The expected JSON shape from Claude Code 2.x is::
+
+        {
+          "type": "result",
+          "subtype": "success",
+          "result": "<text the role produced>",
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          ...
+        }
+    """
+    stripped = text.strip()
+    if not stripped:
+        return text, None
+    try:
+        data = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return text, None
+
+    if not isinstance(data, dict):
+        return text, None
+
+    result_text = data.get("result", "")
+    if not isinstance(result_text, str):
+        result_text = str(result_text)
+
+    usage_raw = data.get("usage")
+    if not isinstance(usage_raw, dict):
+        return result_text or text, None
+
+    usage = {
+        "input_tokens": int(usage_raw.get("input_tokens", 0)),
+        "output_tokens": int(usage_raw.get("output_tokens", 0)),
+        # JSON key is cache_creation_input_tokens; OTel attr is cache_creation_tokens
+        "cache_creation_tokens": int(usage_raw.get("cache_creation_input_tokens", 0)),
+        "cache_read_tokens": int(usage_raw.get("cache_read_input_tokens", 0)),
+    }
+    return result_text or text, usage
 
 
 def _find_binary() -> str:

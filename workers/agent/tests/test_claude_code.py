@@ -238,6 +238,10 @@ def test_run_claude_code_passes_model_and_prompt(
     assert "--permission-mode" in args
     assert "acceptEdits" in args
     assert args[args.index("--permission-mode") + 1] == "acceptEdits"
+    # ADR-0020 token tracking: JSON output mode must be requested so
+    # we can parse usage fields from the result envelope.
+    assert "--output-format" in args
+    assert args[args.index("--output-format") + 1] == "json"
     # ``--print`` must come before ``--model`` in argv so the CLI's
     # headless mode is established before the model flag is parsed.
     # Catches a future arg-order regression where flags get reordered
@@ -459,3 +463,156 @@ def test_run_claude_code_accepts_no_log_context(
         task_title="t", task_description=None, plan_intent=None,
     )
     assert result.summary == "hi"
+
+
+# ── JSON output parsing (_try_parse_json_output) ─────────────────────────────
+
+
+def test_try_parse_json_output_extracts_result_and_usage() -> None:
+    """Happy path: valid Claude Code JSON envelope yields (result, usage)."""
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "result": "I made the change.",
+        "usage": {
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "cache_creation_input_tokens": 5,
+            "cache_read_input_tokens": 10,
+        },
+        "cost_usd": 0.001,
+        "duration_ms": 1500,
+    }
+    import json as _json
+    text = _json.dumps(payload)
+    summary, usage = claude_code._try_parse_json_output(text)
+    assert summary == "I made the change."
+    assert usage == {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "cache_creation_tokens": 5,
+        "cache_read_tokens": 10,
+    }
+
+
+def test_try_parse_json_output_falls_back_for_plain_text() -> None:
+    """Non-JSON stdout (stub binaries, dry-run) returns (raw, None)."""
+    raw = "did the thing\n"
+    summary, usage = claude_code._try_parse_json_output(raw)
+    assert summary == raw
+    assert usage is None
+
+
+def test_try_parse_json_output_falls_back_for_empty() -> None:
+    summary, usage = claude_code._try_parse_json_output("")
+    assert usage is None
+
+
+def test_try_parse_json_output_missing_usage_block() -> None:
+    """JSON without a ``usage`` key yields (result, None)."""
+    import json as _json
+    text = _json.dumps({"type": "result", "result": "ok"})
+    summary, usage = claude_code._try_parse_json_output(text)
+    assert summary == "ok"
+    assert usage is None
+
+
+def test_try_parse_json_output_zero_cache_tokens() -> None:
+    """Zero cache tokens parse to int 0, not missing key."""
+    import json as _json
+    payload = {
+        "result": "done",
+        "usage": {
+            "input_tokens": 50,
+            "output_tokens": 10,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    }
+    _, usage = claude_code._try_parse_json_output(_json.dumps(payload))
+    assert usage is not None
+    assert usage["cache_creation_tokens"] == 0
+    assert usage["cache_read_tokens"] == 0
+
+
+# ── Token OTel emission via JSON stub ────────────────────────────────────────
+
+
+def _json_stub(stub_path: Path, result_text: str = "all done") -> None:
+    """Write a bash stub that emits the Claude Code JSON envelope."""
+    import json as _json
+    payload = _json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": result_text,
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "cache_creation_input_tokens": 8,
+            "cache_read_input_tokens": 16,
+        },
+        "cost_usd": 0.002,
+        "duration_ms": 2000,
+    })
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        f"echo '{payload}'\n"
+    )
+    stub_path.chmod(0o755)
+
+
+def test_run_claude_code_emits_token_metrics_from_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the stub emits a valid JSON envelope, run_claude_code calls
+    observability.record_token_usage with the parsed token counts."""
+    from unittest.mock import patch, call
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    _json_stub(stub)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    with patch("treadmill_agent.claude_code.observability.record_token_usage") as mock_record:
+        result = claude_code.run_claude_code(
+            repo_dir=repo_dir, role=_role(),
+            task_title="t", task_description=None, plan_intent=None,
+            log_context=dict(_LOG_CONTEXT),
+        )
+
+    assert result.summary == "all done"
+    mock_record.assert_called_once_with(
+        model="claude-opus-4-7",
+        role="role-author",
+        task_id="task-abc",
+        step_id="step-xyz",
+        input_tokens=100,
+        output_tokens=40,
+        cache_creation_tokens=8,
+        cache_read_tokens=16,
+    )
+
+
+def test_run_claude_code_skips_token_metrics_for_plain_text_stub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain-text stubs (non-JSON) must not raise; record_token_usage is
+    not called and the raw stdout is returned as the summary."""
+    from unittest.mock import patch
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    stub.write_text("#!/usr/bin/env bash\necho 'did the thing'\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    with patch("treadmill_agent.claude_code.observability.record_token_usage") as mock_record:
+        result = claude_code.run_claude_code(
+            repo_dir=repo_dir, role=_role(),
+            task_title="t", task_description=None, plan_intent=None,
+        )
+
+    assert result.summary == "did the thing"
+    mock_record.assert_not_called()
