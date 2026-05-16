@@ -47,7 +47,25 @@ checks:
                            the diagram (e.g., "ADR-0004 figure 5", "plan
                            2026-05-14-x-y-z.md").
 
-      Your evaluation follows these steps:
+      ### Step 0: When no diagram is cited, the rule does not apply
+
+      **If DIAGRAM_SOURCE is empty / not provided / a placeholder, OR
+      DIAGRAM_CITATION is empty, return `pass` immediately with rationale
+      "no diagram cited in PR; this rule has nothing to enforce against."**
+      The rule's purpose is to enforce diagram conformance; without a
+      diagram cited, the rule has no claim to enforce. Do not fall back
+      to comparing the diff against task-spec prose — that's the
+      validator's other rules' job (description conformance, completion
+      checks, etc.). This rule is scoped narrowly to diagram conformance
+      and must short-circuit when its inputs are absent. This prevents
+      the historical false-positive failure mode where a missing diagram
+      triggered defensive `fail-implementation` on PRs that don't even
+      cite a diagram (observed across multiple PRs 2026-05-15→16; required
+      architect arbitration to override; ADR-0040 captured the architect-
+      tunes-validator partnership that this surgical prompt fix
+      pre-empts).
+
+      Your evaluation follows these steps when a diagram IS provided:
 
       ### Step 1: Understand the diagram
 
