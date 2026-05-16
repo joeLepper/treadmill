@@ -1396,6 +1396,7 @@ def _arch_ctx(
     *,
     role_id: str = "role-architect",
     trigger: str = "registered",
+    empty_branch: bool = False,
 ) -> DispositionContext:
     """Build a DispositionContext for the architect handler.
 
@@ -1403,8 +1404,21 @@ def _arch_ctx(
     handle_architecture via role.id branch in runner.py — for direct
     handler tests we just build a ctx with role-architect and a summary
     carrying the verdict envelope.
+
+    Seeds a dummy commit on the task branch by default so the disposition's
+    empty-diff safety check (forces accept-as-is → amend when no commits
+    exist against origin/main) doesn't fire on every test. Pass
+    ``empty_branch=True`` to skip the seed when testing the safety check
+    itself.
     """
     _bare, clone = _init_bare_and_clone(tmp_path)
+    if not empty_branch:
+        (clone / "WORK.md").write_text("authored work\n")
+        for cmd in (
+            ["git", "-C", str(clone), "add", "-A"],
+            ["git", "-C", str(clone), "commit", "-m", "task work"],
+        ):
+            subprocess.run(cmd, check=True, capture_output=True)
     ctx = _disp_ctx(
         repo_dir=clone,
         output_kind="analysis",
@@ -1629,6 +1643,31 @@ def test_architecture_handler_prose_fallback_extracts_accept_as_is(
     assert out.decision == "accept-as-is"
     assert out.payload["verdict"] == "accept-as-is"
     assert out.payload.get("parsed_from_prose") is True
+
+
+def test_architecture_handler_forces_amend_on_empty_diff_branch(
+    tmp_path: Path,
+) -> None:
+    """ADR-0032/ADR-0038 safety net: when the architect verdicts
+    ``accept-as-is`` but the task branch has NO commits against
+    origin/main (the worker's wf-author failed pre-push, leaving an
+    empty workspace), force the verdict to ``amend``. accept-as-is
+    fires ``review.override`` which is meaningless if no PR exists.
+    The amend verdict re-engages wf-feedback (per PR #113) to author
+    the missing work."""
+    summary = (
+        '```json\n{"verdict": "accept-as-is", "reasoning": "looks fine to '
+        'me", "target_artifact": "services/api/X.py"}\n```'
+    )
+    # empty_branch=True so the disposition's empty-diff check fires.
+    ctx = _arch_ctx(tmp_path, summary, empty_branch=True)
+    out = handle_architecture(ctx)
+    assert out.decision == "amend"
+    assert out.payload.get("empty_diff_forced_amend") is True
+    # The synthetic remediation_summary should explain the situation.
+    assert "no commits against origin/main" in out.payload.get(
+        "remediation_summary", ""
+    )
 
 
 def test_architecture_handler_prose_fallback_catches_all_changes_in_place(

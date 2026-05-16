@@ -460,6 +460,42 @@ def _build_pr_comment_payload(
     return None
 
 
+def _branch_has_no_commits_against_main(repo_dir: Any) -> bool:
+    """Return True if the worker's checkout has no commits ahead of
+    origin/main — i.e. the branch is empty (nothing to accept).
+
+    Observed 2026-05-15→16 on tasks ``2a3eaadb``, ``b25b3f5d``,
+    ``472e3ddc``, ``2850d0cd``: wf-author failed author-side validation
+    (pytest exit 4 — no tests collected) so nothing was committed; the
+    architect dispatched against the same task ran in an empty
+    workspace and verdicted ``accept-as-is`` from prose like "all
+    changes look fine" or "no issues found" — but there was literally
+    no diff to accept. The ``review.override`` event then fires
+    meaninglessly because the gate's target SHA matches origin/main.
+
+    Returns ``False`` on git-command failure (we'd rather over-accept
+    than spuriously force amend on a real diff that the command
+    couldn't reach).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "origin/main..HEAD"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        return int(result.stdout.strip()) == 0
+    except ValueError:
+        return False
+
+
 def handle(ctx: DispositionContext) -> StepOutput:
     """Parse the architect verdict envelope and emit the routing
     payload. No git or PR side effects — those happen downstream when
@@ -469,6 +505,14 @@ def handle(ctx: DispositionContext) -> StepOutput:
     On parse failure (``ArchitectVerdictParseError``) propagates as a
     step failure; wf-feedback can re-run the architect with an explicit
     envelope reminder.
+
+    Post-parse safety check: if the architect verdicted
+    ``accept-as-is`` but the workspace has no commits against
+    origin/main (the branch is empty — wf-author failed pre-push), the
+    verdict is forcibly downgraded to ``amend`` with a synthetic
+    remediation_summary explaining that nothing exists to accept and
+    that wf-feedback should re-engage to author the work. Prevents
+    review.override from firing meaninglessly.
     """
     summary = ctx.claude_result.summary or ""
     # Pass the role's model so the structured-output retry can use the
@@ -479,6 +523,33 @@ def handle(ctx: DispositionContext) -> StepOutput:
     )
 
     verdict: str = envelope["verdict"]
+
+    # Empty-diff safety: accept-as-is is meaningless when no work
+    # exists to accept. Force amend so the partnership (per ADR-0032
+    # / ADR-0038, with #113 wiring amend → wf-feedback) re-engages the
+    # author/feedback loop instead of pretending the work is done.
+    if (
+        verdict == "accept-as-is"
+        and _branch_has_no_commits_against_main(ctx.repo_dir)
+    ):
+        logger.warning(
+            "architect verdicted accept-as-is on a branch with no commits "
+            "against origin/main — forcing verdict=amend (no work to accept). "
+            "Architect's original prose: %r",
+            (envelope.get("reasoning") or "")[:200],
+        )
+        verdict = "amend"
+        envelope["verdict"] = "amend"
+        envelope["empty_diff_forced_amend"] = True
+        envelope["remediation_summary"] = (
+            "The architect verdicted accept-as-is, but the task's branch has "
+            "no commits against origin/main — wf-author likely failed its "
+            "author-side validation gate (PR #121) and never pushed. There is "
+            "nothing to accept. Re-engage wf-feedback to author the missing "
+            "work (likely test files referenced by the task's validation "
+            "script). Original architect reasoning: "
+            + (envelope.get("reasoning") or "<empty>")
+        )
     reasoning: str = envelope.get("reasoning", "")
     target_artifact: str = envelope.get("target_artifact", "")
     remediation_summary: str | None = envelope.get("remediation_summary")
@@ -519,6 +590,8 @@ def handle(ctx: DispositionContext) -> StepOutput:
         payload["parsed_from_prose"] = True
     if envelope.get("parsed_via_retry"):
         payload["parsed_via_retry"] = True
+    if envelope.get("empty_diff_forced_amend"):
+        payload["empty_diff_forced_amend"] = True
 
     logger.info(
         "architect verdict=%s target=%s dispatch=%s capped=%s",
