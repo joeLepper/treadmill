@@ -541,11 +541,12 @@ async def maybe_dispatch_arbitration_on_deadlock(
     typed: StepCompleted,
 ) -> uuid.UUID | None:
     """Dispatch ``wf-architecture-resolve`` when a ralph-loop deadlock fires
-    (ADR-0038, widened 2026-05-15 to a two-axis gate predicate).
+    (ADR-0038, twice-widened 2026-05-15).
 
     The deadlock signal is: a ``wf-feedback`` step.completed with
-    ``decision='responded-without-change'`` against a task whose
-    most-recent gate-bearing workflow returned a blocking verdict:
+    ``decision`` in ``{'responded-without-change', 'fail'}`` (second
+    widening — see below) against a task whose most-recent gate-bearing
+    workflow returned a blocking verdict:
 
       * ``wf-review.decision == 'changes_requested'`` — original
         ADR-0038 predicate; reviewer disagrees with author + feedback
@@ -579,7 +580,7 @@ async def maybe_dispatch_arbitration_on_deadlock(
 
     Skips cleanly when:
       * The completed step isn't ``wf-feedback`` or its decision isn't
-        ``responded-without-change``.
+        in the widened {``responded-without-change``, ``fail``} set.
       * Neither blocking gate signal is present on the most-recent run
         (no deadlock).
       * The task has already dispatched
@@ -594,7 +595,15 @@ async def maybe_dispatch_arbitration_on_deadlock(
     used for ADR-0032's Class C learnings — different trigger sources,
     different namespaces.
     """
-    if typed.output.decision != "responded-without-change":
+    # Widened 2026-05-15 (second widening): also fire on `fail`. Observed
+    # tasks 472e3ddc, 2a3eaadb, b25b3f5d (Plans A + B downstream of OTel
+    # SDK / crystallization-disposition) all dead-ended at
+    # wf-feedback.decision='fail' with no further auto-dispatch. ADR-0037
+    # fires wf-feedback on wf-author-fail; nothing fires on
+    # wf-feedback-fail. Architect arbitration is the right next move
+    # whether the feedback role declined to act
+    # (``responded-without-change``) or tried and gave up (``fail``).
+    if typed.output.decision not in ("responded-without-change", "fail"):
         return None
 
     # Resolve workflow + run + task + repo for the completing step.
