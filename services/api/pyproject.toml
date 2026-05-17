@@ -24,6 +24,7 @@ dependencies = [
     "opentelemetry-instrumentation-httpx>=0.41b0",
     "opentelemetry-instrumentation-botocore>=0.41b0",
     "opentelemetry-instrumentation-logging>=0.41b0",
+    "croniter>=2.0.0",
 ]
 
 [project.scripts]

@@ -8,12 +8,15 @@ This directory contains the Treadmill API, the event-driven control plane that c
 
 - `treadmill_api/cli.py` — entry point; starts the FastAPI server that listens for webhooks and exposes `/plans`, `/tasks`, `/health` routes.
 - `treadmill_api/events/` — event schema definitions (GitHub pushes, pull merges, plan documents, step lifecycle, task output). Event registry routes incoming webhooks to the appropriate consumer.
+- `treadmill_api/events/schedule.py` — `ScheduledTick` payload (entity_type="schedule", action="tick") emitted by the scheduler on each cron fire (ADR-0035).
+- `treadmill_api/scheduler/` — cron scheduler package (ADR-0035): `cron.py` (croniter wrapper), `policy.py` (deterministic jitter + quiet-hours + backoff, ported from RAMJAC), `runner.py` (`SchedulerRunner` — 30 s poll loop + 4 h missed-tick replay on startup).
 - `treadmill_api/dispatch.py` — task dispatch logic; decides when to enqueue a step, applies dependency gates, deduplicates by composite key (plan SHA + step name).
 - `treadmill_api/database.py` — Postgres schema: workflows, plans, steps, tasks, mergeability state, long-lived task output.
 - `treadmill_api/parsers/plan_doc.py` — parses `docs/plans/*.md` frontmatter and extracts the task tree structure.
 
 ## Recent changes
 
+- [#TBD](https://github.com/anthropics/treadmill/pull/TBD) — `treadmill_api/scheduler/` package: `SchedulerRunner` (30 s poll + 4 h replay), `cron.py` (croniter wrapper), `policy.py` (RAMJAC jitter + quiet hours + backoff), `events/schedule.py` (`ScheduledTick` payload registered in registry).
 - [#38](https://github.com/anthropics/treadmill/pull/38) — AGENT.md schema document + validation rules.
 - [#37](https://github.com/anthropics/treadmill/pull/37) — Document the post-deploy operator action for API credentials (ADR-0023 followup).
 - [#33](https://github.com/anthropics/treadmill/pull/33) — First Treadmill-specific rules in `docs/knowledge-base/rules/`.

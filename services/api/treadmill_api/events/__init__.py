@@ -52,6 +52,7 @@ from treadmill_api.events.step_output import (
     StepOutput,
 )
 from treadmill_api.events.review import ReviewOverride
+from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
 from treadmill_api.events.validator_tuning import ValidatorTuning
 
@@ -103,6 +104,8 @@ __all__ = [
     # Internal control-plane events
     "DispatchPublishFailed",
     "DispatchPublishReplayed",
+    # Scheduled-tick events (ADR-0035)
+    "ScheduledTick",
     # Validator tuning proposal (ADR-0040)
     "ValidatorTuning",
 ]
