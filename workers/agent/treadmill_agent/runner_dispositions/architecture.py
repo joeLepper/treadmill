@@ -39,8 +39,11 @@ import re
 import subprocess
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
 from treadmill_agent.events import Artifact, Metadata, StepOutput
 from treadmill_agent.runner_dispositions._context import DispositionContext
+from treadmill_api.events.validator_tuning import ValidatorTuning
 
 logger = logging.getLogger("treadmill.agent.architecture")
 
@@ -599,6 +602,20 @@ def handle(ctx: DispositionContext) -> StepOutput:
         payload["parsed_via_retry"] = True
     if envelope.get("empty_diff_forced_amend"):
         payload["empty_diff_forced_amend"] = True
+    # Surface optional validator_tuning sub-object per ADR-0040.
+    # Best-effort: a malformed tuning is dropped with a WARN log rather
+    # than failing the step (the routing payload is still useful).
+    raw_tuning = envelope.get("validator_tuning")
+    if raw_tuning is not None:
+        try:
+            tuning = ValidatorTuning(**raw_tuning)
+            payload["validator_tuning"] = tuning.model_dump(mode="json")
+        except (PydanticValidationError, TypeError) as exc:
+            logger.warning(
+                "architect envelope carries validator_tuning but it failed "
+                "validation — dropping. Error: %s",
+                exc,
+            )
 
     logger.info(
         "architect verdict=%s target=%s dispatch=%s capped=%s",

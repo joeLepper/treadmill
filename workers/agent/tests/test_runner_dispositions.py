@@ -1816,6 +1816,81 @@ def test_architecture_handler_takes_last_verdict_block(
     assert out.decision == "accept-as-is"
 
 
+def test_architecture_handler_valid_validator_tuning_surfaces_in_payload(
+    tmp_path: Path,
+) -> None:
+    """ADR-0040: when the envelope carries a valid ``validator_tuning``
+    sub-object, it is validated via the ValidatorTuning Pydantic model
+    and surfaced under ``StepOutput.payload.validator_tuning``."""
+    tuning = {
+        "rule_slug": "implementation-conforms-to-diagram",
+        "check_id": "diagram-match",
+        "action": "demote_severity",
+        "evidence": "The diff implements the contract; the rule false-positived.",
+        "proposed_patch": {"from": "blocking", "to": "warning"},
+    }
+    envelope = {
+        "verdict": "accept-as-is",
+        "reasoning": "Reviewer was wrong; work is fine.",
+        "target_artifact": "services/api/treadmill_api/coordination/consumer.py",
+        "validator_tuning": tuning,
+    }
+    summary = f"```json\n{json.dumps(envelope)}\n```"
+    ctx = _arch_ctx(tmp_path, summary, trigger="self:wf-feedback-deadlock")
+    out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
+    assert "validator_tuning" in out.payload
+    vt = out.payload["validator_tuning"]
+    assert vt["rule_slug"] == "implementation-conforms-to-diagram"
+    assert vt["action"] == "demote_severity"
+    assert vt["proposed_patch"] == {"from": "blocking", "to": "warning"}
+
+
+def test_architecture_handler_no_validator_tuning_omits_key(
+    tmp_path: Path,
+) -> None:
+    """When the envelope has no ``validator_tuning`` field, the payload
+    must not carry the key at all."""
+    summary = (
+        '```json\n'
+        '{"verdict": "accept-as-is", "reasoning": "gap is acceptable.", '
+        '"target_artifact": "workers/agent/AGENT.md"}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
+    assert "validator_tuning" not in out.payload
+
+
+def test_architecture_handler_malformed_validator_tuning_drops_with_warn(
+    tmp_path: Path,
+    caplog: Any,
+) -> None:
+    """When the envelope carries a ``validator_tuning`` sub-object that
+    fails Pydantic validation (missing required fields / wrong literal),
+    the step must NOT fail — the malformed tuning is dropped and a WARN
+    log is emitted. The routing payload (verdict + dispatch) still lands."""
+    import logging
+
+    envelope = {
+        "verdict": "accept-as-is",
+        "reasoning": "gap accepted",
+        "target_artifact": "workers/agent/AGENT.md",
+        "validator_tuning": {
+            "rule_slug": "some-rule",
+            # missing: check_id, action, evidence, proposed_patch
+        },
+    }
+    summary = f"```json\n{json.dumps(envelope)}\n```"
+    ctx = _arch_ctx(tmp_path, summary)
+    with caplog.at_level(logging.WARNING, logger="treadmill.agent.architecture"):
+        out = handle_architecture(ctx)
+    assert out.decision == "accept-as-is"
+    assert "validator_tuning" not in out.payload
+    assert any("validator_tuning" in r.message for r in caplog.records)
+
+
 # ── crystallization handler (wf-crystallize-learning) ─────────────────────────
 
 
