@@ -53,6 +53,8 @@ MOTO_CONTAINER_PORT = 5000
 STATE_DIR = Path(".treadmill-local")
 AUTOSCALER_PID_FILE = STATE_DIR / "autoscaler.pid"
 AUTOSCALER_LOG_FILE = STATE_DIR / "autoscaler.log"
+SCHEDULER_PID_FILE = STATE_DIR / "scheduler.pid"
+SCHEDULER_LOG_FILE = STATE_DIR / "scheduler.log"
 BARE_REPOS_DIR = STATE_DIR / "repos"
 """Host-side directory for the agent worker's local-mode bare repos.
 The runtime mounts this into the worker container at
@@ -86,6 +88,13 @@ _API_INTERNAL_DB_URL = (
     "postgresql+asyncpg://postgres:postgres@treadmill-postgres:5432/treadmill"
 )
 _API_INTERNAL_REDIS_URL = "redis://treadmill-redis:6379/0"
+
+# Host-side Postgres URL for subprocesses that run on the host (not in Docker)
+# but need to reach the Postgres container. Port 15432 mirrors the mapping in
+# ``_build_dev_local_service_specs`` → ``port_mappings=[(5432, 15432)]``.
+_SCHEDULER_HOST_DB_URL = (
+    "postgresql+asyncpg://postgres:postgres@localhost:15432/treadmill"
+)
 
 
 def find_repo_root() -> Path:
@@ -148,6 +157,7 @@ class LocalRuntime:
         deployment_config: dict[str, Any] | None = None,
         build_images: bool = True,
         start_autoscaler: bool = True,
+        start_scheduler: bool = True,
     ) -> None:
         """Construct a LocalRuntime.
 
@@ -179,6 +189,13 @@ class LocalRuntime:
                 run a stack without on-demand worker spawning — useful
                 for debugging a specific worker failure in isolation
                 with manual ``run-worker`` control.
+            start_scheduler: When True (default), dev-local ``up``
+                spawns the scheduler subprocess after services are up.
+                Set to False (via ``--no-scheduler``) to suppress the
+                cron-dispatch loop — useful when testing schedule-free
+                workflows. Ignored in fully-local (moto) mode: the
+                scheduler needs a real Postgres schema and runs
+                against it on the host.
         """
         self.infra_dir = infra_dir.resolve()
         self.docker = docker.from_env()
@@ -186,6 +203,7 @@ class LocalRuntime:
         self.deployment_config = deployment_config
         self.build_images = build_images
         self.start_autoscaler = start_autoscaler
+        self.start_scheduler = start_scheduler
         # Per ADR-0019: dev-local credentials are fetched on the host and
         # injected into containers as env vars. The fetched values live in
         # memory on the runtime for the lifetime of the up-process; we
@@ -261,6 +279,12 @@ class LocalRuntime:
         else:
             console.print(
                 "[yellow]• Autoscaler suppressed (--no-autoscaler).[/yellow]"
+            )
+        if self.start_scheduler:
+            self._start_scheduler_dev_local()
+        else:
+            console.print(
+                "[yellow]• Scheduler suppressed (--no-scheduler).[/yellow]"
             )
         self._report_up_dev_local(cfg)
 
@@ -678,6 +702,7 @@ class LocalRuntime:
     def down(self) -> None:
         console.print("[bold]Treadmill local — down[/bold]")
         self._stop_autoscaler()
+        self._stop_scheduler()
         self._stop_managed_containers()
         self._remove_network()
         console.print("[green]Down complete.[/green]")
@@ -781,8 +806,9 @@ class LocalRuntime:
     def status(self) -> None:
         containers = self._managed_containers()
         autoscaler_alive = self._autoscaler_pid_alive()
+        scheduler_alive = self._scheduler_pid_alive()
 
-        if not containers and not autoscaler_alive:
+        if not containers and not autoscaler_alive and not scheduler_alive:
             console.print("[yellow]No Treadmill-managed containers running.[/yellow]")
             return
 
@@ -810,6 +836,14 @@ class LocalRuntime:
                 "[role=autoscaler]",
                 "running",
                 f"pid={pid}, log={AUTOSCALER_LOG_FILE}",
+            )
+        if scheduler_alive:
+            pid = SCHEDULER_PID_FILE.read_text().strip()
+            table.add_row(
+                "scheduler (subprocess)",
+                "[role=scheduler]",
+                "running",
+                f"pid={pid}, log={SCHEDULER_LOG_FILE}",
             )
         console.print(table)
 
@@ -1413,6 +1447,100 @@ class LocalRuntime:
             return False
         try:
             pid = int(AUTOSCALER_PID_FILE.read_text().strip())
+        except ValueError:
+            return False
+        return self._pid_alive(pid)
+
+    # ── Scheduler lifecycle ───────────────────────────────────────────────────
+
+    def _start_scheduler_dev_local(self) -> None:
+        """Spawn the scheduler subprocess for dev-local mode.
+
+        Mirrors ``_start_autoscaler_dev_local`` but drives
+        ``treadmill_api.scheduler.runner`` — the asyncio cron-dispatch
+        loop — rather than the autoscaler. Not started in fully-local
+        (moto) mode: the scheduler needs a real Postgres schema and
+        the host-side port mapping that only exists in dev-local.
+
+        Env-vars passed to the subprocess:
+          * ``DATABASE_URL`` — host-side Postgres URL (localhost:15432)
+            so the subprocess reaches the container from the host.
+          * ``EVENTS_TOPIC_ARN`` — from ``aws.events_topic_arn``.
+          * ``AWS_DEFAULT_REGION`` — from YAML.
+          * ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` — the
+            API's IAM-User keys (same principal that can publish to
+            SNS). Fetched once on the host by
+            ``_ensure_dev_local_credentials`` (ADR-0019).
+          * NOTABLY ABSENT: ``AWS_ENDPOINT_URL`` (moto override;
+            dev-local talks to real AWS).
+        """
+        assert self.deployment_config is not None
+        cfg = self.deployment_config
+
+        if self._scheduler_pid_alive():
+            console.print("• Scheduler already running.")
+            return
+
+        # Credentials must already be fetched (called after _ensure_dev_local_credentials).
+        self._ensure_dev_local_credentials()
+        assert self._api_aws_env is not None
+
+        deployment_id = cfg["deployment_id"]
+        STATE_DIR.mkdir(exist_ok=True)
+        log_handle = open(SCHEDULER_LOG_FILE, "ab")
+        env = {
+            **os.environ,
+            # Host-side Postgres URL — the subprocess runs on the host, so it
+            # uses the mapped port (15432) rather than the container-DNS form.
+            "DATABASE_URL": _SCHEDULER_HOST_DB_URL,
+            "EVENTS_TOPIC_ARN": cfg["aws"]["events_topic_arn"],
+            "AWS_DEFAULT_REGION": cfg["aws_region"],
+            # Reuse the API's IAM-User keys — same principal, same SNS permissions.
+            **self._api_aws_env,
+        }
+        # Defensive: drop the moto endpoint override if it leaked into the env.
+        env.pop("AWS_ENDPOINT_URL", None)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "treadmill_api.scheduler.runner"],
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(Path.cwd()),
+        )
+        SCHEDULER_PID_FILE.write_text(str(proc.pid))
+        console.print(
+            f"• Scheduler started (pid={proc.pid}, deployment={deployment_id})."
+        )
+
+    def _stop_scheduler(self) -> None:
+        if not SCHEDULER_PID_FILE.exists():
+            return
+        try:
+            pid = int(SCHEDULER_PID_FILE.read_text().strip())
+        except ValueError:
+            SCHEDULER_PID_FILE.unlink(missing_ok=True)
+            return
+        if self._pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(20):
+                    if not self._pid_alive(pid):
+                        break
+                    time.sleep(0.1)
+                if self._pid_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
+                console.print(f"• Scheduler stopped (pid={pid}).")
+            except ProcessLookupError:
+                pass
+        SCHEDULER_PID_FILE.unlink(missing_ok=True)
+
+    def _scheduler_pid_alive(self) -> bool:
+        if not SCHEDULER_PID_FILE.exists():
+            return False
+        try:
+            pid = int(SCHEDULER_PID_FILE.read_text().strip())
         except ValueError:
             return False
         return self._pid_alive(pid)

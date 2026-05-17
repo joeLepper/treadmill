@@ -66,6 +66,7 @@ def _runtime(
     deployment_config: dict | None = None,
     build_images: bool = True,
     start_autoscaler: bool = True,
+    start_scheduler: bool = True,
 ) -> LocalRuntime:
     # Fully-local mode requires cdk.json (it shells out to ``cdk synth``).
     # Dev-local skips synth entirely, so the cdk.json check is also
@@ -79,6 +80,7 @@ def _runtime(
         deployment_config=deployment_config,
         build_images=build_images,
         start_autoscaler=start_autoscaler,
+        start_scheduler=start_scheduler,
     )
 
 
@@ -114,6 +116,15 @@ def up(
              "demand. Use this flag when debugging a specific worker "
              "failure in isolation with manual ``run-worker`` control.",
     ),
+    no_scheduler: bool = typer.Option(
+        False,
+        "--no-scheduler",
+        help="Skip starting the scheduler subprocess (dev-local only). "
+             "Default is to always start it: the scheduler polls Postgres "
+             "for active cron schedules and fires ticks on the event bus. "
+             "Use this flag when running schedule-free workflows or when "
+             "debugging without the cron-dispatch loop.",
+    ),
 ) -> None:
     """Synth CDK + provision moto + start support containers (fully-local),
     or start Postgres + Redis + API against real AWS (dev-local, with
@@ -124,6 +135,7 @@ def up(
         deployment_config=cfg,
         build_images=not no_build,
         start_autoscaler=not no_autoscaler,
+        start_scheduler=not no_scheduler,
     )
     rt.up()
 

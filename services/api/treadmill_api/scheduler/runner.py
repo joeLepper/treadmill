@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -258,3 +259,64 @@ class _EventStub:
         self.plan_id = None
         self.run_id = None
         self.step_id = None
+
+
+# ── Subprocess entrypoint ─────────────────────────────────────────────────────
+
+
+async def _amain() -> None:
+    """Async entry point: wire DB + publisher then drive SchedulerRunner.
+
+    Reads from env:
+      DATABASE_URL        — asyncpg-form Postgres URL (required)
+      EVENTS_TOPIC_ARN    — SNS topic; falls back to LoggingEventPublisher
+      AWS_DEFAULT_REGION  — boto3 region
+      AWS_ENDPOINT_URL    — moto override; absent in dev-local/fully-remote
+    """
+    import os
+    import signal
+
+    import boto3
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from treadmill_api.eventbus import SNSEventPublisher, set_publisher
+
+    db_url = os.environ["DATABASE_URL"]
+    topic_arn = os.environ.get("EVENTS_TOPIC_ARN")
+    region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+
+    engine = create_async_engine(db_url, future=True, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    publisher: EventPublisher | None = None
+    if topic_arn:
+        sns_client = boto3.client("sns", region_name=region)
+        publisher = SNSEventPublisher(sns_client, topic_arn)
+        set_publisher(publisher)
+
+    runner = SchedulerRunner(sessionmaker=session_factory, publisher=publisher)
+    stop = asyncio.Event()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+
+    await runner.start()
+    logger.info("scheduler: subprocess running; waiting for stop signal")
+    await stop.wait()
+    logger.info("scheduler: stop signal received; shutting down")
+    await runner.stop()
+    await engine.dispose()
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    )
+    asyncio.run(_amain())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
