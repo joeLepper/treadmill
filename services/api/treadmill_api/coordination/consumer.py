@@ -337,6 +337,14 @@ class CoordinationConsumer:
             )
             return
 
+        if et == "schedule":
+            # ADR-0035: schedule.tick events dispatch the bound workflow.
+            # Other schedule lifecycle events are not actionable here.
+            await self._handle_schedule_event(
+                record, action=action, payload=record.get("payload") or {},
+            )
+            return
+
         if et != "step":
             logger.debug("coordination ignoring %s.%s", et, action)
             return
@@ -481,6 +489,69 @@ class CoordinationConsumer:
         # on plan-active + dependencies, so a freshly-registered task on
         # a freshly-activated plan dispatches here.
         await self._reevaluate()
+
+    async def _handle_schedule_event(
+        self,
+        record: dict[str, Any],
+        *,
+        action: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        """Handle a ``schedule.*`` event — dispatch the bound workflow on tick.
+
+        Only ``schedule.tick`` is actionable; other schedule lifecycle events
+        (pause, resume, delete) are not produced to the consumer queue. An
+        unknown action is ignored defensively.
+
+        Payload validation through the typed registry fires before any DB
+        access — poison-safe, same as the github and step paths. When the
+        dispatcher is not wired the tick is logged at WARNING and dropped;
+        the scheduler will re-fire on the next cron cycle.
+        """
+        if action != "tick":
+            logger.debug("coordination ignoring schedule.%s", action)
+            return
+
+        try:
+            typed = parse_payload("schedule", "tick", payload)
+        except (UnknownEventTypeError, ValidationError) as exc:
+            logger.warning(
+                "coordination dropping malformed schedule.tick payload: %s", exc,
+            )
+            return
+
+        if self.dispatcher is None:
+            logger.warning(
+                "scheduled-tick: dispatcher not wired; cannot dispatch "
+                "workflow for schedule %s",
+                payload.get("schedule_id"),
+            )
+            return
+
+        from treadmill_api.coordination.triggers import handle_scheduled_tick
+        from treadmill_api.events.schedule import ScheduledTick
+
+        assert isinstance(typed, ScheduledTick)
+
+        async with self.sessionmaker() as session:
+            try:
+                run_id = await handle_scheduled_tick(
+                    session, self.dispatcher, typed=typed,
+                )
+            except Exception:
+                logger.exception(
+                    "scheduled-tick: dispatch raised for schedule %s; "
+                    "swallowing so the consumer loop keeps draining",
+                    typed.schedule_id,
+                )
+                return
+            await session.commit()
+
+        if run_id is not None:
+            logger.info(
+                "scheduled-tick: dispatched %s for schedule %s (run %s)",
+                typed.workflow_id, typed.schedule_id, run_id,
+            )
 
     async def _handle_github_event(
         self,

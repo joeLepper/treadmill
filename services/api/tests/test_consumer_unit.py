@@ -1201,3 +1201,165 @@ async def test_maybe_emit_review_override_short_circuits_without_flag() -> None:
         "helper must short-circuit before any DB query when "
         "dispatch.review_override is absent"
     )
+
+
+# ── schedule.tick consumer routing (ADR-0035) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_tick_malformed_payload_drops_before_db() -> None:
+    """A schedule.tick with missing required fields fails Pydantic validation
+    before any DB work — same poison-safe gate as step and github paths."""
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    await consumer.handle({
+        "entity_type": "schedule",
+        "action": "tick",
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            # missing schedule_id, workflow_id — ScheduledTick validation fails
+            "rendered_payload": {},
+        },
+    })
+    session.execute.assert_not_awaited()
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_tick_skips_when_dispatcher_unwired() -> None:
+    """schedule.tick with no dispatcher wired: payload validates but dispatch
+    is skipped (logged at WARNING). No session is opened."""
+    session = _StubSession()
+    consumer = _consumer(session)  # dispatcher=None by default
+
+    await consumer.handle({
+        "entity_type": "schedule",
+        "action": "tick",
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "schedule_id": str(uuid.uuid4()),
+            "workflow_id": "wf-documentarian-audit",
+            "rendered_payload": {},
+        },
+    })
+    session.execute.assert_not_awaited()
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_tick_dispatches_bound_workflow() -> None:
+    """A valid schedule.tick event calls handle_scheduled_tick with the typed
+    ScheduledTick payload and commits the session on success.
+
+    handle_scheduled_tick is patched so we don't need a real DB; this test
+    verifies the consumer routing and the commit contract.
+    """
+    from unittest.mock import MagicMock, patch
+    from treadmill_api.events.schedule import ScheduledTick
+
+    session = _StubSession()
+    mock_dispatcher = MagicMock()
+    schedule_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    dispatched: list[ScheduledTick] = []
+
+    async def _stub_handle(sess: Any, dispatcher: Any, *, typed: ScheduledTick) -> uuid.UUID:
+        dispatched.append(typed)
+        return run_id
+
+    consumer = CoordinationConsumer(
+        sqs_client=None,
+        queue_url="unused",
+        sessionmaker=_stub_factory(session),  # type: ignore[arg-type]
+        dispatcher=mock_dispatcher,
+    )
+
+    with patch(
+        "treadmill_api.coordination.triggers.handle_scheduled_tick",
+        side_effect=_stub_handle,
+    ):
+        await consumer.handle({
+            "entity_type": "schedule",
+            "action": "tick",
+            "event_id": str(uuid.uuid4()),
+            "payload": {
+                "schedule_id": str(schedule_id),
+                "workflow_id": "wf-documentarian-audit",
+                "rendered_payload": {"trigger": "scheduled-audit"},
+            },
+        })
+
+    assert len(dispatched) == 1, "handle_scheduled_tick must be called once"
+    assert dispatched[0].schedule_id == schedule_id
+    assert dispatched[0].workflow_id == "wf-documentarian-audit"
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_non_tick_action_is_ignored() -> None:
+    """Non-tick schedule actions (e.g. schedule.paused) are logged and dropped
+    without opening a session."""
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    await consumer.handle({
+        "entity_type": "schedule",
+        "action": "paused",
+        "event_id": str(uuid.uuid4()),
+        "payload": {"schedule_id": str(uuid.uuid4())},
+    })
+    session.execute.assert_not_awaited()
+    session.commit.assert_not_awaited()
+
+
+# ── handle_scheduled_tick skip conditions (ADR-0035) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_scheduled_tick_skips_when_schedule_not_found() -> None:
+    """handle_scheduled_tick returns None when the schedule row doesn't exist."""
+    from unittest.mock import AsyncMock
+    from treadmill_api.coordination.triggers import handle_scheduled_tick
+    from treadmill_api.events.schedule import ScheduledTick
+
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=None)
+
+    typed = ScheduledTick(
+        schedule_id=uuid.uuid4(),
+        workflow_id="wf-documentarian-audit",
+        rendered_payload={},
+    )
+
+    result = await handle_scheduled_tick(session, dispatcher=None, typed=typed)
+
+    assert result is None
+    session.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_scheduled_tick_skips_when_schedule_paused() -> None:
+    """handle_scheduled_tick returns None when the schedule is paused."""
+    from unittest.mock import AsyncMock, MagicMock
+    from treadmill_api.coordination.triggers import handle_scheduled_tick
+    from treadmill_api.events.schedule import ScheduledTick
+
+    session = AsyncMock()
+    mock_schedule = MagicMock()
+    mock_schedule.status = "paused"
+    mock_schedule.workflow_id = "wf-documentarian-audit"
+    session.get = AsyncMock(return_value=mock_schedule)
+
+    typed = ScheduledTick(
+        schedule_id=uuid.uuid4(),
+        workflow_id="wf-documentarian-audit",
+        rendered_payload={},
+    )
+
+    result = await handle_scheduled_tick(session, dispatcher=None, typed=typed)
+
+    assert result is None
+    session.get.assert_awaited_once()
+    session.execute.assert_not_awaited()

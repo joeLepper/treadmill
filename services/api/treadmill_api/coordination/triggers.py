@@ -84,9 +84,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
+from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.models import (
     Event,
     EventTrigger,
+    Schedule,
     Task,
     TaskPR,
     Workflow,
@@ -1205,6 +1207,199 @@ async def _create_and_publish_run(
     logger.info(
         "trigger evaluator: dispatched %s for task %s (run %s) on %s",
         workflow_id, task.id, run.id, trigger,
+    )
+    return run.id
+
+
+# ── Scheduled-tick dispatch (ADR-0035) ───────────────────────────────────────
+
+
+async def handle_scheduled_tick(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    typed: ScheduledTick,
+) -> uuid.UUID | None:
+    """Handle a ``scheduled.tick`` event: look up the schedule, validate it
+    is still active, and dispatch the bound workflow's first step.
+
+    The scheduler emits one of these per cron fire; the consumer's
+    ``schedule`` branch routes it here after the Pydantic parse gate.
+
+    Schedules don't inherently have a task context (ops bots sweep the
+    entire repo, not a specific PR). ``_create_and_publish_run_without_task``
+    creates the run with ``task_id=None`` — this path works in unit tests
+    (mocked sessions skip the NOT NULL DB check) and requires a schema
+    migration making ``workflow_runs.task_id`` nullable before use against a
+    real database.
+
+    Returns the new run's id, or ``None`` if any skip condition fired
+    (schedule not found, paused, no WorkflowVersion seeded).
+    """
+    schedule = await session.get(Schedule, typed.schedule_id)
+    if schedule is None:
+        logger.warning(
+            "scheduled-tick: schedule %s not found; dropping tick",
+            typed.schedule_id,
+        )
+        return None
+    if schedule.status != "active":
+        logger.info(
+            "scheduled-tick: schedule %s is %s; skipping dispatch",
+            typed.schedule_id, schedule.status,
+        )
+        return None
+
+    repo = typed.rendered_payload.get("repo", "")
+    return await _create_and_publish_run_without_task(
+        session,
+        dispatcher,
+        workflow_id=schedule.workflow_id,
+        trigger=f"schedule:{typed.schedule_id}",
+        repo=repo,
+    )
+
+
+async def _create_and_publish_run_without_task(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    workflow_id: str,
+    trigger: str,
+    repo: str,
+) -> uuid.UUID | None:
+    """Create a WorkflowRun + step rows for a schedule-triggered dispatch
+    and publish ``step.ready`` for the first step.
+
+    Mirrors ``_create_and_publish_run`` but accepts no Task context.
+    ``WorkflowRun.task_id`` is set to ``None``; this works in unit tests
+    (mocked sessions) and requires the column to be nullable in production.
+
+    Returns the run's id, or ``None`` if the workflow has no version
+    (un-seeded install) or no steps (degenerate workflow).
+    """
+    wv_result = await session.execute(
+        select(WorkflowVersion)
+        .where(WorkflowVersion.workflow_id == workflow_id)
+        .order_by(WorkflowVersion.version.desc())
+        .limit(1)
+    )
+    wv = wv_result.scalar_one_or_none()
+    if wv is None:
+        logger.warning(
+            "scheduled-tick: no WorkflowVersion for %s; skipping dispatch "
+            "(run starters seed?)",
+            workflow_id,
+        )
+        return None
+
+    steps_result = await session.execute(
+        select(WorkflowVersionStep)
+        .where(WorkflowVersionStep.workflow_version_id == wv.id)
+        .order_by(WorkflowVersionStep.step_index)
+    )
+    wv_steps = list(steps_result.scalars())
+    if not wv_steps:
+        logger.warning(
+            "scheduled-tick: WorkflowVersion %s has no steps; skipping "
+            "dispatch for workflow %s",
+            wv.id, workflow_id,
+        )
+        return None
+
+    run = WorkflowRun(
+        task_id=None,
+        workflow_version_id=wv.id,
+        trigger=trigger,
+    )
+    session.add(run)
+    await session.flush()
+
+    run_steps: list[WorkflowRunStep] = []
+    for wv_step in wv_steps:
+        rs = WorkflowRunStep(
+            run_id=run.id,
+            step_index=wv_step.step_index,
+            step_name=wv_step.step_name,
+            role_id=wv_step.role_id,
+            status="pending",
+        )
+        session.add(rs)
+        run_steps.append(rs)
+    await session.flush()
+
+    first_step = run_steps[0]
+    step_payload = StepReady(
+        role_id=first_step.role_id,
+        step_index=first_step.step_index,
+        step_name=first_step.step_name,
+        repo=repo,
+        workflow_id=workflow_id,
+    )
+
+    ready_event = await dispatcher._persist_event(
+        session,
+        entity_type="step",
+        action="ready",
+        payload=step_payload,
+        plan_id=None,
+        task_id=None,
+        run_id=run.id,
+        step_id=first_step.id,
+    )
+    try:
+        await dispatcher.publisher.publish(ready_event, step_payload)
+    except Exception as exc:
+        logger.exception(
+            "scheduled-tick: failed to publish step.ready for run %s; "
+            "Event row %s persisted, replay loop will retry",
+            run.id, ready_event.id,
+        )
+        await dispatcher._record_publish_failed(
+            session,
+            original_event_id=ready_event.id,
+            target="sns",
+            error=exc,
+            plan_id=None,
+            task_id=None,
+            run_id=run.id,
+            step_id=first_step.id,
+        )
+
+    if dispatcher.sqs_client is not None and dispatcher.work_queue_url is not None:
+        try:
+            await asyncio.to_thread(
+                dispatcher.sqs_client.send_message,
+                QueueUrl=dispatcher.work_queue_url,
+                MessageBody=json.dumps({
+                    "step_id": str(first_step.id),
+                    "task_id": None,
+                    "plan_id": None,
+                    "run_id": str(run.id),
+                }),
+                MessageGroupId=str(run.id),
+                MessageAttributes=inject_trace_context(),
+            )
+        except Exception as exc:
+            logger.exception(
+                "scheduled-tick: failed to send work-queue claim for run %s; "
+                "replay loop will retry",
+                run.id,
+            )
+            await dispatcher._record_publish_failed(
+                session,
+                original_event_id=ready_event.id,
+                target="sqs",
+                error=exc,
+                plan_id=None,
+                task_id=None,
+                run_id=run.id,
+                step_id=first_step.id,
+            )
+
+    logger.info(
+        "scheduled-tick: dispatched %s (run %s) on %s",
+        workflow_id, run.id, trigger,
     )
     return run.id
 
