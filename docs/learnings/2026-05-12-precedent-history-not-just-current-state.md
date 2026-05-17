@@ -3,6 +3,9 @@ date: 2026-05-12
 trigger: correction
 status: captured
 related: ADR-0007, ADR-0011, ADR-0017
+last_crystallization_check: 2026-05-17
+crystallization_backoff_until: 2026-05-24
+crystallization_target: pending-second-instance
 ---
 
 # Learning: "Stale" doesn't mean "wrong" — different topology may resurrect the older pattern

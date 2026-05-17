@@ -1,0 +1,42 @@
+name: repo-relative-path-in-docs
+description: >
+  File-system path references inside a repo's own docs/ tree must be
+  repo-relative — not prefixed with the repo's own directory name. A path
+  beginning with "treadmill/" when written inside the treadmill repo is by
+  definition wrong.
+
+status: active
+created: 2026-05-17
+
+crystallized_from:
+  - 2026-05-07-repo-relative-path-conventions
+
+# applies_to omitted — defaults to all managed projects (any markdown file).
+
+checks:
+  - id: no-repo-name-prefix-in-path
+    type: deterministic
+    description: >
+      Markdown files must not contain path references that begin with the
+      repository's own name as a directory prefix. Detected via grep for
+      "treadmill/" followed by a known top-level directory name inside
+      documentation files.
+    script: tools/rule-checks/repo-relative-path-in-docs/check.sh
+    severity: warning
+
+remediations:
+  - "on": no-repo-name-prefix-in-path:fail
+    action: comment-on-pr
+    target: pr-author
+    message: >
+      This PR contains a path reference in a markdown file that begins with
+      the repository's own name as a directory prefix (e.g., "treadmill/docs/…").
+      Per rule:repo-relative-path-in-docs (crystallized from
+      docs/learnings/2026-05-07-repo-relative-path-conventions.md), paths
+      inside a repo's documentation must be repo-relative — use "docs/…"
+      not "treadmill/docs/…". Remove the repo-name prefix.
+
+references:
+  - ADR-0001   # opinion #6: learnings crystallize into rules
+  - ADR-0006   # rules + remediations primitive
+  - 2026-05-07-repo-relative-path-conventions   # source learning

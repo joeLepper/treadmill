@@ -3,6 +3,9 @@ date: 2026-05-08
 trigger: correction
 status: captured
 related: 2026-05-08-minimum-runnable-treadmill (plan)
+last_crystallization_check: 2026-05-17
+crystallization_backoff_until: 2026-05-24
+crystallization_target: pending-second-instance
 ---
 
 # Learning: Test-client coverage is not the same as "runs locally"

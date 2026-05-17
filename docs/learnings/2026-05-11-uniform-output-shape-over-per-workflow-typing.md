@@ -3,6 +3,9 @@ date: 2026-05-11
 trigger: correction
 status: captured
 related: ADR-0010, ADR-0011, plan:2026-05-08-minimum-runnable-treadmill
+last_crystallization_check: 2026-05-17
+crystallization_backoff_until: 2026-05-20
+crystallization_target: pending-second-instance
 ---
 
 # Learning: When bunkhouse has already solved a shape question, default to its answer

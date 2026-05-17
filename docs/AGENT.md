@@ -25,6 +25,7 @@ This directory is the durable knowledge base for Treadmill, holding the architec
 - Plan documents live in `docs/plans/` but are referenced from the workflow database (ADR-0028); stale plan files on disk (e.g., orphaned by a manual delete) can cause confusion. Always update the database record before deleting a plan.
 - Learning documents accumulate over time and are not automatically deduplicated; similar learnings from different incidents can sit side-by-side without cross-reference. Periodically audit and consolidate related learnings.
 - Rules are enforced asynchronously by the validation runner (ADR-0029); if a rule definition changes, previously-passing workflows are not re-evaluated. Changes to rule logic are high-risk; always snapshot the old behavior before amending.
+- **Confirm deployment mode before incident diagnosis.** Treadmill has two modes (dev-local and ECS production) with entirely different observability surfaces. Before diagnosing stuck tasks, missing PRs, or silent failures: run `docker ps | grep treadmill` to confirm dev-local workers are up, or check `TREADMILL_DEPLOYMENT_MODE` in the local-adapter config. Consulting the wrong surface produces misleading signals. (Learning: `docs/learnings/2026-05-15-identify-deployment-mode-before-diagnosing.md`)
 
 ## Navigation
 

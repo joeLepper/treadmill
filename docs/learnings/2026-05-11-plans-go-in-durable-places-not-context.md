@@ -3,6 +3,9 @@ date: 2026-05-11
 trigger: correction
 status: captured
 related: ADR-0003, ADR-0010, plan:2026-05-08-minimum-runnable-treadmill, plan:2026-05-11-week-2-closure
+last_crystallization_check: 2026-05-17
+crystallization_backoff_until: 2026-05-24
+crystallization_target: pending-second-instance
 ---
 
 # Learning: Plans go in durable files, never in orchestrator context or TODO lists

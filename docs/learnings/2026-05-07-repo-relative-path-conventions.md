@@ -1,8 +1,9 @@
 ---
 date: 2026-05-07
 trigger: correction
-status: captured
+status: crystallized-into-rule-repo-relative-path-in-docs
 related: ADR-0003
+last_crystallization_check: 2026-05-17
 ---
 
 # Learning: Default to repo-relative paths in repo-internal documentation

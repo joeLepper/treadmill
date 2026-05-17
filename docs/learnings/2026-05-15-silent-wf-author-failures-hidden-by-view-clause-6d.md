@@ -1,8 +1,9 @@
 ---
 date: 2026-05-15
 trigger: surprise
-status: captured
+status: crystallized-into-rule-workflow-step-view-checks-decision
 related: ADR-0011, ADR-0012, ADR-0029, ADR-0038
+last_crystallization_check: 2026-05-17
 ---
 
 # Learning: silent wf-author failures were hidden by task_status view clause 6d

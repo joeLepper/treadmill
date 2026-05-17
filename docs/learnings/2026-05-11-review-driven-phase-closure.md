@@ -3,6 +3,9 @@ date: 2026-05-11
 trigger: correction
 status: captured
 related: ADR-0011, ADR-0010, plan:2026-05-08-minimum-runnable-treadmill
+last_crystallization_check: 2026-05-17
+crystallization_backoff_until: 2026-05-24
+crystallization_target: pending-second-instance
 ---
 
 # Learning: Don't close phases on unresolved review findings — pedanticism compounds at the foundation

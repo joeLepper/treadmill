@@ -1,0 +1,76 @@
+name: authors-run-validation-before-submitting
+description: >
+  Code-emitting workflow steps (wf-author, wf-feedback, wf-ci-fix,
+  wf-conflict) must execute the task's validation block against the working
+  tree before signaling step completion. Plausible but unexecuted tests are
+  not tested — the agent must produce and demonstrate executed output, not
+  described output.
+
+status: active
+created: 2026-05-17
+
+crystallized_from:
+  - 2026-05-14-authors-must-run-validation-before-submitting
+
+# applies_to omitted — defaults to all managed projects.
+
+checks:
+  - id: validation-script-executed
+    type: llm-judge
+    description: >
+      The step output for a code-emitting workflow step must contain evidence
+      that the task's validation script was actually executed — stdout/stderr
+      from the run, exit code, or an explicit "validation passed/failed"
+      message referencing a specific command — not merely a description of
+      what the tests do.
+    severity: blocking
+    prompt: |
+      You are evaluating whether a code-authoring step satisfied the rule
+      "authors-run-validation-before-submitting": code-emitting workflow steps
+      must execute the task's validation script and show the results before
+      signaling completion.
+
+      Inputs you receive:
+        STEP_OUTPUT — the full structured step output from the workflow step.
+        TASK_VALIDATION — the validation block from the task spec (scripts to run).
+
+      Decide one of two outcomes:
+        pass        — the step output contains evidence of validation execution:
+                       script stdout/stderr, exit code, or an explicit
+                       "validation passed" / "validation failed" message
+                       referencing a specific command that ran.
+        fail        — the step output contains no evidence of actual validation
+                       execution. It may describe the tests or assert they would
+                       pass, but there is no execution trace.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"verdict": "pass" | "fail",
+         "rationale": "<one to two sentences citing specific evidence from
+                       STEP_OUTPUT, or flagging its absence>"}
+      If you would have returned ``uncertain`` (ambiguous case), return
+      ``fail`` and use the rationale to explain the ambiguity so a human
+      can review. The ``ValidationVerdict`` Pydantic schema only accepts
+      pass/fail; ambiguity should not silently pass.
+
+      Be terse and concrete. Cite specific content from the step output or
+      flag its absence.
+
+remediations:
+  - "on": validation-script-executed:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      The step output does not show evidence that the task's validation script
+      was executed before this PR was opened. Per
+      rule:authors-run-validation-before-submitting (crystallized from
+      docs/learnings/2026-05-14-authors-must-run-validation-before-submitting.md),
+      code-emitting steps must run every script in the task's validation block
+      and report the results before signaling completion. Re-run the validation
+      script and include its output in the step summary.
+
+references:
+  - ADR-0001   # opinion #6: learnings crystallize into rules
+  - ADR-0006   # rules + remediations primitive
+  - ADR-0029   # ralph-loop validation runner (disposition-layer hook this rule complements)
+  - ADR-0037   # author-side failures dispatch wf-feedback (the loop this rule prevents)
+  - 2026-05-14-authors-must-run-validation-before-submitting   # source learning

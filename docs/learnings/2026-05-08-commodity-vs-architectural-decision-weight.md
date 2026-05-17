@@ -3,6 +3,9 @@ date: 2026-05-08
 trigger: correction
 status: captured
 related: ADR-0011
+last_crystallization_check: 2026-05-17
+crystallization_backoff_until: 2026-05-24
+crystallization_target: pending-second-instance
 ---
 
 # Learning: Calibrate pedantry to decision weight; do not defer commodity choices

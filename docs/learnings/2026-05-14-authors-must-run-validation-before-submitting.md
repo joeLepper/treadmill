@@ -1,8 +1,9 @@
 ---
 date: 2026-05-14
 trigger: pattern
-status: captured
+status: crystallized-into-rule-authors-run-validation-before-submitting
 related: ADR-0029, ADR-0022, plan-2026-05-13-ralph-loop-validation-runner
+last_crystallization_check: 2026-05-17
 ---
 
 # Learning: Authors must run their own validation before signaling completion
