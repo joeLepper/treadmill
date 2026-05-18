@@ -1744,9 +1744,26 @@ AUTO_MERGE_COOLDOWN_SECONDS = 30
 _AUTO_MERGE_KEY_TTL_SECONDS = AUTO_MERGE_COOLDOWN_SECONDS + 60
 _AUTO_MERGE_FIRED_TTL_SECONDS = 86400  # 24h
 
-# Only these workflow completions drive the cooling-off window.
+# Workflow completions that drive the cooling-off window.
+#
+# - ``wf-validate`` / ``wf-review`` are the canonical gates that fire
+#   the predicate when they complete (the typical path: author opens
+#   PR → validate runs → review runs → mergeable → cooling-off).
+# - ``wf-architecture-resolve`` is the override path (ADR-0038/ADR-0042).
+#   When the architect verdicts ``accept-as-is`` it emits
+#   ``review.override`` / ``validate.override`` events that flip
+#   mergeability — but those events arrive *after* the original
+#   validate/review step.completed already fired the predicate (and
+#   bailed because mergeability wasn't yet ``mergeable``). Without
+#   firing the predicate on the architect's completion too, the
+#   override never reaches the cooling-off deadline and the PR sits
+#   open with ``derived_mergeability=mergeable`` indefinitely (the
+#   architect's accept-as-is becomes operator-mediated rather than
+#   hands-free). Observed 2026-05-18 on PR #153 (task 07c71852):
+#   3 architect accept-as-is verdicts, both override events emitted,
+#   mergeability=mergeable, 0 auto-merge fires.
 _AUTO_MERGE_TRIGGER_WORKFLOWS: frozenset[str] = frozenset(
-    {"wf-validate", "wf-review"}
+    {"wf-validate", "wf-review", "wf-architecture-resolve"}
 )
 
 
