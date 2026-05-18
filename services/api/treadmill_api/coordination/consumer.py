@@ -410,6 +410,17 @@ class CoordinationConsumer:
             # dispatch wf-feedback directly (convergence trigger).
             if action == "completed":
                 await self._maybe_fire_author_feedback(session, step_id, typed)
+            # Sibling to ADR-0037: when a wf-author step ends as
+            # ``step.failed`` (worker crashed or died before producing a
+            # decision='fail' payload), also dispatch wf-feedback.
+            # Captured 2026-05-18 on task ``07c71852``: silent-death
+            # left the system with no automatic retry; operator nudge
+            # was the only recovery path. Same dedup + cap as the
+            # decision='fail' path.
+            if action == "failed":
+                await self._maybe_fire_author_feedback_on_step_failed(
+                    session, step_id,
+                )
             # ADR-0038: ralph-loop deadlock arbitration. When a
             # wf-feedback step completes with ``responded-without-change``
             # while the underlying review still says ``changes_requested``,
@@ -1533,6 +1544,45 @@ class CoordinationConsumer:
             logger.exception(
                 "_maybe_fire_author_feedback: dispatch failed for step %s; "
                 "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    async def _maybe_fire_author_feedback_on_step_failed(
+        self,
+        session: AsyncSession,
+        step_id: str,
+    ) -> None:
+        """Fire wf-feedback when a ``wf-author.step.failed`` arrives.
+
+        Sibling to ``_maybe_fire_author_feedback``. The existing helper
+        keys on ``decision='fail'`` in the step's output payload — the
+        worker COMPLETED but reported a failure verdict. This helper
+        covers the silent-death case: the worker died/crashed before
+        producing any output and the step ended at ``status='failed'``
+        with no decision. Captured 2026-05-18 on task ``07c71852``:
+        worker terminated mid-author, ADR-0037's existing trigger
+        didn't fire because there was no decision='fail' payload, and
+        operator nudge was the only recovery.
+
+        Same dedup namespace and FEEDBACK_MAX_ATTEMPTS cap as the
+        decision='fail' path.
+        """
+        if self.dispatcher is None:
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_feedback_on_step_failed,
+        )
+        try:
+            await maybe_dispatch_feedback_on_step_failed(
+                session, self.dispatcher,
+                step_id=step_id,
+                workflow_id="wf-author",
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_author_feedback_on_step_failed: dispatch "
+                "failed for step %s; prior projection committed, will "
+                "retry on redelivery",
                 step_id,
             )
 

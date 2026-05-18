@@ -513,6 +513,98 @@ async def maybe_dispatch_feedback_on_terminal_failure(
     )
 
 
+async def maybe_dispatch_feedback_on_step_failed(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    workflow_id: str,
+) -> uuid.UUID | None:
+    """Dispatch ``wf-feedback`` when a worker step ends as ``step.failed``
+    (status=failed, no decision payload) — the silent-death failure mode.
+
+    Companion to ``maybe_dispatch_feedback_on_terminal_failure``: that
+    one fires on ``step.completed`` with ``decision='fail'`` (the worker
+    completed but reported the task failed). This one fires on
+    ``step.failed`` (the worker crashed or the agent died mid-execution
+    before producing a verdict). Captured 2026-05-18 on task
+    ``07c71852``: wf-author worker terminated as ``step.failed`` with
+    no summary; ADR-0037's existing trigger only checks the
+    decision='fail' path so the system gave up and the task escalated
+    to manual operator nudge.
+
+    Same dedup namespacing as the decision='fail' path (the
+    ``author-fail-run=<run_id>`` namespace) so a single run that both
+    bare-fails and later gets a synthetic decision='fail' doesn't
+    double-dispatch. The FEEDBACK_MAX_ATTEMPTS cap still applies.
+
+    Currently scoped to ``workflow_id='wf-author'`` because that's the
+    only workflow whose step.failed shape is operator-observed.
+    Extending to other workflows is a one-line change in the caller.
+    """
+    if workflow_id != "wf-author":
+        # Other workflows' step.failed paths are not yet auto-retry.
+        # Adding them is a one-line caller change; not blanket-enabled
+        # to avoid surprise retries on workflows that intentionally let
+        # step.failed terminate (e.g. wf-architecture-resolve which
+        # already has its own rework_attempt cap path).
+        return None
+
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "feedback (step.failed): no run/task resolvable for step %s; skipping",
+            step_id,
+        )
+        return None
+    if row.workflow_id != workflow_id:
+        return None
+
+    if await _is_capped(session, row.task_id, FEEDBACK_WORKFLOW_ID):
+        logger.warning(
+            "feedback (step.failed): %s capped for task %s (>=%d prior runs); skipping",
+            FEEDBACK_WORKFLOW_ID, row.task_id, FEEDBACK_MAX_ATTEMPTS,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {"repo": row.repo, "author_run_id": str(row.run_id)}
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id="wf-feedback",
+            trigger="self:wf-author-step-failed",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id="wf-feedback",
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
 async def maybe_dispatch_feedback_on_review_changes_requested(
     session: AsyncSession,
     dispatcher: Any,
