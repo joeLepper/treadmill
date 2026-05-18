@@ -1,5 +1,5 @@
 ---
-status: drafting
+status: active
 trigger: PRs #132 + #133 sat MERGEABLE/CLEAN for 14h on 2026-05-17 because the architect override path silently lost a transaction race. Triage of the open papercut backlog (TaskList #114–#135) surfaced 10 sibling-shaped fixes — most concentrated in the auto-merge / event-state-projection layer. Bundling so the convergence-proof regressions land together.
 ---
 
