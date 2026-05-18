@@ -4,7 +4,7 @@ Starts uvicorn against the FastAPI app on the configured port. Production
 deploys typically run uvicorn directly via the ECS task command; this
 entrypoint exists for local invocation.
 
-Three startup responsibilities live here (and *only* here — so test paths
+Four startup responsibilities live here (and *only* here — so test paths
 that bypass ``run()`` are unaffected):
 
 1. ``logging.basicConfig`` — without it, Python's root logger sits at
@@ -20,6 +20,9 @@ that bypass ``run()`` are unaffected):
    the bunkhouse "I forgot to run seed-starters" failure mode. Multi-
    replica safety via ``SELECT FOR UPDATE`` on the ``alembic_version``
    sentinel row.
+4. Auto-seed schedules when ``schedules`` is empty (ADR-0035). Creates
+   the four canonical ops-bot periodic schedules on first deploy;
+   idempotent across multi-replica rollouts.
 """
 
 from __future__ import annotations
@@ -133,6 +136,44 @@ def _auto_seed_starters(settings: Settings) -> None:
         engine.dispose()
 
 
+def _auto_seed_schedules(settings: Settings) -> None:
+    """Auto-seed the four canonical ops-bot periodic schedules on first deploy.
+
+    Per ADR-0035, the four ops-bot periodic schedules (documentarian-audit,
+    crystallization, stuck-task-sweep, o11y-regression-scan) are seeded
+    automatically when the schedules table is empty. Idempotent: skipped when
+    any schedule row already exists (covers multi-replica rollout safety).
+
+    Runs AFTER ``_auto_seed_starters`` so the roles/workflows layer is always
+    seeded first. If ``TREADMILL_SKIP_AUTO_SEED=true``, this is a no-op.
+    """
+    if settings.skip_auto_seed:
+        logging.getLogger(__name__).info(
+            "TREADMILL_SKIP_AUTO_SEED=true — skipping schedule auto-seed",
+        )
+        return
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from treadmill_api.seed.schedules import seed_schedules_if_empty
+
+    logger = logging.getLogger(__name__)
+    sync_url = settings.database_url.replace("+asyncpg", "+psycopg")
+    engine = create_engine(sync_url)
+    try:
+        with Session(engine) as session:
+            seeded = seed_schedules_if_empty(session)
+        if seeded > 0:
+            logger.info(
+                "auto-seed: seeded %d schedules into fresh DB", seeded,
+            )
+        else:
+            logger.debug("auto-seed: schedules already present; no-op")
+    finally:
+        engine.dispose()
+
+
 def run() -> None:
     settings = get_settings()
 
@@ -148,6 +189,7 @@ def run() -> None:
 
     _run_migrations(settings)
     _auto_seed_starters(settings)
+    _auto_seed_schedules(settings)
 
     uvicorn.run(
         "treadmill_api.app:app",
