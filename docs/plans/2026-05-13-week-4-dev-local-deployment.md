@@ -491,6 +491,55 @@ aws sqs purge-queue --queue-url "$DLQ_URL" --profile treadmill-personal
   - **Friction surfaced + fixed mid-smoke (commit 8b0f63c)**: the first Smoke B attempt silently no-op'd because the local-adapter wasn't injecting `GITHUB_TOKEN` into the API container's env. Without it, the API's `github_client` is None, the plan-doc handler skips its doc-fetch, and the chain halts at "pr_merged event observed, no follow-up." Fix: `_fetch_github_pat` mirrors ADR-0019's host-side fetch pattern; PAT comes from the same Secrets Manager entry the worker uses.
   - **Banked**: task #102 — `role-reviewer` prompt writes from author POV ("created SMOKE.md...") instead of reviewer POV. The runner machinery is right; the prompt needs a sentence about "evaluate" vs "summarize." Small follow-up.
   - **Phase 2 success criterion 4 (end-to-end PRs) is now demonstrably-automated *with plan-doc-merge as the trigger*** — the closed loop Joe described as "the dream end-state."
+- **2026-05-18** **Deploy-watcher implementation closed (PRs #153, #156).** Three tasks completed the watcher chain: `treadmill-local init` reads `DeployEventsQueueUrl` + `DeployEventsDlqUrl` from CDK stack outputs into the per-deployment YAML; `deploy_watcher.py` polls the deploy-events queue on a 10 s tick and applies ADR-0024's dispatch table; `treadmill-local up` spawns the watcher alongside the autoscaler (PID file at `.treadmill-local/deploy-watcher.pid`, log at `.treadmill-local/deploy-watcher.log`) with a `--no-deploy-watcher` opt-out flag.
+- **2026-05-18** **Operator smoke: Deploy-watcher smoke.** Runbook for manually verifying the deploy-watcher after a redeploy or fresh session.
+
+  **Preconditions:** deploy-watcher implementation complete (PRs #151, #153, #156); `treadmill-local up --deployment personal` stack healthy; GitHub webhook active and delivering events to APIGW; GITHUB_TOKEN exported in the operator's shell; `deploy_events_queue_url` present in `~/.treadmill/personal.yaml`.
+
+  **Step 1 — Startup verification.**
+  ```
+  treadmill-local up --deployment personal
+  treadmill-local status
+  ls -la .treadmill-local/deploy-watcher.pid .treadmill-local/deploy-watcher.log
+  tail -f .treadmill-local/deploy-watcher.log
+  ```
+  Expected: `status` reports `deploy-watcher: running`; log emits `[deploy-watcher] polling deploy-events queue…` every ~10 s.
+
+  **Step 2 — API rebuild test.** Open a trivial PR touching `services/api/treadmill_api/` (e.g., add a module docstring) and merge it to main.
+  ```
+  tail -f .treadmill-local/deploy-watcher.log
+  docker ps --filter name=treadmill-api --format "{{.Status}}"
+  ```
+  Expected within one poll tick (~10 s after the webhook lands): log shows `rebuilding treadmill-api:dev` → `restarting treadmill-api` → `treadmill-api healthy`; `docker ps` shows `Up <seconds> seconds`.
+
+  **Step 3 — Worker rebuild test.** Open a trivial PR touching `workers/agent/` (e.g., update a comment) and merge.
+  ```
+  grep -E "agent|treadmill-agent" .treadmill-local/deploy-watcher.log | tail -20
+  ```
+  Expected: `rebuilding treadmill-agent:dev` — **no** `docker restart` line. Workers are one-shot per ADR-0018; the next autoscaler spawn picks up the new image automatically.
+
+  **Step 4 — Infra notify-only test.** Open a trivial PR touching `infra/` (e.g., add a comment to a CDK file) and merge.
+  ```
+  grep -E "infra|notify|manual" .treadmill-local/deploy-watcher.log | tail -10
+  ```
+  Expected: `infra changes detected — manual cycle required: <files>`. No `docker build` or `docker restart` runs. The watcher does NOT invoke `cdk deploy`.
+
+  **Step 5 — Idempotency check.** Re-deliver the same PR's SQS message (re-drive from the AWS console or `aws sqs send-message` with the same payload).
+  ```
+  cat .treadmill-local/deploy-watcher-state.json
+  grep -E "already applied|skip|idempotent" .treadmill-local/deploy-watcher.log | tail -10
+  ```
+  Expected: state file shows the SHA already recorded for the category; log shows `already applied — skipping`; no rebuild runs.
+
+  **Step 6 — Failure mode check.** Trigger a build failure (e.g., temporarily corrupt a Dockerfile) and deliver a PR message. Expected: watcher logs the error, does NOT ack the SQS message (so it re-delivers up to `maxReceiveCount=3` then moves to DLQ). Inspect the DLQ:
+  ```
+  aws sqs get-queue-attributes \
+    --queue-url "$(grep deploy_events_dlq_url ~/.treadmill/personal.yaml | awk '{print $2}')" \
+    --attribute-names ApproximateNumberOfMessages
+  ```
+  Expected: `ApproximateNumberOfMessages: 1`. Restore the Dockerfile and purge the DLQ when done.
+
+  **Sign-off:** Steps 1–4 passing confirms the watcher is live and the ADR-0024 dispatch table routes correctly. Steps 5–6 are regression-net checks; run them after significant local-adapter or CDK changes.
 
 ## Open questions
 
