@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 from treadmill_local.cli import app
 from treadmill_local.deployment_config import (
     build_deployment_config,
+    load_deployment_yaml,
     read_stack_outputs,
     write_deployment_yaml,
 )
@@ -66,6 +67,15 @@ def synthetic_outputs() -> dict[str, str]:
         "WebhookReceiverWebhookInboxDlqUrlABCD1234": (
             "https://sqs.us-east-1.amazonaws.com/111111111111/"
             "treadmill-test-webhook-inbox-dlq"
+        ),
+        # Deploy events
+        "DeployEventsQueueUrl12345678": (
+            "https://sqs.us-east-1.amazonaws.com/111111111111/"
+            "treadmill-test-deploy-events"
+        ),
+        "DeployEventsDlqUrlABCDEFGH": (
+            "https://sqs.us-east-1.amazonaws.com/111111111111/"
+            "treadmill-test-deploy-events-dlq"
         ),
         # Secrets
         "SecretsGithubWebhookSecretName11112222": (
@@ -244,6 +254,14 @@ def test_build_deployment_config_populates_every_yaml_key(synthetic_outputs):
             "treadmill-test-webhook-inbox-dlq"
         ),
         "webhook_api_url": "https://abc123.execute-api.us-east-1.amazonaws.com",
+        "deploy_events_queue_url": (
+            "https://sqs.us-east-1.amazonaws.com/111111111111/"
+            "treadmill-test-deploy-events"
+        ),
+        "deploy_events_dlq_url": (
+            "https://sqs.us-east-1.amazonaws.com/111111111111/"
+            "treadmill-test-deploy-events-dlq"
+        ),
     }
 
     # secrets block
@@ -321,6 +339,32 @@ def test_build_deployment_config_missing_secret_output_raises(synthetic_outputs)
         if "GithubPatSecretName" not in k
     }
     with pytest.raises(KeyError, match="GithubPatSecretName"):
+        build_deployment_config(
+            "test",
+            aws_profile="treadmill-test",
+            aws_region="us-east-1",
+            aws_account_id="111111111111",
+            outputs=incomplete,
+        )
+
+
+def test_build_deployment_config_missing_deploy_events_queue_raises(synthetic_outputs):
+    """Missing DeployEventsQueueUrl raises KeyError naming the suffix."""
+    incomplete = {k: v for k, v in synthetic_outputs.items() if "DeployEventsQueueUrl" not in k}
+    with pytest.raises(KeyError, match="DeployEventsQueueUrl"):
+        build_deployment_config(
+            "test",
+            aws_profile="treadmill-test",
+            aws_region="us-east-1",
+            aws_account_id="111111111111",
+            outputs=incomplete,
+        )
+
+
+def test_build_deployment_config_missing_deploy_events_dlq_raises(synthetic_outputs):
+    """Missing DeployEventsDlqUrl raises KeyError naming the suffix."""
+    incomplete = {k: v for k, v in synthetic_outputs.items() if "DeployEventsDlqUrl" not in k}
+    with pytest.raises(KeyError, match="DeployEventsDlqUrl"):
         build_deployment_config(
             "test",
             aws_profile="treadmill-test",
@@ -465,6 +509,45 @@ def test_write_deployment_yaml_top_level_key_order_matches_adr_0016(
     assert lines == expected
 
 
+# ── load_deployment_yaml: backward-compatibility ──────────────────────────────
+
+
+def test_load_deployment_yaml_missing_deploy_events_queue_url_raises_clear_error(
+    synthetic_outputs, tmp_path: Path
+):
+    """Loading an older YAML without deploy_events_queue_url raises ValueError."""
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=synthetic_outputs,
+    )
+    del config["aws"]["deploy_events_queue_url"]
+    target = tmp_path / "test.yaml"
+    write_deployment_yaml("test", config, path=target)
+    with pytest.raises(ValueError, match="deploy_events_queue_url"):
+        load_deployment_yaml("test", path=target)
+
+
+def test_load_deployment_yaml_missing_deploy_events_dlq_url_raises_clear_error(
+    synthetic_outputs, tmp_path: Path
+):
+    """Loading an older YAML without deploy_events_dlq_url raises ValueError."""
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=synthetic_outputs,
+    )
+    del config["aws"]["deploy_events_dlq_url"]
+    target = tmp_path / "test.yaml"
+    write_deployment_yaml("test", config, path=target)
+    with pytest.raises(ValueError, match="deploy_events_dlq_url"):
+        load_deployment_yaml("test", path=target)
+
+
 # ── End-to-end CLI: ``treadmill-local init <deployment_id>`` ──────────────────
 
 
@@ -554,6 +637,18 @@ def test_init_cli_end_to_end_writes_yaml(tmp_path: Path, patched_session):
             "SecretsApiAwsCredentialsSecretName77778888": {
                 "Value": "treadmill-test/api-aws-credentials",
             },
+            "DeployEventsQueueUrl12345678": {
+                "Value": (
+                    "https://sqs.us-east-1.amazonaws.com/111111111111/"
+                    "treadmill-test-deploy-events"
+                ),
+            },
+            "DeployEventsDlqUrlABCDEFGH": {
+                "Value": (
+                    "https://sqs.us-east-1.amazonaws.com/111111111111/"
+                    "treadmill-test-deploy-events-dlq"
+                ),
+            },
         },
     }
     cfn.create_stack(
@@ -618,6 +713,8 @@ def test_init_cli_overwrites_existing_yaml(tmp_path: Path, patched_session):
             "SecretsGithubPatSecretName33334444": {"Value": "secret2"},
             "SecretsWorkerAwsCredentialsSecretName55556666": {"Value": "secret3"},
             "SecretsApiAwsCredentialsSecretName77778888": {"Value": "secret4"},
+            "DeployEventsQueueUrlAAAA1111": {"Value": "https://sqs.us-east-1.amazonaws.com/111111111111/deploy-events"},
+            "DeployEventsDlqUrlBBBB2222": {"Value": "https://sqs.us-east-1.amazonaws.com/111111111111/deploy-events-dlq"},
         },
     }
     cfn.create_stack(
@@ -664,6 +761,8 @@ def test_init_cli_uses_default_stack_name(tmp_path: Path, patched_session):
             "SecretsGithubPatSecretNameX8": {"Value": "v8"},
             "SecretsWorkerAwsCredentialsSecretNameX9": {"Value": "v9"},
             "SecretsApiAwsCredentialsSecretNameX10": {"Value": "v10"},
+            "DeployEventsQueueUrlX11": {"Value": "https://sqs.us-east-1.amazonaws.com/111111111111/deploy-events"},
+            "DeployEventsDlqUrlX12": {"Value": "https://sqs.us-east-1.amazonaws.com/111111111111/deploy-events-dlq"},
         },
     }
     # Stack name derived from deployment_id="personal".

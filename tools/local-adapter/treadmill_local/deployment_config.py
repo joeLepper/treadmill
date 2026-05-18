@@ -46,6 +46,8 @@ _AWS_OUTPUTS: tuple[tuple[str, str], ...] = (
     ("webhook_inbox_queue_url", "WebhookInboxQueueUrl"),
     ("webhook_inbox_dlq_url", "WebhookInboxDlqUrl"),
     ("webhook_api_url", "WebhookApiUrl"),
+    ("deploy_events_queue_url", "DeployEventsQueueUrl"),
+    ("deploy_events_dlq_url", "DeployEventsDlqUrl"),
 )
 """``aws.*`` block — resource ARNs/URLs from messaging + webhook receiver."""
 

@@ -86,6 +86,14 @@ def _valid_yaml_dict() -> dict[str, Any]:
                 "treadmill-personal-webhook-inbox-dlq"
             ),
             "webhook_api_url": "https://abc.execute-api.us-east-1.amazonaws.com",
+            "deploy_events_queue_url": (
+                "https://sqs.us-east-1.amazonaws.com/111111111111/"
+                "treadmill-personal-deploy-events"
+            ),
+            "deploy_events_dlq_url": (
+                "https://sqs.us-east-1.amazonaws.com/111111111111/"
+                "treadmill-personal-deploy-events-dlq"
+            ),
         },
         "secrets": {
             "github_webhook_secret_name": "treadmill-personal/github-webhook-secret",
