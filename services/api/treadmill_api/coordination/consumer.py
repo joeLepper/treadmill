@@ -450,7 +450,20 @@ class CoordinationConsumer:
             # set/push the auto-merge cooling-off deadline in Redis. The
             # 5s poll loop (``_auto_merge_loop``) fires the merge when
             # the 30s window elapses without a reset.
+            #
+            # Flush before the read: ``_maybe_emit_review_override`` /
+            # ``_maybe_emit_validate_override`` / wf-review's own verdict
+            # write may have INSERTed into ``events`` earlier in this
+            # same transaction. ``_maybe_fire_auto_merge`` consults the
+            # ``task_mergeability`` VIEW which projects from those rows.
+            # Without an explicit flush, the VIEW reads the pre-write
+            # snapshot and bails out silently. Observed 2026-05-17 on
+            # PRs #132 + #133 (validate.override race), and again on
+            # #136/#137/#138 (review.verdict race) — same shape, same
+            # fix. See task #135 / docs/learnings/2026-05-17-auto-merge-
+            # trigger-loses-race-with-validate-override.md.
             if action == "completed":
+                await session.flush()
                 await self._maybe_fire_auto_merge(session, step_id)
             # B.2 — cross-step dispatch. When a step terminates and the
             # workflow has a next pending step, materialize its

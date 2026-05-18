@@ -1629,8 +1629,16 @@ async def maybe_auto_merge_on_mergeable(
         return False
 
     # Not currently mergeable.
+    #
+    # Promoted from debug → info on 2026-05-17 (PR for task #135): silent
+    # bailouts hid a transaction-flush race for hours on PRs #132/#133 and
+    # again on the worker-PR cohort #136/#137/#138. The skip path is a
+    # legitimate read of the VIEW (pre-merge state is normal), but a
+    # *stuck* PR with this log line at info-level is now grep-able. If
+    # this becomes too noisy at steady state, demote with a sampling
+    # filter rather than silencing entirely.
     if merge_row.derived_mergeability != "mergeable":
-        logger.debug(
+        logger.info(
             "auto-merge: task %s mergeability=%r; skipping",
             task_id, merge_row.derived_mergeability,
         )
@@ -1638,7 +1646,7 @@ async def maybe_auto_merge_on_mergeable(
 
     # ADR-0031 Q31.b: only 'pass' auto-merges; 'uncertain' routes to wf-feedback.
     if merge_row.validate_decision != "pass":
-        logger.debug(
+        logger.info(
             "auto-merge: validate_decision=%r for task %s; skipping",
             merge_row.validate_decision, task_id,
         )
@@ -1646,7 +1654,7 @@ async def maybe_auto_merge_on_mergeable(
 
     # Pending human review (review_decision must be 'approved').
     if merge_row.review_decision != "approved":
-        logger.debug(
+        logger.info(
             "auto-merge: review_decision=%r for task %s; skipping",
             merge_row.review_decision, task_id,
         )

@@ -29,6 +29,7 @@ class _StubSession:
     def __init__(self) -> None:
         self.execute = AsyncMock()
         self.commit = AsyncMock()
+        self.flush = AsyncMock()
 
 
 def _stub_factory(session: _StubSession) -> Any:
