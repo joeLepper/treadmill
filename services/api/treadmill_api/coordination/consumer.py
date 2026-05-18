@@ -429,6 +429,14 @@ class CoordinationConsumer:
                 await self._maybe_emit_review_override(
                     session, step_id, typed,
                 )
+            # ADR-0040: when the architect step.completed carries
+            # ``payload.validator_tuning``, dispatch ``wf-doc-amend``
+            # with intent ``tune-rule-from-architect`` so the documentarian
+            # can apply the proposed rule-YAML edit under operator review.
+            if action == "completed":
+                await self._maybe_dispatch_rule_tuning(
+                    session, step_id, typed,
+                )
             # ADR-0032/ADR-0038 partnership closure: when the architect
             # verdicts ``amend``, dispatch ``wf-feedback`` against the
             # same task so the feedback role can author the
@@ -1327,6 +1335,42 @@ class CoordinationConsumer:
         except Exception:
             logger.exception(
                 "_maybe_emit_review_override: emission failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    # ── ADR-0040: architect validator-tuning → wf-doc-amend ──────────────
+
+    async def _maybe_dispatch_rule_tuning(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """ADR-0040: dispatch ``wf-doc-amend`` when an architect
+        step.completed carries ``payload.validator_tuning``.
+
+        Delegates to
+        ``triggers.maybe_dispatch_rule_tuning_on_architect_completion``.
+        Failures are logged but do not propagate — the prior projection
+        has already committed; rolling that back on a dispatch failure
+        would lose progress. Redelivery-safe via SQS retry on the
+        original step.completed.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_rule_tuning_on_architect_completion,
+        )
+        try:
+            await maybe_dispatch_rule_tuning_on_architect_completion(
+                session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_dispatch_rule_tuning: dispatch failed for step %s; "
                 "prior projection committed, will retry on redelivery",
                 step_id,
             )

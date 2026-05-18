@@ -187,20 +187,32 @@ def _build_wf_auto_merge_key(payload: dict[str, Any]) -> str | None:
 
 
 def _build_wf_doc_amend_key(payload: dict[str, Any]) -> str | None:
-    """``wf-doc-amend:<repo>:docs-amend-run=<run_id>``
-    (wf-validate ``docs-current-with-pr`` failure trigger).
+    """Two dispatch sources; namespace is determined by whichever
+    discriminator field is present.
 
-    One doc-amend remediation per wf-validate run that fails the
-    ``docs-current-with-pr`` check. ``docs_amend_run_id`` is the UUID
-    of the wf-validate run that triggered the dispatch; using the
-    validate run id as the discriminator ensures at most one wf-doc-amend
-    is dispatched per validation run regardless of re-delivery.
+    ``docs-amend-run=<run_id>``
+        wf-validate ``docs-current-with-pr`` failure trigger. One
+        doc-amend per wf-validate run that fails the check.
+
+    ``tune-rule=<rule_slug>``
+        ADR-0040 architect validator-tuning trigger. One doc-amend per
+        (repo, rule_slug) tuning proposal — prevents duplicate edits to
+        the same rule YAML across re-deliveries of the same architect
+        step.completed.
+
+    Precedence: ``docs_amend_run_id`` wins when both are present
+    (unexpected — defensive). Missing repo → None for both.
     """
     repo = payload.get("repo")
-    docs_amend_run_id = payload.get("docs_amend_run_id")
-    if not repo or not docs_amend_run_id:
+    if not repo:
         return None
-    return f"wf-doc-amend:{repo}:docs-amend-run={docs_amend_run_id}"
+    docs_amend_run_id = payload.get("docs_amend_run_id")
+    if docs_amend_run_id:
+        return f"wf-doc-amend:{repo}:docs-amend-run={docs_amend_run_id}"
+    rule_slug = payload.get("rule_slug")
+    if rule_slug:
+        return f"wf-doc-amend:{repo}:tune-rule={rule_slug}"
+    return None
 
 
 def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:

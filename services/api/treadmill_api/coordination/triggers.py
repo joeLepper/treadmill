@@ -948,6 +948,118 @@ def is_docs_current_check_failure(output: Any) -> bool:
     )
 
 
+async def maybe_dispatch_rule_tuning_on_architect_completion(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """ADR-0040: fire ``wf-doc-amend`` when a ``wf-architecture-resolve``
+    step.completed carries ``payload.validator_tuning``.
+
+    The architect emits a ``ValidatorTuning`` proposal when its verdict is
+    ``accept-as-is`` and the blocking signal was a validator ``fail`` (not a
+    reviewer ``changes_requested``).  This trigger picks it up and routes a
+    doc-amend run so the documentarian can apply the proposed rule-YAML edit
+    under operator review.
+
+    Intent literal: ``tune-rule-from-architect``.
+
+    Skips cleanly when:
+      * ``payload.validator_tuning`` is absent (common path — most architect
+        completions don't carry tuning proposals).
+      * The tuning payload is malformed (logged at WARNING + skipped).
+      * The step doesn't belong to ``wf-architecture-resolve``.
+      * Task can't be resolved (deleted between dispatch + completion).
+      * No ``WorkflowVersion`` exists for ``wf-doc-amend`` (un-seeded).
+      * Task has already dispatched ``wf-doc-amend`` >= ``DOC_AMEND_MAX_ATTEMPTS``
+        times (cap).
+
+    Dedup namespace: ``wf-doc-amend:<repo>:tune-rule=<rule_slug>`` — at most
+    one tuning doc-amend per (repo, rule) regardless of re-delivery.
+
+    Returns the new ``wf-doc-amend`` run's id, or ``None`` if any skip
+    condition fired.
+    """
+    from treadmill_api.events.validator_tuning import ValidatorTuning
+
+    output = typed.output
+    raw_payload = output.payload if isinstance(output.payload, dict) else {}
+    tuning_raw = raw_payload.get("validator_tuning")
+    if not tuning_raw:
+        return None
+
+    try:
+        tuning = ValidatorTuning.model_validate(tuning_raw)
+    except Exception:
+        logger.warning(
+            "rule-tuning trigger: malformed validator_tuning in step %s; "
+            "dropping (will not dispatch wf-doc-amend)",
+            step_id,
+        )
+        return None
+
+    # Confirm this step belongs to wf-architecture-resolve.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.task_id,
+            Task.repo,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None or row.workflow_id != ARCHITECTURE_RESOLVE_WORKFLOW_ID:
+        logger.debug(
+            "rule-tuning trigger: step %s is not wf-architecture-resolve "
+            "(workflow=%s); skipping",
+            step_id, row.workflow_id if row else None,
+        )
+        return None
+
+    if await _is_capped(session, row.task_id, DOC_AMEND_WORKFLOW_ID):
+        logger.warning(
+            "rule-tuning trigger: %s capped for task %s (>=%d prior runs); "
+            "skipping",
+            DOC_AMEND_WORKFLOW_ID, row.task_id, DOC_AMEND_MAX_ATTEMPTS,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    dedup_payload = {
+        "repo": row.repo,
+        "rule_slug": tuning.rule_slug,
+        "intent": "tune-rule-from-architect",
+        "tuning_proposal": tuning.model_dump(),
+    }
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=DOC_AMEND_WORKFLOW_ID,
+            trigger="self:wf-architecture-tune-rule",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=DOC_AMEND_WORKFLOW_ID,
+        payload=dedup_payload,
+        dispatch_fn=_dispatch,
+    )
+
+
 async def maybe_dispatch_doc_amend_on_docs_check_fail(
     session: AsyncSession,
     dispatcher: Any,

@@ -314,8 +314,8 @@ def test_wf_doc_amend_builder_emits_docs_amend_run_id() -> None:
 
 
 def test_wf_doc_amend_builder_returns_none_when_run_id_missing() -> None:
-    """When ``docs_amend_run_id`` is absent (e.g. normalizer not yet
-    extended), the builder gracefully opts out to unconditional dispatch."""
+    """When neither ``docs_amend_run_id`` nor ``rule_slug`` is present,
+    the builder gracefully opts out to unconditional dispatch."""
     assert build_dedup_key("wf-doc-amend", {"repo": "x/y"}) is None
 
 
@@ -332,6 +332,70 @@ def test_wf_doc_amend_in_dedup_key_builders() -> None:
     entry would silently fall back to unconditional dispatch and break
     the single-dispatch-per-validate-run guarantee."""
     assert "wf-doc-amend" in DEDUP_KEY_BUILDERS
+
+
+def test_wf_doc_amend_builder_emits_tune_rule_key_for_architect_tuning() -> None:
+    """ADR-0040: the rule-tuning dispatch source uses
+    ``wf-doc-amend:<repo>:tune-rule=<rule_slug>`` — one doc-amend per
+    (repo, rule_slug) tuning proposal regardless of re-delivery."""
+    key = build_dedup_key(
+        "wf-doc-amend",
+        {
+            "repo": "joeLepper/treadmill",
+            "rule_slug": "implementation-conforms-to-diagram",
+            "intent": "tune-rule-from-architect",
+        },
+    )
+    assert key == (
+        "wf-doc-amend:joeLepper/treadmill:"
+        "tune-rule=implementation-conforms-to-diagram"
+    )
+
+
+def test_wf_doc_amend_tune_rule_returns_none_when_rule_slug_missing() -> None:
+    """When neither discriminator is present, the builder opts out."""
+    assert build_dedup_key(
+        "wf-doc-amend",
+        {"repo": "x/y", "intent": "tune-rule-from-architect"},
+    ) is None
+
+
+def test_wf_doc_amend_tune_rule_returns_none_when_repo_missing() -> None:
+    """Repo is required even for the tune-rule namespace."""
+    assert build_dedup_key(
+        "wf-doc-amend",
+        {"rule_slug": "implementation-conforms-to-diagram"},
+    ) is None
+
+
+def test_wf_doc_amend_docs_amend_run_takes_precedence_over_rule_slug() -> None:
+    """When both discriminators are present (unexpected — defensive),
+    ``docs_amend_run_id`` wins. Documents the precedence."""
+    key = build_dedup_key(
+        "wf-doc-amend",
+        {
+            "repo": "x/y",
+            "docs_amend_run_id": "fedcba98-7654-3210-fedc-ba9876543210",
+            "rule_slug": "some-rule",
+        },
+    )
+    assert key == "wf-doc-amend:x/y:docs-amend-run=fedcba98-7654-3210-fedc-ba9876543210"
+
+
+def test_wf_doc_amend_tune_rule_namespace_distinct_from_docs_amend_run() -> None:
+    """The two wf-doc-amend dispatch sources use different namespace
+    segments so they cannot collide on the dedup table."""
+    docs_key = build_dedup_key(
+        "wf-doc-amend",
+        {"repo": "x/y", "docs_amend_run_id": "aaa"},
+    )
+    tune_key = build_dedup_key(
+        "wf-doc-amend",
+        {"repo": "x/y", "rule_slug": "aaa"},
+    )
+    assert docs_key is not None
+    assert tune_key is not None
+    assert docs_key != tune_key
 
 
 def test_wf_auto_merge_builder_emits_repo_and_task_id() -> None:

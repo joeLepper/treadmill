@@ -1203,6 +1203,119 @@ async def test_maybe_emit_review_override_short_circuits_without_flag() -> None:
     )
 
 
+# ── ADR-0040: architect validator-tuning → wf-doc-amend ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_consumer_routes_step_completed_to_rule_tuning_helper() -> None:
+    """The consumer must call ``_maybe_dispatch_rule_tuning`` after each
+    step.completed so the architect's validator_tuning proposal can trigger
+    a doc-amend run (ADR-0040)."""
+    session = _StubSession()
+    consumer = _consumer(session)
+
+    tuning_calls: list[dict] = []
+
+    async def _stub(*args: object, **kwargs: object) -> None:
+        tuning_calls.append({"args": args, "kwargs": kwargs})
+
+    consumer._maybe_dispatch_rule_tuning = _stub  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(uuid.uuid4()),
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "completed_at": "2026-05-17T10:00:00+00:00",
+            "output": {
+                "summary": "architect accept-as-is with tuning",
+                "decision": "accept-as-is",
+                "commit_sha": None,
+                "artifacts": [],
+                "payload": {
+                    "verdict": "accept-as-is",
+                    "reasoning": "rule was too broad",
+                    "validator_tuning": {
+                        "rule_slug": "implementation-conforms-to-diagram",
+                        "check_id": "diagram-sync",
+                        "action": "narrow_applies_to",
+                        "evidence": "The rule fired on a test-only file.",
+                        "proposed_patch": {
+                            "remove_globs": ["tests/**"],
+                            "keep_globs": ["src/**"],
+                        },
+                    },
+                },
+                "metadata": {},
+            },
+        },
+    })
+
+    assert len(tuning_calls) == 1, (
+        "consumer must invoke _maybe_dispatch_rule_tuning on every "
+        "step.completed; the helper filters non-architect / non-tuning "
+        "shapes internally"
+    )
+
+
+@pytest.mark.asyncio
+async def test_maybe_dispatch_rule_tuning_short_circuits_without_tuning() -> None:
+    """The rule-tuning helper must early-return (no DB work) when the
+    architect payload doesn't carry ``validator_tuning``. This is the
+    common path: most architect completions do not include a tuning
+    proposal."""
+    from treadmill_api.coordination.triggers import (
+        maybe_dispatch_rule_tuning_on_architect_completion,
+    )
+    from treadmill_api.events.step import StepCompleted
+    from treadmill_api.events.step_output import Metadata, StepOutput
+
+    session = _StubSession()
+    typed = StepCompleted(
+        completed_at="2026-05-17T10:00:00+00:00",
+        output=StepOutput(
+            summary="architect accept-as-is",
+            decision="accept-as-is",
+            payload={
+                "verdict": "accept-as-is",
+                "dispatch": {"workflow_id": None, "review_override": True},
+            },
+            metadata=Metadata(),
+        ),
+    )
+
+    result = await maybe_dispatch_rule_tuning_on_architect_completion(
+        session, None, step_id=str(uuid.uuid4()), typed=typed,  # type: ignore[arg-type]
+    )
+
+    assert result is None
+    assert session.execute.await_count == 0, (
+        "helper must short-circuit before any DB query when "
+        "validator_tuning is absent"
+    )
+
+
+def test_wf_doc_amend_tune_rule_dedup_key_shape() -> None:
+    """The dedup key for the ADR-0040 rule-tuning trigger uses the
+    ``tune-rule=<rule_slug>`` namespace so it does not collide with the
+    ``docs-amend-run=`` namespace used by the wf-validate failure trigger."""
+    from treadmill_api.coordination.dispatch_dedup import build_dedup_key
+
+    key = build_dedup_key(
+        "wf-doc-amend",
+        {
+            "repo": "example/repo",
+            "rule_slug": "implementation-conforms-to-diagram",
+            "intent": "tune-rule-from-architect",
+        },
+    )
+    assert key == (
+        "wf-doc-amend:example/repo:"
+        "tune-rule=implementation-conforms-to-diagram"
+    )
+
+
 # ── schedule.tick consumer routing (ADR-0035) ────────────────────────────────
 
 
