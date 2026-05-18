@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from treadmill_api.config import Settings, get_settings
+from treadmill_api.config import DeploymentMode, Settings, get_settings
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.dispatch import Dispatcher, DispatchError, get_dispatcher
 from treadmill_api.events.plan import PlanActivated, PlanRegistered
@@ -492,16 +492,30 @@ async def create_plan(
                 detail=f"plan-doc parse failed: {exc}",
             ) from exc
 
-    # D.10 — resolve the dev fast-path. Only honored in fully_local mode and
-    # only for intent-only (Scenario 2) submissions; doc-driven Scenario 1
-    # already produces an active plan so the flag is a no-op there. The dev
-    # fast-path is moto-substrate-only — dev_local and fully_remote talk to
-    # real AWS, so the standard wf-plan PR-merge gate must apply there.
-    dev_active = body.dev and settings.is_fully_local and body.doc_content is None
-    if body.dev and not settings.is_fully_local:
+    # D.10 — resolve the dev fast-path. Honored in any LOCAL mode
+    # (fully_local OR dev_local) for intent-only (Scenario 2) submissions;
+    # doc-driven Scenario 1 already produces an active plan so the flag
+    # is a no-op there. Rejected only in fully_remote, where the wf-plan
+    # PR-merge gate is the only governance path.
+    #
+    # 2026-05-18: extended from fully_local-only to also include dev_local
+    # after observing that ``treadmill submit`` (intent-only) in dev_local
+    # created inert plans (status=drafting) with no path to activation
+    # short of authoring a sequence_of_work-shaped doc and POSTing to
+    # /submit-doc. The gate the flag skips is the wf-plan PR-merge gate
+    # (a plan-doc PR has to merge before tasks dispatch); that gate is
+    # orthogonal to AWS — the moto/real-AWS distinction the original
+    # comment cited doesn't actually apply to plan activation. Operators
+    # in dev_local who explicitly pass --dev want the same fast-path.
+    is_local = (
+        settings.deployment_mode == DeploymentMode.FULLY_LOCAL
+        or settings.deployment_mode == DeploymentMode.DEV_LOCAL
+    )
+    dev_active = body.dev and is_local and body.doc_content is None
+    if body.dev and not is_local:
         logger.warning(
-            "dev flag ignored — not in fully_local mode; "
-            "running standard plan-creation path",
+            "dev flag ignored — fully_remote deployment requires "
+            "wf-plan PR-merge gate; running standard plan-creation path",
         )
 
     plan = Plan(
