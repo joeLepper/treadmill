@@ -53,6 +53,10 @@ MOTO_CONTAINER_PORT = 5000
 STATE_DIR = Path(".treadmill-local")
 AUTOSCALER_PID_FILE = STATE_DIR / "autoscaler.pid"
 AUTOSCALER_LOG_FILE = STATE_DIR / "autoscaler.log"
+AUTOSCALER_PULSE_FILE = STATE_DIR / "autoscaler.pulse"
+"""Heartbeat file written by the autoscaler subprocess on every tick.
+``status`` reads its mtime to detect silent-death (loop alive but not
+iterating, as observed 2026-05-17 — see learning of same date)."""
 SCHEDULER_PID_FILE = STATE_DIR / "scheduler.pid"
 SCHEDULER_LOG_FILE = STATE_DIR / "scheduler.log"
 BARE_REPOS_DIR = STATE_DIR / "repos"
@@ -831,10 +835,11 @@ class LocalRuntime:
             )
         if autoscaler_alive:
             pid = AUTOSCALER_PID_FILE.read_text().strip()
+            pulse_status = self._autoscaler_pulse_status()
             table.add_row(
                 "autoscaler (subprocess)",
                 "[role=autoscaler]",
-                "running",
+                pulse_status,
                 f"pid={pid}, log={AUTOSCALER_LOG_FILE}",
             )
         if scheduler_alive:
@@ -1314,6 +1319,7 @@ class LocalRuntime:
             "TREADMILL_AUTOSCALER_MIN": str(min_count),
             "TREADMILL_AUTOSCALER_MAX": str(max_count),
             "TREADMILL_AUTOSCALER_TICK_SECONDS": "2",
+            "TREADMILL_AUTOSCALER_PULSE_FILE": str(AUTOSCALER_PULSE_FILE),
             "AWS_ENDPOINT_URL": self.state.moto_endpoint or "",
             "AWS_DEFAULT_REGION": "us-east-1",
             "AWS_ACCESS_KEY_ID": "test",
@@ -1386,6 +1392,7 @@ class LocalRuntime:
             "TREADMILL_AUTOSCALER_TICK_SECONDS": str(
                 autoscaler_cfg["tick_seconds"]
             ),
+            "TREADMILL_AUTOSCALER_PULSE_FILE": str(AUTOSCALER_PULSE_FILE),
             # The subprocess entrypoint branches on this env var: when set
             # it constructs ``LocalRuntime(deployment_config=cfg)`` so
             # ``start_worker_once`` runs the dev-local credential-injection
@@ -1450,6 +1457,30 @@ class LocalRuntime:
         except ValueError:
             return False
         return self._pid_alive(pid)
+
+    def _autoscaler_pulse_status(self) -> str:
+        """Return a rich-renderable status string for the autoscaler row.
+
+        ``running`` when the pulse file is fresh (mtime within
+        ``tick_seconds × 5``), ``[yellow]running (no pulse yet)[/yellow]``
+        when the file hasn't been written yet (subprocess just spawned),
+        ``[red]stale (Xs since last tick)[/red]`` when mtime is older
+        than the threshold — the silent-death signature captured in
+        learning 2026-05-17-autoscaler-silently-died-without-alarm.md.
+
+        Tick interval is read from ``deployment_config.autoscaler.tick_seconds``
+        when present (dev-local) and falls back to 2.0s (fully-local default).
+        """
+        if not AUTOSCALER_PULSE_FILE.exists():
+            return "[yellow]running (no pulse yet)[/yellow]"
+        tick = 2.0
+        if self.deployment_config is not None:
+            tick = float(self.deployment_config["autoscaler"]["tick_seconds"])
+        age = time.time() - AUTOSCALER_PULSE_FILE.stat().st_mtime
+        threshold = tick * 5
+        if age > threshold:
+            return f"[red]stale ({age:.0f}s since last tick)[/red]"
+        return f"running (pulse {age:.0f}s ago)"
 
     # ── Scheduler lifecycle ───────────────────────────────────────────────────
 

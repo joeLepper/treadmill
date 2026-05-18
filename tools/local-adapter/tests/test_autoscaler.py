@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
 from treadmill_local.autoscaler import Autoscaler, parse_scalable_target_bounds
@@ -106,6 +110,78 @@ def test_tick_natural_drain_when_depth_drops():
 
 
 # ── invariants on construction ────────────────────────────────────────────────
+
+
+# ── heartbeat / pulse file (ADR-0042 follow-up — 2026-05-17 learning) ─────────
+
+
+def test_write_pulse_no_path_is_noop():
+    """When pulse_path is None, _write_pulse does nothing."""
+    fake = _Fake()
+    a = _autoscaler(fake)
+    a._write_pulse()  # Should not raise.
+
+
+def test_write_pulse_creates_file_and_updates_mtime(tmp_path):
+    """When pulse_path is set, _write_pulse touches it; subsequent
+    calls refresh the mtime."""
+    pulse = tmp_path / "autoscaler.pulse"
+    fake = _Fake()
+    a = Autoscaler(
+        queue_depth_fn=fake.queue_depth,
+        worker_count_fn=fake.worker_count,
+        start_worker_fn=fake.start_worker,
+        min_count=0, max_count=1, tick_seconds=0.0,
+        pulse_path=pulse,
+    )
+    a._write_pulse()
+    assert pulse.exists()
+    first_mtime = pulse.stat().st_mtime
+    time.sleep(0.01)
+    a._write_pulse()
+    second_mtime = pulse.stat().st_mtime
+    assert second_mtime >= first_mtime
+
+
+def test_write_pulse_creates_parent_directory(tmp_path):
+    """Missing parent directory is created lazily so a fresh checkout
+    that has never run ``up`` doesn't error on first tick."""
+    pulse = tmp_path / "subdir" / "autoscaler.pulse"
+    fake = _Fake()
+    a = Autoscaler(
+        queue_depth_fn=fake.queue_depth,
+        worker_count_fn=fake.worker_count,
+        start_worker_fn=fake.start_worker,
+        min_count=0, max_count=1, tick_seconds=0.0,
+        pulse_path=pulse,
+    )
+    a._write_pulse()
+    assert pulse.exists()
+
+
+def test_run_loop_writes_pulse_each_iteration(tmp_path):
+    """The run() loop calls _write_pulse on every iteration. Drives a
+    short run on a background thread and asserts the pulse file
+    appears with a fresh mtime."""
+    pulse = tmp_path / "autoscaler.pulse"
+    fake = _Fake(depth=0, current=0)
+    a = Autoscaler(
+        queue_depth_fn=fake.queue_depth,
+        worker_count_fn=fake.worker_count,
+        start_worker_fn=fake.start_worker,
+        min_count=0, max_count=1, tick_seconds=0.01,
+        pulse_path=pulse,
+    )
+    t = threading.Thread(target=a.run, daemon=True)
+    t.start()
+    # Allow a few iterations.
+    time.sleep(0.1)
+    a.stop()
+    t.join(timeout=2.0)
+    assert not t.is_alive()
+    assert pulse.exists()
+    # Pulse should be very recent.
+    assert time.time() - pulse.stat().st_mtime < 1.0
 
 
 def test_constructor_rejects_negative_min():
