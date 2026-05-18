@@ -23,7 +23,23 @@ checks:
       from the run, exit code, or an explicit "validation passed/failed"
       message referencing a specific command — not merely a description of
       what the tests do.
-    severity: blocking
+    # 2026-05-18: demoted from blocking to warning. This LLM-judge fires on
+    # the worker's PROSE for evidence-of-execution language, but ADR-0029's
+    # validator runner already runs each task's validation scripts as
+    # sibling deterministic checks (e.g. ``pytest-collect-pass``). When
+    # those deterministic siblings pass, the work IS demonstrably executed
+    # regardless of whether the worker's free-form prose articulates it
+    # adequately. Keeping this as blocking forced architect arbitration
+    # cycles on every PR where the prose didn't satisfy the LLM judge —
+    # observed 2026-05-18 on PRs #149 / #153 / #156 (5-7 deadlock cycles
+    # each). The judge still fires at warning severity so operators see
+    # the prose-vs-execution rationale at PR review; merge no longer
+    # gates on it. Replacing the LLM-judge with a deterministic
+    # ``every task.validation.script[].check_id passed`` meta-check is
+    # filed as a follow-up (would require a meta-check primitive in the
+    # rule schema). For now, demotion is the durable replacement of
+    # LLM-judge non-determinism with the existing deterministic check set.
+    severity: warning
     prompt: |
       You are evaluating whether a code-authoring step satisfied the rule
       "authors-run-validation-before-submitting": code-emitting workflow steps
@@ -56,8 +72,13 @@ checks:
       flag its absence.
 
 remediations:
+  # 2026-05-18: action demoted from ``block-merge`` to ``comment-on-pr``
+  # alongside the severity downgrade above. Same rationale — the
+  # deterministic validator runner already proves whether the scripts
+  # ran; this judge only flags whether the worker's prose articulated
+  # it well. Operator visibility kept; merge gate removed.
   - "on": validation-script-executed:fail
-    action: block-merge
+    action: comment-on-pr
     target: pr-author
     message: >
       The step output does not show evidence that the task's validation script
