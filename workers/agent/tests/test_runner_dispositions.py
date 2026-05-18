@@ -1910,6 +1910,40 @@ def test_crystallization_judge_missing_envelope(tmp_path: Path) -> None:
         handle_crystallization(ctx)
 
 
+@pytest.mark.parametrize(
+    "prose, expected_verdict",
+    [
+        (
+            "After careful review, this learning is ready to crystallize "
+            "into a rule. learning_slug: my-learning",
+            "ready",
+        ),
+        (
+            "The learning is not-ready for promotion. It needs more evidence "
+            "before we can promote it. learning_slug: my-learning",
+            "not-ready",
+        ),
+        (
+            "This learning should be deferred for now. learning_slug: my-learning",
+            "defer",
+        ),
+    ],
+)
+def test_crystallization_judge_prose_verdict_fallback(
+    tmp_path: Path, prose: str, expected_verdict: str,
+) -> None:
+    """Prose-only output (no JSON envelope) is parsed via cue matching.
+
+    Verifies that each of the three crystallization verdicts can be extracted
+    from prose when the judge omits the fenced JSON block.
+    """
+    ctx = _crystal_ctx(tmp_path, prose)
+    out = handle_crystallization(ctx)
+    assert out.decision == expected_verdict
+    assert out.payload["verdict"] == expected_verdict
+    assert out.payload["learning_slug"] == "my-learning"
+
+
 def test_crystallization_crystallize_writes_rule_yaml(tmp_path: Path) -> None:
     """Step 2: architect output → rule YAML + check.sh written to repo,
     learning status updated, commit + push."""

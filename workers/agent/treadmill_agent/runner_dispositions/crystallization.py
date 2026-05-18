@@ -52,6 +52,87 @@ _VALID_VERDICTS = frozenset({"ready", "not-ready", "defer"})
 # Index = crystallization_check_count before this check.
 _BACKOFF_DAYS = [1, 3, 7, 14, 30]
 
+# Prose-fallback verdict cues. Ordered by precedence — the disposition
+# scans the model's summary for these phrases (lowercased) and assigns
+# the matching verdict. Listed most-specific first to avoid false matches
+# (e.g. "defer" appears inside "not-ready; defer until…").
+#
+# Observed: sonnet on the role-crystallization-judge prompt sometimes
+# produces a thorough prose analysis but omits the JSON envelope at the
+# close — even after the prompt's closing imperative. The strict parser
+# raised CrystallizationVerdictParseError and burned the step attempt.
+# This fallback extracts the model's intended verdict from prose so the
+# system can act on it; the strict JSON path remains primary.
+_PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
+    ("ready", (
+        "verdict: ready",
+        "learning is ready",
+        "ready to crystallize",
+        "ready for crystallization",
+        "promote to a rule",
+        "promote this to a rule",
+        "should be crystallized",
+        "meets the bar for a rule",
+        "qualifies as a rule",
+    )),
+    ("not-ready", (
+        "verdict: not-ready",
+        "not-ready",
+        "not yet ready",
+        "needs more evidence",
+        "more observations needed",
+        "too early to crystallize",
+        "not enough data",
+        "insufficient evidence to crystallize",
+    )),
+    ("defer", (
+        "verdict: defer",
+        "should be deferred",
+        "re-evaluate later",
+        "check again later",
+        "skip this run",
+        "come back to this",
+    )),
+]
+
+# Regex to pull a learning slug from prose — matches patterns like
+# ``learning_slug: my-slug`` or ``"learning_slug": "my-slug"``.
+_SLUG_RE = re.compile(
+    r'"?learning[_\s-]slug"?\s*[:=]\s*"?([a-z0-9][a-z0-9-]*)',
+    re.IGNORECASE,
+)
+
+
+def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
+    """Fallback: scan prose for verdict cues and synthesize an envelope dict.
+
+    Returns the synthesized dict on success, or ``None`` if the summary is
+    empty / blank (callers let the strict-parse error fire in that case).
+
+    Unlike the architect's fallback, crystallization has no ``uncertain``
+    catch-all — if no cue matches, ``None`` is returned so the caller can
+    raise ``CrystallizationVerdictParseError`` rather than silently deferring
+    an unrecognized summary.
+    """
+    if not summary.strip():
+        return None
+    lower = summary.lower()
+    slug_match = _SLUG_RE.search(summary)
+    learning_slug = slug_match.group(1) if slug_match else ""
+    for verdict, cues in _PROSE_VERDICT_CUES:
+        for cue in cues:
+            if cue in lower:
+                return {
+                    "verdict": verdict,
+                    "reasoning": (
+                        "Extracted from judge prose (no JSON envelope emitted). "
+                        f"Matched cue: {cue!r}."
+                    ),
+                    "learning_slug": learning_slug,
+                    "proposed_rule_slug": None,
+                }
+    return None
+
 
 class CrystallizationVerdictParseError(RuntimeError):
     """Raised when Claude's summary lacks a parsable CrystallizationVerdict.
@@ -70,6 +151,10 @@ def _extract_verdict_envelope(summary: str) -> CrystallizationVerdict:
 
     Follows the ADR-0027 last-block-wins convention so a judge that explores
     alternatives in earlier blocks can converge to a final verdict at the end.
+
+    Falls back to prose-cue parsing when no JSON envelope is present —
+    mirrors the architect's fallback (architecture.py ``_parse_verdict_from_prose``).
+    The strict JSON path remains primary; the prose path keeps the loop moving.
     """
     envelope: dict[str, Any] | None = None
     for m in _JSON_BLOCK_RE.finditer(summary):
@@ -80,11 +165,21 @@ def _extract_verdict_envelope(summary: str) -> CrystallizationVerdict:
         if isinstance(data, dict) and data.get("verdict") in _VALID_VERDICTS:
             envelope = data
     if envelope is None:
-        raise CrystallizationVerdictParseError(
-            "crystallization-judge summary contained no JSON block with a valid "
-            "``verdict`` field; expected one of: "
-            + ", ".join(sorted(_VALID_VERDICTS))
-        )
+        fallback = _parse_verdict_from_prose(summary)
+        if fallback is not None:
+            logger.warning(
+                "crystallization-judge: no JSON block found; extracted "
+                "verdict %r from prose (cue matched). Prompt or model may "
+                "need tightening.",
+                fallback.get("verdict"),
+            )
+            envelope = fallback
+        else:
+            raise CrystallizationVerdictParseError(
+                "crystallization-judge summary contained no JSON block with a valid "
+                "``verdict`` field; expected one of: "
+                + ", ".join(sorted(_VALID_VERDICTS))
+            )
     try:
         return CrystallizationVerdict.model_validate(envelope)
     except ValidationError as exc:
