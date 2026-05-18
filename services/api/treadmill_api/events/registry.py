@@ -44,6 +44,7 @@ from treadmill_api.events.step import (
 from treadmill_api.events.review import ReviewOverride
 from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
+from treadmill_api.events.validate import ValidateOverride
 from treadmill_api.events.validator_tuning import ValidatorTuning  # noqa: F401  re-exported
 
 
@@ -80,6 +81,10 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     # Review override (ADR-0038): architect's accept-as-is on a
     # ralph-loop deadlock flips review_decision in the mergeability VIEW.
     ReviewOverride,
+    # Validate override (ADR-0042): sibling to ReviewOverride —
+    # architect's accept-as-is on a validate-fail deadlock flips
+    # validate_decision via the mergeability VIEW's validate LATERAL.
+    ValidateOverride,
     # Internal control-plane events
     DispatchPublishFailed,
     DispatchPublishReplayed,

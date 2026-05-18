@@ -379,16 +379,21 @@ def _build_dispatch_payload(
             "intent": "author-superseding-adr",
         }
     if verdict == "accept-as-is":
-        # ADR-0038: when the architect was dispatched to arbitrate a
-        # ralph-loop deadlock, ``accept-as-is`` means "the work is fine;
-        # the reviewer was wrong." Skip wf-doc-amend (no pitfall to
-        # append) and let the consumer emit a ``review.override`` event
-        # so the mergeability VIEW projects ``review_decision=approved``.
+        # ADR-0038 + ADR-0042: when the architect was dispatched to
+        # arbitrate a ralph-loop deadlock, ``accept-as-is`` means "the
+        # work is fine; the gate was wrong." We emit BOTH overrides
+        # because the deadlock predicate fires on either gate
+        # (wf-review.changes_requested or wf-validate.fail) and the
+        # architect's blanket accept-as-is waives whichever was the
+        # blocker. Each override only takes effect in the mergeability
+        # VIEW if the corresponding gate's latest signal at HEAD was a
+        # fail — an override against an already-passing gate is harmless.
         if trigger == _DEADLOCK_TRIGGER:
             return {
                 "workflow_id": None,
                 "task_id": task_id,
                 "review_override": True,
+                "validate_override": True,
             }
         # ADR-0032 (Class C learning trigger): the original semantics
         # — append a pitfall to the component's AGENT.md.

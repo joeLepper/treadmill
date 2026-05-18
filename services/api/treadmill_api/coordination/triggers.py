@@ -806,6 +806,7 @@ async def maybe_dispatch_feedback_on_architect_amend(
 
 
 _REVIEW_OVERRIDE_NAMESPACE = uuid.UUID("8e16f4c0-2c4c-4f4f-9b9a-7c3d6f1a5e10")
+_VALIDATE_OVERRIDE_NAMESPACE = uuid.UUID("2f7c8a3d-5e9b-4c1d-a2e7-3b5f9d6e0a14")
 
 
 async def maybe_emit_review_override_on_architect_completion(
@@ -922,6 +923,132 @@ async def maybe_emit_review_override_on_architect_completion(
     await session.execute(stmt)
     logger.info(
         "review.override emitted: task=%s commit_sha=%s event_id=%s",
+        row.task_id, head_sha, event_id,
+    )
+    return event_id
+
+
+async def maybe_emit_validate_override_on_architect_completion(
+    session: AsyncSession,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """ADR-0042: emit a ``validate.override`` Event row when an architect
+    step.completed carries ``payload.dispatch.validate_override == True``.
+
+    Sibling to ``maybe_emit_review_override_on_architect_completion``.
+    The mergeability VIEW (post-20260518_1715 migration) reads
+    ``validate.override`` events at HEAD as ``validate_decision='pass'``,
+    unblocking auto-merge for validate-fail-driven deadlocks the architect
+    resolved with ``verdict='accept-as-is'``.
+
+    The architect emits both ``review_override`` and ``validate_override``
+    flags on every deadlock ``accept-as-is`` (see
+    ``runner_dispositions/architecture.py``). Each override only matters
+    in the VIEW if its corresponding gate's latest signal at HEAD was a
+    fail; an override against an already-passing gate is harmless because
+    the UNION ALL in the validate LATERAL prefers the most-recent signal
+    by timestamp, and an override emitted at the same instant the gate
+    was already pass-ing leaves the pre-existing pass in place.
+
+    Idempotency: ``id`` is a deterministic UUIDv5 of
+    ``(task_id, commit_sha)`` under a distinct namespace from
+    ``review.override`` so the two overrides co-exist for the same
+    architect step.
+
+    Returns the emitted Event id, or ``None`` if no emission happened.
+    """
+    output = typed.output
+    payload = output.payload if isinstance(output.payload, dict) else {}
+    dispatch = payload.get("dispatch") if isinstance(payload, dict) else None
+    if not isinstance(dispatch, dict) or not dispatch.get("validate_override"):
+        return None
+
+    # Confirm this step belongs to wf-architecture-resolve. Any other
+    # workflow setting ``validate_override`` is malformed; skip defensively.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.task_id,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None or row.workflow_id != ARCHITECTURE_RESOLVE_WORKFLOW_ID:
+        logger.warning(
+            "validate_override emission skipped: step %s is not "
+            "wf-architecture-resolve (workflow=%s)",
+            step_id, row.workflow_id if row else None,
+        )
+        return None
+
+    pr_result = await session.execute(
+        select(TaskPR.repo, TaskPR.pr_number).where(
+            TaskPR.task_id == row.task_id,
+        )
+    )
+    pr_row = pr_result.first()
+    if pr_row is None:
+        logger.warning(
+            "validate_override emission skipped: no task_pr for task %s",
+            row.task_id,
+        )
+        return None
+
+    head_result = await session.execute(
+        select(Event.payload).where(
+            Event.entity_type == "github",
+            Event.action.in_(("pr_opened", "pr_synchronize")),
+            Event.payload["repo"].astext == pr_row.repo,
+            Event.payload["pr_number"].astext == str(pr_row.pr_number),
+        )
+        .order_by(Event.created_at.desc())
+        .limit(1)
+    )
+    head_row = head_result.first()
+    if head_row is None or not (head_row.payload or {}).get("head_sha"):
+        logger.warning(
+            "validate_override emission skipped: no pr_opened/pr_synchronize "
+            "event for task %s (repo=%s pr=%s)",
+            row.task_id, pr_row.repo, pr_row.pr_number,
+        )
+        return None
+    head_sha = head_row.payload["head_sha"]
+
+    reasoning = payload.get("reasoning") or ""
+
+    event_id = uuid.uuid5(
+        _VALIDATE_OVERRIDE_NAMESPACE,
+        f"{row.task_id}:{head_sha}",
+    )
+    stmt = (
+        pg_insert(Event)
+        .values(
+            id=event_id,
+            entity_type="validate",
+            action="override",
+            task_id=row.task_id,
+            commit_sha=head_sha,
+            payload={
+                "commit_sha": head_sha,
+                "reasoning": reasoning,
+                # Empty list = blanket "all failing checks at this sha".
+                # Future ADR-0040 tuning emission can populate this list
+                # to narrow the override to named check_ids.
+                "override_validate_check_ids": [],
+            },
+        )
+        .on_conflict_do_nothing(index_elements=["id"])
+    )
+    await session.execute(stmt)
+    logger.info(
+        "validate.override emitted: task=%s commit_sha=%s event_id=%s",
         row.task_id, head_sha, event_id,
     )
     return event_id

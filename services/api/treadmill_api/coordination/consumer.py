@@ -429,6 +429,18 @@ class CoordinationConsumer:
                 await self._maybe_emit_review_override(
                     session, step_id, typed,
                 )
+            # ADR-0042: sibling emitter to review.override — when an
+            # architect step.completed carries
+            # ``payload.dispatch.validate_override``, emit the
+            # ``validate.override`` Event the mergeability VIEW reads as
+            # ``validate_decision='pass'``. The architect emits both
+            # overrides on every deadlock accept-as-is; each only takes
+            # effect in the VIEW when the corresponding gate's latest
+            # signal at HEAD was a fail.
+            if action == "completed":
+                await self._maybe_emit_validate_override(
+                    session, step_id, typed,
+                )
             # ADR-0040: when the architect step.completed carries
             # ``payload.validator_tuning``, dispatch ``wf-doc-amend``
             # with intent ``tune-rule-from-architect`` so the documentarian
@@ -1348,6 +1360,37 @@ class CoordinationConsumer:
         except Exception:
             logger.exception(
                 "_maybe_emit_review_override: emission failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    # ── Side-effect: emit validate.override on architect accept-as-is ─────
+
+    async def _maybe_emit_validate_override(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """ADR-0042 architect validate-override emitter.
+
+        Sibling to ``_maybe_emit_review_override``. Delegates to
+        ``triggers.maybe_emit_validate_override_on_architect_completion``.
+        Same failure semantics: logged, not propagated, idempotent
+        on SQS redelivery via the trigger's ``ON CONFLICT DO NOTHING``.
+        """
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_emit_validate_override_on_architect_completion,
+        )
+        try:
+            await maybe_emit_validate_override_on_architect_completion(
+                session, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_emit_validate_override: emission failed for step %s; "
                 "prior projection committed, will retry on redelivery",
                 step_id,
             )
