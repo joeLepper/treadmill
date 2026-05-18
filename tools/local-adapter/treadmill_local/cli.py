@@ -67,6 +67,7 @@ def _runtime(
     build_images: bool = True,
     start_autoscaler: bool = True,
     start_scheduler: bool = True,
+    start_deploy_watcher: bool = True,
 ) -> LocalRuntime:
     # Fully-local mode requires cdk.json (it shells out to ``cdk synth``).
     # Dev-local skips synth entirely, so the cdk.json check is also
@@ -81,6 +82,7 @@ def _runtime(
         build_images=build_images,
         start_autoscaler=start_autoscaler,
         start_scheduler=start_scheduler,
+        start_deploy_watcher=start_deploy_watcher,
     )
 
 
@@ -125,6 +127,15 @@ def up(
              "Use this flag when running schedule-free workflows or when "
              "debugging without the cron-dispatch loop.",
     ),
+    no_deploy_watcher: bool = typer.Option(
+        False,
+        "--no-deploy-watcher",
+        help="Skip starting the deploy-watcher subprocess (dev-local only). "
+             "Default is to always start it: the deploy-watcher polls the "
+             "deploy-events SQS queue and reconciles local containers when "
+             "PRs are merged. Use this flag when debugging without automated "
+             "deploy reconciliation.",
+    ),
 ) -> None:
     """Synth CDK + provision moto + start support containers (fully-local),
     or start Postgres + Redis + API against real AWS (dev-local, with
@@ -136,6 +147,7 @@ def up(
         build_images=not no_build,
         start_autoscaler=not no_autoscaler,
         start_scheduler=not no_scheduler,
+        start_deploy_watcher=not no_deploy_watcher,
     )
     rt.up()
 

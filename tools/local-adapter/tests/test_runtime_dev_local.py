@@ -715,6 +715,9 @@ def test_up_dev_local_skips_moto_and_synth(
         rt, "_start_autoscaler_dev_local",
         lambda: autoscaler_started.append(1),
     )
+    # Stub scheduler + deploy-watcher so they don't spawn subprocesses.
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
     # Per ADR-0019: ``up`` fetches AWS credentials on the host. Stub
     # the fetch so we don't hit real boto3/Secrets Manager in unit tests.
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
@@ -953,6 +956,8 @@ def test_up_dev_local_with_no_autoscaler_flag_skips_spawn(
     monkeypatch.setattr(rt, "_ensure_network", lambda: None)
     monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
     monkeypatch.setattr(rt, "_start_services", lambda: None)
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._github_token = "ghp_test_token_placeholder"
@@ -1357,3 +1362,255 @@ def test_redeploy_aborts_when_cdk_fails(
         rt.redeploy()
     assert exc_info.value.code == 1
     assert order == [], "down/up must not run after a cdk failure"
+
+
+# ── Deploy-watcher lifecycle ──────────────────────────────────────────────────
+
+
+def test_start_deploy_watcher_dev_local_spawns_subprocess_with_expected_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``_start_deploy_watcher_dev_local`` invokes ``subprocess.Popen`` with
+    ``python -m treadmill_local.deploy_watcher`` and an env carrying the
+    deployment ID (so the subprocess loads the right YAML), AWS routing
+    vars, and GITHUB_TOKEN (injected from the host-fetched credential).
+
+    Notably the env does NOT carry ``AWS_ENDPOINT_URL`` — that's the
+    moto override; dev-local talks to real AWS endpoints.
+    """
+    cfg = _valid_yaml_dict()
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    rt._github_token = "ghp_injected_token"
+    # Pre-set the AWS credential caches so ``_ensure_dev_local_credentials``
+    # short-circuits and does not try to load the operator's local
+    # ``treadmill-personal`` boto3 profile (which doesn't exist in CI).
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    monkeypatch.chdir(tmp_path)
+    # Clear any inherited endpoint override so the assertion below
+    # exercises the runtime's explicit pop, not the bare absence.
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "http://example.local:5001")
+    monkeypatch.setenv("AWS_PROFILE", "treadmill-from-env")
+
+    popen_calls: list[dict[str, Any]] = []
+
+    class _FakeProc:
+        pid = 7777
+
+    def _fake_popen(*args: Any, **kwargs: Any) -> _FakeProc:
+        popen_calls.append({"args": args, "kwargs": kwargs})
+        return _FakeProc()
+
+    monkeypatch.setattr(runtime_module.subprocess, "Popen", _fake_popen)
+
+    rt._start_deploy_watcher_dev_local()
+
+    assert len(popen_calls) == 1
+    call = popen_calls[0]
+    # Subprocess command: python -m treadmill_local.deploy_watcher.
+    cmd = call["args"][0]
+    assert cmd[1:] == ["-m", "treadmill_local.deploy_watcher"]
+
+    env = call["kwargs"]["env"]
+    # Deployment ID is the load-bearing var: subprocess reads the YAML via it.
+    assert env["TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID"] == cfg["deployment_id"]
+    # AWS routing — region from YAML, profile inherited from parent env.
+    assert env["AWS_DEFAULT_REGION"] == cfg["aws_region"]
+    assert env["AWS_PROFILE"] == "treadmill-from-env"
+    # GITHUB_TOKEN injected from the host-fetched credential, not from env.
+    assert env["GITHUB_TOKEN"] == "ghp_injected_token"
+    # Moto override MUST NOT leak through — dev-local hits real AWS.
+    assert "AWS_ENDPOINT_URL" not in env
+
+    # PID file written for later teardown.
+    assert (tmp_path / ".treadmill-local" / "deploy-watcher.pid").read_text().strip() == "7777"
+
+
+def test_start_deploy_watcher_dev_local_uses_yaml_profile_when_env_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When ``AWS_PROFILE`` is not in the parent env, the runtime falls
+    back to ``cfg['aws_profile']`` so the subprocess still has a
+    profile-resolvable session."""
+    cfg = _valid_yaml_dict()
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    rt._github_token = "ghp_test"
+    # See sibling test: pre-set AWS env caches so the credential fetch
+    # is skipped (CI has no ``treadmill-personal`` boto3 profile).
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    captured: dict[str, Any] = {}
+
+    class _FakeProc:
+        pid = 8888
+
+    def _fake_popen(*args: Any, **kwargs: Any) -> _FakeProc:
+        captured["env"] = kwargs["env"]
+        return _FakeProc()
+
+    monkeypatch.setattr(runtime_module.subprocess, "Popen", _fake_popen)
+    rt._start_deploy_watcher_dev_local()
+    assert captured["env"]["AWS_PROFILE"] == cfg["aws_profile"]
+
+
+def test_up_dev_local_with_no_deploy_watcher_flag_skips_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When ``start_deploy_watcher=False`` (the ``--no-deploy-watcher``
+    CLI flag), ``_up_dev_local`` does NOT spawn the subprocess."""
+    rt = LocalRuntime(
+        tmp_path,
+        deployment_config=_valid_yaml_dict(),
+        start_deploy_watcher=False,
+    )
+
+    monkeypatch.setattr(rt, "_ensure_network", lambda: None)
+    monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    monkeypatch.setattr(rt, "_start_services", lambda: None)
+    monkeypatch.setattr(rt, "_start_autoscaler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._github_token = "ghp_test_token_placeholder"
+
+    spawn_calls: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_start_deploy_watcher_dev_local",
+        lambda: spawn_calls.append(1),
+    )
+
+    rt.up()
+    assert spawn_calls == [], "deploy watcher must NOT spawn when --no-deploy-watcher is set"
+
+
+def test_cli_up_no_deploy_watcher_flag_propagates_to_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-deploy-watcher`` on ``up`` translates to
+    ``start_deploy_watcher=False`` on the runtime constructor."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".treadmill").mkdir()
+    (tmp_path / ".treadmill" / "personal.yaml").write_text(
+        yaml.safe_dump(_valid_yaml_dict())
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+        self.deployment_config = kwargs.get("deployment_config")
+
+    with patch.object(LocalRuntime, "up", lambda self: None), \
+         patch.object(LocalRuntime, "__init__", _fake_init):
+        result = runner.invoke(
+            app,
+            [
+                "up", "--deployment", "personal",
+                "--infra", str(tmp_path),
+                "--no-deploy-watcher",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert captured["start_deploy_watcher"] is False
+
+
+def test_stop_deploy_watcher_sigterms_pid_and_cleans_up_pid_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``_stop_deploy_watcher`` SIGTERMs the PID stored in the PID file
+    and removes the file."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+    state_dir = tmp_path / ".treadmill-local"
+    state_dir.mkdir()
+    pid_file = state_dir / "deploy-watcher.pid"
+    pid_file.write_text("6666")
+
+    # Simulate "alive then dead".
+    pid_alive_calls = [True, False]
+    monkeypatch.setattr(
+        LocalRuntime, "_pid_alive",
+        staticmethod(lambda pid: pid_alive_calls.pop(0) if pid_alive_calls else False),
+    )
+
+    kill_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        runtime_module.os, "kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    rt._stop_deploy_watcher()
+
+    import signal as _signal
+    assert kill_calls == [(6666, _signal.SIGTERM)]
+    assert not pid_file.exists()
+
+
+def test_stop_deploy_watcher_no_pid_file_is_noop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When no PID file is present, ``_stop_deploy_watcher`` is a noop."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+
+    kill_calls: list[Any] = []
+    monkeypatch.setattr(
+        runtime_module.os, "kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    rt._stop_deploy_watcher()  # Must not raise.
+    assert kill_calls == []
+
+
+def test_down_sigterms_deploy_watcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``down`` calls ``_stop_deploy_watcher``, which SIGTERMs the watcher
+    process and removes the PID file."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+    state_dir = tmp_path / ".treadmill-local"
+    state_dir.mkdir()
+    pid_file = state_dir / "deploy-watcher.pid"
+    pid_file.write_text("5555")
+
+    pid_alive_calls = [True, False]
+    monkeypatch.setattr(
+        LocalRuntime, "_pid_alive",
+        staticmethod(lambda pid: pid_alive_calls.pop(0) if pid_alive_calls else False),
+    )
+
+    kill_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        runtime_module.os, "kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    # Stub out everything else down() does.
+    monkeypatch.setattr(rt, "_stop_autoscaler", lambda: None)
+    monkeypatch.setattr(rt, "_stop_scheduler", lambda: None)
+    monkeypatch.setattr(rt, "_stop_managed_containers", lambda: None)
+    monkeypatch.setattr(rt, "_remove_network", lambda: None)
+
+    rt.down()
+
+    import signal as _signal
+    assert (5555, _signal.SIGTERM) in kill_calls
+    assert not pid_file.exists()

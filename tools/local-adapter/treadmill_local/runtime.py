@@ -59,6 +59,8 @@ autoscaler logs ``tick:`` at INFO on every loop iteration, and
 mode captured 2026-05-17 (process alive but loop ceased)."""
 SCHEDULER_PID_FILE = STATE_DIR / "scheduler.pid"
 SCHEDULER_LOG_FILE = STATE_DIR / "scheduler.log"
+DEPLOY_WATCHER_PID_FILE = STATE_DIR / "deploy-watcher.pid"
+DEPLOY_WATCHER_LOG_FILE = STATE_DIR / "deploy-watcher.log"
 BARE_REPOS_DIR = STATE_DIR / "repos"
 """Host-side directory for the agent worker's local-mode bare repos.
 The runtime mounts this into the worker container at
@@ -162,6 +164,7 @@ class LocalRuntime:
         build_images: bool = True,
         start_autoscaler: bool = True,
         start_scheduler: bool = True,
+        start_deploy_watcher: bool = True,
     ) -> None:
         """Construct a LocalRuntime.
 
@@ -200,6 +203,12 @@ class LocalRuntime:
                 workflows. Ignored in fully-local (moto) mode: the
                 scheduler needs a real Postgres schema and runs
                 against it on the host.
+            start_deploy_watcher: When True (default), dev-local ``up``
+                spawns the deploy-watcher subprocess after services are
+                up. Set to False (via ``--no-deploy-watcher``) to
+                suppress the deploy-event reconciliation loop — useful
+                when debugging without automated container updates on
+                merged PRs. Ignored in fully-local (moto) mode.
         """
         self.infra_dir = infra_dir.resolve()
         self.docker = docker.from_env()
@@ -208,6 +217,7 @@ class LocalRuntime:
         self.build_images = build_images
         self.start_autoscaler = start_autoscaler
         self.start_scheduler = start_scheduler
+        self.start_deploy_watcher = start_deploy_watcher
         # Per ADR-0019: dev-local credentials are fetched on the host and
         # injected into containers as env vars. The fetched values live in
         # memory on the runtime for the lifetime of the up-process; we
@@ -289,6 +299,12 @@ class LocalRuntime:
         else:
             console.print(
                 "[yellow]• Scheduler suppressed (--no-scheduler).[/yellow]"
+            )
+        if self.start_deploy_watcher:
+            self._start_deploy_watcher_dev_local()
+        else:
+            console.print(
+                "[yellow]• Deploy watcher suppressed (--no-deploy-watcher).[/yellow]"
             )
         self._report_up_dev_local(cfg)
 
@@ -721,6 +737,7 @@ class LocalRuntime:
         console.print("[bold]Treadmill local — down[/bold]")
         self._stop_autoscaler()
         self._stop_scheduler()
+        self._stop_deploy_watcher()
         self._stop_managed_containers()
         self._remove_network()
         console.print("[green]Down complete.[/green]")
@@ -1597,6 +1614,100 @@ class LocalRuntime:
             return False
         try:
             pid = int(SCHEDULER_PID_FILE.read_text().strip())
+        except ValueError:
+            return False
+        return self._pid_alive(pid)
+
+    # ── Deploy-watcher lifecycle ──────────────────────────────────────────────
+
+    def _start_deploy_watcher_dev_local(self) -> None:
+        """Spawn the deploy-watcher subprocess for dev-local mode.
+
+        Mirrors ``_start_autoscaler_dev_local`` but drives
+        ``treadmill_local.deploy_watcher`` — the SQS-polling loop that
+        reconciles local containers when PRs are merged. Not started in
+        fully-local (moto) mode: the watcher polls real AWS SQS and needs
+        the deployment YAML that only exists in dev-local.
+
+        Env-vars passed to the subprocess:
+          * ``TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID`` — the deployment
+            slug; the subprocess's ``main()`` branches on this to load
+            the right per-deployment YAML and extract
+            ``deploy_events_queue_url``.
+          * ``AWS_PROFILE`` — inherited from parent shell or YAML fallback.
+          * ``AWS_DEFAULT_REGION`` — from YAML.
+          * ``GITHUB_TOKEN`` — fetched once on the host by
+            ``_ensure_dev_local_credentials`` and injected here so the
+            subprocess can call the GitHub PR-files API without reading
+            from Secrets Manager itself.
+          * NOTABLY ABSENT: ``AWS_ENDPOINT_URL`` (moto override;
+            dev-local talks to real AWS).
+        """
+        assert self.deployment_config is not None
+        cfg = self.deployment_config
+
+        if self._deploy_watcher_pid_alive():
+            console.print("• Deploy watcher already running.")
+            return
+
+        deployment_id = cfg["deployment_id"]
+
+        # Credentials must already be fetched (called after _ensure_dev_local_credentials).
+        self._ensure_dev_local_credentials()
+        assert self._github_token is not None
+
+        STATE_DIR.mkdir(exist_ok=True)
+        log_handle = open(DEPLOY_WATCHER_LOG_FILE, "ab")
+        env = {
+            **os.environ,
+            "TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID": deployment_id,
+            "AWS_DEFAULT_REGION": cfg["aws_region"],
+            "AWS_PROFILE": os.environ.get("AWS_PROFILE", cfg["aws_profile"]),
+            "GITHUB_TOKEN": self._github_token,
+        }
+        # Defensive: drop the moto endpoint override if it leaked into the env.
+        env.pop("AWS_ENDPOINT_URL", None)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "treadmill_local.deploy_watcher"],
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(Path.cwd()),
+        )
+        DEPLOY_WATCHER_PID_FILE.write_text(str(proc.pid))
+        console.print(
+            f"• Deploy watcher started (pid={proc.pid}, deployment={deployment_id})."
+        )
+
+    def _stop_deploy_watcher(self) -> None:
+        if not DEPLOY_WATCHER_PID_FILE.exists():
+            return
+        try:
+            pid = int(DEPLOY_WATCHER_PID_FILE.read_text().strip())
+        except ValueError:
+            DEPLOY_WATCHER_PID_FILE.unlink(missing_ok=True)
+            return
+        if self._pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(20):
+                    if not self._pid_alive(pid):
+                        break
+                    time.sleep(0.1)
+                if self._pid_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
+                console.print(f"• Deploy watcher stopped (pid={pid}).")
+            except ProcessLookupError:
+                pass
+        DEPLOY_WATCHER_PID_FILE.unlink(missing_ok=True)
+
+    def _deploy_watcher_pid_alive(self) -> bool:
+        if not DEPLOY_WATCHER_PID_FILE.exists():
+            return False
+        try:
+            pid = int(DEPLOY_WATCHER_PID_FILE.read_text().strip())
         except ValueError:
             return False
         return self._pid_alive(pid)
