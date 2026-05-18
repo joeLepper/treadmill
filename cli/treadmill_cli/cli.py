@@ -18,6 +18,7 @@ Command groups:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -58,6 +59,37 @@ app.add_typer(schedules_app)
 
 console = Console()
 err_console = Console(stderr=True)
+
+# ── Plan doc status helpers ───────────────────────────────────────────────────
+
+_FM_RE = re.compile(r"\A(---[ \t]*\n)(.*?)(\n---[ \t]*(?:\n|$))", re.DOTALL)
+_FM_STATUS_RE = re.compile(r"^(status:[ \t]*)(\S+)", re.MULTILINE)
+_TERMINAL_STATUSES = frozenset({"completed", "abandoned"})
+
+
+def _promote_draft_status(content: str) -> str:
+    """Flip ``status: drafting`` → ``status: active`` in plan doc frontmatter.
+
+    Returns content unchanged if status is already ``active`` or absent.
+    Raises ``ValueError(current_status)`` for terminal statuses so the
+    caller can surface a human-readable error.
+    """
+    m = _FM_RE.match(content)
+    if not m:
+        return content
+    fm_body = m.group(2)
+    sm = _FM_STATUS_RE.search(fm_body)
+    if not sm:
+        return content
+    status = sm.group(2)
+    if status == "active":
+        return content
+    if status in _TERMINAL_STATUSES:
+        raise ValueError(status)
+    if status == "drafting":
+        new_fm_body = fm_body[: sm.start(2)] + "active" + fm_body[sm.end(2):]
+        return content[: m.start(2)] + new_fm_body + content[m.end(2):]
+    return content
 
 
 def _client() -> ApiClient:
@@ -110,6 +142,19 @@ def plan_submit(
             raise typer.Exit(code=2)
         doc_content = doc.read_text(encoding="utf-8")
         doc_path = str(doc)
+        original_content = doc_content
+        try:
+            doc_content = _promote_draft_status(doc_content)
+        except ValueError as exc:
+            err_console.print(
+                f"[red]cannot submit: plan doc status is '{exc}'; "
+                f"only drafting or active docs may be submitted[/red]"
+            )
+            raise typer.Exit(code=2)
+        if doc_content != original_content:
+            console.print("  [dim]status: drafting → active[/dim]")
+            if dev:
+                doc.write_text(doc_content, encoding="utf-8")
 
     try:
         with _client() as client:

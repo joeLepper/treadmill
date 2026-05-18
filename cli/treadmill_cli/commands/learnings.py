@@ -93,6 +93,48 @@ def scan_learnings(learnings_dir: Path, today: date | None = None) -> list[str]:
     ]
 
 
+def _build_crystallize_doc(candidates: list[str]) -> str:
+    """Generate a plan doc (``status: active``) for a crystallize run.
+
+    Submitting via doc_content activates the plan immediately (no drafting
+    phase) and lets the API spawn the wf-crystallize-learning task from
+    the embedded sequence_of_work block.
+    """
+    n = len(candidates)
+    slug_list = "\n".join(f"- {s}" for s in candidates)
+    intent_lines = "\n".join(f"      - {s}" for s in candidates)
+    plural = "s" if n != 1 else ""
+    return f"""\
+---
+status: active
+---
+
+# Crystallize learnings ({n} candidate{plural})
+
+{slug_list}
+
+## sequence_of_work
+
+```yaml
+sequence_of_work:
+  - id: crystallize-all
+    title: "crystallize {n} learning(s)"
+    workflow: wf-crystallize-learning
+    intent: |
+      Crystallize captured learnings:
+{intent_lines}
+    scope:
+      files:
+        - docs/learnings/*.md
+        - docs/knowledge-base/rules/*.md
+    validation:
+      - kind: deterministic
+        description: Crystallization task dispatched
+        script: exit 0
+```
+"""
+
+
 @learnings_app.command("crystallize")
 def crystallize(
     repo: Annotated[str, typer.Option("--repo", "-r", help="org/repo slug.")],
@@ -101,11 +143,12 @@ def crystallize(
         help="Directory containing learning markdown files.",
     )] = Path("docs/learnings"),
 ) -> None:
-    """Scan captured learnings and dispatch a single wf-crystallize-learning task.
+    """Scan captured learnings and dispatch a wf-crystallize-learning task.
 
     Finds all docs/learnings/*.md with status=captured and no active backoff,
-    then dispatches one fan-out task carrying all candidate slugs. The workflow
-    fans out internally (per Q34.c) — one task per CLI run regardless of count.
+    then submits a plan doc (status:active) whose sequence_of_work carries
+    all candidate slugs. The plan is activated immediately (no drafting phase);
+    the API spawns the task inline per Q34.c.
     """
     candidates = scan_learnings(learnings_dir)
     if not candidates:
@@ -116,25 +159,18 @@ def crystallize(
     for slug in candidates:
         console.print(f"  {slug}")
 
-    description = (
-        "Crystallize captured learnings:\n"
-        + "\n".join(f"- {slug}" for slug in candidates)
-    )
+    doc_content = _build_crystallize_doc(candidates)
 
     try:
         with _client() as client:
-            plan = client.create_plan(repo=repo, intent=description)
-            task = client.create_task(
-                plan_id=plan["id"],
-                title=f"crystallize {len(candidates)} learning(s)",
-                workflow="wf-crystallize-learning",
-                description=description,
-            )
+            plan = client.create_plan(repo=repo, doc_content=doc_content)
+            tasks = client.list_plan_tasks(plan["id"])
     except ApiError as exc:
         _handle_api_error(exc)
 
+    task = tasks[0] if tasks else None
     console.print(
-        f"[green]dispatched:[/green] plan=[bold]{plan['id']}[/bold] "
-        f"task=[bold]{task['id']}[/bold]"
+        f"[green]dispatched:[/green] plan=[bold]{plan['id']}[/bold]"
+        + (f" task=[bold]{task['id']}[/bold]" if task else "")
     )
     console.print(f"  candidates: {len(candidates)}")

@@ -12,7 +12,11 @@ from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
 from treadmill_cli.cli import app
-from treadmill_cli.commands.learnings import _is_candidate, scan_learnings
+from treadmill_cli.commands.learnings import (
+    _build_crystallize_doc,
+    _is_candidate,
+    scan_learnings,
+)
 
 
 runner = CliRunner()
@@ -161,6 +165,37 @@ def test_scan_learnings_mixed_statuses(tmp_path: Path) -> None:
     assert slugs == ["2026-05-10-captured-a", "2026-05-12-captured-c"]
 
 
+# ── _build_crystallize_doc ────────────────────────────────────────────────────
+
+
+def test_build_crystallize_doc_has_active_status() -> None:
+    doc = _build_crystallize_doc(["2026-05-10-alpha", "2026-05-11-beta"])
+    assert "status: active" in doc
+
+
+def test_build_crystallize_doc_contains_slugs() -> None:
+    doc = _build_crystallize_doc(["2026-05-10-alpha", "2026-05-11-beta"])
+    assert "2026-05-10-alpha" in doc
+    assert "2026-05-11-beta" in doc
+
+
+def test_build_crystallize_doc_excludes_absent_slugs() -> None:
+    doc = _build_crystallize_doc(["2026-05-10-alpha"])
+    assert "2026-05-11-beta" not in doc
+
+
+def test_build_crystallize_doc_single_candidate() -> None:
+    doc = _build_crystallize_doc(["only-one"])
+    assert "crystallize 1 learning" in doc
+    assert "candidate)" in doc  # singular "candidate"
+
+
+def test_build_crystallize_doc_plural_candidates() -> None:
+    doc = _build_crystallize_doc(["a", "b"])
+    assert "crystallize 2 learning" in doc
+    assert "candidates)" in doc
+
+
 # ── crystallize CLI command ───────────────────────────────────────────────────
 
 
@@ -188,8 +223,8 @@ def test_crystallize_dispatches_single_task(
         json=plan, status_code=201,
     )
     httpx_mock.add_response(
-        method="POST", url="http://fake-api/api/v1/tasks",
-        json=task, status_code=201,
+        method="GET", url=f"http://fake-api/api/v1/plans/{plan['id']}/tasks",
+        json=[task],
     )
 
     result = runner.invoke(app, [
@@ -202,15 +237,20 @@ def test_crystallize_dispatches_single_task(
     assert task["id"] in result.output
     assert "candidates: 2" in result.output
 
-    # Exactly one task POST.
+    # API creates the task from sequence_of_work — no separate POST /tasks.
     task_posts = [
         r for r in httpx_mock.get_requests()
         if r.method == "POST" and r.url.path == "/api/v1/tasks"
     ]
-    assert len(task_posts) == 1
+    assert len(task_posts) == 0
+
+    # Plan POST carries doc_content with status: active.
+    plan_post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+    body = json.loads(plan_post.content)
+    assert "status: active" in body.get("doc_content", "")
 
 
-def test_crystallize_task_payload_carries_candidate_slugs(
+def test_crystallize_doc_content_carries_candidate_slugs(
     httpx_mock: HTTPXMock, tmp_path: Path,
 ) -> None:
     _write_learning(tmp_path, "alpha", status="captured", date_prefix="2026-05-10")
@@ -223,7 +263,8 @@ def test_crystallize_task_payload_carries_candidate_slugs(
         method="POST", url="http://fake-api/api/v1/plans", json=plan, status_code=201,
     )
     httpx_mock.add_response(
-        method="POST", url="http://fake-api/api/v1/tasks", json=task, status_code=201,
+        method="GET", url=f"http://fake-api/api/v1/plans/{plan['id']}/tasks",
+        json=[task],
     )
 
     runner.invoke(app, [
@@ -231,15 +272,13 @@ def test_crystallize_task_payload_carries_candidate_slugs(
         "--learnings-dir", str(tmp_path),
     ])
 
-    task_post = next(
-        r for r in httpx_mock.get_requests()
-        if r.method == "POST" and r.url.path == "/api/v1/tasks"
-    )
-    body = json.loads(task_post.content)
-    assert body["workflow"] == "wf-crystallize-learning"
-    assert "2026-05-10-alpha" in body["description"]
-    assert "2026-05-11-beta" in body["description"]
-    assert "skipped" not in body["description"]
+    plan_post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+    body = json.loads(plan_post.content)
+    doc = body.get("doc_content", "")
+    assert "wf-crystallize-learning" in doc
+    assert "2026-05-10-alpha" in doc
+    assert "2026-05-11-beta" in doc
+    assert "skipped" not in doc
 
 
 def test_crystallize_excludes_backoff_active_learnings(
@@ -255,7 +294,8 @@ def test_crystallize_excludes_backoff_active_learnings(
         method="POST", url="http://fake-api/api/v1/plans", json=plan, status_code=201,
     )
     httpx_mock.add_response(
-        method="POST", url="http://fake-api/api/v1/tasks", json=task, status_code=201,
+        method="GET", url=f"http://fake-api/api/v1/plans/{plan['id']}/tasks",
+        json=[task],
     )
 
     result = runner.invoke(app, [
@@ -265,13 +305,10 @@ def test_crystallize_excludes_backoff_active_learnings(
     assert result.exit_code == 0, result.output
     assert "candidates: 1" in result.output
 
-    task_post = next(
-        r for r in httpx_mock.get_requests()
-        if r.method == "POST" and r.url.path == "/api/v1/tasks"
-    )
-    body = json.loads(task_post.content)
-    assert "ready-to-go" in body["description"]
-    assert "backoff-still-active" not in body["description"]
+    plan_post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+    doc = json.loads(plan_post.content).get("doc_content", "")
+    assert "ready-to-go" in doc
+    assert "backoff-still-active" not in doc
 
 
 def test_crystallize_surfaces_api_error(

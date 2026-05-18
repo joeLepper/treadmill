@@ -120,6 +120,156 @@ def test_plan_submit_with_missing_doc_file(tmp_path: Path) -> None:
     assert "not found" in result.output
 
 
+# ── plan submit --doc: status auto-promotion ─────────────────────────────────
+
+
+_DOC_WITH_STATUS = """\
+---
+status: {status}
+---
+
+# Plan
+
+## sequence_of_work
+
+```yaml
+sequence_of_work:
+  - id: t1
+    title: do thing
+    workflow: wf-author
+    intent: do it
+    scope:
+      files:
+        - src/x.py
+    validation:
+      - kind: deterministic
+        description: passes
+        script: exit 0
+```
+"""
+
+
+@pytest.mark.parametrize("initial_status,expected_in_body", [
+    ("drafting", "status: active"),
+    ("active", "status: active"),
+])
+def test_plan_submit_doc_status_promoted_to_active(
+    httpx_mock: HTTPXMock,
+    tmp_path: Path,
+    initial_status: str,
+    expected_in_body: str,
+) -> None:
+    """Doc with status: drafting is auto-promoted to active before submission;
+    doc already active passes through unchanged."""
+    plan = _plan_payload(doc_path="plan.md")
+    plan_id = plan["id"]
+
+    doc_file = tmp_path / "plan.md"
+    doc_file.write_text(_DOC_WITH_STATUS.format(status=initial_status))
+
+    httpx_mock.add_response(
+        method="POST", url="http://fake-api/api/v1/plans",
+        json={**plan, "doc_path": str(doc_file)}, status_code=201,
+    )
+    httpx_mock.add_response(
+        method="GET", url=f"http://fake-api/api/v1/plans/{plan_id}/tasks",
+        json=[],
+    )
+
+    result = runner.invoke(app, [
+        "plan", "submit", "-r", "test/repo", "-d", str(doc_file),
+    ])
+    assert result.exit_code == 0, result.output
+
+    import json as _json
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    body = _json.loads(posts[0].content)
+    assert expected_in_body in body["doc_content"]
+
+
+def test_plan_submit_doc_drafting_writes_local_file_with_dev(
+    httpx_mock: HTTPXMock,
+    tmp_path: Path,
+) -> None:
+    """With --dev, flipping drafting → active also writes the updated content
+    back to the local file so the working copy stays in sync."""
+    plan = _plan_payload()
+    plan_id = plan["id"]
+
+    doc_file = tmp_path / "plan.md"
+    doc_file.write_text(_DOC_WITH_STATUS.format(status="drafting"))
+
+    httpx_mock.add_response(
+        method="POST", url="http://fake-api/api/v1/plans",
+        json=plan, status_code=201,
+    )
+    httpx_mock.add_response(
+        method="GET", url=f"http://fake-api/api/v1/plans/{plan_id}/tasks",
+        json=[_task_payload()],
+    )
+
+    result = runner.invoke(app, [
+        "plan", "submit", "-r", "test/repo", "-d", str(doc_file), "--dev",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "status: active" in doc_file.read_text()
+
+
+def test_plan_submit_doc_drafting_no_local_write_without_dev(
+    httpx_mock: HTTPXMock,
+    tmp_path: Path,
+) -> None:
+    """Without --dev, flipping drafting → active does NOT write the local file
+    (the bump travels in the PR; the local copy stays at drafting until merge)."""
+    plan = _plan_payload()
+    plan_id = plan["id"]
+
+    original = _DOC_WITH_STATUS.format(status="drafting")
+    doc_file = tmp_path / "plan.md"
+    doc_file.write_text(original)
+
+    httpx_mock.add_response(
+        method="POST", url="http://fake-api/api/v1/plans",
+        json=plan, status_code=201,
+    )
+    httpx_mock.add_response(
+        method="GET", url=f"http://fake-api/api/v1/plans/{plan_id}/tasks",
+        json=[],
+    )
+
+    runner.invoke(app, [
+        "plan", "submit", "-r", "test/repo", "-d", str(doc_file),
+    ])
+    # Local file is unchanged — the PR carries the bump.
+    assert doc_file.read_text() == original
+
+
+def test_plan_submit_doc_with_completed_status_refuses(tmp_path: Path) -> None:
+    """Submitting a plan doc whose frontmatter status is 'completed' must
+    exit with code 2 and a helpful error — the plan is terminal."""
+    doc_file = tmp_path / "plan.md"
+    doc_file.write_text(_DOC_WITH_STATUS.format(status="completed"))
+
+    result = runner.invoke(app, [
+        "plan", "submit", "-r", "test/repo", "-d", str(doc_file),
+    ])
+    assert result.exit_code == 2
+    assert "completed" in result.output
+
+
+def test_plan_submit_doc_with_abandoned_status_refuses(tmp_path: Path) -> None:
+    """Submitting a plan doc whose frontmatter status is 'abandoned' must
+    exit with code 2."""
+    doc_file = tmp_path / "plan.md"
+    doc_file.write_text(_DOC_WITH_STATUS.format(status="abandoned"))
+
+    result = runner.invoke(app, [
+        "plan", "submit", "-r", "test/repo", "-d", str(doc_file),
+    ])
+    assert result.exit_code == 2
+    assert "abandoned" in result.output
+
+
 def test_plan_submit_with_dev_propagates_flag_in_body(httpx_mock: HTTPXMock) -> None:
     """The --dev flag must travel as ``dev: true`` in the POST body so the
     API can short-circuit the wf-plan PR-merge gate (D.10). After create,
