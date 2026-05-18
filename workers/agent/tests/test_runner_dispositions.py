@@ -45,7 +45,6 @@ from treadmill_agent.runner_dispositions.review import (
     ReviewVerdict,
     _extract_json_block,
     _parse_review_envelope,
-    _parse_verdict_marker,
     _strip_json_block,
 )
 
@@ -487,116 +486,6 @@ def test_code_handler_captures_validation_stderr(tmp_path: Path) -> None:
 # ── review handler ──────────────────────────────────────────────────────────
 
 
-def test_parse_verdict_marker_picks_approve() -> None:
-    assert _parse_verdict_marker("blah\nVERDICT: approve\n") == "approve"
-
-
-def test_parse_verdict_marker_picks_request_changes() -> None:
-    assert (
-        _parse_verdict_marker("blah\nVERDICT: request_changes\n")
-        == "request_changes"
-    )
-
-
-def test_parse_verdict_marker_treats_legacy_comment_as_default() -> None:
-    """``comment`` was retired 2026-05-15. A stale ``VERDICT: comment``
-    line no longer matches the inner regex, so the marker is treated as
-    absent and the function returns its default (``request_changes``)."""
-    assert (
-        _parse_verdict_marker("blah\nVERDICT: comment\n") == "request_changes"
-    )
-
-
-def test_parse_verdict_marker_defaults_to_request_changes_when_absent() -> None:
-    """The safe default — no marker means ``request_changes``, never
-    accidentally approves a PR Treadmill can't actually evaluate. Pre
-    2026-05-15 this defaulted to ``comment`` which was a black hole."""
-    assert _parse_verdict_marker("just text, no marker") == "request_changes"
-
-
-def test_parse_verdict_marker_takes_last_match_when_ambiguous() -> None:
-    """Q22.c — multiple markers means the prompt is wrong; the handler
-    takes the LAST line so a corrected verdict at the end wins."""
-    text = "VERDICT: approve\n...changed my mind...\nVERDICT: request_changes"
-    assert _parse_verdict_marker(text) == "request_changes"
-
-
-# ── Marker-decoration tolerance (tourniquet for the PR #10 deathloop) ──────────
-#
-# The strict regex used to reject everything except ``^VERDICT: <verb>$``;
-# the model occasionally adds Markdown emphasis under the "end your
-# response with one of these lines" instruction, and that defeated the
-# parse → verdict defaulted to ``comment`` → mergeability collapsed to
-# ``blocked-on-review`` → the runner re-authored → deathloop. Each case
-# below is a real or near-real decoration we have observed (or trivially
-# expect to observe given the prompt's emphasis instructions).
-
-
-def test_parse_verdict_marker_tolerates_bold_wrap() -> None:
-    """``**VERDICT: request_changes**`` — the live PR #10 failure case."""
-    assert (
-        _parse_verdict_marker("blah\n**VERDICT: request_changes**\n")
-        == "request_changes"
-    )
-
-
-def test_parse_verdict_marker_tolerates_italic_wrap() -> None:
-    assert (
-        _parse_verdict_marker("blah\n*VERDICT: approve*\n") == "approve"
-    )
-
-
-def test_parse_verdict_marker_tolerates_backtick_wrap() -> None:
-    assert _parse_verdict_marker("blah\n`VERDICT: approve`\n") == "approve"
-
-
-def test_parse_verdict_marker_tolerates_double_wrap() -> None:
-    """The model has been seen to double-wrap (``**`VERDICT: ...`**``)."""
-    assert (
-        _parse_verdict_marker("blah\n**`VERDICT: request_changes`**\n")
-        == "request_changes"
-    )
-
-
-def test_parse_verdict_marker_tolerates_leading_bullet() -> None:
-    assert (
-        _parse_verdict_marker("Summary follows.\n- VERDICT: approve\n")
-        == "approve"
-    )
-
-
-def test_parse_verdict_marker_tolerates_leading_blockquote() -> None:
-    assert (
-        _parse_verdict_marker("> VERDICT: request_changes\n")
-        == "request_changes"
-    )
-
-
-def test_parse_verdict_marker_tolerates_trailing_punctuation() -> None:
-    assert (
-        _parse_verdict_marker("...\nVERDICT: approve.\n") == "approve"
-    )
-
-
-def test_parse_verdict_marker_rejects_unknown_verb() -> None:
-    """Tolerance widens decorations, NOT the verdict vocabulary —
-    ``VERDICT: lgtm`` is still nonsense and must fall through to the
-    safe default rather than silently rewriting to e.g. ``approve``."""
-    assert _parse_verdict_marker("VERDICT: lgtm") == "request_changes"
-
-
-def test_parse_verdict_marker_last_wins_across_decorated_lines() -> None:
-    """Last-marker-wins still holds when each candidate is decorated
-    differently — the normalization must not collapse multiple matches
-    into the first."""
-    text = (
-        "**VERDICT: approve**\n"
-        "Actually on reflection:\n"
-        "- VERDICT: request_changes\n"
-    )
-    assert _parse_verdict_marker(text) == "request_changes"
-
-
 # ── ADR-0027: JSON envelope path ─────────────────────────────────────────────
 
 
@@ -703,33 +592,30 @@ def test_parse_review_envelope_picks_from_json_fence_happy_path() -> None:
     assert rationale == "missing tests"
 
 
-def test_parse_review_envelope_falls_through_to_regex_on_invalid_json() -> None:
-    """When the JSON block is malformed (syntactic), the parser falls
-    through to the regex tourniquet. Rationale is None because the
-    regex path can't recover one."""
+def test_parse_review_envelope_returns_safe_default_on_invalid_json() -> None:
+    """When the JSON block is malformed (syntactic), the parser emits a
+    warning and returns the safe default ``request_changes``."""
     text = (
         "Reviewed the diff.\n\n"
         "```json\n"
         '{"verdict": "approve", but this is not valid json\n'
         "```\n\n"
-        "VERDICT: approve\n"
     )
     verdict, rationale = _parse_review_envelope(text)
-    assert verdict == "approve"
+    assert verdict == "request_changes"
     assert rationale is None
 
 
-def test_parse_review_envelope_falls_through_on_invalid_verdict_value() -> None:
+def test_parse_review_envelope_returns_safe_default_on_invalid_verdict_value() -> None:
     """When the JSON block parses but the verdict is outside the
-    closed value-set, fall through to regex (or default)."""
+    closed value-set, the envelope falls through to the safe default."""
     text = (
         "```json\n"
         '{"verdict": "lgtm", "rationale": "looks good"}\n'
         "```\n"
-        "VERDICT: approve\n"
     )
     verdict, rationale = _parse_review_envelope(text)
-    assert verdict == "approve"
+    assert verdict == "request_changes"
     assert rationale is None
 
 
@@ -765,9 +651,8 @@ def test_parse_review_envelope_safe_default_when_both_paths_fail() -> None:
 
 def test_parse_review_envelope_legacy_comment_marker_falls_to_default() -> None:
     """A stale ``VERDICT: comment`` line (e.g. from a pre-2026-05-15
-    role prompt cached somewhere) does not match the inner regex
-    anymore — the envelope falls through to the request_changes
-    default."""
+    role prompt cached somewhere) is not a valid JSON envelope, so the
+    envelope falls through to the request_changes safe default."""
     text = "Some notes.\nVERDICT: comment\n"
     verdict, rationale = _parse_review_envelope(text)
     assert verdict == "request_changes"
@@ -883,13 +768,18 @@ def test_review_handler_invokes_gh_pr_comment_with_verdict_header(
 
     ctx = _disp_ctx(
         repo_dir=tmp_path, output_kind="review", pr_number=42,
-        summary="Reviewed the diff carefully.\n\nVERDICT: approve\n",
+        summary=(
+            "Reviewed the diff carefully.\n\n"
+            "```json\n"
+            '{"verdict": "approve", "rationale": "LGTM"}\n'
+            "```\n"
+        ),
     )
     out = handle_review(ctx)
     assert len(calls) == 1
     assert calls[0]["pr"] == 42
     assert calls[0]["body"].startswith("## Treadmill review verdict: approve\n\n")
-    assert ctx.claude_result.summary in calls[0]["body"]
+    assert "LGTM" in calls[0]["body"]
     # ADR-0012 mapping: approve → approved.
     assert out.decision == "approved"
     review_artifacts = [a for a in out.artifacts if a.kind == "pr_review"]
@@ -913,7 +803,12 @@ def test_review_handler_request_changes_header_uses_human_verb(
     monkeypatch.setattr(gh, "pr_review", lambda *a, **kw: None)
     ctx = _disp_ctx(
         repo_dir=tmp_path, output_kind="review", pr_number=11,
-        summary="Diff has correctness issues.\nVERDICT: request_changes\n",
+        summary=(
+            "Diff has correctness issues.\n\n"
+            "```json\n"
+            '{"verdict": "request_changes", "rationale": "Diff has correctness issues"}\n'
+            "```\n"
+        ),
     )
     handle_review(ctx)
     assert captured[0].startswith("## Treadmill review verdict: request changes\n\n")
@@ -932,7 +827,12 @@ def test_review_handler_skips_gh_in_dry_run(
     monkeypatch.setattr(gh, "pr_review", _fail)
     ctx = _disp_ctx(
         repo_dir=tmp_path, output_kind="review", pr_number=42,
-        summary="ok\nVERDICT: request_changes\n",
+        summary=(
+            "ok\n\n"
+            "```json\n"
+            '{"verdict": "request_changes", "rationale": "ok"}\n'
+            "```\n"
+        ),
         is_dry_run=True,
     )
     out = handle_review(ctx)

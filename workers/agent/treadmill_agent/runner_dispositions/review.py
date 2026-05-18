@@ -1,6 +1,6 @@
 """``review`` disposition — post a PR comment carrying the verdict.
 
-Parser stack (ADR-0027 + task #108 path 1):
+Parser stack (ADR-0027 + ADR-0028):
 
   1. **JSON envelope path (primary, ADR-0027).** The role-reviewer
      prompt instructs Claude to end its output with a fenced JSON
@@ -10,16 +10,11 @@ Parser stack (ADR-0027 + task #108 path 1):
      closed value-set + the model's typed rationale field replace the
      prose-marker grep with a typed boundary (the pattern ADR-0011
      established for every other output kind).
-  2. **Regex tourniquet (fallback, kept ~one release).** On JSON
-     parse / validation failure (or no fence at all), the handler
-     emits a structured ``review.json_parse_failed`` warning and
-     falls through to the per-line ``VERDICT:`` regex parser. This
-     keeps the loop alive during prompt-rollout drift; per Q27.a's
-     resolution, the regex is deleted after 10 consecutive runs land
-     cleanly via the JSON path.
-  3. **Safe default (``comment``).** If both paths fail, the verdict
-     defaults to ``comment`` — never accidentally approves a PR
-     Treadmill can't actually evaluate.
+  2. **Safe default (``request_changes``).** If the JSON path fails,
+     the verdict defaults to ``request_changes`` — never accidentally
+     approves a PR Treadmill can't actually evaluate, and the
+     request_changes verdict gives the system a productive next step
+     (wf-feedback) instead of an ambiguous outcome.
 
 Transport: ``gh pr comment`` per task #108 path 1. GitHub blocks
 same-author ``gh pr review`` and Treadmill's single-PAT identity
@@ -96,73 +91,6 @@ class MissingContextError(RuntimeError):
     a PR yet."""
 
 
-# Tourniquet for the markdown-drift bug observed on PR #10
-# 2026-05-12 (the strict ``^VERDICT: ...$`` regex rejected
-# ``**VERDICT: request_changes**`` — model emphasis defeated the parse,
-# the verdict fell back to ``comment``, the mergeability VIEW collapsed
-# that to ``blocked-on-review``, the runner re-authored, and the loop
-# deathlooped). Per-line normalization strips the common Markdown
-# decorations the model produces under emphasis instructions: leading
-# list / blockquote markers, surrounding ``*`` / ``_`` / backtick
-# wrapping, and trailing punctuation. The durable fix is a structured
-# JSON envelope (ADR-0027); this widening is the tourniquet that lets
-# the running loop survive until that lands.
-_VERDICT_INNER_RE = re.compile(
-    r"^VERDICT:\s*(approve|request_changes)$",
-)
-_LEADING_MARKER_RE = re.compile(r"^\s*(?:[-*+>]\s+|>\s*)*")
-_SURROUNDING_DECORATION_RE = re.compile(r"^[*_`]+|[*_`]+$")
-_TRAILING_PUNCTUATION_RE = re.compile(r"[.,;:!?\s]+$")
-
-
-def _normalize_verdict_line(line: str) -> str:
-    """Strip the markdown decorations a model commonly adds around a
-    marker line so the strict inner regex can still match.
-
-    Operates on a single line. Returns the bare ``VERDICT: <value>``
-    text if recognizable, else an empty string. Conservative: only
-    peels decorations we've actually seen the model emit; does not
-    fuzzy-match the verdict word itself (so e.g. ``VERDICT: lgtm``
-    still fails, falling through to the safe default).
-    """
-    s = _LEADING_MARKER_RE.sub("", line).strip()
-    # Repeatedly peel surrounding ``*``/``_``/backtick pairs; the model
-    # occasionally double-wraps (``**`*VERDICT*`**``).
-    while True:
-        peeled = _SURROUNDING_DECORATION_RE.sub("", s).strip()
-        if peeled == s:
-            break
-        s = peeled
-    s = _TRAILING_PUNCTUATION_RE.sub("", s)
-    return s
-
-
-def _parse_verdict_marker(summary: str, *, default: str = "request_changes") -> str:
-    """Return the last ``VERDICT: ...`` line's value, or ``default``.
-
-    Per ADR-0022 Q22.c: if Claude is ambiguous (multiple VERDICT
-    lines), the handler takes the *last* match. The role's prompt
-    teaches a single-line marker convention; multiple lines is a
-    prompt-engineering bug, not a runner bug.
-
-    The default — ``request_changes`` — is conservative: a missing /
-    malformed marker never accidentally approves a PR, and the
-    request_changes verdict gives the system a productive next step
-    (wf-feedback) instead of the legacy ``comment`` black hole.
-
-    Per ADR-0027 this regex-driven path is the tourniquet fallback
-    behind the JSON-envelope parser. Kept until 10 consecutive runs
-    land cleanly via the JSON path (Q27.a).
-    """
-    last: str | None = None
-    for line in (summary or "").splitlines():
-        normalized = _normalize_verdict_line(line)
-        m = _VERDICT_INNER_RE.match(normalized)
-        if m is not None:
-            last = m.group(1)
-    return last if last is not None else default
-
-
 def _extract_json_block(summary: str) -> str | None:
     """Return the contents of the LAST ```` ```json ... ``` ```` block
     in ``summary``, or ``None`` if no such block exists.
@@ -202,17 +130,7 @@ def _parse_review_verdict_object(summary: str) -> ReviewVerdict | None:
     """Parse the review-kind JSON envelope into a ReviewVerdict object.
 
     Returns the typed ReviewVerdict if parsing succeeds, or None if the
-    JSON envelope is missing/invalid (falls back to regex tourniquet).
-
-    Three-tier parser per ADR-0027:
-
-      1. **JSON envelope (primary).** ``_extract_json_block`` →
-         ``json.loads`` → ``ReviewVerdict.model_validate``. On
-         success, returns the typed verdict object.
-      2. **Regex tourniquet (fallback).** On ``JSONDecodeError`` /
-         ``ValidationError``, emit a structured
-         ``review.json_parse_failed`` warning and return None.
-      3. **Safe default.** None return means fall back to regex parsing.
+    JSON envelope is missing/invalid (caller applies safe default).
 
     Per Q27.d's resolution, this function ALWAYS runs (dry-run path
     included); the dry-run only skips the ``gh pr comment`` call,
@@ -236,18 +154,14 @@ def _parse_review_verdict_object(summary: str) -> ReviewVerdict | None:
 def _parse_review_envelope(summary: str) -> tuple[str, str | None]:
     """Parse the review-kind output into ``(verdict, rationale)``.
 
-    Three-tier parser per ADR-0027 — returns tuple of (verdict_str, rationale_str).
-    This is the backward-compatible interface; use _parse_review_verdict_object
-    for the full typed envelope with issues.
+    Two-path parser per ADR-0027 / ADR-0028:
 
       1. **JSON envelope (primary).** Returns (parsed.verdict, parsed.rationale).
-      2. **Regex tourniquet (fallback).** Returns (verdict, None).
-      3. **Safe default.** Returns ("request_changes", None).
+      2. **Safe default.** Returns ("request_changes", None).
 
     ``comment`` was retired 2026-05-15 (hands-free has no use for an
     ambiguous verdict). If the model emits ``"comment"`` in the JSON
-    block, model_validate rejects it and the regex tourniquet returns
-    the request_changes default.
+    block, model_validate rejects it and the safe default applies.
 
     Per Q27.d's resolution, this function ALWAYS runs (dry-run path
     included); the dry-run only skips the ``gh pr comment`` call,
@@ -257,23 +171,7 @@ def _parse_review_envelope(summary: str) -> tuple[str, str | None]:
     parsed = _parse_review_verdict_object(summary)
     if parsed is not None:
         return (parsed.verdict, parsed.rationale)
-    # Fallback: regex tourniquet. Returns ``request_changes`` if no
-    # marker line matches.
-    return (_parse_verdict_marker(summary), None)
-
-
-def _has_verdict_marker(summary: str) -> bool:
-    """Return True if the regex tourniquet found a literal VERDICT:
-    line. No longer load-bearing for verdict resolution after the
-    2026-05-15 comment-retirement (``request_changes`` is now the
-    safe default whether or not a marker was present); retained as
-    a hook for drift-signal tests in case the JSON-envelope path
-    degrades."""
-    for line in (summary or "").splitlines():
-        normalized = _normalize_verdict_line(line)
-        if _VERDICT_INNER_RE.match(normalized):
-            return True
-    return False
+    return ("request_changes", None)
 
 
 _VERDICT_HEADER_VERB: dict[str, str] = {
@@ -369,11 +267,9 @@ def handle(ctx: DispositionContext) -> StepOutput:
         verdict = verdict_obj.verdict
         rationale = verdict_obj.rationale
     else:
-        # Fallback path: regex tourniquet or safe default.
-        # Use the legacy tuple-based parser for verdict + rationale.
+        # Fallback path: JSON parse failed, use safe default.
         verdict, rationale = _parse_review_envelope(summary)
         stripped_body = _strip_json_block(summary)
-        # Old behavior: prepend header to the model's prose.
         comment_body = _compose_comment_body(verdict, stripped_body)
 
     # Dry-run path: skip the gh CLI invocation; tests assert the
