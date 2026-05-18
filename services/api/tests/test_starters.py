@@ -41,6 +41,7 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-doc-amend",
     "wf-architecture-resolve",
     "wf-crystallize-learning",
+    "wf-audit-rule-corpus",
 }
 
 _EXPECTED_ROLE_IDS = {
@@ -55,6 +56,7 @@ _EXPECTED_ROLE_IDS = {
     "role-documentarian",
     "role-architect",
     "role-crystallization-judge",
+    "role-rule-corpus-auditor",
 }
 
 # Action-role ids that may appear as step 2 of a 2-step workflow. Per
@@ -68,7 +70,7 @@ _ACTION_ROLE_IDS = {"role-code-author", "role-doc-author", "role-architect"}
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 
-def test_starters_has_ten_canonical_workflows() -> None:
+def test_starters_has_eleven_canonical_workflows() -> None:
     """The canonical workflows, exactly (per ADR-0015 + ADR-0032 +
     ADR-0034). Future starters extend this list; the count is asserted
     as a tripwire so additions are intentional."""
@@ -76,8 +78,8 @@ def test_starters_has_ten_canonical_workflows() -> None:
     assert ids == _EXPECTED_WORKFLOW_IDS
 
 
-def test_starters_declares_eleven_canonical_roles() -> None:
-    """Per ADR-0015 §"Role taxonomy" + ADR-0032 + ADR-0034 — eleven
+def test_starters_declares_twelve_canonical_roles() -> None:
+    """Per ADR-0015 §"Role taxonomy" + ADR-0032 + ADR-0034 — twelve
     roles, exactly."""
     ids = {role["id"] for role in _all_roles()}
     assert ids == _EXPECTED_ROLE_IDS
@@ -170,6 +172,7 @@ _EXPECTED_OUTPUT_KINDS: dict[str, OutputKind] = {
     "role-documentarian": OutputKind.DOCUMENTATION,
     "role-architect": OutputKind.ANALYSIS,
     "role-crystallization-judge": OutputKind.ANALYSIS,
+    "role-rule-corpus-auditor": OutputKind.ANALYSIS,
 }
 
 
@@ -632,13 +635,17 @@ def test_every_role_is_referenced_by_at_least_one_workflow() -> None:
 
 
 def test_single_step_workflows_match_adr_0015_and_0032_matrix() -> None:
-    """Tripwire — the five single-step workflows are wf-author, wf-review,
-    wf-validate, wf-doc-amend, and wf-architecture-resolve. Per ADR-0015,
-    ``wf-author`` deliberately stays single-step because its input is already
-    structured. Per ADR-0032, ``wf-doc-amend`` and ``wf-architecture-resolve``
-    are single-step (verdict routing in disposition, not a second step)."""
+    """Tripwire — the six single-step workflows are wf-author, wf-review,
+    wf-validate, wf-doc-amend, wf-architecture-resolve, and
+    wf-audit-rule-corpus. Per ADR-0015, ``wf-author`` deliberately stays
+    single-step because its input is already structured. Per ADR-0032,
+    ``wf-doc-amend`` and ``wf-architecture-resolve`` are single-step (verdict
+    routing in disposition, not a second step)."""
     ids = {wf["id"] for wf in STARTERS if len(wf["steps"]) == 1}
-    assert ids == {"wf-author", "wf-review", "wf-validate", "wf-doc-amend", "wf-architecture-resolve"}
+    assert ids == {
+        "wf-author", "wf-review", "wf-validate", "wf-doc-amend",
+        "wf-architecture-resolve", "wf-audit-rule-corpus",
+    }
 
 
 # ── seed() behavior ──────────────────────────────────────────────────────────
@@ -984,3 +991,51 @@ def test_seed_default_event_triggers_match_week3_plan() -> None:
         ("pr_conflict", "wf-conflict"),
     ]
     assert _DEFAULT_EVENT_TRIGGERS == expected
+
+
+# ── role-rule-corpus-auditor + RuleCorpusAudit ───────────────────────────────
+
+
+def test_role_rule_corpus_auditor_prompt_teaches_json_envelope() -> None:
+    """The rule-corpus-auditor role must teach the JSON envelope with the
+    ``entries`` list and the three status literals (keep / deprecate / update).
+    The disposition layer parses the fenced JSON block to extract the audit
+    results; without envelope teaching the model produces prose and the
+    parse fails."""
+    auditor = next(r for r in _all_roles() if r["id"] == "role-rule-corpus-auditor")
+    prompt = auditor["system_prompt"]
+    assert "json" in prompt.lower(), (
+        "role-rule-corpus-auditor prompt must teach the JSON envelope"
+    )
+    assert "```json" in prompt, (
+        "role-rule-corpus-auditor prompt must include a literal ```json fence "
+        "example so the model has a concrete template"
+    )
+    assert "entries" in prompt, (
+        "role-rule-corpus-auditor prompt must reference the 'entries' field "
+        "— the envelope is a list of per-rule results"
+    )
+    for status in ("keep", "deprecate", "update"):
+        assert status in prompt, (
+            f"role-rule-corpus-auditor prompt must reference status value {status!r}; "
+            "the disposition layer uses these literals to route follow-up actions"
+        )
+
+
+def test_rule_corpus_audit_envelope_importable_from_events() -> None:
+    """``RuleCorpusAudit`` and ``RuleCorpusAuditEntry`` must be importable
+    from ``treadmill_api.events`` so the disposition layer can parse the
+    auditor's JSON output into a typed envelope without importing from the
+    internal sub-module directly."""
+    from treadmill_api.events import RuleCorpusAudit, RuleCorpusAuditEntry
+
+    # Smoke-test that the model accepts valid input.
+    entry = RuleCorpusAuditEntry(
+        rule_slug="adr-and-plan-has-diagram",
+        status="keep",
+        rationale="Rule is referenced and check.sh exists.",
+        proposed_action="no action",
+    )
+    audit = RuleCorpusAudit(entries=[entry])
+    assert audit.entries[0].status == "keep"
+    assert audit.entries[0].rule_slug == "adr-and-plan-has-diagram"

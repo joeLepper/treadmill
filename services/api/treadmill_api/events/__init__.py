@@ -52,6 +52,7 @@ from treadmill_api.events.step_output import (
     StepOutput,
 )
 from treadmill_api.events.review import ReviewOverride
+from treadmill_api.events.rule_corpus_audit import RuleCorpusAudit, RuleCorpusAuditEntry
 from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
 from treadmill_api.events.validator_tuning import ValidatorTuning
@@ -108,4 +109,7 @@ __all__ = [
     "ScheduledTick",
     # Validator tuning proposal (ADR-0040)
     "ValidatorTuning",
+    # Rule corpus audit envelope
+    "RuleCorpusAudit",
+    "RuleCorpusAuditEntry",
 ]

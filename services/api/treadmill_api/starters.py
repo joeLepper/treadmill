@@ -1,10 +1,11 @@
 """Canonical starter workflows + roles for a fresh Treadmill install.
 
-Per ADR-0015 (multi-step workflows + role reuse), Treadmill ships ten
-roles and nine workflows. Three of the workflows are single-step
+Per ADR-0015 (multi-step workflows + role reuse), Treadmill ships twelve
+roles and eleven workflows. Six of the workflows are single-step
 (``wf-author``, ``wf-review``, ``wf-validate``, ``wf-doc-amend``,
-``wf-architecture-resolve``) and four are two-step analyzer-then-action
-shapes (``wf-plan``, ``wf-feedback``, ``wf-ci-fix``, ``wf-conflict``).
+``wf-architecture-resolve``, ``wf-audit-rule-corpus``) and five are
+two-step analyzer-then-action shapes (``wf-plan``, ``wf-feedback``,
+``wf-ci-fix``, ``wf-conflict``, ``wf-crystallize-learning``).
 The shared terminals are ``role-code-author`` (wf-author, wf-feedback,
 wf-ci-fix, wf-conflict) and ``role-documentarian`` (wf-doc-amend).
 
@@ -664,6 +665,63 @@ _ROLES: list[dict[str, Any]] = [
             "5-attempt cap.**"
         ),
     },
+    {
+        "id": "role-rule-corpus-auditor",
+        "model": WORKER_MODEL,
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": (
+            "You are the Treadmill rule-corpus auditor — single step of "
+            "``wf-audit-rule-corpus``. Your job is to evaluate the current "
+            "rule corpus for staleness, supersession, and unimplementable "
+            "remediations.\n\n"
+            "Input: read-only access to the repo. Action:\n"
+            "1. Enumerate all rule files at "
+            "``docs/knowledge-base/rules/*.yaml``.\n"
+            "2. For each rule, apply these four criteria:\n"
+            "   a. **Referenced?** — grep across ``docs/``, ``services/``, "
+            "and ``workers/`` for the rule's slug. A rule slug unreferenced "
+            "by any active learning, ADR, or workflow step is a deprecation "
+            "candidate.\n"
+            "   b. **Superseded?** — check whether a newer rule's ``scope`` "
+            "field covers this one's domain entirely. If so, the older rule "
+            "is redundant and should be deprecated.\n"
+            "   c. **Remediations implementable?** — verify that any "
+            "``check.sh`` script paths cited in the rule's ``remediations`` "
+            "field still exist in the repo. A rule whose check scripts have "
+            "moved or been deleted needs an ``update`` action.\n"
+            "   d. **Underlying learning obsolete?** — if the rule carries a "
+            "``learning_slug`` field, read the corresponding "
+            "``docs/learnings/<slug>.md``. If its frontmatter ``status`` is "
+            "``obsolete``, the rule should be deprecated.\n\n"
+            "Return your audit as a fenced JSON block. The JSON must be "
+            "valid and Pydantic-parseable:\n"
+            "```json\n"
+            "{\n"
+            '  "entries": [\n'
+            "    {\n"
+            '      "rule_slug": "<slug from filename, e.g. adr-and-plan-has-diagram>",\n'
+            '      "status": "keep" | "deprecate" | "update",\n'
+            '      "rationale": "<one-sentence reason for the status>",\n'
+            '      "proposed_action": "<what to do: no action / remove rule file / update check.sh path / ...>"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "```\n\n"
+            "**Status meanings:**\n"
+            "  ``keep`` — the rule is referenced, not superseded, its "
+            "remediations are implementable, and its underlying learning "
+            "(if any) is active. No action needed.\n"
+            "  ``deprecate`` — the rule is unreferenced, superseded by a "
+            "newer rule, or its underlying learning is marked obsolete. "
+            "Proposed action should name the rule file to remove.\n"
+            "  ``update`` — the rule's check.sh paths or content are "
+            "inaccurate. Proposed action should describe the specific edit.\n\n"
+            "Emit exactly one entry per rule file. A missing entry means "
+            "the audit is incomplete and the disposition layer will reject it. "
+            "**Your JSON envelope is the complete output — do not add prose "
+            "outside the fenced block.**"
+        ),
+    },
 ]
 
 
@@ -785,6 +843,17 @@ STARTERS: list[dict[str, Any]] = [
         "steps": [
             {"name": "judge", "role_id": "role-crystallization-judge"},
             {"name": "crystallize", "role_id": "role-architect"},
+        ],
+    },
+    {
+        "id": "wf-audit-rule-corpus",
+        "description": (
+            "Audit the rule corpus for stale, superseded, or "
+            "unimplementable rules and return a per-rule verdict."
+        ),
+        "roles": _roles_for("role-rule-corpus-auditor"),
+        "steps": [
+            {"name": "audit", "role_id": "role-rule-corpus-auditor"},
         ],
     },
 ]
