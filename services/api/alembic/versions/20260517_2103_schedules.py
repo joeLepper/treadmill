@@ -8,8 +8,23 @@ design (see ADR-0035 §References).
 ``payload_template`` is JSONB — the third explicit JSONB site in
 Treadmill (ADR-0011 exception granted by ADR-0035).
 
-Revision ID: 0017
-Revises: 0016
+Revision ID: 20260517_2103
+Revises: 0017
+
+Renamed from 0017_schedules.py on 2026-05-17 after the revision-0017 slot
+collided with 0017_task_status_surface_decision_fail.py. Both migrations
+merged separately to main, each passing its own author-side validation
+against a fresh DB; the collision only manifested at runtime after both
+landed (alembic warned "Revision 0017 is present more than once" and
+silently picked one to apply, leaving this migration orphaned and the
+schedules table un-created — the entire ADR-0035 scheduler plan was
+non-functional until this rename).
+
+This migration is the first to adopt datetime-keyed revision IDs per
+ADR-0044 (proposed). The chain now mixes formats: existing sequential
+IDs through 0017, then datetime IDs going forward. Future migrations
+follow ``revision="YYYYMMDD_HHMM"``; ``down_revision`` continues to
+reference whatever the previous head was, sequential or datetime.
 """
 
 from __future__ import annotations
@@ -21,8 +36,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0017"
-down_revision: Union[str, Sequence[str], None] = "0016"
+revision: str = "20260517_2103"
+down_revision: Union[str, Sequence[str], None] = "0017"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
