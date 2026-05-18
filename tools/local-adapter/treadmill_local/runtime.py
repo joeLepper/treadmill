@@ -53,10 +53,10 @@ MOTO_CONTAINER_PORT = 5000
 STATE_DIR = Path(".treadmill-local")
 AUTOSCALER_PID_FILE = STATE_DIR / "autoscaler.pid"
 AUTOSCALER_LOG_FILE = STATE_DIR / "autoscaler.log"
-AUTOSCALER_PULSE_FILE = STATE_DIR / "autoscaler.pulse"
-"""Heartbeat file written by the autoscaler subprocess on every tick.
-``status`` reads its mtime to detect silent-death (loop alive but not
-iterating, as observed 2026-05-17 — see learning of same date)."""
+"""Autoscaler log file. Doubles as the heartbeat substrate — the
+autoscaler logs ``tick:`` at INFO on every loop iteration, and
+``status`` reads this file's mtime to detect the silent-death failure
+mode captured 2026-05-17 (process alive but loop ceased)."""
 SCHEDULER_PID_FILE = STATE_DIR / "scheduler.pid"
 SCHEDULER_LOG_FILE = STATE_DIR / "scheduler.log"
 BARE_REPOS_DIR = STATE_DIR / "repos"
@@ -614,7 +614,14 @@ class LocalRuntime:
         # init from the ObservabilityCollectorEndpoint CFN output).
         collector = cfg.get("aws", {}).get("observability_collector_endpoint")
         if collector:
-            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"http://{collector}"
+            # Accept value with or without scheme. Operator yaml may carry
+            # ``127.0.0.1:4318`` (bare host:port, from a CFN output) or
+            # ``http://127.0.0.1:4318`` (full URL). Either is canonical;
+            # we don't want ``http://http://...`` when the value already
+            # carries the scheme.
+            if not collector.startswith(("http://", "https://")):
+                collector = f"http://{collector}"
+            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = collector
         return env
 
     def _dev_local_worker_env(self, cfg: dict[str, Any]) -> dict[str, str]:
@@ -657,7 +664,14 @@ class LocalRuntime:
         # deployed. No-ops when unset (fully-local or obs stack absent).
         collector = cfg.get("aws", {}).get("observability_collector_endpoint")
         if collector:
-            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"http://{collector}"
+            # Accept value with or without scheme. Operator yaml may carry
+            # ``127.0.0.1:4318`` (bare host:port, from a CFN output) or
+            # ``http://127.0.0.1:4318`` (full URL). Either is canonical;
+            # we don't want ``http://http://...`` when the value already
+            # carries the scheme.
+            if not collector.startswith(("http://", "https://")):
+                collector = f"http://{collector}"
+            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = collector
         return env
 
     def _report_up_dev_local(self, cfg: dict[str, Any]) -> None:
@@ -827,9 +841,22 @@ class LocalRuntime:
                 for port, hosts in (c.attrs["NetworkSettings"]["Ports"] or {}).items()
                 for host in (hosts or [])
             ) or "-"
+            # A container whose backing image has been removed (image-id
+            # 404) raises ``ImageNotFound`` on ``c.image``. Don't crash
+            # the whole status output for one stale container; degrade
+            # to the image id from the container's attrs.
+            try:
+                image_label = c.image.tags[0] if c.image.tags else c.image.short_id
+            except docker.errors.ImageNotFound:
+                # ``Image`` field on the container is the original
+                # reference (tag or sha). Fall back to that.
+                image_label = (
+                    c.attrs.get("Config", {}).get("Image")
+                    or "[red]image removed[/red]"
+                )
             table.add_row(
                 c.name,
-                c.image.tags[0] if c.image.tags else c.image.short_id,
+                image_label,
                 c.status,
                 ports,
             )
@@ -1319,7 +1346,6 @@ class LocalRuntime:
             "TREADMILL_AUTOSCALER_MIN": str(min_count),
             "TREADMILL_AUTOSCALER_MAX": str(max_count),
             "TREADMILL_AUTOSCALER_TICK_SECONDS": "2",
-            "TREADMILL_AUTOSCALER_PULSE_FILE": str(AUTOSCALER_PULSE_FILE),
             "AWS_ENDPOINT_URL": self.state.moto_endpoint or "",
             "AWS_DEFAULT_REGION": "us-east-1",
             "AWS_ACCESS_KEY_ID": "test",
@@ -1392,7 +1418,6 @@ class LocalRuntime:
             "TREADMILL_AUTOSCALER_TICK_SECONDS": str(
                 autoscaler_cfg["tick_seconds"]
             ),
-            "TREADMILL_AUTOSCALER_PULSE_FILE": str(AUTOSCALER_PULSE_FILE),
             # The subprocess entrypoint branches on this env var: when set
             # it constructs ``LocalRuntime(deployment_config=cfg)`` so
             # ``start_worker_once`` runs the dev-local credential-injection
@@ -1461,26 +1486,26 @@ class LocalRuntime:
     def _autoscaler_pulse_status(self) -> str:
         """Return a rich-renderable status string for the autoscaler row.
 
-        ``running`` when the pulse file is fresh (mtime within
-        ``tick_seconds × 5``), ``[yellow]running (no pulse yet)[/yellow]``
-        when the file hasn't been written yet (subprocess just spawned),
-        ``[red]stale (Xs since last tick)[/red]`` when mtime is older
-        than the threshold — the silent-death signature captured in
-        learning 2026-05-17-autoscaler-silently-died-without-alarm.md.
+        Uses the autoscaler log file's mtime as the liveness signal —
+        the autoscaler logs ``tick:`` at INFO on every loop iteration
+        (per-2026-05-18 refactor following the heartbeat-reinvented-
+        logging learning). Fresh mtime (within ``tick_seconds × 5``)
+        means the loop is ticking; stale mtime means the silent-death
+        failure mode captured 2026-05-17.
 
         Tick interval is read from ``deployment_config.autoscaler.tick_seconds``
         when present (dev-local) and falls back to 2.0s (fully-local default).
         """
-        if not AUTOSCALER_PULSE_FILE.exists():
-            return "[yellow]running (no pulse yet)[/yellow]"
+        if not AUTOSCALER_LOG_FILE.exists():
+            return "[yellow]running (no log yet)[/yellow]"
         tick = 2.0
         if self.deployment_config is not None:
             tick = float(self.deployment_config["autoscaler"]["tick_seconds"])
-        age = time.time() - AUTOSCALER_PULSE_FILE.stat().st_mtime
+        age = time.time() - AUTOSCALER_LOG_FILE.stat().st_mtime
         threshold = tick * 5
         if age > threshold:
-            return f"[red]stale ({age:.0f}s since last tick)[/red]"
-        return f"running (pulse {age:.0f}s ago)"
+            return f"[red]stale ({age:.0f}s since last tick log)[/red]"
+        return f"running (last tick {age:.0f}s ago)"
 
     # ── Scheduler lifecycle ───────────────────────────────────────────────────
 

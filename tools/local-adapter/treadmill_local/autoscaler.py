@@ -28,8 +28,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-PULSE_ENV_VAR = "TREADMILL_AUTOSCALER_PULSE_FILE"
-
 logger = logging.getLogger("treadmill.autoscaler")
 
 
@@ -61,7 +59,6 @@ class Autoscaler:
         min_count: int,
         max_count: int,
         tick_seconds: float = 2.0,
-        pulse_path: Path | None = None,
     ) -> None:
         if min_count < 0:
             raise ValueError(f"min_count must be >= 0, got {min_count}")
@@ -73,15 +70,6 @@ class Autoscaler:
         self.min_count = min_count
         self.max_count = max_count
         self.tick_seconds = tick_seconds
-        # Pulse file path — when set, the autoscaler touches this file
-        # on every loop iteration so an out-of-process observer (e.g.
-        # ``treadmill-local status``) can detect silent death by
-        # comparing mtime to ``tick_seconds × 5``. Captures the
-        # 2026-05-17 incident where the autoscaler was alive per ``ps``
-        # but had stopped ticking, with no observable signal until SQS
-        # depth grew. See docs/learnings/2026-05-17-autoscaler-silently-
-        # died-without-alarm.md.
-        self.pulse_path = pulse_path
         self._stop_event = threading.Event()
 
     def tick(self) -> AutoscalerTick:
@@ -100,7 +88,16 @@ class Autoscaler:
         return max(self.min_count, min(depth, self.max_count))
 
     def run(self) -> None:
-        """Loop until stop() is called or SIGTERM is received."""
+        """Loop until stop() is called or SIGTERM is received.
+
+        Logs ``tick:`` at INFO on every iteration unconditionally. This
+        is the autoscaler's heartbeat — observers read the log file's
+        mtime as a liveness signal (``treadmill-local status``
+        compares mtime to ``tick_seconds × 5``). The 2026-05-17 silent-
+        death failure mode (process alive, loop ceased) becomes
+        observable as soon as the log mtime falls outside the
+        threshold.
+        """
         logger.info(
             "autoscaler starting (min=%d, max=%d, tick=%.1fs)",
             self.min_count, self.max_count, self.tick_seconds,
@@ -108,32 +105,14 @@ class Autoscaler:
         while not self._stop_event.is_set():
             try:
                 t = self.tick()
-                if t.started > 0 or t.depth > 0:
-                    logger.info(
-                        "tick: depth=%d current=%d desired=%d started=%d",
-                        t.depth, t.current, t.desired, t.started,
-                    )
+                logger.info(
+                    "tick: depth=%d current=%d desired=%d started=%d",
+                    t.depth, t.current, t.desired, t.started,
+                )
             except Exception:
                 logger.exception("tick failed; continuing")
-            self._write_pulse()
             self._stop_event.wait(self.tick_seconds)
         logger.info("autoscaler stopped")
-
-    def _write_pulse(self) -> None:
-        """Touch the pulse file so external observers can detect
-        silent death (loop alive but not iterating). Skips cleanly
-        when no path is configured. Failure to write is logged but
-        does not crash the loop — the missing/stale pulse will
-        surface as the same operator-visible signal via ``status``.
-        """
-        if self.pulse_path is None:
-            return
-        try:
-            self.pulse_path.parent.mkdir(parents=True, exist_ok=True)
-            self.pulse_path.touch(exist_ok=True)
-            os.utime(self.pulse_path, None)
-        except OSError:
-            logger.exception("pulse write failed; continuing")
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -243,9 +222,6 @@ def main() -> int:
     def start_worker() -> None:
         runtime.start_worker_once(family)
 
-    pulse_env = os.environ.get(PULSE_ENV_VAR)
-    pulse_path = Path(pulse_env) if pulse_env else None
-
     autoscaler = Autoscaler(
         queue_depth_fn=get_depth,
         worker_count_fn=count_workers,
@@ -253,7 +229,6 @@ def main() -> int:
         min_count=min_count,
         max_count=max_count,
         tick_seconds=tick,
-        pulse_path=pulse_path,
     )
 
     def _on_signal(_signum: int, _frame: Any) -> None:
