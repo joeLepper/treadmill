@@ -243,25 +243,36 @@ def _build_wf_author_key(payload: dict[str, Any]) -> str | None:
 
 
 def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
-    """``wf-architecture-resolve:<repo>:deadlock-feedback-run=<run_id>``
-    (ADR-0038 ralph-loop deadlock arbitration trigger).
+    """Two dispatch sources; namespace determined by discriminator field.
 
-    One arbitration dispatch per wf-feedback run that resolved with
-    ``responded-without-change`` while wf-review still says
-    ``changes_requested``. ``deadlock_feedback_run_id`` is the UUID of
-    the wf-feedback run that surfaced the deadlock; using the feedback
-    run id as the discriminator ensures at most one arbitration is
-    dispatched per deadlock cycle regardless of re-delivery. Distinct
-    namespace from ADR-0032's ``class-c-learning`` trigger source.
+    ``deadlock-feedback-run=<run_id>``
+        ADR-0038 ralph-loop deadlock arbitration. One arbitration per
+        wf-feedback run that resolved with ``responded-without-change``
+        while a blocking gate (wf-review=changes_requested or
+        wf-validate=fail) is still present. Distinct namespace from
+        ADR-0032's ``class-c-learning`` trigger source.
+
+    ``author-no-diff-run=<run_id>``
+        ADR-0048 wf-author no-diff trigger. One arbitration per
+        wf-author run that produced no changes to commit. The architect
+        reviews the task spec (amend/supersede/accept-as-is).
     """
     repo = payload.get("repo")
-    deadlock_feedback_run_id = payload.get("deadlock_feedback_run_id")
-    if not repo or not deadlock_feedback_run_id:
+    if not repo:
         return None
-    return (
-        f"wf-architecture-resolve:{repo}:"
-        f"deadlock-feedback-run={deadlock_feedback_run_id}"
-    )
+    deadlock_feedback_run_id = payload.get("deadlock_feedback_run_id")
+    if deadlock_feedback_run_id:
+        return (
+            f"wf-architecture-resolve:{repo}:"
+            f"deadlock-feedback-run={deadlock_feedback_run_id}"
+        )
+    author_no_diff_run_id = payload.get("author_no_diff_run_id")
+    if author_no_diff_run_id:
+        return (
+            f"wf-architecture-resolve:{repo}:"
+            f"author-no-diff-run={author_no_diff_run_id}"
+        )
+    return None
 
 
 # Per-workflow dedup-key builders. Workflows not in this dict implicitly

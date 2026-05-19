@@ -122,6 +122,11 @@ ARCHITECTURE_RESOLVE_MAX_ATTEMPTS = 5
 # of wf-feedback. Any other check failure still dispatches wf-feedback.
 DOCS_CURRENT_CHECK_ID = "docs-current-with-pr"
 
+# The exact error message raised by code.py when Claude Code produces no
+# diff — used to route step.failed events to wf-architecture-resolve
+# instead of wf-feedback (which requires an existing PR to remediate).
+_NO_CHANGES_ERROR_SIGNATURE = "Claude Code produced no changes to commit"
+
 
 # Conclusions that represent a genuine CI failure — the only ones that
 # should fire the CI-fix workflow. Mirrors bunkhouse's
@@ -568,8 +573,8 @@ async def maybe_dispatch_feedback_on_step_failed(
     step_id: str,
     workflow_id: str,
 ) -> uuid.UUID | None:
-    """Dispatch ``wf-feedback`` when a worker step ends as ``step.failed``
-    (status=failed, no decision payload) — the silent-death failure mode.
+    """Dispatch wf-feedback or wf-architecture-resolve when a wf-author
+    step ends as ``step.failed`` (silent-death failure mode).
 
     Companion to ``maybe_dispatch_feedback_on_terminal_failure``: that
     one fires on ``step.completed`` with ``decision='fail'`` (the worker
@@ -581,10 +586,17 @@ async def maybe_dispatch_feedback_on_step_failed(
     decision='fail' path so the system gave up and the task escalated
     to manual operator nudge.
 
-    Same dedup namespacing as the decision='fail' path (the
-    ``author-fail-run=<run_id>`` namespace) so a single run that both
-    bare-fails and later gets a synthetic decision='fail' doesn't
-    double-dispatch. The FEEDBACK_MAX_ATTEMPTS cap still applies.
+    Routing is based on the step's ``error`` text (ADR-0048):
+
+      * No-changes error (``_NO_CHANGES_ERROR_SIGNATURE``): routes to
+        ``wf-architecture-resolve`` via
+        ``maybe_dispatch_architect_on_author_no_diff``. The author had
+        nothing to commit — no PR was ever opened, so wf-feedback has
+        nothing to remediate. The architect should review the task spec.
+
+      * Any other error (worker crash, author-validations rejected):
+        routes to ``wf-feedback`` as before, with the
+        ``author-fail-run=<run_id>`` dedup namespace.
 
     Currently scoped to ``workflow_id='wf-author'`` because that's the
     only workflow whose step.failed shape is operator-observed.
@@ -604,6 +616,7 @@ async def maybe_dispatch_feedback_on_step_failed(
             WorkflowRun.id.label("run_id"),
             WorkflowRun.task_id,
             Task.repo,
+            WorkflowRunStep.error.label("step_error"),
         )
         .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
         .join(
@@ -622,6 +635,12 @@ async def maybe_dispatch_feedback_on_step_failed(
         return None
     if row.workflow_id != workflow_id:
         return None
+
+    # Route: no-diff errors go to the architect; other failures go to feedback.
+    if row.step_error and _NO_CHANGES_ERROR_SIGNATURE in row.step_error:
+        return await maybe_dispatch_architect_on_author_no_diff(
+            session, dispatcher, step_id=step_id, workflow_id=workflow_id
+        )
 
     if await _is_capped(session, row.task_id, FEEDBACK_WORKFLOW_ID):
         logger.warning(
@@ -648,6 +667,105 @@ async def maybe_dispatch_feedback_on_step_failed(
     return await maybe_dispatch_with_dedup(
         session,
         workflow_id="wf-feedback",
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
+async def maybe_dispatch_architect_on_author_no_diff(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    workflow_id: str,
+) -> uuid.UUID | None:
+    """Dispatch ``wf-architecture-resolve`` when a wf-author step.failed
+    carries the no-changes error — the author produced no diff (ADR-0048).
+
+    The no-diff case means the task spec may be wrong or already complete:
+    no PR was ever opened, so wf-feedback (which requires an existing PR
+    to remediate) has nothing to work with. The architect reviews the task
+    spec and verdicts one of: amend (iterate with hint), supersede (rewrite
+    task text + restart), or accept-as-is (work is genuinely done elsewhere).
+
+    Skips cleanly when:
+      * ``workflow_id`` is not ``'wf-author'``.
+      * The step's error doesn't contain ``_NO_CHANGES_ERROR_SIGNATURE``.
+      * Owning task can't be resolved (deleted between dispatch + completion).
+      * No ``WorkflowVersion`` exists for ``wf-architecture-resolve``
+        (un-seeded install).
+      * Task has already dispatched ``wf-architecture-resolve`` >=
+        ``ARCHITECTURE_RESOLVE_MAX_ATTEMPTS`` times (cap).
+
+    Dedup key:
+        ``wf-architecture-resolve:<repo>:author-no-diff-run=<wf_author_run_id>``
+
+    Distinct from the deadlock-feedback-run namespace so both trigger
+    sources can fire for the same task when each has its own run.
+
+    Returns the new ``wf-architecture-resolve`` run's id, or ``None``
+    if any skip condition fired.
+    """
+    if workflow_id != AUTHOR_WORKFLOW_ID:
+        return None
+
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+            WorkflowRunStep.error.label("step_error"),
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "architect (author-no-diff): no run/task resolvable for step %s; skipping",
+            step_id,
+        )
+        return None
+    if row.workflow_id != AUTHOR_WORKFLOW_ID:
+        return None
+
+    if not row.step_error or _NO_CHANGES_ERROR_SIGNATURE not in row.step_error:
+        return None
+
+    if await _is_capped(session, row.task_id, ARCHITECTURE_RESOLVE_WORKFLOW_ID):
+        logger.warning(
+            "architect (author-no-diff): %s capped for task %s "
+            "(>=%d prior runs); operator must intervene",
+            ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            row.task_id,
+            ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {"repo": row.repo, "author_no_diff_run_id": str(row.run_id)}
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            trigger="self:wf-author-no-diff",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
         payload=payload,
         dispatch_fn=_dispatch,
     )
