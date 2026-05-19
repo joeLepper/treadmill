@@ -12,13 +12,25 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from treadmill_api.coordination.triggers import (
+    _create_and_publish_run,
+    _is_capped,
+    infer_retry_workflow,
+)
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.dispatch import Dispatcher, DispatchError, get_dispatcher
-from treadmill_api.events.task import TaskRegistered
-from treadmill_api.models import Plan, Task, Workflow, WorkflowVersion
+from treadmill_api.events.task import TaskRegistered, TaskRetry
+from treadmill_api.models import (
+    Plan,
+    Task,
+    Workflow,
+    WorkflowDispatchDedup,
+    WorkflowRun,
+    WorkflowVersion,
+)
 
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
@@ -69,6 +81,18 @@ class MergeabilityResponse(BaseModel):
     pr_conflicting: bool | None
     derived_mergeability: str
     """Never null — defaults to ``'pending'`` when no PR row exists."""
+
+
+class TaskRetryRequest(BaseModel):
+    workflow_id: str | None = None
+    """Workflow slug to re-dispatch. If omitted, inferred from the most-recent
+    non-terminal run per ADR-0046."""
+    reason: str = Field(..., min_length=1, max_length=500)
+    force_bypass_cap: bool = False
+
+
+class TaskRetryResponse(BaseModel):
+    workflow_run_id: uuid.UUID
 
 
 def _row_to_response(row) -> TaskResponse:
@@ -255,3 +279,114 @@ async def get_task_mergeability(
         pr_conflicting=row.pr_conflicting,
         derived_mergeability=row.derived_mergeability or "pending",
     )
+
+
+@router.post(
+    "/{task_id}/retry",
+    response_model=TaskRetryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def retry_task(
+    task_id: uuid.UUID,
+    body: TaskRetryRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+) -> TaskRetryResponse:
+    """Operator-driven retry of a stuck task's most-recent workflow (ADR-0046).
+
+    Clears the matching dedup row(s), emits a task.retry audit event, and
+    dispatches a fresh workflow run. Respects the per-workflow attempt cap
+    unless force_bypass_cap is set.
+    """
+    # 1. 404 if task not found.
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="task not found",
+        )
+
+    # 2. Resolve workflow_id (explicit or inferred).
+    workflow_id = body.workflow_id
+    if workflow_id is None:
+        workflow_id = await infer_retry_workflow(session, task_id)
+    if workflow_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="no retryable workflow found; pass workflow_id explicitly",
+        )
+
+    # Capture most-recent run id for the audit event before any mutations.
+    prev_result = await session.execute(
+        select(WorkflowRun.id)
+        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
+        .where(
+            WorkflowRun.task_id == task_id,
+            WorkflowVersion.workflow_id == workflow_id,
+        )
+        .order_by(WorkflowRun.created_at.desc())
+        .limit(1)
+    )
+    previous_run_id = prev_result.scalar_one_or_none()
+
+    # 3. Check cap; 409 if at cap and force_bypass_cap not set.
+    if await _is_capped(session, task_id, workflow_id) and not body.force_bypass_cap:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="cap reached; pass force_bypass_cap=true",
+        )
+
+    # 4. Clear matching workflow_dispatch_dedup rows for every run of the
+    # target workflow on this task (the rows that would block re-dispatch).
+    await session.execute(
+        delete(WorkflowDispatchDedup).where(
+            WorkflowDispatchDedup.workflow_run_id.in_(
+                select(WorkflowRun.id)
+                .join(
+                    WorkflowVersion,
+                    WorkflowVersion.id == WorkflowRun.workflow_version_id,
+                )
+                .where(
+                    WorkflowRun.task_id == task_id,
+                    WorkflowVersion.workflow_id == workflow_id,
+                )
+            )
+        )
+    )
+
+    # 5. Emit task.retry audit event.
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="task",
+        action="retry",
+        payload=TaskRetry(
+            workflow_id=workflow_id,
+            reason=body.reason,
+            by_operator="operator",
+            bypassed_cap=body.force_bypass_cap,
+            previous_run_id=str(previous_run_id) if previous_run_id else None,
+        ),
+        plan_id=task.plan_id,
+        task_id=task_id,
+    )
+
+    # 6. Create new workflow run + publish step.ready.
+    # Uses _create_and_publish_run (same path as the trigger evaluator) rather
+    # than dispatch_task — the latter has an idempotency guard that returns the
+    # existing run when step.ready already exists for the task.
+    run_id = await _create_and_publish_run(
+        session,
+        dispatcher,
+        task=task,
+        workflow_id=workflow_id,
+        trigger="operator:task-retry",
+    )
+    if run_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"workflow {workflow_id!r} has no version or no steps",
+        )
+
+    await session.commit()
+
+    # 7. Return 201 with the new run id.
+    return TaskRetryResponse(workflow_run_id=run_id)
