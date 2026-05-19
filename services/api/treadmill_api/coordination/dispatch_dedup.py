@@ -243,7 +243,7 @@ def _build_wf_author_key(payload: dict[str, Any]) -> str | None:
 
 
 def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
-    """Three dispatch sources; namespace determined by discriminator field.
+    """Four dispatch sources; namespace determined by discriminator field.
 
     ``deadlock-feedback-run=<run_id>``
         ADR-0038 ralph-loop deadlock arbitration. One arbitration per
@@ -262,6 +262,16 @@ def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
         wf-author run whose git push was rejected (branch protection,
         stale force-with-lease, etc.). The architect almost always
         verdicts supersede to start fresh on a new branch.
+
+    ``feedback-validation-fail-step=<step_id>``
+        ADR-0048 follow-on (2026-05-19) wf-feedback validation-fail
+        trigger. One arbitration per wf-feedback action step that
+        committed a diff locally but had it rejected by author-side
+        deterministic validation (``runner_dispositions/code.py``)
+        before the push. Keyed on the wf-feedback action STEP id
+        (not run id) because the action step is the one that produced
+        the failure shape; a re-delivery of the same step.completed
+        event must not double-dispatch.
     """
     repo = payload.get("repo")
     if not repo:
@@ -283,6 +293,14 @@ def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
         return (
             f"wf-architecture-resolve:{repo}:"
             f"remote-rejected-run={author_remote_reject_run_id}"
+        )
+    feedback_validation_fail_step_id = payload.get(
+        "feedback_validation_fail_step_id"
+    )
+    if feedback_validation_fail_step_id:
+        return (
+            f"wf-architecture-resolve:{repo}:"
+            f"feedback-validation-fail-step={feedback_validation_fail_step_id}"
         )
     return None
 

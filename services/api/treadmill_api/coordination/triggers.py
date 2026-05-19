@@ -1169,6 +1169,185 @@ async def maybe_dispatch_arbitration_on_deadlock(
     )
 
 
+async def maybe_dispatch_architect_on_feedback_validation_fail(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """ADR-0048 follow-on: when wf-feedback's action step completes with
+    ``decision='fail'`` because author-side deterministic validation
+    (``runner_dispositions/code.py::_run_author_validations``) rejected
+    the worker's diff, route directly to ``wf-architecture-resolve``.
+
+    Predicate:
+      * step belongs to ``wf-feedback``
+      * ``step_name == 'action'``
+      * ``output.decision == 'fail'``
+      * ``output.payload.validation_results`` contains at least one
+        verdict='fail' entry
+      * task has no open PR (any ``task_prs`` row with
+        ``closed_at IS NULL`` → skip and let the deadlock-arbitration
+        path own PR-bearing cases)
+      * existing cap on ``wf-architecture-resolve`` applies
+
+    Sibling of ``maybe_dispatch_architect_on_author_no_diff`` (PR #187)
+    for a different trigger source: PR #187 fires on wf-author's
+    no-changes step.failed (no diff was produced at all); this fires
+    on wf-feedback's action step.completed when a diff WAS produced
+    but was rejected by deterministic author-side validation.
+
+    **Diff handling note** (per ``runner_dispositions/code.py``): when
+    author-side validation fails, the disposition has already executed
+    ``git.commit_all`` (line 76) and produced a ``commit_sha`` on the
+    LOCAL branch. The push is then skipped, so the commit lives only
+    in the worker's repo_dir (which is torn down at step end). From
+    the architect's perspective the diff is effectively discarded —
+    only ``validation_results.log_excerpt`` and the worker's
+    ``summary`` survive in the step's ``output`` payload.
+
+    Dedup namespace:
+        ``wf-architecture-resolve:<repo>:feedback-validation-fail-step=<wf_feedback_action_step_id>``
+
+    Keyed on the STEP id (not run id) because wf-feedback's two-step
+    structure (analyzer + action) means the same run id could in
+    principle contain multiple action attempts; we want one architect
+    dispatch per action-step that produced this shape.
+
+    Returns the new ``wf-architecture-resolve`` run's id, or ``None``
+    if any skip condition fired.
+
+    Ordering invariant: callers MUST invoke this AFTER
+    ``maybe_dispatch_arbitration_on_deadlock``. The deadlock trigger
+    fires when a blocking gate signal exists (PR-bearing cases). When
+    no PR exists there is no gate signal so the deadlock trigger
+    short-circuits silently, leaving this trigger to pick up the
+    no-PR validation-fail case. See ADR-0048 / consumer hazard note.
+    """
+    # Cheap filter: only fire on decision=fail. Other wf-feedback
+    # decisions (``pushed``, ``responded-without-change``) are not
+    # validation-rejection shapes.
+    if typed.output.decision != "fail":
+        return None
+
+    # Defensive payload shape filter: the validation-rejection shape
+    # carries a ``validation_results`` list with at least one entry
+    # marked ``verdict='fail'``. Any other ``decision='fail'`` shape
+    # (e.g. a feedback worker that crashed and surfaced as fail
+    # without this payload) is out of scope — the deadlock trigger or
+    # a future helper handles those.
+    validation_results = (typed.output.payload or {}).get("validation_results")
+    if not isinstance(validation_results, list) or not validation_results:
+        return None
+    if not any(
+        isinstance(r, dict) and r.get("verdict") == "fail"
+        for r in validation_results
+    ):
+        return None
+
+    # Resolve workflow + run + task + repo + step_name for the
+    # completing step. Workflow + step_name filter happens after the
+    # cheap payload filter so we only hit the DB on candidate events.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+            WorkflowRunStep.step_name,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "architect (feedback-validation-fail): no run/task resolvable "
+            "for step %s; skipping",
+            step_id,
+        )
+        return None
+    if row.workflow_id != FEEDBACK_WORKFLOW_ID:
+        return None
+    if row.step_name != "action":
+        # Only the action step's failure indicates a tried-and-rejected
+        # diff. The analyzer step's decision=fail (if it ever happens)
+        # means the analyzer couldn't even produce a directive — that
+        # is not a validation-fail shape.
+        return None
+
+    # No-PR predicate: if any open PR exists for this task, let the
+    # deadlock-arbitration path handle it. This trigger owns the
+    # no-PR case specifically (which is what dead-ends 4 of 6 retries
+    # in the 2026-05-19 batch).
+    open_pr_result = await session.execute(
+        select(TaskPR.pr_number)
+        .where(
+            TaskPR.task_id == row.task_id,
+            TaskPR.closed_at.is_(None),
+        )
+        .limit(1)
+    )
+    if open_pr_result.first() is not None:
+        logger.debug(
+            "architect (feedback-validation-fail): task %s has an open PR; "
+            "deferring to deadlock-arbitration trigger",
+            row.task_id,
+        )
+        return None
+
+    if await _is_capped(session, row.task_id, ARCHITECTURE_RESOLVE_WORKFLOW_ID):
+        logger.warning(
+            "architect (feedback-validation-fail): %s capped for task %s "
+            "(>=%d prior runs); operator must intervene",
+            ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            row.task_id,
+            ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
+        )
+        await _emit_arch_cap_reached(
+            session, dispatcher, task_id=row.task_id, repo=row.repo,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {
+        "repo": row.repo,
+        "feedback_validation_fail_step_id": str(step_id),
+    }
+
+    async def _dispatch() -> uuid.UUID | None:
+        # Pass the wf-feedback action step's id as ``source_step_id``
+        # so the architect's worker can read the step's ``output``
+        # payload (including ``validation_results`` with check_ids and
+        # rationales) via the SourceStep block — same plumbing as
+        # PR #190's architect→feedback path. The architect needs this
+        # to understand WHY the diff was rejected.
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            trigger="self:wf-feedback-validation-fail",
+            source_step_id=step_id,
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
 async def maybe_dispatch_feedback_on_architect_amend(
     session: AsyncSession,
     dispatcher: Any,

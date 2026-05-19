@@ -431,6 +431,19 @@ class CoordinationConsumer:
                 await self._maybe_fire_deadlock_arbitration(
                     session, step_id, typed,
                 )
+            # ADR-0048 follow-on (2026-05-19): when wf-feedback's action
+            # step completes with decision=fail because the author-side
+            # deterministic validation rejected the worker's diff AND no
+            # PR exists, dispatch wf-architecture-resolve. MUST run after
+            # the deadlock helper above so PR-bearing cases stay on the
+            # deadlock path; this helper picks up the no-PR no-gate-signal
+            # case (4 of 6 retries in the 2026-05-19 batch). See
+            # ``maybe_dispatch_architect_on_feedback_validation_fail``
+            # for the ordering invariant.
+            if action == "completed":
+                await self._maybe_fire_feedback_validation_fail_arbitration(
+                    session, step_id, typed,
+                )
             # ADR-0038: companion to the dispatch helper above — when an
             # architect step.completed carries
             # ``payload.dispatch.review_override``, emit the
@@ -1316,6 +1329,51 @@ class CoordinationConsumer:
                 "_maybe_fire_deadlock_arbitration: dispatch failed for "
                 "step %s; prior projection committed, will retry on "
                 "redelivery",
+                step_id,
+            )
+
+    # ── Self-trigger: feedback-validation-fail → wf-architecture-resolve ─
+    #   (ADR-0048 follow-on, 2026-05-19)
+
+    async def _maybe_fire_feedback_validation_fail_arbitration(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """ADR-0048 follow-on: when wf-feedback's action step completes
+        with ``decision='fail'`` because author-side deterministic
+        validation rejected the worker's diff (no PR was opened),
+        dispatch ``wf-architecture-resolve`` so the architect arbitrates.
+
+        Sibling to ``_maybe_fire_deadlock_arbitration``. Ordering:
+        this helper MUST be invoked AFTER the deadlock helper. The
+        deadlock helper fires for PR-bearing cases (a blocking gate
+        signal exists for the task); the validation-fail-no-PR case
+        skips deadlock cleanly (no gate signal) and is picked up
+        here. Documented as an ordering invariant on the trigger
+        function itself.
+
+        Failures are logged but do not propagate; the prior projection
+        has already committed and rolling back on a dispatch failure
+        would lose progress.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_architect_on_feedback_validation_fail,
+        )
+        try:
+            await maybe_dispatch_architect_on_feedback_validation_fail(
+                session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_feedback_validation_fail_arbitration: "
+                "dispatch failed for step %s; prior projection committed, "
+                "will retry on redelivery",
                 step_id,
             )
 
