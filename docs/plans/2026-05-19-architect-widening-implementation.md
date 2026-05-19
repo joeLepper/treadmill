@@ -163,12 +163,14 @@ sequence_of_work:
           New trigger function dispatches wf-architecture-resolve on
           the no-diff error; wf-feedback dispatch is suppressed on the
           same step. Both regression tests pass.
+        script: |
+          cd services/api && uv run pytest tests/test_triggers_author_no_diff_routing.py -q
 
   - id: route-author-remote-rejection-to-architect
     title: Route wf-author remote-rejection step.failed to wf-architecture-resolve
     workflow: wf-author
     depends_on:
-      - route-author-no-diff-to-architect
+      - task.route-author-no-diff-to-architect.pr_merged
     intent: |
       Mirror the routing established for author-no-diff (task 1) but
       for the "remote rejected push" failure shape. When the wf-author
@@ -205,12 +207,14 @@ sequence_of_work:
           Remote-rejection step.failed dispatches
           wf-architecture-resolve under its own dedup namespace.
           Regression tests pass.
+        script: |
+          cd services/api && uv run pytest tests/test_triggers_author_no_diff_routing.py -q
 
   - id: integration-test-supersede-end-to-end
     title: End-to-end integration test for supersede affordance
     workflow: wf-author
     depends_on:
-      - route-author-no-diff-to-architect
+      - task.route-author-no-diff-to-architect.pr_merged
     intent: |
       Add an integration test that drives a full supersede flow end-
       to-end: a wf-author run produces no diff (mocked), the
@@ -252,6 +256,8 @@ sequence_of_work:
           The new integration test passes in CI. The test exercises
           the full supersede flow end-to-end (trigger → child task →
           fresh dispatch → mergeable).
+        script: |
+          cd services/api && uv run pytest tests/test_integration_supersede_end_to_end.py -q
 
   - id: operator-surface-for-arch-cap-reached
     title: Operator notification surface for arch-cap-reached
@@ -301,4 +307,6 @@ sequence_of_work:
           A cap-blocked dispatch attempt produces an operator-
           observable signal; the test asserts the signal fires with
           the expected payload shape.
+        script: |
+          cd services/api && uv run pytest tests/test_arch_cap_operator_surface.py -q
 ```
