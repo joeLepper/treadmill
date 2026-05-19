@@ -1,0 +1,65 @@
+version: "3.8"
+
+# dev-local override for the Treadmill observability stack (ADR-0043).
+#
+# Applied on top of ``docker-compose.yml`` via:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# Differences from the production compose unit:
+#   - Loki and Prometheus storage switch from EBS bind mounts
+#     (/mnt/loki, /mnt/prometheus) to named docker volumes
+#     (treadmill-loki-data, treadmill-prometheus-data). The container-side
+#     paths are unchanged so loki-config.yaml / prometheus.yml don't need
+#     local overrides.
+#   - Tempo swaps the S3 backend for a local filesystem backend
+#     (treadmill-tempo-data named volume, /var/tempo inside the container).
+#     The backend keys differ enough between S3 and filesystem that we
+#     ship a sibling tempo-config.local.yaml rather than coercing env vars.
+#   - Grafana gets a sensible default admin password ("admin"). This file
+#     is local-only — operators access the dashboards on localhost — so
+#     the weak default is acceptable. Production wires
+#     GF_SECURITY_ADMIN_PASSWORD from Secrets Manager via the base file.
+#   - Tempo's environment block is overridden to clear the
+#     ${TEMPO_S3_BUCKET} / ${AWS_DEFAULT_REGION} requirement (the
+#     local backend doesn't read them).
+
+services:
+  loki:
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - treadmill-loki-data:/mnt/loki
+    # Drop the host /mnt/loki bind mount from the base file.
+
+  prometheus:
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - treadmill-prometheus-data:/prometheus
+
+  tempo:
+    volumes:
+      - ./tempo-config.local.yaml:/etc/tempo/config.yaml:ro
+      - treadmill-tempo-data:/var/tempo
+    environment:
+      # Override the base file's S3-bucket env wiring; the local backend
+      # uses neither. Explicit empty values prevent the base
+      # ${TEMPO_S3_BUCKET} interpolation from raising at compose time
+      # when the operator hasn't exported the var.
+      - TEMPO_S3_BUCKET=
+      - AWS_DEFAULT_REGION=
+
+  grafana:
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      # Local-only default — see file header. Production overrides via
+      # the base file's ${GF_SECURITY_ADMIN_PASSWORD} env-var binding.
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SERVER_HTTP_PORT=3000
+
+volumes:
+  treadmill-loki-data:
+    name: treadmill-loki-data
+  treadmill-prometheus-data:
+    name: treadmill-prometheus-data
+  treadmill-tempo-data:
+    name: treadmill-tempo-data

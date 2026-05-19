@@ -319,6 +319,12 @@ def test_up_dev_local_calls_ensure_images_built_before_starting_services(
     # ADR-0018: dev-local ``up`` also spawns the autoscaler. Stub it so
     # this test only exercises the network → build → services order.
     monkeypatch.setattr(rt, "_start_autoscaler_dev_local", lambda: None)
+    # Likewise stub the scheduler, deploy-watcher, and observability
+    # spawns (all dev-local ``up`` side-effects) so this test doesn't
+    # shell out to subprocesses or ``docker compose``.
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
     # ADR-0019: ``up`` fetches AWS credentials on the host before building
     # any spec env. Stub the fetch so unit tests don't hit real boto3.
     monkeypatch.setattr(rt, "_ensure_dev_local_credentials", lambda: None)

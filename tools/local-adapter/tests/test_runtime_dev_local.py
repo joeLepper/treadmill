@@ -715,9 +715,11 @@ def test_up_dev_local_skips_moto_and_synth(
         rt, "_start_autoscaler_dev_local",
         lambda: autoscaler_started.append(1),
     )
-    # Stub scheduler + deploy-watcher so they don't spawn subprocesses.
+    # Stub scheduler + deploy-watcher + observability so they don't spawn
+    # subprocesses or shell out to docker compose.
     monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
     monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
     # Per ADR-0019: ``up`` fetches AWS credentials on the host. Stub
     # the fetch so we don't hit real boto3/Secrets Manager in unit tests.
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
@@ -958,6 +960,7 @@ def test_up_dev_local_with_no_autoscaler_flag_skips_spawn(
     monkeypatch.setattr(rt, "_start_services", lambda: None)
     monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
     monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._github_token = "ghp_test_token_placeholder"
@@ -1495,6 +1498,7 @@ def test_up_dev_local_with_no_deploy_watcher_flag_skips_spawn(
     monkeypatch.setattr(rt, "_start_services", lambda: None)
     monkeypatch.setattr(rt, "_start_autoscaler_dev_local", lambda: None)
     monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
     rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
     rt._github_token = "ghp_test_token_placeholder"
@@ -1623,6 +1627,7 @@ def test_down_sigterms_deploy_watcher(
     # Stub out everything else down() does.
     monkeypatch.setattr(rt, "_stop_autoscaler", lambda: None)
     monkeypatch.setattr(rt, "_stop_scheduler", lambda: None)
+    monkeypatch.setattr(rt, "_stop_observability", lambda: None)
     monkeypatch.setattr(rt, "_stop_managed_containers", lambda: None)
     monkeypatch.setattr(rt, "_remove_network", lambda: None)
 
@@ -1631,3 +1636,249 @@ def test_down_sigterms_deploy_watcher(
     import signal as _signal
     assert (5555, _signal.SIGTERM) in kill_calls
     assert not pid_file.exists()
+
+
+# ── Observability stack lifecycle (ADR-0043) ──────────────────────────────────
+
+
+def test_start_observability_dev_local_invokes_docker_compose_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``_start_observability_dev_local`` shells out to
+    ``docker compose -f docker-compose.yml -f docker-compose.local.yml up -d``
+    so the OTel collector + Loki + Prometheus + Tempo + Grafana stack
+    comes up (per ADR-0043).
+    """
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    # No prior container → start should proceed.
+    fake_docker.containers.get.side_effect = runtime_module.docker.errors.NotFound(
+        "no container"
+    )
+
+    runs: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        runs.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", _fake_run)
+
+    rt._start_observability_dev_local()
+
+    assert len(runs) == 1
+    cmd = runs[0]
+    # Compose CLI invocation with both base and override files.
+    assert cmd[0:2] == ["docker", "compose"]
+    # Order matters: base file first, local override second (so the
+    # override wins on conflicts).
+    assert cmd.count("-f") == 2
+    f_indexes = [i for i, tok in enumerate(cmd) if tok == "-f"]
+    base_path = cmd[f_indexes[0] + 1]
+    local_path = cmd[f_indexes[1] + 1]
+    assert base_path.endswith("infra/observability/docker-compose.yml"), base_path
+    assert local_path.endswith(
+        "infra/observability/docker-compose.local.yml"
+    ), local_path
+    # Detached: returns control after bringing the stack up.
+    assert cmd[-2:] == ["up", "-d"]
+
+
+def test_start_observability_dev_local_is_noop_when_otel_already_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When the OTel collector container is already running,
+    ``_start_observability_dev_local`` does NOT re-invoke docker compose.
+    """
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    # Container exists and is running → idempotent skip.
+    existing = MagicMock()
+    existing.status = "running"
+    fake_docker.containers.get.return_value = existing
+
+    runs: list[list[str]] = []
+    monkeypatch.setattr(
+        runtime_module.subprocess, "run",
+        lambda cmd, **kwargs: runs.append(cmd),
+    )
+
+    rt._start_observability_dev_local()
+
+    assert runs == [], "must skip compose up when stack is already running"
+
+
+def test_up_dev_local_with_no_observability_flag_skips_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When ``start_observability=False`` (the ``--no-observability``
+    CLI flag), ``_up_dev_local`` does NOT spawn the compose stack."""
+    rt = LocalRuntime(
+        tmp_path,
+        deployment_config=_valid_yaml_dict(),
+        start_observability=False,
+    )
+
+    monkeypatch.setattr(rt, "_ensure_network", lambda: None)
+    monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    monkeypatch.setattr(rt, "_start_services", lambda: None)
+    monkeypatch.setattr(rt, "_start_autoscaler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._github_token = "ghp_test_token_placeholder"
+
+    spawn_calls: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_start_observability_dev_local",
+        lambda: spawn_calls.append(1),
+    )
+
+    rt.up()
+    assert spawn_calls == [], (
+        "observability must NOT spawn when --no-observability is set"
+    )
+
+
+def test_cli_up_no_observability_flag_propagates_to_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-observability`` on ``up`` translates to
+    ``start_observability=False`` on the runtime constructor."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".treadmill").mkdir()
+    (tmp_path / ".treadmill" / "personal.yaml").write_text(
+        yaml.safe_dump(_valid_yaml_dict())
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+        self.deployment_config = kwargs.get("deployment_config")
+
+    with patch.object(LocalRuntime, "up", lambda self: None), \
+         patch.object(LocalRuntime, "__init__", _fake_init):
+        result = runner.invoke(
+            app,
+            [
+                "up", "--deployment", "personal",
+                "--infra", str(tmp_path),
+                "--no-observability",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert captured["start_observability"] is False
+
+
+def test_stop_observability_invokes_docker_compose_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``_stop_observability`` runs ``docker compose down`` (without
+    ``-v``, so named volumes survive) when the stack is up."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    # Stack is up → tear it down.
+    existing = MagicMock()
+    existing.status = "running"
+    fake_docker.containers.get.return_value = existing
+
+    runs: list[list[str]] = []
+    monkeypatch.setattr(
+        runtime_module.subprocess, "run",
+        lambda cmd, **kwargs: runs.append(cmd) or subprocess.CompletedProcess(
+            args=cmd, returncode=0
+        ),
+    )
+
+    rt._stop_observability()
+
+    assert len(runs) == 1
+    cmd = runs[0]
+    assert cmd[0:2] == ["docker", "compose"]
+    assert cmd[-1] == "down"
+    # Critical: must NOT pass -v / --volumes — the named volumes
+    # (treadmill-loki-data, etc.) should survive a down/up cycle so
+    # operator metrics + traces persist across restarts.
+    assert "-v" not in cmd
+    assert "--volumes" not in cmd
+
+
+def test_stop_observability_is_noop_when_stack_not_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When the OTel collector container is absent,
+    ``_stop_observability`` is a noop — no docker compose call."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    fake_docker.containers.get.side_effect = runtime_module.docker.errors.NotFound(
+        "no container"
+    )
+
+    runs: list[list[str]] = []
+    monkeypatch.setattr(
+        runtime_module.subprocess, "run",
+        lambda cmd, **kwargs: runs.append(cmd),
+    )
+
+    rt._stop_observability()
+    assert runs == []
+
+
+def test_down_stops_observability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``down`` invokes ``_stop_observability`` so a clean teardown
+    removes the compose stack alongside the host subprocesses."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+
+    stop_calls: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_stop_observability", lambda: stop_calls.append(1)
+    )
+    # Stub the other teardown steps so this test stays focused on
+    # the observability hook.
+    monkeypatch.setattr(rt, "_stop_autoscaler", lambda: None)
+    monkeypatch.setattr(rt, "_stop_scheduler", lambda: None)
+    monkeypatch.setattr(rt, "_stop_deploy_watcher", lambda: None)
+    monkeypatch.setattr(rt, "_stop_managed_containers", lambda: None)
+    monkeypatch.setattr(rt, "_remove_network", lambda: None)
+
+    rt.down()
+
+    assert stop_calls == [1], "down must tear down the observability stack"
+
+
+def test_start_observability_dev_local_raises_on_compose_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """If ``docker compose up`` returns non-zero (e.g., port conflict),
+    ``_start_observability_dev_local`` propagates the failure so the
+    operator sees the fail-fast clearly rather than a silently broken
+    stack. Verifies the brief's hazard #1 (port conflicts surface as
+    a hard error, not a soft fallback)."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    fake_docker.containers.get.side_effect = runtime_module.docker.errors.NotFound(
+        "no container"
+    )
+
+    def _fail_run(cmd: list[str], **kwargs: Any) -> Any:
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", _fail_run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        rt._start_observability_dev_local()

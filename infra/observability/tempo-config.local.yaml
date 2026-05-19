@@ -1,0 +1,51 @@
+# Tempo configuration for the dev-local Treadmill observability stack
+# (ADR-0043). Mounted into the tempo container by docker-compose.local.yml
+# in place of tempo-config.yaml.
+#
+# The only differences from the production config are in the
+# ``storage.trace`` block: filesystem-backed blob storage on a named
+# docker volume (treadmill-tempo-data → /var/tempo) instead of S3.
+# Everything else (receivers, retention, metrics-generator) matches
+# the prod config so dashboards and queries behave identically.
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 336h  # 14 days
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+    pool:
+      max_workers: 100
+      queue_depth: 10000
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]

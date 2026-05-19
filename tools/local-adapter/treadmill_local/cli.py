@@ -89,6 +89,7 @@ def _runtime(
     start_autoscaler: bool = True,
     start_scheduler: bool = True,
     start_deploy_watcher: bool = True,
+    start_observability: bool = True,
 ) -> LocalRuntime:
     # Fully-local mode requires cdk.json (it shells out to ``cdk synth``).
     # Dev-local skips synth entirely, so the cdk.json check is also
@@ -104,6 +105,7 @@ def _runtime(
         start_autoscaler=start_autoscaler,
         start_scheduler=start_scheduler,
         start_deploy_watcher=start_deploy_watcher,
+        start_observability=start_observability,
     )
 
 
@@ -157,6 +159,16 @@ def up(
              "PRs are merged. Use this flag when debugging without automated "
              "deploy reconciliation.",
     ),
+    no_observability: bool = typer.Option(
+        False,
+        "--no-observability",
+        help="Skip starting the observability compose stack (dev-local only). "
+             "Default is to always start it (per ADR-0043): the stack runs "
+             "Loki + Prometheus + Tempo + Grafana + OTel collector via "
+             "docker compose. Use this flag when debugging without "
+             "observability or when memory pressure on the operator's "
+             "laptop matters more than dashboards.",
+    ),
 ) -> None:
     """Synth CDK + provision moto + start support containers (fully-local),
     or start Postgres + Redis + API against real AWS (dev-local, with
@@ -169,6 +181,7 @@ def up(
         start_autoscaler=not no_autoscaler,
         start_scheduler=not no_scheduler,
         start_deploy_watcher=not no_deploy_watcher,
+        start_observability=not no_observability,
     )
     rt.up()
 

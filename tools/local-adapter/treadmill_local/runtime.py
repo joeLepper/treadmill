@@ -68,6 +68,20 @@ SCHEDULER_PID_FILE = STATE_DIR / "scheduler.pid"
 SCHEDULER_LOG_FILE = STATE_DIR / "scheduler.log"
 DEPLOY_WATCHER_PID_FILE = STATE_DIR / "deploy-watcher.pid"
 DEPLOY_WATCHER_LOG_FILE = STATE_DIR / "deploy-watcher.log"
+
+# Observability stack (ADR-0043) — five containers managed by docker
+# compose, not by a host subprocess. There's no PID file because the
+# lifecycle is owned by ``docker compose`` itself; we identify the
+# stack by one of its container names (the otel-collector is a stable
+# proxy — every service in the compose unit shares its lifecycle).
+OBSERVABILITY_COMPOSE_FILE_REL = Path("infra") / "observability" / "docker-compose.yml"
+OBSERVABILITY_COMPOSE_LOCAL_FILE_REL = (
+    Path("infra") / "observability" / "docker-compose.local.yml"
+)
+OBSERVABILITY_OTEL_CONTAINER_NAME = "treadmill-otel-collector"
+OBSERVABILITY_GRAFANA_URL = "http://localhost:3000"
+OBSERVABILITY_OTLP_HTTP_URL = "http://localhost:4318"
+
 BARE_REPOS_DIR = STATE_DIR / "repos"
 """Host-side directory for the agent worker's local-mode bare repos.
 The runtime mounts this into the worker container at
@@ -215,6 +229,7 @@ class LocalRuntime:
         start_autoscaler: bool = True,
         start_scheduler: bool = True,
         start_deploy_watcher: bool = True,
+        start_observability: bool = True,
     ) -> None:
         """Construct a LocalRuntime.
 
@@ -259,6 +274,16 @@ class LocalRuntime:
                 suppress the deploy-event reconciliation loop — useful
                 when debugging without automated container updates on
                 merged PRs. Ignored in fully-local (moto) mode.
+            start_observability: When True (default), dev-local ``up``
+                brings up the observability compose stack (OTel
+                Collector + Loki + Prometheus + Tempo + Grafana) via
+                ``docker compose -f infra/observability/docker-compose.yml
+                -f infra/observability/docker-compose.local.yml up -d``
+                (per ADR-0043). Set to False (via ``--no-observability``)
+                when running without the stack — useful for debugging
+                without observability, or when laptop memory matters
+                more than dashboards. Ignored in fully-local (moto)
+                mode: ADR-0020 keeps fully-local OTLP-free.
         """
         self.infra_dir = infra_dir.resolve()
         self.docker = docker.from_env()
@@ -268,6 +293,7 @@ class LocalRuntime:
         self.start_autoscaler = start_autoscaler
         self.start_scheduler = start_scheduler
         self.start_deploy_watcher = start_deploy_watcher
+        self.start_observability = start_observability
         # Per ADR-0019: dev-local credentials are fetched on the host and
         # injected into containers as env vars. The fetched values live in
         # memory on the runtime for the lifetime of the up-process; we
@@ -349,6 +375,15 @@ class LocalRuntime:
         else:
             console.print(
                 "[yellow]• Scheduler suppressed (--no-scheduler).[/yellow]"
+            )
+        # Observability ahead of the deploy-watcher so the watcher's
+        # OTLP exporter has a live collector to publish to on startup
+        # (per ADR-0043).
+        if self.start_observability:
+            self._start_observability_dev_local()
+        else:
+            console.print(
+                "[yellow]• Observability suppressed (--no-observability).[/yellow]"
             )
         if self.start_deploy_watcher:
             self._start_deploy_watcher_dev_local()
@@ -788,6 +823,7 @@ class LocalRuntime:
         self._stop_autoscaler()
         self._stop_scheduler()
         self._stop_deploy_watcher()
+        self._stop_observability()
         self._stop_managed_containers()
         self._remove_network()
         console.print("[green]Down complete.[/green]")
@@ -1780,4 +1816,113 @@ class LocalRuntime:
             return True
         except (ProcessLookupError, PermissionError):
             return False
+
+    # ── Observability stack lifecycle (ADR-0043) ──────────────────────────────
+
+    def _start_observability_dev_local(self) -> None:
+        """Bring up the observability compose stack for dev-local mode.
+
+        Per ADR-0043, dev-local runs Loki + Prometheus + Tempo + Grafana
+        + OTel Collector in a local docker-compose unit (rather than the
+        AWS-hosted EC2 stack used by fully_remote). The base compose
+        file at ``infra/observability/docker-compose.yml`` is reused
+        verbatim from the production path; a sibling
+        ``docker-compose.local.yml`` override swaps EBS bind mounts for
+        named docker volumes, swaps Tempo's S3 backend for filesystem,
+        and sets a sensible default Grafana admin password.
+
+        Idempotent: if the OTel collector container is already running
+        the call is a noop. Container existence is the liveness signal
+        — compose owns the lifecycle, so there's no PID file (in
+        contrast to the autoscaler / scheduler / deploy-watcher
+        subprocesses).
+
+        Foreground exec (subprocess.run, not Popen): the first ``up``
+        pulls ~1.5 GB of images and operators need to see what's
+        happening rather than waiting in silence. Subsequent runs are
+        sub-second when images are cached.
+        """
+        if self._observability_already_running():
+            console.print("• Observability stack already running.")
+            return
+
+        repo_root = find_repo_root()
+        base_file = repo_root / OBSERVABILITY_COMPOSE_FILE_REL
+        local_file = repo_root / OBSERVABILITY_COMPOSE_LOCAL_FILE_REL
+        cmd = [
+            "docker", "compose",
+            "-f", str(base_file),
+            "-f", str(local_file),
+            "up", "-d",
+        ]
+        console.print(
+            "• Starting observability stack "
+            f"(compose: {base_file.name} + {local_file.name})..."
+        )
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            console.print(
+                "[red]• Observability stack failed to start "
+                f"(docker compose exit {exc.returncode}). "
+                "Common causes: port conflict on 3000/3100/4317/4318/8888/9090, "
+                "docker daemon not running, or first-pull network failure. "
+                "Re-run after resolving, or pass --no-observability to skip.[/red]"
+            )
+            raise
+        console.print(
+            f"• Observability stack ready (Grafana {OBSERVABILITY_GRAFANA_URL}, "
+            f"OTLP {OBSERVABILITY_OTLP_HTTP_URL})."
+        )
+
+    def _stop_observability(self) -> None:
+        """Tear down the observability compose stack.
+
+        Runs ``docker compose down`` without ``-v`` so the named volumes
+        (treadmill-loki-data, treadmill-prometheus-data,
+        treadmill-tempo-data) persist across down/up cycles — matching
+        the Postgres named-volume convention. Operators who want to
+        reclaim disk drop the volumes by hand.
+
+        Idempotent: compose ``down`` against an absent stack is a noop
+        with a brief warning; we swallow it (best-effort teardown).
+        """
+        if not self._observability_already_running():
+            return
+        repo_root = find_repo_root()
+        base_file = repo_root / OBSERVABILITY_COMPOSE_FILE_REL
+        local_file = repo_root / OBSERVABILITY_COMPOSE_LOCAL_FILE_REL
+        cmd = [
+            "docker", "compose",
+            "-f", str(base_file),
+            "-f", str(local_file),
+            "down",
+        ]
+        try:
+            subprocess.run(cmd, check=True)
+            console.print("• Observability stack stopped.")
+        except subprocess.CalledProcessError as exc:
+            # Best-effort: log and continue so the rest of `down` still
+            # cleans up (containers, network). A failed compose down is
+            # usually a transient docker daemon hiccup, not something
+            # that should block other teardown.
+            console.print(
+                f"[yellow]• Observability stack down returned exit "
+                f"{exc.returncode}; continuing.[/yellow]"
+            )
+
+    def _observability_already_running(self) -> bool:
+        """True iff the OTel-collector container is up.
+
+        OTel collector is the load-bearing stack member from the worker
+        perspective (it's where OTLP traffic terminates), so its
+        presence is the cleanest proxy for the whole compose unit. The
+        operator could in principle stop one of the five services by
+        hand, but at that point manual recovery is appropriate.
+        """
+        try:
+            container = self.docker.containers.get(OBSERVABILITY_OTEL_CONTAINER_NAME)
+        except docker.errors.NotFound:
+            return False
+        return container.status == "running"
 
