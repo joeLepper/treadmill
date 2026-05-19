@@ -45,6 +45,32 @@ class WorkflowRun(Base):
     """How this run started: ``registered`` (initial dispatch),
     ``webhook:pr_opened``, ``webhook:check_run_completed``, etc."""
 
+    source_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workflow_run_steps.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    """FK to the ``workflow_run_steps`` row whose completion triggered
+    this run, when this run was dispatched as a self-trigger side-effect
+    of an upstream step. ``None`` for the common paths (initial
+    dispatch, webhook fan-out, deadlock arbitration) — only set on the
+    self-trigger paths that need to plumb the upstream step's output
+    into the downstream worker's context.
+
+    Today only ``maybe_dispatch_feedback_on_architect_amend`` populates
+    it (with the ``wf-architecture-resolve`` step that emitted
+    ``amend``) so the downstream ``role-feedback-analyzer`` can read the
+    architect's ``remediation_summary`` + ``reasoning`` from
+    ``workflow_run_steps.output`` and honor the directive verbatim. The
+    steps router joins through this FK and exposes the source step on
+    the ``WorkerContextResponse`` as a ``source_step`` block so the
+    worker sees it on its initial step-context fetch.
+
+    Per ADR-0011: ``workflow_run_steps.output`` is already JSONB (one of
+    the two sites the architecture commits to JSONB); the structured-FK
+    shape here keeps the lineage typed without adding a new JSONB
+    column on ``workflow_runs``."""
+
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

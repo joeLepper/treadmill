@@ -71,6 +71,33 @@ class PriorStep:
 
 
 @dataclass(frozen=True)
+class SourceStep:
+    """The upstream step whose completion triggered this run.
+
+    Populated by the API when ``run.source_step_id`` is set. Today only
+    the architect-amend → wf-feedback dispatch sets it: the
+    wf-feedback analyzer reads
+    ``source_step.output['payload']['remediation_summary']`` (+
+    ``['reasoning']``) and honors the architect's directive verbatim
+    instead of re-evaluating the original failure from scratch.
+
+    Distinct from ``prior_steps`` — that field is the intra-run
+    analyzer→action communication path (ADR-0015 §``task_directive``).
+    ``source_step`` is the cross-run / cross-workflow plumbing.
+
+    ``output`` mirrors the raw JSONB envelope (per ADR-0011 +
+    ADR-0012); the prompt composer dispatches on ``workflow_id`` to
+    know what shape to expect in ``payload``.
+    """
+
+    step_id: str
+    run_id: str
+    workflow_id: str
+    step_name: str
+    output: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class TaskValidationInfo:
     """A validation check from the task's ``validation:`` block.
 
@@ -123,6 +150,15 @@ class WorkerContext:
     to empty so callers that don't have validation info (e.g. unit tests
     constructing WorkerContext directly, or the dry-run path) don't need
     to thread an empty list everywhere."""
+    source_step: SourceStep | None = None
+    """The upstream step whose completion triggered this run, when this
+    run was dispatched as a self-trigger side-effect. Populated by the
+    API when ``run.source_step_id`` is set — today only the architect-
+    amend → wf-feedback path. The prompt composer reads
+    ``source_step.output`` for the upstream directive; the analyzer
+    honors it verbatim instead of re-evaluating. ``None`` for paths
+    that didn't plumb cross-run context (initial dispatch, webhook
+    fan-out, etc.)."""
 
 
 class ApiClient:
@@ -149,6 +185,24 @@ class ApiClient:
 
 def _decode_context(body: dict[str, Any]) -> WorkerContext:
     role_block = body["role"]
+    # ``source_step`` is present when the API resolved a non-NULL
+    # ``run.source_step_id`` (today: architect-amend → wf-feedback).
+    # Older API responses + the (vast majority of) dispatch paths that
+    # don't plumb cross-run context omit the key entirely; we accept
+    # both ``None`` and absent gracefully so the worker is forward-
+    # compatible with any pre-plumbing API mocks still in fixtures.
+    source_step_raw = body.get("source_step")
+    source_step: SourceStep | None
+    if source_step_raw is None:
+        source_step = None
+    else:
+        source_step = SourceStep(
+            step_id=source_step_raw["step_id"],
+            run_id=source_step_raw["run_id"],
+            workflow_id=source_step_raw["workflow_id"],
+            step_name=source_step_raw["step_name"],
+            output=source_step_raw.get("output"),
+        )
     return WorkerContext(
         step_id=body["step"]["id"],
         run_id=body["step"]["run_id"],
@@ -214,4 +268,5 @@ def _decode_context(body: dict[str, Any]) -> WorkerContext:
             )
             for v in body.get("task_validations", [])
         ],
+        source_step=source_step,
     )

@@ -1130,12 +1130,22 @@ async def maybe_dispatch_feedback_on_architect_amend(
     }
 
     async def _dispatch() -> uuid.UUID | None:
+        # Pass the architect's step_id as ``source_step_id`` so the
+        # downstream wf-feedback worker can read the architect's
+        # ``remediation_summary`` + ``reasoning`` from this step's
+        # ``output`` (JSONB per ADR-0011) on its initial context
+        # fetch. Without this plumbing the architect's directive is
+        # dropped at the dispatch boundary and the analyzer re-evaluates
+        # from scratch, often re-concluding ``no code change needed``
+        # against the architect's explicit directive (observed
+        # 2026-05-16 on PRs #120/#122/#123/#124).
         return await _create_and_publish_run(
             session,
             dispatcher,
             task=task,
             workflow_id=FEEDBACK_WORKFLOW_ID,
             trigger="self:architect-amend",
+            source_step_id=step_id,
         )
 
     return await maybe_dispatch_with_dedup(
@@ -1926,6 +1936,7 @@ async def _create_and_publish_run(
     task: Task,
     workflow_id: str,
     trigger: str,
+    source_step_id: uuid.UUID | str | None = None,
 ) -> uuid.UUID | None:
     """Create a WorkflowRun + step rows for the workflow and publish
     ``step.ready`` for the first step.
@@ -1938,6 +1949,20 @@ async def _create_and_publish_run(
     (e.g. ``webhook:pr_synchronize`` for the github path,
     ``self:wf-review-changes-requested`` for the step-output path) so
     the audit trail still tells you what fired the run.
+
+    ``source_step_id`` is the optional FK back to the upstream
+    ``workflow_run_steps`` row whose ``step.completed`` triggered this
+    dispatch. Self-trigger paths that need to plumb the upstream step's
+    output into the downstream worker's context (e.g.
+    ``maybe_dispatch_feedback_on_architect_amend`` plumbing the
+    architect's ``remediation_summary``) pass it; the steps router
+    joins through it on context fetch. Webhook fan-out, the initial
+    ``wf-author`` dispatch, the deadlock-arbitration trigger, and the
+    other paths that don't need cross-run plumbing leave it ``None``
+    and the column stays ``NULL``. Per ADR-0011 this is the
+    structured-column path; the source step's payload lives on
+    ``workflow_run_steps.output`` (the one JSONB column the architecture
+    commits to) — no new JSONB column on ``workflow_runs``.
 
     Returns the run's id, or ``None`` if the workflow has no version
     (un-seeded install) or no steps (degenerate workflow).
@@ -1976,11 +2001,22 @@ async def _create_and_publish_run(
         )
         return None
 
-    # Create the WorkflowRun.
+    # Create the WorkflowRun. ``source_step_id`` is normalized to UUID
+    # at the boundary — callers may pass either ``str`` (the SQS
+    # message body shape) or ``uuid.UUID`` (the in-process consumer
+    # call shape).
+    coerced_source: uuid.UUID | None
+    if source_step_id is None:
+        coerced_source = None
+    elif isinstance(source_step_id, uuid.UUID):
+        coerced_source = source_step_id
+    else:
+        coerced_source = uuid.UUID(source_step_id)
     run = WorkflowRun(
         task_id=task.id,
         workflow_version_id=wv.id,
         trigger=trigger,
+        source_step_id=coerced_source,
     )
     session.add(run)
     await session.flush()

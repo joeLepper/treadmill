@@ -172,6 +172,85 @@ def test_decoder_maps_prior_steps() -> None:
     assert second.output is None
 
 
+def test_decoder_defaults_source_step_to_none_when_absent() -> None:
+    """The (vast majority of) dispatch paths leave ``run.source_step_id``
+    unset; the API omits ``source_step`` entirely (or sends ``None``)
+    and the decoder must surface ``None`` — not raise. Forward-compat
+    with pre-plumbing API mocks still in fixtures."""
+    body = _sample_response()
+    assert "source_step" not in body
+    ctx = _decode_context(body)
+    assert ctx.source_step is None
+
+
+def test_decoder_maps_source_step_when_present() -> None:
+    """When the API resolves a non-NULL ``run.source_step_id`` (today
+    only on the architect-amend → wf-feedback path), the decoder lifts
+    the upstream step's identifying triple + its JSONB ``output``
+    into the typed ``SourceStep`` dataclass.
+
+    The wf-feedback analyzer's prompt composer reads
+    ``source_step.output['payload']['remediation_summary']`` here —
+    the architect's verbatim directive — and surfaces it unchanged.
+    """
+    architect_step_id = "12121212-0000-0000-0000-000000000099"
+    architect_run_id = "13131313-0000-0000-0000-000000000099"
+    remediation = (
+        "Edit services/api/treadmill_api/foo.py:42 to add a None-guard."
+    )
+    body = _sample_response()
+    body["source_step"] = {
+        "step_id": architect_step_id,
+        "run_id": architect_run_id,
+        "workflow_id": "wf-architecture-resolve",
+        "step_name": "resolve",
+        "output": {
+            "summary": "architect amend verdict",
+            "decision": "amend",
+            "commit_sha": None,
+            "artifacts": [],
+            "payload": {
+                "verdict": "amend",
+                "remediation_summary": remediation,
+                "reasoning": (
+                    "Intent is right; code drops None at entrance."
+                ),
+            },
+            "metadata": {},
+        },
+    }
+    ctx = _decode_context(body)
+    assert ctx.source_step is not None
+    assert ctx.source_step.step_id == architect_step_id
+    assert ctx.source_step.run_id == architect_run_id
+    assert ctx.source_step.workflow_id == "wf-architecture-resolve"
+    assert ctx.source_step.step_name == "resolve"
+    assert ctx.source_step.output is not None
+    assert ctx.source_step.output["decision"] == "amend"
+    assert (
+        ctx.source_step.output["payload"]["remediation_summary"]
+        == remediation
+    )
+
+
+def test_decoder_source_step_handles_null_output() -> None:
+    """Defensive: if the upstream step exists but its ``output`` is
+    still NULL (a race during dispatch — step was completed-then-rolled-
+    back, etc.), the decoder must pass ``None`` through rather than
+    crashing on a missing key."""
+    body = _sample_response()
+    body["source_step"] = {
+        "step_id": "12121212-0000-0000-0000-000000000099",
+        "run_id": "13131313-0000-0000-0000-000000000099",
+        "workflow_id": "wf-architecture-resolve",
+        "step_name": "resolve",
+        "output": None,
+    }
+    ctx = _decode_context(body)
+    assert ctx.source_step is not None
+    assert ctx.source_step.output is None
+
+
 def test_fetch_step_context_calls_get(httpx_mock: HTTPXMock) -> None:
     body = _sample_response()
     step_id = body["step"]["id"]

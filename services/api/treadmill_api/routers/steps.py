@@ -145,6 +145,36 @@ class PriorStepBlock(BaseModel):
     output: dict | None
 
 
+class SourceStepBlock(BaseModel):
+    """The upstream step whose completion triggered this run, exposed
+    on the worker context for cross-run / cross-workflow plumbing.
+
+    Populated when ``run.source_step_id`` is non-NULL — today the only
+    site is the architect-amend → wf-feedback path
+    (``maybe_dispatch_feedback_on_architect_amend``). The downstream
+    analyzer reads ``source_step.output['payload']['remediation_summary']``
+    + ``['reasoning']`` to honor the architect's verbatim directive
+    instead of re-evaluating the original failure signal from scratch.
+
+    Distinct from ``prior_steps``: ``prior_steps`` is the intra-run
+    analyzer→action communication path (ADR-0015 §``task_directive``);
+    ``source_step`` is the cross-run / cross-workflow plumbing for
+    self-triggered dispatches. The worker reads each from its own
+    field — folding them together would lose the routing context.
+
+    ``output`` is the raw JSONB payload (StepOutput envelope per
+    ADR-0012). The router passes it through; the worker's prompt
+    composer knows the per-workflow shape (architect verdict here,
+    validator output for future hookups).
+    """
+
+    step_id: uuid.UUID
+    run_id: uuid.UUID
+    workflow_id: str
+    step_name: str
+    output: dict | None
+
+
 class WorkerContextResponse(BaseModel):
     """The full bundle a worker needs to execute one step."""
 
@@ -174,6 +204,15 @@ class WorkerContextResponse(BaseModel):
     """Task-specific validation checks defined in the plan-doc task spec.
     Per the 2026-05-14 learning, the code disposition runs these scripts
     before pushing to gate on self-validation."""
+    source_step: SourceStepBlock | None = None
+    """The upstream step whose completion triggered this run (cross-run
+    plumbing for self-triggered dispatches). Populated when
+    ``run.source_step_id`` is non-NULL. Today only the architect-amend
+    → wf-feedback path sets it; the wf-feedback analyzer reads the
+    architect's ``remediation_summary`` from ``source_step.output``
+    here. ``None`` for every other dispatch path (initial dispatch,
+    webhook fan-out, deadlock arbitration, etc.). Distinct from
+    ``prior_steps`` (intra-run analyzer→action per ADR-0015)."""
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -305,6 +344,51 @@ async def get_step_context(
         )
     ).scalars().all()
 
+    # Cross-run source-step lookup. When the run was dispatched as a
+    # side-effect of an upstream step (today: architect ``amend`` →
+    # wf-feedback), the upstream step's output is the load-bearing
+    # context the downstream worker needs. We join through
+    # ``workflow_run_steps → workflow_runs → workflow_versions`` so the
+    # response surfaces the upstream ``workflow_id`` too — the worker's
+    # prompt composer dispatches on it (e.g. only treat
+    # ``workflow_id == "wf-architecture-resolve"`` output as a
+    # remediation directive). ``None`` for the (vast majority of)
+    # paths that don't plumb upstream context.
+    source_step_block: SourceStepBlock | None = None
+    if run.source_step_id is not None:
+        row = (
+            await session.execute(
+                select(
+                    WorkflowRunStep.id,
+                    WorkflowRunStep.run_id,
+                    WorkflowRunStep.step_name,
+                    WorkflowRunStep.output,
+                    WorkflowVersion.workflow_id,
+                )
+                .join(
+                    WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id,
+                )
+                .join(
+                    WorkflowVersion,
+                    WorkflowVersion.id == WorkflowRun.workflow_version_id,
+                )
+                .where(WorkflowRunStep.id == run.source_step_id)
+            )
+        ).first()
+        if row is not None:
+            source_step_block = SourceStepBlock(
+                step_id=row.id,
+                run_id=row.run_id,
+                workflow_id=row.workflow_id,
+                step_name=row.step_name,
+                output=row.output,
+            )
+        # ``ON DELETE SET NULL`` means a deleted upstream step nulls
+        # this run's FK; an ``IS NOT NULL`` FK should always resolve.
+        # If the lookup misses anyway (rare race during cascade), we
+        # leave ``source_step`` as ``None`` rather than 500 — the
+        # worker's prompt composer falls back to the original signal.
+
     return WorkerContextResponse(
         step=_StepBlock(
             id=step.id, run_id=step.run_id, step_index=step.step_index,
@@ -357,4 +441,5 @@ async def get_step_context(
             )
             for v in validation_rows
         ],
+        source_step=source_step_block,
     )
