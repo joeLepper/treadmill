@@ -390,6 +390,50 @@ async def _is_capped(
     return count >= cap
 
 
+# Terminal derived_status values per the task_status VIEW (ADR-0011). When a
+# task reaches one of these, there is no non-terminal workflow to retry.
+_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"pr_merged", "cancelled", "done"})
+
+
+async def infer_retry_workflow(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+) -> str | None:
+    """Return the workflow_id of the most-recent non-terminal workflow run
+    for this task, or ``None`` when no eligible run exists.
+
+    Returns ``None`` when:
+    - The task has no workflow runs.
+    - The task's derived_status (task_status VIEW) is in
+      ``{'pr_merged', 'cancelled', 'done'}`` — the operator should pass
+      ``--workflow`` explicitly when the task is already terminal.
+
+    Used by the ``treadmill task retry`` CLI path (ADR-0046) to infer which
+    workflow to re-dispatch when the operator omits ``--workflow``.
+    """
+    result = await session.execute(
+        select(WorkflowVersion.workflow_id)
+        .join(WorkflowRun, WorkflowRun.workflow_version_id == WorkflowVersion.id)
+        .where(WorkflowRun.task_id == task_id)
+        .order_by(WorkflowRun.created_at.desc())
+        .limit(1)
+    )
+    row = result.first()
+    if row is None:
+        return None
+
+    status_result = await session.execute(
+        text("SELECT derived_status FROM task_status WHERE id = CAST(:task_id AS uuid)"),
+        {"task_id": str(task_id)},
+    )
+    status_row = status_result.first()
+    if status_row is None:
+        return None
+    if status_row.derived_status in _TERMINAL_TASK_STATUSES:
+        return None
+    return row.workflow_id
+
+
 async def maybe_dispatch_feedback_on_terminal_failure(
     session: AsyncSession,
     dispatcher: Any,
