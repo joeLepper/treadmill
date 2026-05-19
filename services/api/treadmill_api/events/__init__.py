@@ -54,7 +54,7 @@ from treadmill_api.events.step_output import (
 from treadmill_api.events.review import ReviewOverride
 from treadmill_api.events.rule_corpus_audit import RuleCorpusAudit, RuleCorpusAuditEntry
 from treadmill_api.events.schedule import ScheduledTick
-from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
+from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered, TaskRetry
 from treadmill_api.events.validate import ValidateOverride
 from treadmill_api.events.validator_tuning import ValidatorTuning
 
@@ -75,10 +75,11 @@ __all__ = [
     "Artifact",
     "Metadata",
     # Task events
-    "TaskRegistered",
-    "TaskReady",
-    "TaskCancelled",
     "TaskAutoMerged",
+    "TaskCancelled",
+    "TaskReady",
+    "TaskRegistered",
+    "TaskRetry",
     # Plan events
     "PlanRegistered",
     "PlanPlanningStarted",

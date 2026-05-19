@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import ClassVar
 
+import pydantic
+
 from treadmill_api.events.base import EventPayload
 
 
@@ -43,6 +45,19 @@ class TaskCancelled(EventPayload):
     ACTION: ClassVar[str] = "cancelled"
 
     reason: str | None = None
+
+
+class TaskRetry(EventPayload):
+    """Emitted when an operator retries a task via the CLI (ADR-0046)."""
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "retry"
+
+    workflow_id: str
+    reason: str = pydantic.Field(min_length=1, max_length=500)
+    by_operator: str
+    bypassed_cap: bool
+    previous_run_id: str | None = None
 
 
 class TaskAutoMerged(EventPayload):

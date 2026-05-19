@@ -43,7 +43,7 @@ from treadmill_api.events.step import (
 )
 from treadmill_api.events.review import ReviewOverride
 from treadmill_api.events.schedule import ScheduledTick
-from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered
+from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered, TaskRetry
 from treadmill_api.events.validate import ValidateOverride
 from treadmill_api.events.validator_tuning import ValidatorTuning  # noqa: F401  re-exported
 
@@ -52,10 +52,11 @@ from treadmill_api.events.validator_tuning import ValidatorTuning  # noqa: F401 
 # exhaustive — every event type the API emits or consumes appears here.
 _REGISTRY_CLASSES: list[type[EventPayload]] = [
     # Task events
-    TaskRegistered,
-    TaskReady,
-    TaskCancelled,
     TaskAutoMerged,
+    TaskCancelled,
+    TaskReady,
+    TaskRegistered,
+    TaskRetry,
     # Plan events
     PlanRegistered,
     PlanPlanningStarted,
