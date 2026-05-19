@@ -499,7 +499,7 @@ def test_role_architect_prompt_teaches_json_envelope() -> None:
     """Per ADR-0032 Q32.d, the architect role must return a Pydantic-validated
     ArchitectVerdict JSON envelope, patterned on ADR-0027's ReviewVerdict.
     The prompt must teach the JSON envelope convention with the three verdict
-    values: amend / supersede / accept-as-is (per ADR-0049 — ``uncertain``
+    values: amend / supersede / accept-as-is (per ADR-0048 — ``uncertain``
     was removed)."""
     architect = next(r for r in _all_roles() if r["id"] == "role-architect")
     prompt = architect["system_prompt"]

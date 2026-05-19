@@ -978,7 +978,7 @@ def test_runner_stops_heartbeat_in_finally_even_on_disposition_raise(
     )
 
 
-# ── Queue-hygiene contract (ADR-0049 verification) ───────────────────────────
+# ── Queue-hygiene contract (ADR-0048 verification) ───────────────────────────
 #
 # The contract:
 #

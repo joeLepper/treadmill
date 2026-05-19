@@ -113,7 +113,7 @@ def test_tasks_workflow_version_id_fk_targets_workflow_versions(engine: Engine) 
 
 
 def test_tasks_parent_task_id_self_fk_exists(engine: Engine) -> None:
-    """Per ADR-0049, ``tasks.parent_task_id`` is a self-FK linking child
+    """Per ADR-0048, ``tasks.parent_task_id`` is a self-FK linking child
     → parent for supersede lineage. The migration adds the column,
     self-FK with ON DELETE SET NULL, and a backing index."""
     inspector = sa.inspect(engine)

@@ -218,7 +218,7 @@ def _build_wf_doc_amend_key(payload: dict[str, Any]) -> str | None:
 
 def _build_wf_author_key(payload: dict[str, Any]) -> str | None:
     """``wf-author:<repo>:supersede-parent=<parent_task_id>``
-    (ADR-0049 supersede trigger).
+    (ADR-0048 supersede trigger).
 
     The supersede trigger creates a child task and dispatches a fresh
     ``wf-author`` against it. The dedup key is keyed on the PARENT

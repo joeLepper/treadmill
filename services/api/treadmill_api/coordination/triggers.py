@@ -1332,7 +1332,7 @@ async def maybe_dispatch_supersede_on_architect_verdict(
     typed: StepCompleted,
     github_client: Any = None,
 ) -> uuid.UUID | None:
-    """ADR-0049: handle the architect's repurposed ``supersede`` verdict.
+    """ADR-0048: handle the architect's repurposed ``supersede`` verdict.
 
     When the architect verdicts ``supersede`` the plan-text itself was
     wrong. We close the existing PR (if any), create a CHILD task row

@@ -1,6 +1,6 @@
-"""Add tasks.parent_task_id self-FK for supersede lineage (ADR-0049).
+"""Add tasks.parent_task_id self-FK for supersede lineage (ADR-0048).
 
-ADR-0049 reframes the architect's ``supersede`` verdict: when the
+ADR-0048 reframes the architect's ``supersede`` verdict: when the
 architect decides the plan-text itself was wrong (not just the code),
 the supersede trigger closes the existing PR, creates a NEW task row
 with a rewritten description, and dispatches a fresh ``wf-author``

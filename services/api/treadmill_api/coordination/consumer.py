@@ -460,7 +460,7 @@ class CoordinationConsumer:
                 await self._maybe_dispatch_rule_tuning(
                     session, step_id, typed,
                 )
-            # ADR-0049: when the architect step.completed carries
+            # ADR-0048: when the architect step.completed carries
             # ``payload.verdict='supersede'`` with a non-empty
             # ``rewritten_description``, close the parent task's PR
             # (best-effort), create a CHILD task row with the rewritten
@@ -1454,7 +1454,7 @@ class CoordinationConsumer:
                 step_id,
             )
 
-    # ── ADR-0049: architect supersede → close PR + child task + wf-author ──
+    # ── ADR-0048: architect supersede → close PR + child task + wf-author ──
 
     async def _maybe_dispatch_supersede(
         self,
@@ -1462,7 +1462,7 @@ class CoordinationConsumer:
         step_id: str,
         typed: Any,
     ) -> None:
-        """ADR-0049: dispatch the supersede sequence when an architect
+        """ADR-0048: dispatch the supersede sequence when an architect
         step.completed carries ``payload.verdict='supersede'``.
 
         Delegates to

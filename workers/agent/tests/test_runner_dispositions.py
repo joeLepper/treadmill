@@ -1415,7 +1415,7 @@ def test_architecture_handler_amend_verdict_routes_to_wf_plan(
 def test_architecture_handler_supersede_verdict_routes_to_api_trigger(
     tmp_path: Path,
 ) -> None:
-    """``supersede`` per ADR-0049 is repurposed: the disposition emits
+    """``supersede`` per ADR-0048 is repurposed: the disposition emits
     ``workflow_id=None`` + ``rewritten_description`` in the dispatch
     payload. The API-side
     ``maybe_dispatch_supersede_on_architect_verdict`` trigger handles
@@ -1444,7 +1444,7 @@ def test_architecture_handler_supersede_verdict_routes_to_api_trigger(
 def test_architecture_handler_supersede_without_rewrite_raises(
     tmp_path: Path,
 ) -> None:
-    """Per ADR-0049, ``verdict='supersede'`` without a non-empty
+    """Per ADR-0048, ``verdict='supersede'`` without a non-empty
     ``rewritten_description`` is a parse failure. The disposition
     forbids the worker from emitting an empty-rewrite supersede so the
     step fails fast rather than silently dispatching an empty child
@@ -1525,7 +1525,7 @@ def test_architecture_handler_raises_on_unrecognized_prose(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    """Post-ADR-0049, prose with no recognized verdict cue is a hard
+    """Post-ADR-0048, prose with no recognized verdict cue is a hard
     failure — the prior ``uncertain`` catch-all is gone. The retry
     helper is monkeypatched to a no-op so the cue path is exercised
     cleanly without making a real Claude call."""

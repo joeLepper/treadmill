@@ -1,4 +1,4 @@
-"""Unit tests for the supersede-on-architect-verdict trigger (ADR-0049).
+"""Unit tests for the supersede-on-architect-verdict trigger (ADR-0048).
 
 Drives ``maybe_dispatch_supersede_on_architect_verdict`` directly with
 stubs so we can prove the trigger's short-circuit behavior + the
@@ -201,7 +201,7 @@ async def test_supersede_helper_skips_whitespace_only_rewrite() -> None:
 async def test_consumer_routes_step_completed_to_supersede_helper() -> None:
     """The consumer must call ``_maybe_dispatch_supersede`` after each
     step.completed so the architect's supersede verdict triggers the
-    close-PR + child-task + wf-author sequence (ADR-0049)."""
+    close-PR + child-task + wf-author sequence (ADR-0048)."""
     session = _StubSession()
     consumer = _consumer(session)
 

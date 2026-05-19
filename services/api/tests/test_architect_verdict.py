@@ -20,7 +20,7 @@ def test_architect_verdict_well_formed() -> None:
 
 
 def test_architect_verdict_with_remediation_summary() -> None:
-    """A verdict with remediation_summary validates. Per ADR-0049
+    """A verdict with remediation_summary validates. Per ADR-0048
     supersede now requires ``rewritten_description``; amend uses
     ``remediation_summary``."""
     verdict = ArchitectVerdict.model_validate({
@@ -34,7 +34,7 @@ def test_architect_verdict_with_remediation_summary() -> None:
 
 
 def test_architect_verdict_all_verdict_values() -> None:
-    """All three verdict values are accepted. Per ADR-0049 supersede
+    """All three verdict values are accepted. Per ADR-0048 supersede
     requires ``rewritten_description``; we supply one here so the
     validator passes."""
     for verdict_value in ["amend", "accept-as-is"]:
@@ -44,7 +44,7 @@ def test_architect_verdict_all_verdict_values() -> None:
             "target_artifact": "docs/test.md",
         })
         assert verdict.verdict == verdict_value
-    # supersede requires the rewritten_description (ADR-0049).
+    # supersede requires the rewritten_description (ADR-0048).
     supersede = ArchitectVerdict.model_validate({
         "verdict": "supersede",
         "reasoning": "Plan text was wrong",
@@ -66,7 +66,7 @@ def test_architect_verdict_rejects_invalid_verdict() -> None:
 
 
 def test_architect_verdict_rejects_uncertain() -> None:
-    """Per ADR-0049, ``uncertain`` was removed from the verdict surface;
+    """Per ADR-0048, ``uncertain`` was removed from the verdict surface;
     the architect must always commit to one of the three actionable
     verdicts. Pydantic rejects the old value."""
     with pytest.raises(ValidationError):
@@ -115,11 +115,11 @@ def test_architect_verdict_rejects_unknown_fields() -> None:
         })
 
 
-# ── ADR-0049: supersede requires rewritten_description ──────────────────────
+# ── ADR-0048: supersede requires rewritten_description ──────────────────────
 
 
 def test_architect_verdict_supersede_requires_rewritten_description() -> None:
-    """Per ADR-0049, ``verdict='supersede'`` must carry a non-empty
+    """Per ADR-0048, ``verdict='supersede'`` must carry a non-empty
     ``rewritten_description``. Without it the supersede trigger has no
     text to put on the child task row, so a missing-field supersede is
     a parse failure. The model_validator surfaces the error at validate

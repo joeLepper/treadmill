@@ -7,7 +7,7 @@ parses that envelope from the Claude summary, surfaces the routing
 payload, and emits the downstream-dispatch hint for the coordination
 consumer.
 
-Routing per ADR-0032 §Decision + ADR-0049 §supersede repurpose:
+Routing per ADR-0032 §Decision + ADR-0048 §supersede repurpose:
 
 * ``amend`` — intent right, code wrong. Payload carries
   ``dispatch.workflow_id = "wf-plan"`` so a remediation plan gets
@@ -19,7 +19,7 @@ Routing per ADR-0032 §Decision + ADR-0049 §supersede repurpose:
   description + ``parent_task_id`` pointing back, and dispatches a
   fresh ``wf-author`` against the child. ``dispatch.workflow_id`` is
   ``None`` — the API trigger owns the dispatch shape, not the
-  disposition. Per ADR-0049, the prior supersede→wf-doc-amend routing
+  disposition. Per ADR-0048, the prior supersede→wf-doc-amend routing
   (author a superseding ADR) was removed; supersede now means
   "rewrite the task text and restart fresh" instead.
 * ``accept-as-is`` — gap is acceptable. Payload carries
@@ -27,7 +27,7 @@ Routing per ADR-0032 §Decision + ADR-0049 §supersede repurpose:
   ``AGENT.md`` (append to Pitfalls). Also emits a structured PR comment
   request (``pr_comment`` payload field) so the operator confirms.
 
-Per ADR-0049, the prior ``uncertain`` verdict was removed; the architect
+Per ADR-0048, the prior ``uncertain`` verdict was removed; the architect
 must always commit to one of the three actionable verdicts above.
 
 No git side effects. No PR-side side effects (the coordination consumer
@@ -56,7 +56,7 @@ logger = logging.getLogger("treadmill.agent.architecture")
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
-# ADR-0032 §Decision three-verdict contract (post-ADR-0049). Kept in
+# ADR-0032 §Decision three-verdict contract (post-ADR-0048). Kept in
 # sync with ``ArchitectVerdict.verdict`` Literal in
 # ``services/api/treadmill_api/events/architect_verdict.py``.
 _VALID_VERDICTS = frozenset({"amend", "supersede", "accept-as-is"})
@@ -84,7 +84,7 @@ class ArchitectVerdictParseError(RuntimeError):
 # This fallback extracts the model's intended verdict from prose so the
 # system can act on it; the strict JSON path remains primary.
 #
-# Per ADR-0049, ``uncertain`` was removed from the verdict surface; the
+# Per ADR-0048, ``uncertain`` was removed from the verdict surface; the
 # cue table now covers only the three actionable verdicts.
 _PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
     ("amend", (
@@ -132,7 +132,7 @@ def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
     """Fallback verdict parser. Scans prose for phrase cues and
     synthesizes a verdict envelope.
 
-    Ordered fallback chain (post-ADR-0049):
+    Ordered fallback chain (post-ADR-0048):
       1. Try the cue table (amend → supersede → accept-as-is).
       2. If nothing matches, return ``None`` so the caller raises
          ``ArchitectVerdictParseError`` and the step.failure surfaces.
@@ -281,7 +281,7 @@ def _extract_verdict_envelope(
     """Return the last JSON block whose parsed object contains
     ``"verdict"`` keyed at one of the three valid literals.
 
-    Ordered chain (highest fidelity first, post-ADR-0049):
+    Ordered chain (highest fidelity first, post-ADR-0048):
       1. Strict JSON parse from the original summary.
       2. Structured-output retry — ask claude to reformat its prose
          as a JSON envelope (when ``retry_model`` is supplied).
@@ -334,7 +334,7 @@ def _build_dispatch_payload(
 ) -> dict[str, Any]:
     """Build the routing payload the consumer reads to dispatch the
     downstream workflow. Shape per ADR-0032 §Decision + ADR-0038
-    semantics for deadlock-triggered runs + ADR-0049 supersede repurpose."""
+    semantics for deadlock-triggered runs + ADR-0048 supersede repurpose."""
     if verdict == "amend":
         return {
             "workflow_id": "wf-plan",
@@ -343,7 +343,7 @@ def _build_dispatch_payload(
             "remediation_summary": remediation_summary or "",
         }
     if verdict == "supersede":
-        # ADR-0049: supersede repurposed. The API-side
+        # ADR-0048: supersede repurposed. The API-side
         # ``maybe_dispatch_supersede_on_architect_verdict`` trigger owns
         # the close-PR + create-child-task + dispatch-fresh-wf-author
         # sequence; this disposition just surfaces the architect's
@@ -398,7 +398,7 @@ def _build_pr_comment_payload(
 
     Only ``accept-as-is`` surfaces a comment so the operator confirms
     the gap is acceptable; other verdicts route purely to downstream
-    workflows. (Per ADR-0049, ``uncertain`` was removed from the verdict
+    workflows. (Per ADR-0048, ``uncertain`` was removed from the verdict
     surface, so the prior capped-uncertain comment path is gone too.)
     """
     if verdict == "accept-as-is":
@@ -517,7 +517,7 @@ def handle(ctx: DispositionContext) -> StepOutput:
     remediation_summary: str | None = envelope.get("remediation_summary")
     rewritten_description: str | None = envelope.get("rewritten_description")
 
-    # ADR-0049: supersede repurposed. The architect must include a
+    # ADR-0048: supersede repurposed. The architect must include a
     # non-empty ``rewritten_description`` so the API-side trigger has
     # text to write onto the child task row. A supersede with no
     # rewritten text is a parse failure — wf-feedback can re-run the
@@ -531,7 +531,7 @@ def handle(ctx: DispositionContext) -> StepOutput:
         raise ArchitectVerdictParseError(
             "architect verdict=supersede requires a non-empty "
             "``rewritten_description`` field (the corrected task text "
-            "that becomes the child task's description). Per ADR-0049, "
+            "that becomes the child task's description). Per ADR-0048, "
             "supersede creates a new task row carrying this field's "
             "value; an empty rewrite has no child-task content."
         )

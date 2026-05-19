@@ -56,7 +56,7 @@ class TaskResponse(BaseModel):
     created_by: str | None
     created_at: datetime
     parent_task_id: uuid.UUID | None = None
-    """Per ADR-0049: when the architect verdicts ``supersede``, a child
+    """Per ADR-0048: when the architect verdicts ``supersede``, a child
     task is created with the rewritten description and ``parent_task_id``
     pointing back to the original. ``None`` for tasks that did not
     originate from a supersede."""

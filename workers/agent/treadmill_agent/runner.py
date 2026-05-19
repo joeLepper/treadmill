@@ -175,7 +175,7 @@ def run(
             daemon=True,
         )
         heartbeat.start()
-        # Queue-hygiene contract (ADR-0025, ADR-0049): we do NOT ack on
+        # Queue-hygiene contract (ADR-0025, ADR-0048): we do NOT ack on
         # uncaught exception. ``_delete`` lives strictly inside the try
         # block AFTER ``_handle_step`` returns normally. Any path that
         # raises — subprocess crash, claude_code timeout, network error,

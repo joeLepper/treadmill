@@ -70,7 +70,7 @@ class Task(Base):
         ForeignKey("tasks.id", ondelete="SET NULL"),
         nullable=True,
     )
-    """Self-FK for ``supersede`` lineage (ADR-0049). When the architect
+    """Self-FK for ``supersede`` lineage (ADR-0048). When the architect
     verdicts ``supersede`` on a task whose plan needs a rewritten
     description, the supersede trigger creates a NEW task row with the
     rewritten ``description`` and ``parent_task_id`` pointing back to the

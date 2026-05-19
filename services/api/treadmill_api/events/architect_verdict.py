@@ -6,10 +6,10 @@ The verdict is a closed Literal so Pydantic rejects anything outside
 the value-set. The three verdicts (amend / supersede / accept-as-is)
 route to different downstream handlers in ``wf-architecture-resolve``.
 
-Per ADR-0049, the prior ``uncertain`` verdict was removed: the architect
+Per ADR-0048, the prior ``uncertain`` verdict was removed: the architect
 must always commit to one of the three actionable verdicts.
 
-Per ADR-0049, ``supersede`` was also repurposed: the architect now
+Per ADR-0048, ``supersede`` was also repurposed: the architect now
 declares the plan-text itself was wrong (not just the code). When
 ``verdict='supersede'`` the envelope MUST carry ``rewritten_description``
 — the corrected task description that becomes the child task's text.
@@ -45,7 +45,7 @@ class ArchitectVerdict(BaseModel):
     rewritten_description: str | None = Field(
         None,
         description=(
-            "Required for ``verdict='supersede'`` (ADR-0049). The corrected "
+            "Required for ``verdict='supersede'`` (ADR-0048). The corrected "
             "task description that the supersede trigger writes onto the "
             "child task row. Task text is immutable per row — supersede "
             "creates a new row carrying this field's value, not an in-place "
@@ -56,7 +56,7 @@ class ArchitectVerdict(BaseModel):
     @model_validator(mode="after")
     def _supersede_requires_rewritten_description(self) -> "ArchitectVerdict":
         """Enforce ``rewritten_description`` presence when verdict is
-        ``supersede`` (ADR-0049). A supersede with no rewritten text is
+        ``supersede`` (ADR-0048). A supersede with no rewritten text is
         meaningless — the trigger would create a child task with the
         parent's original (already-failed) description. Treat as a parse
         failure so wf-feedback can re-run the architect with an explicit
@@ -68,7 +68,7 @@ class ArchitectVerdict(BaseModel):
             raise ValueError(
                 "ArchitectVerdict.verdict='supersede' requires a non-empty "
                 "``rewritten_description`` (the corrected task text that "
-                "becomes the child task's description). Per ADR-0049, "
+                "becomes the child task's description). Per ADR-0048, "
                 "supersede creates a new task row carrying this field's "
                 "value; an empty rewrite has no child-task content."
             )
