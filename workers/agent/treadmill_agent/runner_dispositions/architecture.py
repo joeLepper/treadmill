@@ -19,11 +19,9 @@ Routing per ADR-0032 §Decision:
   ``dispatch.workflow_id = "wf-doc-amend"`` against the component's
   ``AGENT.md`` (append to Pitfalls). Also emits a structured PR comment
   request (``pr_comment`` payload field) so the operator confirms.
-* ``uncertain`` — block, re-dispatch. Payload carries
-  ``dispatch.workflow_id = "wf-architecture-resolve"`` for rework.
-  ``rework_attempt`` counts up; on the 5th, the consumer caps + leaves
-  a PR comment (per ADR-0029 Q29.e, ADR-0032 Q32.e) instead of
-  re-dispatching.
+
+Per ADR-0049, the prior ``uncertain`` verdict was removed; the architect
+must always commit to one of the three actionable verdicts above.
 
 No git side effects. No PR-side side effects (the coordination consumer
 emits the PR comment via the ``pr_comment`` helper from ADR-0033).
@@ -49,13 +47,10 @@ logger = logging.getLogger("treadmill.agent.architecture")
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
-# Per ADR-0029 Q29.e / ADR-0032 Q32.e: 5-attempt rework cap.
-MAX_REWORK_ATTEMPTS = 5
-
-# ADR-0032 §Decision four-verdict contract. Kept in sync with
-# ``ArchitectVerdict.verdict`` Literal in
+# ADR-0032 §Decision three-verdict contract (post-ADR-0049). Kept in
+# sync with ``ArchitectVerdict.verdict`` Literal in
 # ``services/api/treadmill_api/events/architect_verdict.py``.
-_VALID_VERDICTS = frozenset({"amend", "supersede", "accept-as-is", "uncertain"})
+_VALID_VERDICTS = frozenset({"amend", "supersede", "accept-as-is"})
 
 
 class ArchitectVerdictParseError(RuntimeError):
@@ -79,6 +74,9 @@ class ArchitectVerdictParseError(RuntimeError):
 # ``ArchitectVerdictParseError`` and the step.failed, burning attempts.
 # This fallback extracts the model's intended verdict from prose so the
 # system can act on it; the strict JSON path remains primary.
+#
+# Per ADR-0049, ``uncertain`` was removed from the verdict surface; the
+# cue table now covers only the three actionable verdicts.
 _PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
     ("amend", (
         "verdict: amend",
@@ -95,13 +93,6 @@ _PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
         "supersede the plan",
         "intent is no longer right",
         "intent has shifted",
-    )),
-    ("uncertain", (
-        "verdict: uncertain",
-        "need more context",
-        "cannot decide",
-        "ambiguous",
-        "insufficient evidence",
     )),
     ("accept-as-is", (
         "verdict: accept-as-is",
@@ -128,29 +119,16 @@ _PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-# Last-resort prose cues — if NOTHING matches, prefer `uncertain` over
-# raising. Uncertain re-dispatches the architect (up to ADR-0029 Q29.e's
-# 5-attempt cap), which surfaces to operator at the cap. Better than
-# dead-ending the task on an unrecognized prose pattern.
-_UNCERTAIN_FALLBACK_CUE = (
-    "(no recognized cue — defaulted to uncertain to keep loop moving)"
-)
-
-
 def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
     """Fallback verdict parser. Scans prose for phrase cues and
     synthesizes a verdict envelope.
 
-    Ordered fallback chain:
-      1. Try the cue table (amend → supersede → uncertain → accept-as-is).
-      2. If nothing matches AND the summary has substantive content (not
-         empty / not just whitespace), default to ``uncertain`` so the
-         architect re-dispatches up to ADR-0029 Q29.e's 5-attempt cap.
-         Operator surfaces at the cap. Better than dead-ending on an
-         unrecognized prose pattern.
-      3. If the summary is empty / blank, return ``None`` so the
-         strict-parse error fires (this is the "model returned nothing
-         useful" path — worth surfacing as a hard failure).
+    Ordered fallback chain (post-ADR-0049):
+      1. Try the cue table (amend → supersede → accept-as-is).
+      2. If nothing matches, return ``None`` so the caller raises
+         ``ArchitectVerdictParseError`` and the step.failure surfaces.
+         Without ``uncertain`` as a catch-all, an unrecognized prose
+         pattern is a hard failure rather than a silent rework-loop.
 
     The synthesized envelope marks ``parsed_from_prose: true`` so the
     dispatched downstream knows this verdict came from the lossy path
@@ -170,20 +148,6 @@ def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
                     "target_artifact": "",
                     "parsed_from_prose": True,
                 }
-    # No specific cue matched but the model did produce substantive
-    # prose — default to uncertain to keep the loop moving.
-    if summary.strip():
-        return {
-            "verdict": "uncertain",
-            "reasoning": (
-                "Architect produced prose but no recognized verdict cue "
-                "matched; defaulted to ``uncertain`` so the task continues "
-                "through the rework-cap path rather than dead-ending. "
-                "Prompt or model may need tightening if this fires often."
-            ),
-            "target_artifact": "",
-            "parsed_from_prose": True,
-        }
     return None
 
 
@@ -194,10 +158,10 @@ _RETRY_PROMPT = (
     "fields:\n"
     "```json\n"
     "{\n"
-    '  "verdict": "amend" | "supersede" | "accept-as-is" | "uncertain",\n'
+    '  "verdict": "amend" | "supersede" | "accept-as-is",\n'
     '  "reasoning": "<one paragraph distilling your prior analysis>",\n'
     '  "target_artifact": "<path to the implicated artifact>",\n'
-    '  "remediation_summary": "<required for amend/supersede; omit for accept-as-is/uncertain>"\n'
+    '  "remediation_summary": "<required for amend/supersede; omit for accept-as-is>"\n'
     "}\n"
     "```\n\n"
     "Reply with ONLY the fenced ```json block. No other text.\n\n"
@@ -224,7 +188,7 @@ def _try_structured_retry(
     Returns the parsed envelope on success, ``None`` on any failure
     (claude unavailable, output un-parseable, model still produces
     prose). Failures fall through to the prose-cue path, then the
-    uncertain catch-all. Keep the loop moving regardless.
+    hard-fail ``ArchitectVerdictParseError`` if no cue matches.
 
     Cost: one Claude call (~$0.05–0.10 on sonnet, ~5–30s). Only
     fires when the strict JSON path failed.
@@ -306,18 +270,17 @@ def _extract_verdict_envelope(
     summary: str, *, retry_model: str | None = None,
 ) -> dict[str, Any]:
     """Return the last JSON block whose parsed object contains
-    ``"verdict"`` keyed at one of the four valid literals.
+    ``"verdict"`` keyed at one of the three valid literals.
 
-    Ordered chain (highest fidelity first):
+    Ordered chain (highest fidelity first, post-ADR-0049):
       1. Strict JSON parse from the original summary.
       2. Structured-output retry — ask claude to reformat its prose
          as a JSON envelope (when ``retry_model`` is supplied).
       3. Prose-cue parsing — pattern-match the summary for verdict
          phrasings.
-      4. Uncertain catch-all — if substantive prose exists but no
-         signal extracted, default to ``uncertain`` so the loop
-         continues through the rework-cap path.
-      5. Hard fail (empty summary only).
+      4. Hard fail — no cue matched (or summary is empty). Raises
+         ``ArchitectVerdictParseError`` so wf-feedback can re-run the
+         architect with an envelope reminder.
 
     Each step has lower fidelity but keeps things moving. The retry
     closes the most common gap (sonnet skipping the JSON close)
@@ -357,7 +320,6 @@ def _build_dispatch_payload(
     target_artifact: str,
     remediation_summary: str | None,
     task_id: str,
-    rework_attempt: int,
     trigger: str,
 ) -> dict[str, Any]:
     """Build the routing payload the consumer reads to dispatch the
@@ -403,19 +365,6 @@ def _build_dispatch_payload(
             "target_artifact": target_artifact,
             "intent": "append-pitfall",
         }
-    if verdict == "uncertain":
-        if rework_attempt >= MAX_REWORK_ATTEMPTS:
-            return {
-                "workflow_id": None,
-                "task_id": task_id,
-                "capped": True,
-                "rework_attempt": rework_attempt,
-            }
-        return {
-            "workflow_id": "wf-architecture-resolve",
-            "task_id": task_id,
-            "rework_attempt": rework_attempt + 1,
-        }
     # Should be unreachable; _VALID_VERDICTS gates the parse.
     raise ArchitectVerdictParseError(f"unknown verdict: {verdict!r}")
 
@@ -425,12 +374,13 @@ def _build_pr_comment_payload(
     verdict: str,
     reasoning: str,
     target_artifact: str,
-    capped: bool,
 ) -> dict[str, Any] | None:
     """Return the PR-comment routing hint per ADR-0033 §PR comments.
 
-    Only ``accept-as-is`` and capped ``uncertain`` surface a comment;
-    other verdicts route purely to downstream workflows.
+    Only ``accept-as-is`` surfaces a comment so the operator confirms
+    the gap is acceptable; other verdicts route purely to downstream
+    workflows. (Per ADR-0049, ``uncertain`` was removed from the verdict
+    surface, so the prior capped-uncertain comment path is gone too.)
     """
     if verdict == "accept-as-is":
         return {
@@ -447,23 +397,6 @@ def _build_pr_comment_payload(
                 "``wf-architecture-resolve``."
             ),
             "see": f"See: ``{target_artifact}`` AGENT.md Pitfalls.",
-        }
-    if verdict == "uncertain" and capped:
-        return {
-            "workflow_id": "wf-architecture-resolve",
-            "signal": "capped",
-            "summary": (
-                f"Architect could not converge after {MAX_REWORK_ATTEMPTS} "
-                f"attempts on ``{target_artifact}``.\n\n"
-                f"Last reasoning: {reasoning}"
-            ),
-            "action_items": (
-                "- Operator judgment required.\n"
-                "- Read the architect's latest reasoning above + the "
-                "underlying learning, then decide manually: amend, "
-                "supersede, or accept-as-is."
-            ),
-            "see": f"See: ``{target_artifact}``.",
         }
     return None
 
@@ -534,22 +467,17 @@ def handle(ctx: DispositionContext) -> StepOutput:
 
     # Empty-diff safety: only ``amend`` makes sense on a branch with no
     # commits against origin/main. ``accept-as-is`` is meaningless
-    # (nothing to accept), ``uncertain`` is also wrong (nothing to be
-    # uncertain about — there's no work), and ``supersede`` is
-    # unrelated. Force amend so the partnership (per ADR-0032 / ADR-0038,
-    # with #113 wiring amend → wf-feedback) re-engages the author /
-    # feedback loop. Observed 2026-05-16: architect verdicted uncertain
-    # on empty branches without firing the check; uncertain dead-ended
-    # silently. Widened to cover both verdicts.
+    # (nothing to accept), and ``supersede`` is unrelated. Force amend
+    # so the partnership (per ADR-0032 / ADR-0038, with #113 wiring
+    # amend → wf-feedback) re-engages the author / feedback loop.
     if (
-        verdict in ("accept-as-is", "uncertain")
+        verdict == "accept-as-is"
         and _branch_has_no_commits_against_main(ctx.repo_dir)
     ):
         logger.warning(
-            "architect verdicted %s on a branch with no commits against "
-            "origin/main — forcing verdict=amend (no work to %s). "
-            "Architect's original prose: %r",
-            verdict, "accept" if verdict == "accept-as-is" else "consider",
+            "architect verdicted accept-as-is on a branch with no commits "
+            "against origin/main — forcing verdict=amend (no work to "
+            "accept). Architect's original prose: %r",
             (envelope.get("reasoning") or "")[:200],
         )
         original_verdict = verdict
@@ -560,33 +488,26 @@ def handle(ctx: DispositionContext) -> StepOutput:
             f"The architect verdicted {original_verdict}, but the task's "
             "branch has no commits against origin/main — wf-author likely "
             "failed its author-side validation gate (PR #121) and never "
-            "pushed. There is nothing to accept or be uncertain about. "
-            "Re-engage wf-feedback to author the missing work (likely test "
-            "files referenced by the task's validation script). Original "
-            "architect reasoning: " + (envelope.get("reasoning") or "<empty>")
+            "pushed. There is nothing to accept. Re-engage wf-feedback "
+            "to author the missing work (likely test files referenced by "
+            "the task's validation script). Original architect reasoning: "
+            + (envelope.get("reasoning") or "<empty>")
         )
     reasoning: str = envelope.get("reasoning", "")
     target_artifact: str = envelope.get("target_artifact", "")
     remediation_summary: str | None = envelope.get("remediation_summary")
-    # ``rework_attempt`` accumulates across re-dispatches of the same
-    # task. Source is the upstream payload (the consumer increments on
-    # each dispatch); v0 reads from envelope as a fallback.
-    rework_attempt: int = int(envelope.get("rework_attempt", 0))
 
     dispatch_payload = _build_dispatch_payload(
         verdict=verdict,
         target_artifact=target_artifact,
         remediation_summary=remediation_summary,
         task_id=ctx.ctx.task_id,
-        rework_attempt=rework_attempt,
         trigger=ctx.ctx.trigger,
     )
-    capped = bool(dispatch_payload.get("capped"))
     pr_comment_payload = _build_pr_comment_payload(
         verdict=verdict,
         reasoning=reasoning,
         target_artifact=target_artifact,
-        capped=capped,
     )
 
     payload: dict[str, Any] = {
@@ -623,9 +544,8 @@ def handle(ctx: DispositionContext) -> StepOutput:
             )
 
     logger.info(
-        "architect verdict=%s target=%s dispatch=%s capped=%s",
+        "architect verdict=%s target=%s dispatch=%s",
         verdict, target_artifact, dispatch_payload.get("workflow_id"),
-        capped,
     )
 
     return StepOutput(

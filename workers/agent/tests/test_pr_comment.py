@@ -238,7 +238,7 @@ Action items:
 
 See: link"""
 
-        for signal in ["capped", "uncertain", "accept-as-is", "class-c-gap"]:
+        for signal in ["capped", "accept-as-is", "class-c-gap"]:
             mock_gh_comment.reset_mock()
             pr_comment.leave_pr_comment(
                 workflow_id="wf-test",
@@ -361,12 +361,12 @@ See: link"""
         self, mock_gh_comment: MagicMock,
     ) -> None:
         """Body with multiline sections is handled correctly."""
-        body = """Architecture resolve hit the retry cap.
-Manual intervention required to proceed.
+        body = """Architecture resolve produced an accept-as-is verdict.
+Operator confirmation requested.
 
 Action items:
 - Review the Claude Code output in the PR
-- Examine the uncertainty reason
+- Examine the architect's reasoning
 - Either approve the gap or request rework
 - Trigger redispatch if needed
 
@@ -377,7 +377,7 @@ See:
 
         pr_comment.leave_pr_comment(
             workflow_id="wf-architecture-resolve",
-            signal="uncertain",
+            signal="accept-as-is",
             body=body,
             pr_number=789,
         )
@@ -386,4 +386,4 @@ See:
         assert "Architecture resolve" in rendered
         assert "Review the Claude Code" in rendered
         assert "ADR-0032" in rendered
-        assert "[treadmill:wf-architecture-resolve:uncertain]" in rendered
+        assert "[treadmill:wf-architecture-resolve:accept-as-is]" in rendered

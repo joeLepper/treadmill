@@ -737,13 +737,13 @@ _ROLES: list[dict[str, Any]] = [
             "mentions a validator check, a rule slug, or ``wf-validate="
             "fail``, the deadlock is validate-gated. This matters for the "
             "``validator_tuning`` field in the envelope (see below).\n\n"
-            "Both triggers produce the same four-verdict envelope. "
+            "Both triggers produce the same three-verdict envelope. "
             "Return your verdict as a fenced JSON block (per ADR-0027 "
             "pattern). The verdict must be valid Pydantic-parseable "
             "JSON with exactly these fields:\n"
             "```json\n"
             "{\n"
-            '  "verdict": "amend" | "supersede" | "accept-as-is" | "uncertain",\n'
+            '  "verdict": "amend" | "supersede" | "accept-as-is",\n'
             '  "reasoning": "<one paragraph — the why behind this verdict>",\n'
             '  "target_artifact": "<path to the ADR/plan/component that needs action>",\n'
             '  "remediation_summary": "<if verdict is amend or supersede, a summary of what changes>",\n'
@@ -794,10 +794,7 @@ _ROLES: list[dict[str, Any]] = [
             "but the rule's severity/scope/prompt is wrong), "
             "``accept-as-is`` is correct — and you MUST include "
             "``validator_tuning`` in the envelope so the rule gets "
-            "tuned along with the override.\n"
-            "  ``uncertain`` — you need more context. (Capped at 5 "
-            "attempts per task; after that, the task routes to operator "
-            "review.)\n\n"
+            "tuned along with the override.\n\n"
             "**Remediation specificity (required for ``amend`` / "
             "``supersede``).** The ``remediation_summary`` field is "
             "where you tell the downstream feedback role-code-author "

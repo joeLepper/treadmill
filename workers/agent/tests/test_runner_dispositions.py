@@ -36,7 +36,6 @@ from treadmill_agent.runner_dispositions import (
 )
 from treadmill_agent.runner_dispositions.architecture import (
     ArchitectVerdictParseError,
-    MAX_REWORK_ATTEMPTS,
 )
 from treadmill_agent.runner_dispositions._context import DispositionContext
 from treadmill_agent.runner_dispositions.plan_doc import PlanDocScopeError
@@ -1480,78 +1479,30 @@ def test_architecture_handler_accept_as_is_on_deadlock_emits_review_override(
     assert out.payload["dispatch"]["task_id"] == ctx.ctx.task_id
 
 
-def test_architecture_handler_uncertain_redispatches_with_attempt_counter(
-    tmp_path: Path,
-) -> None:
-    """``uncertain`` before the cap → re-dispatch wf-architecture-resolve
-    with ``rework_attempt`` incremented."""
-    summary = (
-        '```json\n'
-        '{"verdict": "uncertain", "reasoning": "Need more context on the '
-        'caller graph.", "target_artifact": "services/api/...", '
-        '"rework_attempt": 2}\n'
-        '```'
-    )
-    ctx = _arch_ctx(tmp_path, summary)
-    out = handle_architecture(ctx)
-    assert out.decision == "uncertain"
-    assert out.payload["dispatch"]["workflow_id"] == "wf-architecture-resolve"
-    assert out.payload["dispatch"]["rework_attempt"] == 3
-    # No PR comment until cap.
-    assert "pr_comment" not in out.payload
-
-
-def test_architecture_handler_uncertain_caps_at_5_and_emits_pr_comment(
-    tmp_path: Path,
-) -> None:
-    """The 5th uncertain (rework_attempt=5 inbound, would be 6) → capped,
-    no re-dispatch, pr_comment carries the operator-needed signal."""
-    summary = (
-        '```json\n'
-        '{"verdict": "uncertain", "reasoning": "Still ambiguous after 5 '
-        'attempts.", "target_artifact": "services/api/X", '
-        f'"rework_attempt": {MAX_REWORK_ATTEMPTS}'
-        '}\n```'
-    )
-    ctx = _arch_ctx(tmp_path, summary)
-    out = handle_architecture(ctx)
-    assert out.decision == "uncertain"
-    assert out.payload["dispatch"]["capped"] is True
-    assert out.payload["dispatch"]["workflow_id"] is None
-    assert out.payload["pr_comment"]["signal"] == "capped"
-
-
 def test_architecture_handler_raises_on_empty_summary(
     tmp_path: Path,
 ) -> None:
-    """Empty / blank summary is the only path that still raises after
-    the prose fallback + uncertain default landed — there's no signal
-    at all to parse. The strict-parse error surfaces as a step.failure
-    that wf-feedback can re-run with an envelope reminder."""
+    """Empty / blank summary raises ``ArchitectVerdictParseError`` — no
+    signal at all to parse. Surfaces as a step.failure that wf-feedback
+    can re-run with an envelope reminder."""
     ctx = _arch_ctx(tmp_path, "")
     with pytest.raises(ArchitectVerdictParseError):
         handle_architecture(ctx)
 
 
-def test_architecture_handler_prose_fallback_defaults_to_uncertain(
+def test_architecture_handler_raises_on_unrecognized_prose(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    """When the architect produces substantive prose but no specific
-    verdict cue matches AND the structured-output retry yields nothing
-    usable, the fallback defaults to ``uncertain`` so the task continues
-    through the 5-attempt rework cap (ADR-0029 Q29.e) rather than
-    dead-ending on an unrecognized prose pattern.
-
-    Monkeypatch the retry to a no-op so the cue/uncertain path is
-    exercised cleanly without making a real Claude call.
-    """
+    """Post-ADR-0049, prose with no recognized verdict cue is a hard
+    failure — the prior ``uncertain`` catch-all is gone. The retry
+    helper is monkeypatched to a no-op so the cue path is exercised
+    cleanly without making a real Claude call."""
     from treadmill_agent.runner_dispositions import architecture
     monkeypatch.setattr(architecture, "_try_structured_retry", lambda *a, **kw: None)
     ctx = _arch_ctx(tmp_path, "I thought about this for a while but didn't decide.")
-    out = handle_architecture(ctx)
-    assert out.decision == "uncertain"
-    assert out.payload.get("parsed_from_prose") is True
+    with pytest.raises(ArchitectVerdictParseError):
+        handle_architecture(ctx)
 
 
 def test_architecture_handler_structured_retry_yields_clean_verdict(
@@ -1560,8 +1511,8 @@ def test_architecture_handler_structured_retry_yields_clean_verdict(
 ) -> None:
     """The structured-output retry is the highest-fidelity fallback when
     strict JSON parsing fails. Mock the retry helper to return a valid
-    envelope and confirm the disposition uses that verdict — neither
-    the prose-cue path nor the uncertain catch-all should be reached."""
+    envelope and confirm the disposition uses that verdict instead of
+    falling through to the prose-cue path or the hard-fail at the end."""
     from treadmill_agent.runner_dispositions import architecture
 
     def _fake_retry(summary: str, model: str, log_context: Any = None) -> dict[str, Any]:
@@ -1574,8 +1525,8 @@ def test_architecture_handler_structured_retry_yields_clean_verdict(
         }
 
     monkeypatch.setattr(architecture, "_try_structured_retry", _fake_retry)
-    # Prose that would otherwise fall through to ``uncertain`` (no
-    # cue match), proving the retry path is what produces the verdict.
+    # Prose that has no cue match — proves the retry path is what
+    # produces the verdict.
     ctx = _arch_ctx(tmp_path, "Some prose without any specific verdict cue.")
     out = handle_architecture(ctx)
     assert out.decision == "amend"
@@ -1628,22 +1579,6 @@ def test_architecture_handler_forces_amend_on_empty_diff_branch(
     assert "no commits against origin/main" in out.payload.get(
         "remediation_summary", ""
     )
-
-
-def test_architecture_handler_forces_amend_on_uncertain_empty_diff(
-    tmp_path: Path,
-) -> None:
-    """Same safety net, broader scope: ``uncertain`` on an empty branch
-    is also wrong — there's nothing to be uncertain about when no work
-    exists. Force amend so the feedback loop re-engages."""
-    summary = (
-        '```json\n{"verdict": "uncertain", "reasoning": "I am not sure what '
-        'to do here", "target_artifact": "services/api/X.py"}\n```'
-    )
-    ctx = _arch_ctx(tmp_path, summary, empty_branch=True)
-    out = handle_architecture(ctx)
-    assert out.decision == "amend"
-    assert out.payload.get("empty_diff_forced_amend") is True
 
 
 def test_architecture_handler_prose_fallback_catches_all_changes_in_place(

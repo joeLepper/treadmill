@@ -498,8 +498,9 @@ def test_role_documentarian_prompt_teaches_adr_0033_branch_naming() -> None:
 def test_role_architect_prompt_teaches_json_envelope() -> None:
     """Per ADR-0032 Q32.d, the architect role must return a Pydantic-validated
     ArchitectVerdict JSON envelope, patterned on ADR-0027's ReviewVerdict.
-    The prompt must teach the JSON envelope convention with the four verdict
-    values: amend / supersede / accept-as-is / uncertain."""
+    The prompt must teach the JSON envelope convention with the three verdict
+    values: amend / supersede / accept-as-is (per ADR-0049 — ``uncertain``
+    was removed)."""
     architect = next(r for r in _all_roles() if r["id"] == "role-architect")
     prompt = architect["system_prompt"]
     assert "json" in prompt.lower(), (
@@ -510,8 +511,8 @@ def test_role_architect_prompt_teaches_json_envelope() -> None:
         "role-architect prompt should include a literal ```json fence "
         "example so the model has a concrete template."
     )
-    # Architect must teach all four verdict values.
-    for value in ("amend", "supersede", "accept-as-is", "uncertain"):
+    # Architect must teach all three verdict values.
+    for value in ("amend", "supersede", "accept-as-is"):
         assert value in prompt, (
             f"role-architect prompt must reference verdict value {value!r}; "
             "the runner won't recognize verdicts the prompt doesn't teach."

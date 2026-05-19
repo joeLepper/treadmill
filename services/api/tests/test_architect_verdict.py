@@ -32,8 +32,8 @@ def test_architect_verdict_with_remediation_summary() -> None:
 
 
 def test_architect_verdict_all_verdict_values() -> None:
-    """All four verdict values are accepted."""
-    for verdict_value in ["amend", "supersede", "accept-as-is", "uncertain"]:
+    """All three verdict values are accepted."""
+    for verdict_value in ["amend", "supersede", "accept-as-is"]:
         verdict = ArchitectVerdict.model_validate({
             "verdict": verdict_value,
             "reasoning": "Test reasoning",
@@ -43,11 +43,23 @@ def test_architect_verdict_all_verdict_values() -> None:
 
 
 def test_architect_verdict_rejects_invalid_verdict() -> None:
-    """Closed value-set rejects anything outside the four verdicts."""
+    """Closed value-set rejects anything outside the three verdicts."""
     with pytest.raises(ValidationError):
         ArchitectVerdict.model_validate({
             "verdict": "lgtm",
             "reasoning": "Invalid verdict",
+            "target_artifact": "docs/test.md",
+        })
+
+
+def test_architect_verdict_rejects_uncertain() -> None:
+    """Per ADR-0049, ``uncertain`` was removed from the verdict surface;
+    the architect must always commit to one of the three actionable
+    verdicts. Pydantic rejects the old value."""
+    with pytest.raises(ValidationError):
+        ArchitectVerdict.model_validate({
+            "verdict": "uncertain",
+            "reasoning": "Need more context",
             "target_artifact": "docs/test.md",
         })
 
