@@ -39,6 +39,14 @@ services:
       - treadmill-local
 
   loki:
+    # Override the image's default non-root user (UID 10001). Freshly
+    # initialized docker named volumes are owned by root:root with mode
+    # 0755, so the loki user can't ``mkdir /mnt/loki/{chunks,rules,...}``
+    # on first boot. In prod the EBS mount is chowned by EC2 user-data;
+    # we don't have an equivalent init step for the named volume, and a
+    # root-on-localhost concession is consistent with the local Grafana
+    # admin/admin default a few lines below.
+    user: "0"
     volumes:
       - ./loki-config.yaml:/etc/loki/config.yaml:ro
       - treadmill-loki-data:/mnt/loki

@@ -39,6 +39,14 @@ compactor:
   working_directory: /mnt/loki/compactor
   retention_enabled: true
   retention_delete_delay: 2h
+  # Required by Loki 3.x when retention_enabled is true: the compactor
+  # persists delete requests so they survive container restarts and are
+  # applied on the next compaction cycle. "filesystem" reuses the
+  # common.storage.filesystem backend above, so delete-request state
+  # lands under path_prefix (/mnt/loki) — the same persistent volume
+  # (EBS in prod, named docker volume in dev_local per ADR-0043) that
+  # holds chunks and the compactor's working directory.
+  delete_request_store: filesystem
 
 ruler:
   alertmanager_url: http://localhost:9093
