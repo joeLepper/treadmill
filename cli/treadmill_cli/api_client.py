@@ -118,6 +118,21 @@ class ApiClient:
             body["created_by"] = created_by
         return self._request("POST", "/api/v1/tasks", json=body)
 
+    def retry_task(
+        self,
+        task_id: str,
+        reason: str,
+        *,
+        workflow: str | None = None,
+        force_bypass_cap: bool = False,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"reason": reason}
+        if workflow is not None:
+            body["workflow"] = workflow
+        if force_bypass_cap:
+            body["force_bypass_cap"] = True
+        return self._request("POST", f"/api/v1/tasks/{task_id}/retry", json=body)
+
     # ── Health ────────────────────────────────────────────────────────────────
 
     def health(self) -> dict[str, Any]:

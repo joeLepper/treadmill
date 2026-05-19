@@ -349,6 +349,44 @@ def task_list(
     console.print(table)
 
 
+# ── task retry ───────────────────────────────────────────────────────────────
+
+
+@task_app.command("retry")
+def task_retry(
+    task_id: Annotated[str, typer.Argument(help="Task ID to retry.")],
+    reason: Annotated[str, typer.Option(
+        "--reason", "-r", help="One-line reason for the retry (required).",
+    )],
+    workflow: Annotated[str | None, typer.Option(
+        "--workflow", "-w", help="Workflow slug (inferred if omitted).",
+    )] = None,
+    force_bypass_cap: Annotated[bool, typer.Option(
+        "--force-bypass-cap",
+        help="Bypass the per-workflow attempt cap.",
+    )] = False,
+) -> None:
+    """Retry a task via POST /api/v1/tasks/{task-id}/retry."""
+    try:
+        with _client() as client:
+            result = client.retry_task(
+                task_id,
+                reason,
+                workflow=workflow,
+                force_bypass_cap=force_bypass_cap,
+            )
+    except ApiError as exc:
+        if exc.status_code == 409:
+            err_console.print(f"[red]error: cap reached — {exc.detail}[/red]")
+            err_console.print("[yellow]hint: pass --force-bypass-cap to override[/yellow]")
+            raise typer.Exit(code=2)
+        if exc.status_code == 404:
+            err_console.print("[red]task not found[/red]")
+            raise typer.Exit(code=2)
+        _handle_api_error(exc)
+    console.print(f"retry dispatched: workflow_run={result['workflow_run_id']}")
+
+
 # ── status ───────────────────────────────────────────────────────────────────
 
 
