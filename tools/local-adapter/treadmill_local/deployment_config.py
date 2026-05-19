@@ -88,12 +88,25 @@ the YAML when the stack was not deployed (graceful no-op).
 # These defaults are written into the dev_local YAML at ``init`` time when
 # the matching ``TreadmillObservabilityStack`` CFN outputs are absent (the
 # normal dev_local case — that stack is not deployed). The operator-facing
-# host-side URL (``http://localhost:4318`` for OTLP, ``http://localhost:3000``
-# for Grafana) is still served by the compose port mapping; that's a
-# separate concern from what we inject into the container env.
+# host-side URL (``http://localhost:4318`` for OTLP,
+# ``http://localhost:3001`` for Grafana) is still served by the compose
+# port mapping; that's a separate concern from what we inject into the
+# container env.
+#
+# ``observability_grafana_host`` + ``observability_grafana_port`` are the
+# single source of truth for the operator-facing Grafana URL. The port
+# defaults to 3001 (not 3000) to side-step the common collision on a
+# laptop already running a Grafana / dashboard / Next.js dev server on
+# 3000 (observed 2026-05-19 against ``bunkhouse-dashboard``). Compose
+# substitutes the host-side mapping from this value via
+# ``GRAFANA_HOST_PORT`` (see ``LocalRuntime._start_observability_dev_local``);
+# ``treadmill observe`` and the obs-status checks read the same field so
+# the URL the operator browses matches the port compose actually bound.
 
-_DEV_LOCAL_OBSERVABILITY_DEFAULTS: dict[str, str] = {
+_DEV_LOCAL_OBSERVABILITY_DEFAULTS: dict[str, Any] = {
     "observability_collector_endpoint": "http://treadmill-otel-collector:4318",
+    "observability_grafana_host": "127.0.0.1",
+    "observability_grafana_port": 3001,
 }
 
 

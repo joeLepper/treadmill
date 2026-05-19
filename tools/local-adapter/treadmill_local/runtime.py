@@ -79,8 +79,15 @@ OBSERVABILITY_COMPOSE_LOCAL_FILE_REL = (
     Path("infra") / "observability" / "docker-compose.local.yml"
 )
 OBSERVABILITY_OTEL_CONTAINER_NAME = "treadmill-otel-collector"
-OBSERVABILITY_GRAFANA_URL = "http://localhost:3000"
 OBSERVABILITY_OTLP_HTTP_URL = "http://localhost:4318"
+
+# Grafana host port substituted into ``docker-compose.local.yml`` via the
+# ``GRAFANA_HOST_PORT`` env-var. 3001 (not 3000) sidesteps the common
+# port-3000 collision on laptops also running a dashboard / Next.js dev
+# server (bunkhouse-dashboard observed 2026-05-19). Operators override
+# via ``aws.observability_grafana_port`` in
+# ``~/.treadmill/<deployment>.yaml``.
+OBSERVABILITY_GRAFANA_HOST_PORT_DEFAULT = 3001
 
 BARE_REPOS_DIR = STATE_DIR / "repos"
 """Host-side directory for the agent worker's local-mode bare repos.
@@ -1847,6 +1854,16 @@ class LocalRuntime:
         named docker volumes, swaps Tempo's S3 backend for filesystem,
         and sets a sensible default Grafana admin password.
 
+        Grafana's host-side port is driven by
+        ``aws.observability_grafana_port`` in the deployment YAML
+        (default 3001 — see ``OBSERVABILITY_GRAFANA_HOST_PORT_DEFAULT``)
+        and injected via the ``GRAFANA_HOST_PORT`` env var that
+        ``docker-compose.local.yml`` substitutes into the ports binding.
+        This single-source-of-truth shape means the URL ``treadmill
+        observe`` opens matches the binding compose actually creates,
+        and operators can dodge a port-3000 collision (bunkhouse
+        dashboard, Next.js dev server, etc.) by editing one YAML field.
+
         Idempotent: if the OTel collector container is already running
         the call is a noop. Container existence is the liveness signal
         — compose owns the lifecycle, so there's no PID file (in
@@ -1871,25 +1888,60 @@ class LocalRuntime:
             "-f", str(local_file),
             "up", "-d",
         ]
+        # Resolve the operator-facing Grafana port from the deployment
+        # YAML, falling back to 3001 when the field is absent (older
+        # YAMLs that pre-date this knob). This env var is what
+        # ``docker-compose.local.yml`` substitutes into the host-side
+        # ports binding; without it the default ``${GRAFANA_HOST_PORT:-3001}``
+        # still kicks in, but we pass it explicitly so the value the
+        # operator wrote in YAML is the one compose binds.
+        grafana_port = self._observability_grafana_port()
+        env = {**os.environ, "GRAFANA_HOST_PORT": str(grafana_port)}
+        grafana_url = f"http://localhost:{grafana_port}"
         console.print(
             "• Starting observability stack "
             f"(compose: {base_file.name} + {local_file.name})..."
         )
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, env=env)
         except subprocess.CalledProcessError as exc:
             console.print(
                 "[red]• Observability stack failed to start "
                 f"(docker compose exit {exc.returncode}). "
-                "Common causes: port conflict on 3000/3100/4317/4318/8888/9090, "
+                f"Common causes: port conflict on "
+                f"{grafana_port}/3100/4317/4318/8888/9090, "
                 "docker daemon not running, or first-pull network failure. "
+                f"To pick a different Grafana port, edit "
+                f"``aws.observability_grafana_port`` in "
+                f"``~/.treadmill/<deployment>.yaml``. "
                 "Re-run after resolving, or pass --no-observability to skip.[/red]"
             )
             raise
         console.print(
-            f"• Observability stack ready (Grafana {OBSERVABILITY_GRAFANA_URL}, "
+            f"• Observability stack ready (Grafana {grafana_url}, "
             f"OTLP {OBSERVABILITY_OTLP_HTTP_URL})."
         )
+
+    def _observability_grafana_port(self) -> int:
+        """Return the host-side Grafana port from the deployment YAML.
+
+        Reads ``cfg["aws"]["observability_grafana_port"]`` and coerces
+        to int; falls back to ``OBSERVABILITY_GRAFANA_HOST_PORT_DEFAULT``
+        when the field is absent (older YAMLs pre-dating this knob, or
+        a fully-local invocation that nevertheless reached this method
+        via test wiring). The compose file's own
+        ``${GRAFANA_HOST_PORT:-3001}`` default backs us up if the env
+        var is somehow unset, but passing the explicit value here means
+        the in-process Python sees the same number compose binds.
+        """
+        if self.deployment_config is None:
+            return OBSERVABILITY_GRAFANA_HOST_PORT_DEFAULT
+        raw = self.deployment_config.get("aws", {}).get(
+            "observability_grafana_port"
+        )
+        if raw is None:
+            return OBSERVABILITY_GRAFANA_HOST_PORT_DEFAULT
+        return int(raw)
 
     def _stop_observability(self) -> None:
         """Tear down the observability compose stack.

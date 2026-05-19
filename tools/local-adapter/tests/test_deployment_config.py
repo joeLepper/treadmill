@@ -234,8 +234,9 @@ def test_build_deployment_config_populates_every_yaml_key(synthetic_outputs):
     # aws block — substring matching pulled the right values out of
     # hash-suffixed keys. The synthetic outputs above do NOT include
     # ``TreadmillObservabilityStack`` CFN outputs (the normal dev_local
-    # case: that stack is fully_remote-only), so the dev-local default
-    # for ``observability_collector_endpoint`` is stamped in.
+    # case: that stack is fully_remote-only), so the dev-local defaults
+    # for ``observability_collector_endpoint``, ``observability_grafana_host``,
+    # and ``observability_grafana_port`` are stamped in.
     assert config["aws"] == {
         "events_topic_arn": (
             "arn:aws:sns:us-east-1:111111111111:treadmill-test-events"
@@ -268,6 +269,8 @@ def test_build_deployment_config_populates_every_yaml_key(synthetic_outputs):
         "observability_collector_endpoint": (
             "http://treadmill-otel-collector:4318"
         ),
+        "observability_grafana_host": "127.0.0.1",
+        "observability_grafana_port": 3001,
     }
 
     # secrets block
@@ -424,6 +427,51 @@ def test_build_deployment_config_cfn_observability_output_wins_over_default(
     assert config["aws"]["observability_collector_endpoint"] == (
         "http://10.0.1.42:4318"
     )
+
+
+def test_build_deployment_config_stamps_grafana_host_and_port_defaults(
+    synthetic_outputs,
+):
+    """When ``TreadmillObservabilityStack`` was not deployed (the normal
+    dev_local case), ``build_deployment_config`` stamps the operator-
+    facing Grafana defaults: 127.0.0.1 + port 3001. The port is 3001
+    (not 3000) to sidestep the common laptop port-3000 collision
+    (bunkhouse-dashboard observed 2026-05-19); ``treadmill-local up``
+    binds Grafana to this port, and ``treadmill observe`` reads the
+    same field so the URL it opens matches the binding."""
+    assert not any(
+        "ObservabilityGrafanaHost" in k for k in synthetic_outputs
+    )
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=synthetic_outputs,
+    )
+    assert config["aws"]["observability_grafana_host"] == "127.0.0.1"
+    assert config["aws"]["observability_grafana_port"] == 3001
+
+
+def test_build_deployment_config_cfn_grafana_host_wins_over_default(
+    synthetic_outputs,
+):
+    """When ``ObservabilityGrafanaHost`` IS provided (fully_remote
+    deployments), the CFN-provided EC2 private IP wins over the
+    dev-local 127.0.0.1 default. The port stays at the dev-local 3001
+    default because CFN doesn't emit a port output — fully_remote
+    Grafana also listens on 3000, but operators reach it via SSM-forwarded
+    tunnels, not direct binding."""
+    outputs = dict(synthetic_outputs)
+    outputs["ObservabilityGrafanaHostDEADBEEF"] = "10.0.1.42"
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=outputs,
+    )
+    assert config["aws"]["observability_grafana_host"] == "10.0.1.42"
 
 
 def test_build_deployment_config_matches_unhashed_output_keys(synthetic_outputs):

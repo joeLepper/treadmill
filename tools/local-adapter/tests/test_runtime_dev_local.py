@@ -1765,10 +1765,10 @@ def test_start_observability_dev_local_invokes_docker_compose_up(
         "no container"
     )
 
-    runs: list[list[str]] = []
+    runs: list[tuple[list[str], dict[str, Any]]] = []
 
     def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
-        runs.append(cmd)
+        runs.append((cmd, kwargs))
         return subprocess.CompletedProcess(args=cmd, returncode=0)
 
     monkeypatch.setattr(runtime_module.subprocess, "run", _fake_run)
@@ -1776,7 +1776,7 @@ def test_start_observability_dev_local_invokes_docker_compose_up(
     rt._start_observability_dev_local()
 
     assert len(runs) == 1
-    cmd = runs[0]
+    cmd, _kwargs = runs[0]
     # Compose CLI invocation with both base and override files.
     assert cmd[0:2] == ["docker", "compose"]
     # Order matters: base file first, local override second (so the
@@ -1791,6 +1791,138 @@ def test_start_observability_dev_local_invokes_docker_compose_up(
     ), local_path
     # Detached: returns control after bringing the stack up.
     assert cmd[-2:] == ["up", "-d"]
+
+
+# ── Configurable Grafana host port (port-3000 collision fix) ─────────────────
+
+
+def test_start_observability_dev_local_passes_grafana_host_port_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """The compose subprocess receives ``GRAFANA_HOST_PORT`` derived
+    from ``aws.observability_grafana_port``. Compose substitutes that
+    env var into ``docker-compose.local.yml``'s grafana ports binding,
+    so the host port the operator browses matches what was bound.
+    """
+    cfg = _valid_yaml_dict()
+    cfg["aws"]["observability_grafana_port"] = 3001
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    fake_docker.containers.get.side_effect = runtime_module.docker.errors.NotFound(
+        "no container"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", _fake_run)
+
+    rt._start_observability_dev_local()
+
+    env = captured["env"]
+    assert env is not None, "must pass an env dict so compose sees GRAFANA_HOST_PORT"
+    assert env.get("GRAFANA_HOST_PORT") == "3001", (
+        f"expected GRAFANA_HOST_PORT=3001, got {env.get('GRAFANA_HOST_PORT')!r}"
+    )
+
+
+def test_start_observability_dev_local_grafana_port_default_when_yaml_field_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When the YAML omits ``aws.observability_grafana_port`` (older
+    YAMLs pre-dating this knob), the runtime falls back to 3001 — the
+    chosen dev-local default. The fallback is the runtime's job, not
+    just compose's ``${GRAFANA_HOST_PORT:-3001}`` shell default, so the
+    Python-side log line and the compose binding agree on the same
+    number."""
+    cfg = _valid_yaml_dict()
+    # No observability_grafana_port key — the absent case.
+    assert "observability_grafana_port" not in cfg["aws"]
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    fake_docker.containers.get.side_effect = runtime_module.docker.errors.NotFound(
+        "no container"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", _fake_run)
+
+    rt._start_observability_dev_local()
+
+    assert captured["env"]["GRAFANA_HOST_PORT"] == str(
+        runtime_module.OBSERVABILITY_GRAFANA_HOST_PORT_DEFAULT
+    )
+    assert runtime_module.OBSERVABILITY_GRAFANA_HOST_PORT_DEFAULT == 3001
+
+
+def test_start_observability_dev_local_grafana_port_custom_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """Operator-chosen value (e.g., 3002 when both 3000 AND 3001 are
+    bound on the laptop) propagates through into compose's env."""
+    cfg = _valid_yaml_dict()
+    cfg["aws"]["observability_grafana_port"] = 3002
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    fake_docker.containers.get.side_effect = runtime_module.docker.errors.NotFound(
+        "no container"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", _fake_run)
+
+    rt._start_observability_dev_local()
+
+    assert captured["env"]["GRAFANA_HOST_PORT"] == "3002"
+
+
+def test_start_observability_dev_local_inherits_existing_environ(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """The compose env must extend ``os.environ`` (not replace it), so
+    operator-set env vars like ``DOCKER_HOST`` or AWS creds still reach
+    the compose subprocess. We assert one non-Treadmill env var carries
+    through."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///custom/docker.sock")
+    cfg = _valid_yaml_dict()
+    cfg["aws"]["observability_grafana_port"] = 3001
+    rt = LocalRuntime(tmp_path, deployment_config=cfg)
+    fake_docker.containers.get.side_effect = runtime_module.docker.errors.NotFound(
+        "no container"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", _fake_run)
+
+    rt._start_observability_dev_local()
+
+    env = captured["env"]
+    assert env["DOCKER_HOST"] == "unix:///custom/docker.sock"
+    assert env["GRAFANA_HOST_PORT"] == "3001"
 
 
 def test_start_observability_dev_local_is_noop_when_otel_already_running(

@@ -41,7 +41,14 @@ _PROMETHEUS_UID = "prometheus"
 _TEMPO_UID = "tempo"
 
 _DEFAULT_DASHBOARD = "treadmill-overview"
-_GRAFANA_PORT = 3000
+# Default Grafana host-side port when the deployment YAML omits
+# ``aws.observability_grafana_port``. 3000 was the original default —
+# preserved here for fully_remote deployments whose CFN-rendered YAML
+# pre-dates the configurable-port field. Dev-local YAMLs written by
+# ``treadmill-local init`` now default to 3001 (per
+# ``deployment_config._DEV_LOCAL_OBSERVABILITY_DEFAULTS``); operators
+# bump further if even 3001 collides on their machine.
+_DEFAULT_GRAFANA_PORT = 3000
 _SSM_LOCAL_PORT = 3000
 _DIRECT_TIMEOUT = 2.0  # seconds
 
@@ -89,7 +96,23 @@ def _load_obs_config(deployment_id: str) -> dict[str, Any]:
 # ── Reachability + SSM tunnel ─────────────────────────────────────────────────
 
 
-def check_direct_reachable(host: str, port: int = _GRAFANA_PORT) -> bool:
+def _grafana_port(aws: dict[str, Any]) -> int:
+    """Return the operator-facing Grafana port from the deployment YAML.
+
+    Reads ``aws.observability_grafana_port`` (added per the configurable-
+    host-port change for dev-local; written by ``treadmill-local init``
+    or hand-edited by operators dodging a port collision). Falls back to
+    ``_DEFAULT_GRAFANA_PORT`` (3000) when the field is absent, which
+    keeps fully_remote deployments — whose CFN-rendered YAMLs pre-date
+    the field — working unchanged.
+    """
+    raw = aws.get("observability_grafana_port")
+    if raw is None:
+        return _DEFAULT_GRAFANA_PORT
+    return int(raw)
+
+
+def check_direct_reachable(host: str, port: int = _DEFAULT_GRAFANA_PORT) -> bool:
     """Return True if host:port accepts a TCP connection within the timeout."""
     try:
         with socket.create_connection((host, port), timeout=_DIRECT_TIMEOUT):
@@ -101,7 +124,7 @@ def check_direct_reachable(host: str, port: int = _GRAFANA_PORT) -> bool:
 def start_ssm_tunnel(
     ec2_id: str,
     remote_host: str,
-    remote_port: int = _GRAFANA_PORT,
+    remote_port: int = _DEFAULT_GRAFANA_PORT,
     local_port: int = _SSM_LOCAL_PORT,
 ) -> subprocess.Popen:
     """Start an SSM port-forwarding session as a background subprocess."""
@@ -129,19 +152,20 @@ def _resolve_grafana_base_url(aws: dict[str, Any]) -> tuple[str, subprocess.Pope
     waiting on / terminating ssm_proc when the session ends.
     """
     grafana_host = aws["observability_grafana_host"]
+    grafana_port = _grafana_port(aws)
     ec2_id = aws.get("observability_ec2_id")
 
-    if check_direct_reachable(grafana_host, _GRAFANA_PORT):
-        return f"http://{grafana_host}:{_GRAFANA_PORT}", None
+    if check_direct_reachable(grafana_host, grafana_port):
+        return f"http://{grafana_host}:{grafana_port}", None
 
     if not ec2_id:
         err_console.print(
-            f"[red]Grafana at {grafana_host}:{_GRAFANA_PORT} is unreachable "
+            f"[red]Grafana at {grafana_host}:{grafana_port} is unreachable "
             f"and no observability_ec2_id is configured for SSM fallback.[/red]"
         )
         raise typer.Exit(code=2)
 
-    proc = start_ssm_tunnel(ec2_id, grafana_host, _GRAFANA_PORT, _SSM_LOCAL_PORT)
+    proc = start_ssm_tunnel(ec2_id, grafana_host, grafana_port, _SSM_LOCAL_PORT)
     return f"http://localhost:{_SSM_LOCAL_PORT}", proc
 
 
@@ -266,24 +290,25 @@ def obs_status(
     """Check Grafana reachability and report access method without opening a browser."""
     aws = _load_obs_config(deployment)
     grafana_host = aws["observability_grafana_host"]
+    grafana_port = _grafana_port(aws)
     ec2_id = aws.get("observability_ec2_id")
 
-    if check_direct_reachable(grafana_host, _GRAFANA_PORT):
+    if check_direct_reachable(grafana_host, grafana_port):
         console.print(
-            f"[green]reachable[/green] http://{grafana_host}:{_GRAFANA_PORT}"
+            f"[green]reachable[/green] http://{grafana_host}:{grafana_port}"
         )
         console.print("  access: direct")
         return
 
     if ec2_id:
         console.print(
-            f"[yellow]not directly reachable[/yellow] {grafana_host}:{_GRAFANA_PORT}"
+            f"[yellow]not directly reachable[/yellow] {grafana_host}:{grafana_port}"
         )
         console.print(f"  access: SSM tunnel via {ec2_id}")
         ssm_params = json.dumps({
             "host": [grafana_host],
-            "portNumber": ["3000"],
-            "localPortNumber": ["3000"],
+            "portNumber": [str(grafana_port)],
+            "localPortNumber": [str(_SSM_LOCAL_PORT)],
         })
         console.print(
             f"  command: aws ssm start-session "
@@ -293,7 +318,7 @@ def obs_status(
         )
     else:
         err_console.print(
-            f"[red]not reachable[/red] {grafana_host}:{_GRAFANA_PORT} "
+            f"[red]not reachable[/red] {grafana_host}:{grafana_port} "
             f"(no observability_ec2_id for SSM fallback)"
         )
         raise typer.Exit(code=2)
@@ -331,7 +356,7 @@ def obs_open(
         raise typer.Exit(code=2)
 
     aws = _load_obs_config(deployment)
-    base_url = f"http://{aws['observability_grafana_host']}:{_GRAFANA_PORT}"
+    base_url = f"http://{aws['observability_grafana_host']}:{_grafana_port(aws)}"
 
     if target == "dashboard":
         url = dashboard_url(base_url, name)

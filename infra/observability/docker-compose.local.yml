@@ -79,6 +79,24 @@ services:
       - treadmill-local
 
   grafana:
+    # Override the base file's hardcoded "3000:3000" host:container
+    # mapping so the host port is configurable from the deployment YAML
+    # (``aws.observability_grafana_port``). The default falls to 3001 to
+    # side-step the port-3000 collision common on laptops (bunkhouse
+    # dashboard, Next.js dev servers, etc., observed 2026-05-19). The
+    # container-side port stays 3000 because that's Grafana's internal
+    # listen port (``GF_SERVER_HTTP_PORT``); only the host-side
+    # mapping varies. ``treadmill-local up`` injects
+    # ``GRAFANA_HOST_PORT=<yaml value>`` into the compose env so the
+    # binding the operator browses matches the URL ``treadmill observe``
+    # constructs.
+    #
+    # The ``!override`` tag is required: without it, compose merges
+    # ``ports`` arrays additively across base + override files, so the
+    # base file's ``3000:3000`` would still bind alongside our 3001 and
+    # re-trigger the very collision this override exists to fix.
+    ports: !override
+      - "${GRAFANA_HOST_PORT:-3001}:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       # Local-only default — see file header. Production overrides via

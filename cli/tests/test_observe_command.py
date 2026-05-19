@@ -23,10 +23,11 @@ import yaml
 from typer.testing import CliRunner
 
 from treadmill_cli.observe import (
-    _GRAFANA_PORT,
+    _DEFAULT_GRAFANA_PORT,
     _LOKI_UID,
     _PROMETHEUS_UID,
     _TEMPO_UID,
+    _grafana_port,
     build_explore_url,
     check_direct_reachable,
     dashboard_url,
@@ -338,3 +339,119 @@ def test_obs_metrics_opens_prometheus_explore(patched_home):
     assert result.exit_code == 0
     url = mock_browser.call_args[0][0]
     assert "worker_run_duration_seconds" in urllib.parse.unquote(url)
+
+
+# ── Configurable Grafana port (aws.observability_grafana_port) ────────────────
+#
+# The dev-local observability stack defaults to host port 3001 (set by
+# ``deployment_config._DEV_LOCAL_OBSERVABILITY_DEFAULTS``) to sidestep
+# the port-3000 collision common on laptops also running a dashboard.
+# These tests confirm ``treadmill observe`` reads that field from the
+# YAML — so the URL it opens matches the binding ``treadmill-local up``
+# actually created — and falls back to 3000 only when the field is
+# absent (fully_remote YAMLs pre-dating the field).
+
+
+def test_grafana_port_defaults_to_3000_when_field_absent():
+    """Backward-compat: fully_remote YAMLs pre-date the field. They
+    rely on Grafana being on the historical default (3000)."""
+    aws_no_port = {"observability_grafana_host": "10.0.1.42"}
+    assert _grafana_port(aws_no_port) == _DEFAULT_GRAFANA_PORT
+    assert _DEFAULT_GRAFANA_PORT == 3000
+
+
+def test_grafana_port_reads_from_yaml_field():
+    """The YAML value wins over the default; the helper coerces ints."""
+    assert _grafana_port({"observability_grafana_port": 3001}) == 3001
+    assert _grafana_port({"observability_grafana_port": 3002}) == 3002
+    # Operator might write the port as a string (YAML quoting choice);
+    # the helper still returns an int so call sites can format it
+    # uniformly with f-strings.
+    assert _grafana_port({"observability_grafana_port": "3007"}) == 3007
+
+
+def _write_deployment_yaml(
+    tmp_path: Path,
+    monkeypatch: Any,
+    *,
+    grafana_port: int | None,
+) -> None:
+    """Write a minimal test.yaml under ``tmp_path/.treadmill/`` with the
+    requested ``observability_grafana_port`` value (omitted when None)."""
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    treadmill_dir = tmp_path / ".treadmill"
+    treadmill_dir.mkdir()
+    aws: dict[str, Any] = {
+        "observability_grafana_host": "127.0.0.1",
+        "observability_ec2_id": "i-0abc1234def56789",
+    }
+    if grafana_port is not None:
+        aws["observability_grafana_port"] = grafana_port
+    config = {"deployment_id": "test", "aws": aws}
+    (treadmill_dir / "test.yaml").write_text(yaml.dump(config))
+
+
+def test_obs_status_uses_configured_port(tmp_path, monkeypatch):
+    """``treadmill observe status`` reports the port from the YAML, not
+    a hardcoded 3000. The reachable URL the operator sees matches the
+    port ``treadmill-local up`` bound."""
+    _write_deployment_yaml(tmp_path, monkeypatch, grafana_port=3001)
+    with patch(
+        "treadmill_cli.observe.check_direct_reachable", return_value=True,
+    ) as mock_check:
+        result = runner.invoke(observe_app, ["status", "--deployment", "test"])
+    assert result.exit_code == 0
+    assert "127.0.0.1:3001" in result.output
+    # The reachability probe ran against the configured port, not 3000.
+    mock_check.assert_called_once_with("127.0.0.1", 3001)
+
+
+def test_obs_status_default_port_when_field_absent(tmp_path, monkeypatch):
+    """When the YAML omits the field (fully_remote case), status falls
+    back to 3000 — the historical default."""
+    _write_deployment_yaml(tmp_path, monkeypatch, grafana_port=None)
+    with patch(
+        "treadmill_cli.observe.check_direct_reachable", return_value=True,
+    ) as mock_check:
+        result = runner.invoke(observe_app, ["status", "--deployment", "test"])
+    assert result.exit_code == 0
+    assert "127.0.0.1:3000" in result.output
+    mock_check.assert_called_once_with("127.0.0.1", 3000)
+
+
+def test_obs_open_dashboard_emits_url_with_configured_port(tmp_path, monkeypatch):
+    """``treadmill observe open dashboard`` prints a URL whose port
+    matches ``aws.observability_grafana_port`` from the YAML."""
+    _write_deployment_yaml(tmp_path, monkeypatch, grafana_port=3001)
+    result = runner.invoke(observe_app, [
+        "open", "dashboard", "--deployment", "test",
+    ])
+    assert result.exit_code == 0
+    assert "http://127.0.0.1:3001/d/treadmill-overview" in result.output
+
+
+def test_obs_open_dashboard_custom_port(tmp_path, monkeypatch):
+    """Operator-chosen port (e.g., 3002 to dodge both 3000 and 3001
+    collisions) propagates into the emitted URL verbatim."""
+    _write_deployment_yaml(tmp_path, monkeypatch, grafana_port=3002)
+    result = runner.invoke(observe_app, [
+        "open", "dashboard", "--deployment", "test",
+    ])
+    assert result.exit_code == 0
+    assert "http://127.0.0.1:3002/d/treadmill-overview" in result.output
+
+
+def test_obs_status_ssm_params_use_configured_remote_port(tmp_path, monkeypatch):
+    """The SSM tunnel command emitted by ``status`` (when direct
+    reachability fails) forwards to the configured Grafana port on the
+    remote — not 3000."""
+    _write_deployment_yaml(tmp_path, monkeypatch, grafana_port=3001)
+    with patch(
+        "treadmill_cli.observe.check_direct_reachable", return_value=False,
+    ):
+        result = runner.invoke(observe_app, ["status", "--deployment", "test"])
+    assert result.exit_code == 0
+    # The remote portNumber in the SSM params matches the configured
+    # port; the localPortNumber stays at the SSM-local fixed 3000
+    # (controlled by ``_SSM_LOCAL_PORT``, intentionally constant).
+    assert "\"portNumber\": [\"3001\"]" in result.output
