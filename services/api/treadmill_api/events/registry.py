@@ -43,7 +43,14 @@ from treadmill_api.events.step import (
 )
 from treadmill_api.events.review import ReviewOverride
 from treadmill_api.events.schedule import ScheduledTick
-from treadmill_api.events.task import TaskAutoMerged, TaskCancelled, TaskReady, TaskRegistered, TaskRetry
+from treadmill_api.events.task import (
+    TaskAutoMerged,
+    TaskCancelled,
+    TaskEscalatedToOperator,
+    TaskReady,
+    TaskRegistered,
+    TaskRetry,
+)
 from treadmill_api.events.validate import ValidateOverride
 from treadmill_api.events.validator_tuning import ValidatorTuning  # noqa: F401  re-exported
 
@@ -54,6 +61,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     # Task events
     TaskAutoMerged,
     TaskCancelled,
+    TaskEscalatedToOperator,
     TaskReady,
     TaskRegistered,
     TaskRetry,

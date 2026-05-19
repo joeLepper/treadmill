@@ -85,6 +85,7 @@ from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.events.schedule import ScheduledTick
+from treadmill_api.events.task import TaskEscalatedToOperator
 from treadmill_api.models import (
     Event,
     EventTrigger,
@@ -363,6 +364,8 @@ def _cap_for(workflow_id: str) -> int:
         return FEEDBACK_MAX_ATTEMPTS
     if workflow_id == DOC_AMEND_WORKFLOW_ID:
         return DOC_AMEND_MAX_ATTEMPTS
+    if workflow_id == ARCHITECTURE_RESOLVE_WORKFLOW_ID:
+        return ARCHITECTURE_RESOLVE_MAX_ATTEMPTS
     return 0
 
 
@@ -673,6 +676,88 @@ async def maybe_dispatch_feedback_on_review_changes_requested(
     )
 
 
+async def _emit_arch_cap_reached(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    task_id: uuid.UUID,
+    repo: str,
+) -> None:
+    """Persist + publish task.escalated_to_operator when the arch-resolve cap fires.
+
+    Queries the last completed wf-architecture-resolve step for its verdict
+    and reasoning, and the IDs of recent runs, then emits the event via the
+    dispatcher. If the dispatcher is absent (test stubs) or the task row is
+    missing, logs and returns without raising — the cap warning above already
+    recorded the signal.
+    """
+    if dispatcher is None:
+        return
+    task = await session.get(Task, task_id)
+    if task is None:
+        logger.warning(
+            "arch-cap-reached: task %s not found; skipping escalation event",
+            task_id,
+        )
+        return
+
+    # Fetch last architect step output for verdict + reasoning.
+    last_step_result = await session.execute(
+        select(WorkflowRunStep.output)
+        .join(WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id)
+        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
+        .where(
+            WorkflowRun.task_id == task_id,
+            WorkflowVersion.workflow_id == ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            WorkflowRunStep.status == "completed",
+        )
+        .order_by(WorkflowRunStep.completed_at.desc().nulls_last())
+        .limit(1)
+    )
+    last_step = last_step_result.first()
+    last_verdict: str | None = None
+    last_reasoning: str | None = None
+    if last_step and last_step.output:
+        arch_payload = (last_step.output.get("payload") or {})
+        last_verdict = arch_payload.get("verdict")
+        last_reasoning = arch_payload.get("reasoning")
+
+    # Fetch recent run IDs (up to 5) for the operator's reference.
+    run_ids_result = await session.execute(
+        select(WorkflowRun.id)
+        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
+        .where(
+            WorkflowRun.task_id == task_id,
+            WorkflowVersion.workflow_id == ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+        )
+        .order_by(WorkflowRun.created_at.desc())
+        .limit(5)
+    )
+    run_ids = [str(r) for r in run_ids_result.scalars()]
+
+    try:
+        await dispatcher.persist_and_publish(
+            session,
+            entity_type="task",
+            action="escalated_to_operator",
+            payload=TaskEscalatedToOperator(
+                task_id=task_id,
+                repo=repo,
+                last_verdict=last_verdict,
+                last_reasoning=last_reasoning,
+                run_ids=run_ids,
+            ),
+            plan_id=task.plan_id,
+            task_id=task_id,
+        )
+    except Exception:
+        logger.exception(
+            "arch-cap-reached: failed to emit escalation event for task %s; "
+            "operator must check logs",
+            task_id,
+        )
+
+
 async def maybe_dispatch_arbitration_on_deadlock(
     session: AsyncSession,
     dispatcher: Any,
@@ -829,6 +914,7 @@ async def maybe_dispatch_arbitration_on_deadlock(
             row.task_id,
             ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
         )
+        await _emit_arch_cap_reached(session, dispatcher, task_id=row.task_id, repo=row.repo)
         return None
 
     task = await session.get(Task, row.task_id)

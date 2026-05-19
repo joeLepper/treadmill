@@ -200,6 +200,20 @@ async def create_task(
     return _row_to_response(row)
 
 
+_TASK_NEEDS_OPERATOR_SQL = """
+    SELECT DISTINCT t.id, t.plan_id, t.repo, t.title, t.description,
+           t.workflow_version_id, t.created_by, t.created_at,
+           t.parent_task_id,
+           ts.derived_status,
+           tm.derived_mergeability
+    FROM tasks t
+    LEFT JOIN task_status ts ON ts.id = t.id
+    LEFT JOIN task_mergeability tm ON tm.task_id = t.id
+    INNER JOIN events e ON e.task_id = t.id
+        AND e.entity_type = 'task' AND e.action = 'escalated_to_operator'
+"""
+
+
 @router.get("", response_model=list[TaskResponse])
 async def list_tasks(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -207,9 +221,27 @@ async def list_tasks(
     plan_id: Annotated[uuid.UUID | None, Query()] = None,
     derived_status: Annotated[str | None, Query()] = None,
 ) -> list[TaskResponse]:
-    """List tasks with optional filters by repo, plan_id, or derived_status."""
+    """List tasks with optional filters by repo, plan_id, or derived_status.
+
+    Special value ``derived_status=needs_operator`` returns tasks that have
+    a ``task.escalated_to_operator`` event — i.e. tasks where the architect
+    cap fired and operator intervention is required (ADR-0048 §3).
+    """
+    if derived_status == "needs_operator":
+        sql = _TASK_NEEDS_OPERATOR_SQL + " WHERE 1=1"
+        params: dict[str, object] = {}
+        if repo is not None:
+            sql += " AND t.repo = :repo"
+            params["repo"] = repo
+        if plan_id is not None:
+            sql += " AND t.plan_id = :plan_id"
+            params["plan_id"] = plan_id
+        sql += " ORDER BY t.created_at DESC LIMIT 500"
+        result = await session.execute(text(sql), params)
+        return [_row_to_response(row) for row in result]
+
     sql = _TASK_WITH_STATUS_SQL + " WHERE 1=1"
-    params: dict[str, object] = {}
+    params = {}
     if repo is not None:
         sql += " AND t.repo = :repo"
         params["repo"] = repo

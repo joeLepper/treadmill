@@ -10,6 +10,25 @@ import pydantic
 from treadmill_api.events.base import EventPayload
 
 
+class TaskEscalatedToOperator(EventPayload):
+    """Emitted when wf-architecture-resolve hits its per-task dispatch cap.
+
+    Per ADR-0048 §3 escalation 3: when the 5-attempt architect cap
+    (ADR-0029 Q29.e) blocks dispatch, automated recovery is exhausted.
+    Operator intervention is required. Surface via
+    GET /api/v1/tasks?status=needs_operator.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "escalated_to_operator"
+
+    task_id: uuid.UUID
+    repo: str
+    last_verdict: str | None = None
+    last_reasoning: str | None = None
+    run_ids: list[str] = pydantic.Field(default_factory=list)
+
+
 class TaskRegistered(EventPayload):
     """Emitted when a task is created via the API.
 
