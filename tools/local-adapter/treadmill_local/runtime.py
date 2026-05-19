@@ -723,6 +723,16 @@ class LocalRuntime:
             if not collector.startswith(("http://", "https://")):
                 collector = f"http://{collector}"
             env["OTEL_EXPORTER_OTLP_ENDPOINT"] = collector
+            # The OTel Python SDK defaults its exporter to gRPC (port 4317).
+            # The collector listens on 4318 for OTLP HTTP and 4317 for gRPC,
+            # and the endpoint above names the HTTP port (consistent with
+            # the ``http://`` scheme and the host-side port mapping in
+            # ``infra/observability/docker-compose.yml``). Force HTTP/protobuf
+            # so the SDK's transport matches the port. The unsuffixed
+            # ``OTEL_EXPORTER_OTLP_PROTOCOL`` is the catch-all that applies
+            # to all signals (traces + metrics + logs) when the
+            # signal-specific spellings are absent.
+            env["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/protobuf"
         return env
 
     def _dev_local_worker_env(self, cfg: dict[str, Any]) -> dict[str, str]:
@@ -773,6 +783,12 @@ class LocalRuntime:
             if not collector.startswith(("http://", "https://")):
                 collector = f"http://{collector}"
             env["OTEL_EXPORTER_OTLP_ENDPOINT"] = collector
+            # See ``_dev_local_api_env`` for rationale — the OTel Python
+            # SDK defaults to gRPC (port 4317) but the endpoint above
+            # names the HTTP port (4318). Force HTTP/protobuf so transport
+            # matches the port. The unsuffixed catch-all applies to all
+            # signals (traces + metrics + logs).
+            env["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/protobuf"
         return env
 
     def _report_up_dev_local(self, cfg: dict[str, Any]) -> None:

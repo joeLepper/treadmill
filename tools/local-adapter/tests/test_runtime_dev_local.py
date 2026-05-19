@@ -360,6 +360,114 @@ def test_dev_local_worker_env_wires_github_mode_from_yaml(
     assert "AWS_ENDPOINT_URL" not in env
 
 
+# ── OTel exporter wiring (ADR-0020) ───────────────────────────────────────────
+
+
+def _yaml_with_collector(collector: str | None) -> dict[str, Any]:
+    """Helper: copy of ``_valid_yaml_dict`` with the OTel collector field
+    explicitly set (or removed when ``None``). The base fixture omits
+    the field; tests that exercise the OTel-wiring branch need to
+    inject it deliberately so the assertion is unambiguous."""
+    cfg = _valid_yaml_dict()
+    if collector is None:
+        cfg["aws"].pop("observability_collector_endpoint", None)
+    else:
+        cfg["aws"]["observability_collector_endpoint"] = collector
+    return cfg
+
+
+def test_dev_local_api_env_injects_otlp_protocol_when_collector_set(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """When the collector endpoint is wired in, the API container's env
+    pairs ``OTEL_EXPORTER_OTLP_ENDPOINT`` with
+    ``OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf``. The catch-all
+    unsuffixed protocol var applies to all signals (traces/metrics/logs)
+    — we deliberately don't set the signal-specific variants.
+
+    The protocol/port mismatch this prevents: the OTel Python SDK
+    defaults to gRPC (port 4317), but the collector listens on 4318
+    for HTTP. Without this var the SDK speaks gRPC against the HTTP
+    port and every export fails with ``StatusCode.UNAVAILABLE``.
+    """
+    cfg = _yaml_with_collector("http://treadmill-otel-collector:4318")
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_api_env(cfg)
+
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
+        "http://treadmill-otel-collector:4318"
+    )
+    assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
+    # Signal-specific protocol vars are NOT set — the unsuffixed
+    # catch-all is sufficient.
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL" not in env
+    assert "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL" not in env
+    assert "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL" not in env
+
+
+def test_dev_local_worker_env_injects_otlp_protocol_when_collector_set(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """Worker mirrors the API: collector endpoint + ``http/protobuf``
+    protocol var are injected together."""
+    cfg = _yaml_with_collector("http://treadmill-otel-collector:4318")
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_worker_env(cfg)
+
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
+        "http://treadmill-otel-collector:4318"
+    )
+    assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL" not in env
+    assert "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL" not in env
+    assert "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL" not in env
+
+
+def test_dev_local_api_env_omits_otlp_vars_when_collector_absent(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """Operators running without the observability stack rely on the
+    SDK being a silent no-op. The protocol var must be gated on the
+    SAME ``if collector:`` block as the endpoint — setting it alone
+    could surprise the SDK."""
+    cfg = _yaml_with_collector(None)
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_api_env(cfg)
+
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+    assert "OTEL_EXPORTER_OTLP_PROTOCOL" not in env
+
+
+def test_dev_local_worker_env_omits_otlp_vars_when_collector_absent(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """Worker counterpart to the no-collector API test."""
+    cfg = _yaml_with_collector(None)
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_worker_env(cfg)
+
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+    assert "OTEL_EXPORTER_OTLP_PROTOCOL" not in env
+
+
+def test_dev_local_otlp_collector_bare_host_port_gets_http_scheme(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """When the YAML carries a bare ``host:port`` (no scheme), the
+    env-builder prepends ``http://`` AND still sets the protocol var.
+    This is the path a CFN-output-derived value takes."""
+    cfg = _yaml_with_collector("treadmill-otel-collector:4318")
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    api_env = rt._dev_local_api_env(cfg)
+    worker_env = rt._dev_local_worker_env(cfg)
+
+    for env in (api_env, worker_env):
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
+            "http://treadmill-otel-collector:4318"
+        )
+        assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
+
+
 def test_dev_local_service_specs_includes_postgres_redis_api(
     tmp_path: Path,
     fake_docker: MagicMock,
