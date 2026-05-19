@@ -102,3 +102,203 @@ The plan is done when:
 4. The diagrams reflect main accurately.
 
 If a real task autonomously flows `wf-author → architect → supersede → child task → wf-author → wf-validate → wf-review → wf-merged`, that's the strongest possible signal. Mark the plan complete when we observe one.
+
+## sequence_of_work
+
+```yaml
+sequence_of_work:
+  - id: route-author-no-diff-to-architect
+    title: Route wf-author no-diff step.failed to wf-architecture-resolve
+    workflow: wf-author
+    intent: |
+      The wf-author worker raises ``CodeAuthorError("Claude Code
+      produced no changes to commit")`` when it can't produce a diff
+      against the task spec (per
+      ``workers/agent/treadmill_agent/runner_dispositions/code.py``).
+      Today this surfaces as a ``step.failed`` and dispatches
+      wf-feedback via
+      ``maybe_dispatch_feedback_on_step_failed`` in
+      ``services/api/treadmill_api/coordination/triggers.py``.
+
+      This is wrong-shaped per ADR-0048 — wf-feedback looks at a
+      gate-bearing failure on an existing PR, and an author no-diff
+      means no PR was ever opened, so feedback has nothing to
+      remediate. The correct route is wf-architecture-resolve, where
+      the architect reads the task spec + branch state and emits one
+      of amend (iterate with hint), supersede (rewrite task text +
+      restart fresh), or accept-as-is (work is genuinely done
+      elsewhere).
+
+      Implementation:
+        - In ``triggers.py``, when
+          ``maybe_dispatch_feedback_on_step_failed`` would fire on a
+          wf-author step.failed, first inspect the step's ``error``
+          text. If the error contains the no-changes signature (grep
+          ``workers/agent/`` for the exact string), instead dispatch
+          ``wf-architecture-resolve`` against the same task.
+        - Dedup key:
+          ``wf-architecture-resolve:<repo>:author-no-diff-run=<wf_author_run_id>``.
+        - Keep the wf-feedback dispatch for all other step.failed
+          shapes (worker crash, author-validations rejected).
+        - Add a sibling ``maybe_dispatch_architect_on_author_no_diff``
+          helper following the same pattern as the other
+          ``maybe_dispatch_*`` helpers — predicate, dedup, dispatch.
+
+      Tests in
+      ``services/api/tests/test_triggers_author_no_diff_routing.py``
+      (new file):
+        - A wf-author ``step.failed`` with the no-changes error
+          dispatches wf-architecture-resolve, NOT wf-feedback.
+        - A wf-author ``step.failed`` with any other error still
+          dispatches wf-feedback (regression for the existing path).
+        - Dedup is keyed on the wf-author run id, not the step id.
+    scope:
+      files:
+        - services/api/treadmill_api/coordination/triggers.py
+        - services/api/treadmill_api/coordination/consumer.py
+        - services/api/tests/test_triggers_author_no_diff_routing.py
+    validation:
+      - kind: deterministic
+        description: |
+          New trigger function dispatches wf-architecture-resolve on
+          the no-diff error; wf-feedback dispatch is suppressed on the
+          same step. Both regression tests pass.
+
+  - id: route-author-remote-rejection-to-architect
+    title: Route wf-author remote-rejection step.failed to wf-architecture-resolve
+    workflow: wf-author
+    depends_on:
+      - route-author-no-diff-to-architect
+    intent: |
+      Mirror the routing established for author-no-diff (task 1) but
+      for the "remote rejected push" failure shape. When the wf-author
+      worker's ``git push`` is rejected by GitHub (branch protection,
+      conflicting state, etc.), today it surfaces as ``step.failed``
+      indistinguishable from any other crash. Per ADR-0048 this should
+      route to wf-architecture-resolve so the architect can decide —
+      almost always with ``supersede`` to close the rejected branch
+      and start fresh.
+
+      Identify the exact error surface for remote rejection — grep
+      ``workers/agent/treadmill_agent/git.py`` and surrounding for the
+      rejection error pattern (probably ``"remote rejected"`` or
+      ``"failed to push some refs"``). Once identified, extend the
+      step.failed routing from task 1 to also recognize this shape.
+
+      Dedup key:
+      ``wf-architecture-resolve:<repo>:remote-rejected-run=<wf_author_run_id>``.
+
+      Tests in
+      ``services/api/tests/test_triggers_author_no_diff_routing.py``
+      (same file as task 1):
+        - A wf-author ``step.failed`` with the remote-rejection error
+          string dispatches wf-architecture-resolve.
+        - The routing distinguishes remote-rejection from no-diff
+          (different dedup namespaces).
+    scope:
+      files:
+        - services/api/treadmill_api/coordination/triggers.py
+        - services/api/tests/test_triggers_author_no_diff_routing.py
+    validation:
+      - kind: deterministic
+        description: |
+          Remote-rejection step.failed dispatches
+          wf-architecture-resolve under its own dedup namespace.
+          Regression tests pass.
+
+  - id: integration-test-supersede-end-to-end
+    title: End-to-end integration test for supersede affordance
+    workflow: wf-author
+    depends_on:
+      - route-author-no-diff-to-architect
+    intent: |
+      Add an integration test that drives a full supersede flow end-
+      to-end: a wf-author run produces no diff (mocked), the
+      architect dispatches with verdict=supersede + a
+      rewritten_description, a child task is created with
+      parent_task_id pointing back, a fresh wf-author dispatches
+      against the child (mocked to produce a real diff this time),
+      and the child reaches mergeability.
+
+      PR #181 covered the trigger-level mechanics
+      (``test_supersede_trigger.py``). The gap this task closes is the
+      end-to-end flow: trigger + child task creation + fresh dispatch
+      + worker pickup + auto-merge.
+
+      Pattern after
+      ``services/api/tests/test_integration_task_retry.py`` — same
+      shape of integration harness, same SQS+Postgres+API mocking.
+
+      File:
+      ``services/api/tests/test_integration_supersede_end_to_end.py``
+      (new). Test stages:
+        1. Register a task with a deliberately-broken description.
+        2. Drive wf-author to fail with the no-diff error (mocked).
+        3. Drive task 1's new routing — verify
+           wf-architecture-resolve dispatches.
+        4. Mock architect emit verdict=supersede with a
+           rewritten_description.
+        5. Assert: child task row created, parent's PR closed (if
+           any), fresh wf-author dispatch event emitted.
+        6. Drive the child's wf-author to completion (mocked to
+           produce a real diff).
+        7. Assert: child reaches mergeability; auto-merge fires.
+    scope:
+      files:
+        - services/api/tests/test_integration_supersede_end_to_end.py
+    validation:
+      - kind: deterministic
+        description: |
+          The new integration test passes in CI. The test exercises
+          the full supersede flow end-to-end (trigger → child task →
+          fresh dispatch → mergeable).
+
+  - id: operator-surface-for-arch-cap-reached
+    title: Operator notification surface for arch-cap-reached
+    workflow: wf-author
+    intent: |
+      When ``wf-architecture-resolve`` would dispatch but its
+      per-task cap (5, per ADR-0029 Q29.e) blocks the dispatch, the
+      system today silently no-ops. Per ADR-0048 §3 escalation 3,
+      this should produce an operator-visible signal.
+
+      Emit a structured event when an architect cap-block fires.
+      Event name: ``task.escalated_to_operator`` (or a similar slug
+      that matches conventions — check ``events/`` for the naming
+      pattern). Event payload: task_id, repo, last architect verdict,
+      last architect reasoning, link to the most recent runs.
+
+      Pick ONE notification surface (call out which one in the PR
+      description):
+        - Option A: post a comment on the parent task's PR (if
+          open).
+        - Option B: emit to an SNS topic that an external notifier
+          subscribes to.
+        - Option C: structured log + a
+          ``GET /api/v1/tasks?status=needs_operator`` query
+          parameter the operator polls.
+
+      Option C is the smallest move; A is the most operator-visible.
+      Pick based on what's already plumbed; if neither A nor B is
+      already wired, default to C.
+
+      Tests in
+      ``services/api/tests/test_arch_cap_operator_surface.py``
+      (new file):
+        - When ``_is_capped`` returns true for
+          wf-architecture-resolve, the new event/notification fires
+          (where it didn't before).
+        - The notification carries the load-bearing fields
+          (task_id, last verdict, last reasoning).
+    scope:
+      files:
+        - services/api/treadmill_api/coordination/triggers.py
+        - services/api/treadmill_api/events/task.py
+        - services/api/tests/test_arch_cap_operator_surface.py
+    validation:
+      - kind: deterministic
+        description: |
+          A cap-blocked dispatch attempt produces an operator-
+          observable signal; the test asserts the signal fires with
+          the expected payload shape.
+```
