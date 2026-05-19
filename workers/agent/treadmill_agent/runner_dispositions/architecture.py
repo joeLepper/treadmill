@@ -7,14 +7,21 @@ parses that envelope from the Claude summary, surfaces the routing
 payload, and emits the downstream-dispatch hint for the coordination
 consumer.
 
-Routing per ADR-0032 §Decision:
+Routing per ADR-0032 §Decision + ADR-0049 §supersede repurpose:
 
 * ``amend`` — intent right, code wrong. Payload carries
   ``dispatch.workflow_id = "wf-plan"`` so a remediation plan gets
   authored. ``target_artifact`` + ``remediation_summary`` flow through.
-* ``supersede`` — intent no longer right. Payload carries
-  ``dispatch.workflow_id = "wf-doc-amend"`` so a superseding ADR is
-  authored at ``docs/adrs/<next>-*.md``.
+* ``supersede`` — the plan-text itself was wrong. Payload carries
+  the ``rewritten_description`` the architect emitted; the API-side
+  ``maybe_dispatch_supersede_on_architect_verdict`` trigger reads it,
+  closes the existing PR, creates a child task with the rewritten
+  description + ``parent_task_id`` pointing back, and dispatches a
+  fresh ``wf-author`` against the child. ``dispatch.workflow_id`` is
+  ``None`` — the API trigger owns the dispatch shape, not the
+  disposition. Per ADR-0049, the prior supersede→wf-doc-amend routing
+  (author a superseding ADR) was removed; supersede now means
+  "rewrite the task text and restart fresh" instead.
 * ``accept-as-is`` — gap is acceptable. Payload carries
   ``dispatch.workflow_id = "wf-doc-amend"`` against the component's
   ``AGENT.md`` (append to Pitfalls). Also emits a structured PR comment
@@ -24,7 +31,9 @@ Per ADR-0049, the prior ``uncertain`` verdict was removed; the architect
 must always commit to one of the three actionable verdicts above.
 
 No git side effects. No PR-side side effects (the coordination consumer
-emits the PR comment via the ``pr_comment`` helper from ADR-0033).
+emits the PR comment via the ``pr_comment`` helper from ADR-0033; the
+supersede PR-close + child-task-create side effects fire from the
+API-side trigger, not from this handler).
 
 Empty diff is a SUCCESS — the architect role isn't asked to modify code.
 """
@@ -319,12 +328,13 @@ def _build_dispatch_payload(
     verdict: str,
     target_artifact: str,
     remediation_summary: str | None,
+    rewritten_description: str | None,
     task_id: str,
     trigger: str,
 ) -> dict[str, Any]:
     """Build the routing payload the consumer reads to dispatch the
     downstream workflow. Shape per ADR-0032 §Decision + ADR-0038
-    semantics for deadlock-triggered runs."""
+    semantics for deadlock-triggered runs + ADR-0049 supersede repurpose."""
     if verdict == "amend":
         return {
             "workflow_id": "wf-plan",
@@ -333,12 +343,21 @@ def _build_dispatch_payload(
             "remediation_summary": remediation_summary or "",
         }
     if verdict == "supersede":
+        # ADR-0049: supersede repurposed. The API-side
+        # ``maybe_dispatch_supersede_on_architect_verdict`` trigger owns
+        # the close-PR + create-child-task + dispatch-fresh-wf-author
+        # sequence; this disposition just surfaces the architect's
+        # ``rewritten_description`` so the trigger can write it onto the
+        # child task row. ``workflow_id=None`` signals "API-side trigger
+        # handles dispatch" — same convention as the deadlock-override
+        # branch of accept-as-is below.
         return {
-            "workflow_id": "wf-doc-amend",
+            "workflow_id": None,
             "task_id": task_id,
             "target_artifact": target_artifact,
             "remediation_summary": remediation_summary or "",
-            "intent": "author-superseding-adr",
+            "rewritten_description": rewritten_description or "",
+            "intent": "supersede-rewrite-task",
         }
     if verdict == "accept-as-is":
         # ADR-0038 + ADR-0042: when the architect was dispatched to
@@ -496,11 +515,32 @@ def handle(ctx: DispositionContext) -> StepOutput:
     reasoning: str = envelope.get("reasoning", "")
     target_artifact: str = envelope.get("target_artifact", "")
     remediation_summary: str | None = envelope.get("remediation_summary")
+    rewritten_description: str | None = envelope.get("rewritten_description")
+
+    # ADR-0049: supersede repurposed. The architect must include a
+    # non-empty ``rewritten_description`` so the API-side trigger has
+    # text to write onto the child task row. A supersede with no
+    # rewritten text is a parse failure — wf-feedback can re-run the
+    # architect with an envelope reminder. Mirrors the Pydantic
+    # validator on ``ArchitectVerdict`` itself (API-side), enforced
+    # here at the worker-side parse so the step fails fast rather than
+    # silently dispatching an empty-rewrite supersede.
+    if verdict == "supersede" and not (
+        rewritten_description and rewritten_description.strip()
+    ):
+        raise ArchitectVerdictParseError(
+            "architect verdict=supersede requires a non-empty "
+            "``rewritten_description`` field (the corrected task text "
+            "that becomes the child task's description). Per ADR-0049, "
+            "supersede creates a new task row carrying this field's "
+            "value; an empty rewrite has no child-task content."
+        )
 
     dispatch_payload = _build_dispatch_payload(
         verdict=verdict,
         target_artifact=target_artifact,
         remediation_summary=remediation_summary,
+        rewritten_description=rewritten_description,
         task_id=ctx.ctx.task_id,
         trigger=ctx.ctx.trigger,
     )
@@ -518,6 +558,13 @@ def handle(ctx: DispositionContext) -> StepOutput:
     }
     if remediation_summary:
         payload["remediation_summary"] = remediation_summary
+    if rewritten_description:
+        # Surface at top level too (in addition to dispatch_payload) so
+        # downstream readers that inspect the verdict envelope shape
+        # rather than the dispatch sub-object see the corrected task
+        # text in the natural place. The API-side supersede trigger
+        # reads ``dispatch.rewritten_description``.
+        payload["rewritten_description"] = rewritten_description
     if pr_comment_payload is not None:
         payload["pr_comment"] = pr_comment_payload
     # Surface the prose-fallback marker so downstream telemetry can

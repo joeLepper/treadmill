@@ -55,6 +55,11 @@ class TaskResponse(BaseModel):
     workflow_version_id: uuid.UUID
     created_by: str | None
     created_at: datetime
+    parent_task_id: uuid.UUID | None = None
+    """Per ADR-0049: when the architect verdicts ``supersede``, a child
+    task is created with the rewritten description and ``parent_task_id``
+    pointing back to the original. ``None`` for tasks that did not
+    originate from a supersede."""
     derived_status: str | None = None
     mergeability: str | None = None
     """The ``derived_mergeability`` from the ``task_mergeability`` VIEW
@@ -101,6 +106,7 @@ def _row_to_response(row) -> TaskResponse:
         title=row.title, description=row.description,
         workflow_version_id=row.workflow_version_id,
         created_by=row.created_by, created_at=row.created_at,
+        parent_task_id=row.parent_task_id,
         derived_status=row.derived_status,
         mergeability=row.derived_mergeability,
     )
@@ -109,6 +115,7 @@ def _row_to_response(row) -> TaskResponse:
 _TASK_WITH_STATUS_SQL = """
     SELECT t.id, t.plan_id, t.repo, t.title, t.description,
            t.workflow_version_id, t.created_by, t.created_at,
+           t.parent_task_id,
            ts.derived_status,
            tm.derived_mergeability
     FROM tasks t

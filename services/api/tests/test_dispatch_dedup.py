@@ -186,9 +186,13 @@ def test_wf_conflict_builder_emits_pr_and_base_sha() -> None:
 # ── Builders: opt-outs ───────────────────────────────────────────────────────
 
 
-def test_wf_author_opts_out_of_dedup() -> None:
-    """wf-author runs are dispatched per Task; task-level dedup is the
-    existing ``tasks`` PK. No builder registered → returns None."""
+def test_wf_author_natural_dispatch_path_opts_out_of_dedup() -> None:
+    """wf-author runs from the natural ``dispatch_task`` path are
+    dispatched per Task; task-level dedup is the existing ``tasks`` PK.
+    Per ADR-0049 a builder IS registered (for the supersede-driven
+    dispatch path keyed on ``supersede_parent_task_id``), but a payload
+    lacking that discriminator returns ``None`` so the natural path
+    opts out gracefully."""
     assert build_dedup_key("wf-author", {"repo": "x/y", "pr_number": 1}) is None
 
 
@@ -288,12 +292,25 @@ def test_wf_review_treats_empty_string_repo_as_missing() -> None:
     ) is None
 
 
-def test_builders_dict_does_not_include_opt_out_workflows() -> None:
-    """The wf-author / wf-plan opt-out is enforced by absence from
-    the registry dict — not by a None-returning builder. Codify so
-    future contributors don't accidentally add a builder."""
-    assert "wf-author" not in DEDUP_KEY_BUILDERS
+def test_wf_plan_opts_out_by_absence_from_builders_dict() -> None:
+    """The wf-plan opt-out is enforced by absence from the registry
+    dict — not by a None-returning builder. Codify so future
+    contributors don't accidentally add a builder."""
     assert "wf-plan" not in DEDUP_KEY_BUILDERS
+
+
+def test_wf_author_builder_returns_none_for_natural_dispatch_path() -> None:
+    """Per ADR-0049, wf-author DOES register a builder (for the
+    supersede-driven dispatch path that keys on ``supersede_parent_task_id``).
+    The natural dispatch path through ``dispatch_task`` lacks that
+    field, so the builder returns ``None`` and that path opts out
+    gracefully. Verify both halves of the duality."""
+    assert "wf-author" in DEDUP_KEY_BUILDERS
+    # Natural path payload: no supersede discriminator → None.
+    assert build_dedup_key(
+        "wf-author",
+        {"repo": "example/repo", "task_id": "abc"},
+    ) is None
 
 
 def test_wf_doc_amend_builder_emits_docs_amend_run_id() -> None:

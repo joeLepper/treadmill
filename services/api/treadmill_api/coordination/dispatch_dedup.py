@@ -29,15 +29,16 @@ row too, so a retry will be allowed to land.
 
 Per the ADR's "Discriminator parts" table:
 
-  | workflow      | discriminator              |
-  |---------------|----------------------------|
-  | wf-review     | pr=<N>,sha=<head_sha>      |
-  | wf-feedback   | review=<review_id>         |
-  | wf-ci-fix     | check_run=<check_run_id>   |
-  | wf-conflict   | pr=<N>,sha=<base_sha>      |
-  | wf-auto-merge | auto-merge=<task_id>       |
-  | wf-author     | (opts out — None)          |
-  | wf-plan       | (opts out — None)          |
+  | workflow      | discriminator                       |
+  |---------------|-------------------------------------|
+  | wf-review     | pr=<N>,sha=<head_sha>               |
+  | wf-feedback   | review=<review_id>                  |
+  | wf-ci-fix     | check_run=<check_run_id>            |
+  | wf-conflict   | pr=<N>,sha=<base_sha>               |
+  | wf-auto-merge | auto-merge=<task_id>                |
+  | wf-author     | supersede-parent=<parent_task_id>   |
+  |               |   (else opts out — None)            |
+  | wf-plan       | (opts out — None)                   |
 
 Missing-field disposition: a builder that depends on a field the
 normalizer does not currently emit (today: ``review_id``,
@@ -215,6 +216,32 @@ def _build_wf_doc_amend_key(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _build_wf_author_key(payload: dict[str, Any]) -> str | None:
+    """``wf-author:<repo>:supersede-parent=<parent_task_id>``
+    (ADR-0049 supersede trigger).
+
+    The supersede trigger creates a child task and dispatches a fresh
+    ``wf-author`` against it. The dedup key is keyed on the PARENT
+    task id (the task being superseded), not the child — re-delivery
+    of the same architect step.completed must not create N children
+    against the same parent.
+
+    Other wf-author dispatch paths (the natural one through
+    ``dispatch_task`` for a freshly-registered task) opt out of dedup
+    here: the ``tasks`` PK already provides task-level uniqueness for
+    that path, and forcing a dedup key on it would interfere with the
+    task-registration flow. So this builder only returns a key when
+    the supersede discriminator is present.
+    """
+    repo = payload.get("repo")
+    if not repo:
+        return None
+    supersede_parent_task_id = payload.get("supersede_parent_task_id")
+    if supersede_parent_task_id:
+        return f"wf-author:{repo}:supersede-parent={supersede_parent_task_id}"
+    return None
+
+
 def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
     """``wf-architecture-resolve:<repo>:deadlock-feedback-run=<run_id>``
     (ADR-0038 ralph-loop deadlock arbitration trigger).
@@ -238,18 +265,21 @@ def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
 
 
 # Per-workflow dedup-key builders. Workflows not in this dict implicitly
-# opt out (the helper treats a missing entry as "return None"). Per
-# ADR-0026's table, wf-author and wf-plan have no natural dedup key:
+# opt out (the helper treats a missing entry as "return None").
 #
-#   * wf-author runs are dispatched per Task, with task-level dedup via
-#     the existing ``tasks`` PK.
+#   * wf-author dispatches from ``dispatch_task`` per Task (no key
+#     here — the ``tasks`` PK provides task-level dedup). But the
+#     supersede trigger also dispatches wf-author against the child
+#     task created from a parent task's verdict; that path keys on
+#     ``supersede_parent_task_id`` to prevent re-delivery from
+#     creating N children. See ``_build_wf_author_key``.
 #   * wf-plan dispatches from ``plan_doc_merged`` events, with the
 #     ADR-0021 handler already deduping by ``uuid5(repo:path@sha)``.
-#
-# So they intentionally do not appear here.
+#     It opts out here.
 DEDUP_KEY_BUILDERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
     "wf-review": _build_wf_review_key,
     "wf-feedback": _build_wf_feedback_key,
+    "wf-author": _build_wf_author_key,
     "wf-architecture-resolve": _build_wf_architecture_resolve_key,
     "wf-ci-fix": _build_wf_ci_fix_key,
     "wf-conflict": _build_wf_conflict_key,

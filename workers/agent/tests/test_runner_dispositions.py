@@ -1412,22 +1412,53 @@ def test_architecture_handler_amend_verdict_routes_to_wf_plan(
     assert "Wrap _handle_step" in out.payload["dispatch"]["remediation_summary"]
 
 
-def test_architecture_handler_supersede_verdict_routes_to_doc_amend(
+def test_architecture_handler_supersede_verdict_routes_to_api_trigger(
     tmp_path: Path,
 ) -> None:
-    """``supersede`` → wf-doc-amend with intent=author-superseding-adr."""
+    """``supersede`` per ADR-0049 is repurposed: the disposition emits
+    ``workflow_id=None`` + ``rewritten_description`` in the dispatch
+    payload. The API-side
+    ``maybe_dispatch_supersede_on_architect_verdict`` trigger handles
+    the close-PR + create-child-task + dispatch-fresh-wf-author
+    sequence — the disposition just surfaces the architect's rewritten
+    text."""
     summary = (
         '```json\n'
-        '{"verdict": "supersede", "reasoning": "Original ADR-0010 intent '
-        'no longer matches reality after #95 bootstrap.", '
-        '"target_artifact": "docs/adrs/0010-branch-conventions.md"}\n'
+        '{"verdict": "supersede", "reasoning": "Plan named the wrong '
+        'file paths.", '
+        '"target_artifact": "docs/plans/0010-branch-conventions.md", '
+        '"rewritten_description": "Write services/api/treadmill_api/'
+        'foo.py with function bar() that returns the new shape."}\n'
         '```'
     )
     ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
     assert out.decision == "supersede"
-    assert out.payload["dispatch"]["workflow_id"] == "wf-doc-amend"
-    assert out.payload["dispatch"]["intent"] == "author-superseding-adr"
+    assert out.payload["dispatch"]["workflow_id"] is None
+    assert out.payload["dispatch"]["intent"] == "supersede-rewrite-task"
+    assert "services/api" in out.payload["dispatch"]["rewritten_description"]
+    # Also surfaced at top level for downstream readers.
+    assert "services/api" in out.payload["rewritten_description"]
+
+
+def test_architecture_handler_supersede_without_rewrite_raises(
+    tmp_path: Path,
+) -> None:
+    """Per ADR-0049, ``verdict='supersede'`` without a non-empty
+    ``rewritten_description`` is a parse failure. The disposition
+    forbids the worker from emitting an empty-rewrite supersede so the
+    step fails fast rather than silently dispatching an empty child
+    task description."""
+    summary = (
+        '```json\n'
+        '{"verdict": "supersede", "reasoning": "Plan is wrong", '
+        '"target_artifact": "docs/plans/x.md"}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    with pytest.raises(ArchitectVerdictParseError) as exc_info:
+        handle_architecture(ctx)
+    assert "rewritten_description" in str(exc_info.value)
 
 
 def test_architecture_handler_accept_as_is_emits_pr_comment(

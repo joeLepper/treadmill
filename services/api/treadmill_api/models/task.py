@@ -65,10 +65,27 @@ class Task(Base):
         server_default=text("now()"),
     )
 
+    parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tasks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    """Self-FK for ``supersede`` lineage (ADR-0049). When the architect
+    verdicts ``supersede`` on a task whose plan needs a rewritten
+    description, the supersede trigger creates a NEW task row with the
+    rewritten ``description`` and ``parent_task_id`` pointing back to the
+    original. The original task closes its PR and marks itself
+    superseded; the child task is registered fresh and runs its own
+    ``wf-author``. Task text remains immutable per row — supersede is a
+    new row, not an in-place edit. ``ON DELETE SET NULL`` so an
+    administrative delete of the parent doesn't cascade-delete child
+    work (the lineage breaks gracefully, leaving the child standalone)."""
+
     __table_args__ = (
         Index("ix_tasks_plan_id", "plan_id"),
         Index("ix_tasks_repo", "repo"),
         Index("ix_tasks_workflow_version_id", "workflow_version_id"),
+        Index("ix_tasks_parent_task_id", "parent_task_id"),
     )
 
 

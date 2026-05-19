@@ -110,6 +110,7 @@ CONFLICT_WORKFLOW_ID = "wf-conflict"
 FEEDBACK_WORKFLOW_ID = "wf-feedback"
 DOC_AMEND_WORKFLOW_ID = "wf-doc-amend"
 ARCHITECTURE_RESOLVE_WORKFLOW_ID = "wf-architecture-resolve"
+AUTHOR_WORKFLOW_ID = "wf-author"
 CI_FIX_MAX_ATTEMPTS = 3
 CONFLICT_RESOLVE_MAX_ATTEMPTS = 3
 FEEDBACK_MAX_ATTEMPTS = 5
@@ -1320,6 +1321,297 @@ async def maybe_dispatch_rule_tuning_on_architect_completion(
         workflow_id=DOC_AMEND_WORKFLOW_ID,
         payload=dedup_payload,
         dispatch_fn=_dispatch,
+    )
+
+
+async def maybe_dispatch_supersede_on_architect_verdict(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+    github_client: Any = None,
+) -> uuid.UUID | None:
+    """ADR-0049: handle the architect's repurposed ``supersede`` verdict.
+
+    When the architect verdicts ``supersede`` the plan-text itself was
+    wrong. We close the existing PR (if any), create a CHILD task row
+    carrying the architect's ``rewritten_description`` (with
+    ``parent_task_id`` pointing back to the original), and dispatch a
+    fresh ``wf-author`` run against the child. Task text remains
+    immutable per row — supersede creates a new row, not an in-place
+    edit.
+
+    Predicate: the step belongs to ``wf-architecture-resolve`` AND its
+    output payload carries ``verdict='supersede'`` with a non-empty
+    ``rewritten_description``. The worker-side parse (and the
+    ``ArchitectVerdict`` Pydantic validator) already reject empty-rewrite
+    supersedes, so this trigger defensively re-checks rather than
+    failing silently.
+
+    Side-effect order (most-recoverable last):
+
+      1. Resolve owning task + repo + (optionally) the open PR.
+      2. Create the child task row with the rewritten description.
+      3. Dispatch ``wf-author`` against the child (via
+         ``_create_and_publish_run``).
+      4. Best-effort close the parent's PR. PR-close failures are
+         logged and swallowed — the child task is already created and
+         dispatched, so the new work proceeds even if GitHub is
+         temporarily unreachable. The operator can close the stale PR
+         manually if needed.
+
+    Dedup key (per ADR-0026): ``wf-author:<repo>:supersede-parent=<parent_task_id>``
+    — re-delivery of the same architect step.completed cannot create N
+    children against the same parent.
+
+    Returns the new wf-author run's id, or ``None`` if any skip
+    condition fired (non-supersede payload, non-architect step,
+    missing rewrite text, no workflow version seeded, dedup collision).
+    """
+    output = typed.output
+    payload = output.payload if isinstance(output.payload, dict) else {}
+    if not isinstance(payload, dict):
+        return None
+    verdict = payload.get("verdict")
+    if verdict != "supersede":
+        return None
+
+    # Pull the rewritten description from either the top-level field
+    # (where the worker disposition surfaces it) or the dispatch
+    # sub-object (where it also appears for downstream readers). Top-
+    # level wins.
+    rewritten = payload.get("rewritten_description")
+    if not rewritten:
+        dispatch = payload.get("dispatch")
+        if isinstance(dispatch, dict):
+            rewritten = dispatch.get("rewritten_description")
+    if not isinstance(rewritten, str) or not rewritten.strip():
+        logger.warning(
+            "supersede trigger: step %s carries verdict=supersede but no "
+            "rewritten_description; skipping (worker-side parse should "
+            "have rejected this — defensive)",
+            step_id,
+        )
+        return None
+
+    # Confirm this step belongs to wf-architecture-resolve.
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.task_id,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None or row.workflow_id != ARCHITECTURE_RESOLVE_WORKFLOW_ID:
+        logger.debug(
+            "supersede trigger: step %s is not wf-architecture-resolve "
+            "(workflow=%s); skipping",
+            step_id, row.workflow_id if row else None,
+        )
+        return None
+
+    parent_task = await session.get(Task, row.task_id)
+    if parent_task is None:
+        logger.warning(
+            "supersede trigger: parent task %s not found; skipping",
+            row.task_id,
+        )
+        return None
+
+    reasoning = payload.get("reasoning") or ""
+
+    # The dedup key keys on the PARENT task id — re-delivery of the
+    # same architect step.completed must not create N children against
+    # the same parent. The child's id is freshly generated below; we
+    # dispatch first under the dedup gate, then close the parent PR
+    # as a follow-up best-effort step (so a transient PR-close failure
+    # doesn't block forward progress).
+    dedup_payload = {
+        "repo": parent_task.repo,
+        "supersede_parent_task_id": str(parent_task.id),
+    }
+
+    # Holder so the closure can pass the child task id back to the
+    # caller for the PR-close step.
+    child_holder: dict[str, Any] = {"child_task": None}
+
+    async def _dispatch() -> uuid.UUID | None:
+        # Create the child task row. Inherits ``plan_id``,
+        # ``workflow_version_id``, ``repo`` from the parent; carries the
+        # rewritten ``description`` and ``parent_task_id`` pointing back.
+        # Title is suffixed with " (superseded)" so the operator UI can
+        # disambiguate parent vs child at a glance.
+        child_title = parent_task.title
+        if not child_title.endswith("(superseded)"):
+            child_title = f"{parent_task.title} (superseded)"
+        child = Task(
+            plan_id=parent_task.plan_id,
+            repo=parent_task.repo,
+            title=child_title,
+            description=rewritten,
+            workflow_version_id=parent_task.workflow_version_id,
+            created_by="architect:supersede",
+            parent_task_id=parent_task.id,
+        )
+        session.add(child)
+        await session.flush()
+        child_holder["child_task"] = child
+
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=child,
+            workflow_id=AUTHOR_WORKFLOW_ID,
+            trigger="self:wf-architecture-supersede",
+        )
+
+    run_id = await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=AUTHOR_WORKFLOW_ID,
+        payload=dedup_payload,
+        dispatch_fn=_dispatch,
+    )
+
+    if run_id is None:
+        # Dedup collision OR _create_and_publish_run found no workflow
+        # version. In either case the supersede side-effect is complete
+        # (either a prior delivery already won, or the install can't
+        # dispatch wf-author at all). Nothing more to do.
+        return None
+
+    # Best-effort PR close. Done AFTER the child is created so a
+    # transient GitHub failure doesn't lose the supersede signal.
+    child_task = child_holder.get("child_task")
+    await _maybe_close_parent_pr_for_supersede(
+        session,
+        github_client=github_client,
+        parent_task_id=parent_task.id,
+        repo=parent_task.repo,
+        child_task_id=child_task.id if child_task is not None else None,
+        reasoning=reasoning,
+    )
+
+    return run_id
+
+
+async def _maybe_close_parent_pr_for_supersede(
+    session: AsyncSession,
+    *,
+    github_client: Any,
+    parent_task_id: uuid.UUID,
+    repo: str,
+    child_task_id: uuid.UUID | None,
+    reasoning: str,
+) -> None:
+    """Best-effort: close the parent task's open PR (if any) and post a
+    comment naming the child task.
+
+    The supersede side-effect is fundamentally about the child task
+    becoming the new home for the work — the stale PR is a follow-up
+    cleanup. We never let a PR-close failure block the child-task
+    creation or dispatch; on any error we log and return so the next
+    redelivery / operator nudge can retry the close.
+
+    Skip conditions (logged at DEBUG, not WARNING):
+      * ``github_client`` is None — common in unit tests that don't
+        exercise the real PR-close path.
+      * No ``task_prs`` row for the parent — parent never opened a PR.
+      * ``closed_at`` already set — PR already closed.
+    """
+    pr_result = await session.execute(
+        select(TaskPR.pr_number, TaskPR.closed_at).where(
+            TaskPR.task_id == parent_task_id,
+        )
+    )
+    pr_row = pr_result.first()
+    if pr_row is None:
+        logger.debug(
+            "supersede trigger: parent task %s has no task_prs row; "
+            "no PR to close",
+            parent_task_id,
+        )
+        return
+    if pr_row.closed_at is not None:
+        logger.debug(
+            "supersede trigger: parent task %s PR #%s already closed; "
+            "no-op",
+            parent_task_id, pr_row.pr_number,
+        )
+        return
+
+    if github_client is None:
+        logger.debug(
+            "supersede trigger: github_client unavailable; deferring PR "
+            "close for parent task %s PR #%s (child task %s created + "
+            "dispatched; operator can close stale PR manually)",
+            parent_task_id, pr_row.pr_number, child_task_id,
+        )
+        return
+
+    pr_number = pr_row.pr_number
+    child_ref = f"task {child_task_id}" if child_task_id else "a child task"
+    comment_body = (
+        f"Superseded by {child_ref} — the architect verdicted "
+        f"`supersede`, so the task text has been rewritten and a fresh "
+        f"`wf-author` run is dispatching against the child task. "
+        f"Closing this PR.\n\n"
+        f"Architect reasoning: {reasoning or '(none provided)'}"
+    )
+
+    # Comment first (so the close has context), then close. Each step
+    # is independent; either failure leaves the other side intact.
+    try:
+        comment_resp = await github_client.post(
+            f"/repos/{repo}/issues/{pr_number}/comments",
+            json={"body": comment_body},
+        )
+        comment_resp.raise_for_status()
+    except Exception:
+        logger.exception(
+            "supersede trigger: failed to post supersede comment on "
+            "PR #%s of %s (parent task %s); will still attempt close",
+            pr_number, repo, parent_task_id,
+        )
+
+    try:
+        close_resp = await github_client.patch(
+            f"/repos/{repo}/pulls/{pr_number}",
+            json={"state": "closed"},
+        )
+        close_resp.raise_for_status()
+    except Exception:
+        logger.exception(
+            "supersede trigger: failed to close PR #%s of %s (parent "
+            "task %s); child task %s is created and dispatched, operator "
+            "can close stale PR manually",
+            pr_number, repo, parent_task_id, child_task_id,
+        )
+        return
+
+    # Mark the task_prs row as closed locally so subsequent redeliveries
+    # see ``closed_at`` set and short-circuit cleanly. ``GithubPrMerged`` /
+    # ``pr_closed`` webhook handlers usually do this, but those events
+    # arrive asynchronously and may race with another supersede
+    # redelivery.
+    await session.execute(
+        text(
+            "UPDATE task_prs SET closed_at = now() "
+            "WHERE task_id = :task_id AND pr_number = :pr_number "
+            "  AND closed_at IS NULL"
+        ),
+        {"task_id": parent_task_id, "pr_number": pr_number},
+    )
+    logger.info(
+        "supersede trigger: closed parent PR #%s of %s "
+        "(parent task %s → child task %s)",
+        pr_number, repo, parent_task_id, child_task_id,
     )
 
 

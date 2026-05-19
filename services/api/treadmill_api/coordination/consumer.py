@@ -460,6 +460,18 @@ class CoordinationConsumer:
                 await self._maybe_dispatch_rule_tuning(
                     session, step_id, typed,
                 )
+            # ADR-0049: when the architect step.completed carries
+            # ``payload.verdict='supersede'`` with a non-empty
+            # ``rewritten_description``, close the parent task's PR
+            # (best-effort), create a CHILD task row with the rewritten
+            # description + ``parent_task_id`` pointing back to the
+            # parent, and dispatch a fresh ``wf-author`` against the
+            # child. Sibling to the review/validate override emitters
+            # above — independent path; fires only on supersede.
+            if action == "completed":
+                await self._maybe_dispatch_supersede(
+                    session, step_id, typed,
+                )
             # ADR-0032/ADR-0038 partnership closure: when the architect
             # verdicts ``amend``, dispatch ``wf-feedback`` against the
             # same task so the feedback role can author the
@@ -1438,6 +1450,50 @@ class CoordinationConsumer:
         except Exception:
             logger.exception(
                 "_maybe_dispatch_rule_tuning: dispatch failed for step %s; "
+                "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    # ── ADR-0049: architect supersede → close PR + child task + wf-author ──
+
+    async def _maybe_dispatch_supersede(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """ADR-0049: dispatch the supersede sequence when an architect
+        step.completed carries ``payload.verdict='supersede'``.
+
+        Delegates to
+        ``triggers.maybe_dispatch_supersede_on_architect_verdict``. The
+        trigger creates a child task carrying the architect's
+        ``rewritten_description``, dispatches a fresh ``wf-author``
+        against the child, and best-effort closes the parent's PR.
+
+        Failures are logged but do not propagate — the prior projection
+        has already committed; rolling that back on a dispatch failure
+        would lose progress. Dedup gate keys on the parent task id so
+        SQS redelivery cannot create N children against the same parent.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_supersede_on_architect_verdict,
+        )
+        try:
+            await maybe_dispatch_supersede_on_architect_verdict(
+                session,
+                self.dispatcher,
+                step_id=step_id,
+                typed=typed,
+                github_client=self.github_client,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_dispatch_supersede: dispatch failed for step %s; "
                 "prior projection committed, will retry on redelivery",
                 step_id,
             )

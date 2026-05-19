@@ -112,6 +112,34 @@ def test_tasks_workflow_version_id_fk_targets_workflow_versions(engine: Engine) 
     assert ("workflow_versions", ("id",)) in targets
 
 
+def test_tasks_parent_task_id_self_fk_exists(engine: Engine) -> None:
+    """Per ADR-0049, ``tasks.parent_task_id`` is a self-FK linking child
+    → parent for supersede lineage. The migration adds the column,
+    self-FK with ON DELETE SET NULL, and a backing index."""
+    inspector = sa.inspect(engine)
+    cols = {c["name"]: c for c in inspector.get_columns("tasks")}
+    assert "parent_task_id" in cols, (
+        "migration 20260519_1718 must add parent_task_id to tasks"
+    )
+    assert cols["parent_task_id"]["nullable"] is True
+
+    # Self-FK.
+    fks = inspector.get_foreign_keys("tasks")
+    self_fks = [
+        fk for fk in fks
+        if fk["referred_table"] == "tasks"
+        and tuple(fk["constrained_columns"]) == ("parent_task_id",)
+    ]
+    assert len(self_fks) == 1
+    assert self_fks[0]["options"].get("ondelete", "").upper() == "SET NULL"
+
+    # Backing index.
+    indexes = inspector.get_indexes("tasks")
+    by_name = {ix["name"]: ix for ix in indexes}
+    assert "ix_tasks_parent_task_id" in by_name
+    assert by_name["ix_tasks_parent_task_id"]["column_names"] == ["parent_task_id"]
+
+
 def test_task_prs_uses_composite_primary_key(engine: Engine) -> None:
     """The (repo, pr_number) PK matches the bunkhouse pattern per ADR-0007."""
     inspector = sa.inspect(engine)

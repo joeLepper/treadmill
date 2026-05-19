@@ -746,7 +746,8 @@ _ROLES: list[dict[str, Any]] = [
             '  "verdict": "amend" | "supersede" | "accept-as-is",\n'
             '  "reasoning": "<one paragraph — the why behind this verdict>",\n'
             '  "target_artifact": "<path to the ADR/plan/component that needs action>",\n'
-            '  "remediation_summary": "<if verdict is amend or supersede, a summary of what changes>",\n'
+            '  "remediation_summary": "<if verdict is amend, a summary of what changes>",\n'
+            '  "rewritten_description": "<REQUIRED for supersede: the corrected task description>",\n'
             '  "validator_tuning": {  // ONLY when trigger is wf-validate.fail AND verdict is accept-as-is\n'
             '    "rule_slug": "<slug of the rule that fired, e.g. adr-and-plan-has-diagram>",\n'
             '    "action": "demote_severity" | "narrow_applies_to" | "refine_prompt",\n'
@@ -776,8 +777,20 @@ _ROLES: list[dict[str, Any]] = [
             "be drafted to fix the implementation. For deadlock, the "
             "system dispatches ``wf-plan`` against the task to author a "
             "remediation that closes the spec-vs-diff gap.\n"
-            "  ``supersede`` — the intent is no longer right; the "
-            "ADR/plan should be updated or replaced.\n"
+            "  ``supersede`` — the plan-text itself was wrong (not just "
+            "the code). The task's description doesn't capture what "
+            "actually needs to happen, so retrying the implementation "
+            "against the same text will keep producing failing diffs. "
+            "Per ADR-0049, the system closes the existing PR, creates a "
+            "CHILD task carrying your ``rewritten_description`` "
+            "(``parent_task_id`` points back to the original), and "
+            "dispatches a fresh ``wf-author`` against the child. **You "
+            "MUST include ``rewritten_description`` — the corrected task "
+            "text — when you emit supersede.** Without it the trigger "
+            "has no child-task content and the parse fails. Vague "
+            "rewrites (\"do it correctly this time\") produce vague "
+            "child tasks; the rewrite should be substantive and "
+            "self-contained, the same shape a planner would write.\n"
             "  ``accept-as-is`` — the gap is acceptable given trade-"
             "offs (Class C: gap captured in AGENT.md Pitfalls; deadlock: "
             "the gate was wrong, the work is fine — the system emits "
@@ -795,14 +808,18 @@ _ROLES: list[dict[str, Any]] = [
             "``accept-as-is`` is correct — and you MUST include "
             "``validator_tuning`` in the envelope so the rule gets "
             "tuned along with the override.\n\n"
-            "**Remediation specificity (required for ``amend`` / "
-            "``supersede``).** The ``remediation_summary`` field is "
+            "**Remediation specificity (required for ``amend``).** "
+            "The ``remediation_summary`` field is "
             "where you tell the downstream feedback role-code-author "
             "what to do. Vague summaries (``fix it``, ``add docs``, "
             "``address the gap``) produce vague work — the code-author "
             "reports \"implementation is already in place\" and the "
             "loop stalls (observed 2026-05-16 on PRs #120/#122/#123/"
-            "#124). Each ``remediation_summary`` MUST contain:\n"
+            "#124). For ``supersede`` the equivalent specificity bar "
+            "applies to ``rewritten_description`` — the corrected task "
+            "text becomes the child task's spec, so it must be "
+            "self-contained, file-path / behavior-specific, and "
+            "actionable. Each ``remediation_summary`` MUST contain:\n"
             "    1. The failing **check_id(s)** that the remediation "
             "addresses — copy them verbatim from the gate's output.\n"
             "    2. The specific **file paths** to write, edit, or "

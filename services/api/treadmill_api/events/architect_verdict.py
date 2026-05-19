@@ -8,13 +8,22 @@ route to different downstream handlers in ``wf-architecture-resolve``.
 
 Per ADR-0049, the prior ``uncertain`` verdict was removed: the architect
 must always commit to one of the three actionable verdicts.
+
+Per ADR-0049, ``supersede`` was also repurposed: the architect now
+declares the plan-text itself was wrong (not just the code). When
+``verdict='supersede'`` the envelope MUST carry ``rewritten_description``
+— the corrected task description that becomes the child task's text.
+The supersede trigger reads this field; without it the trigger has no
+text to put on the child task row, so a missing-field supersede is a
+parse failure (forced ``ValueError`` by the validator below) rather than
+a silent dispatch with empty description.
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ArchitectVerdict(BaseModel):
@@ -33,3 +42,34 @@ class ArchitectVerdict(BaseModel):
     remediation_summary: str | None = Field(
         None, description="populated for amend / supersede verdicts"
     )
+    rewritten_description: str | None = Field(
+        None,
+        description=(
+            "Required for ``verdict='supersede'`` (ADR-0049). The corrected "
+            "task description that the supersede trigger writes onto the "
+            "child task row. Task text is immutable per row — supersede "
+            "creates a new row carrying this field's value, not an in-place "
+            "edit of the parent."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _supersede_requires_rewritten_description(self) -> "ArchitectVerdict":
+        """Enforce ``rewritten_description`` presence when verdict is
+        ``supersede`` (ADR-0049). A supersede with no rewritten text is
+        meaningless — the trigger would create a child task with the
+        parent's original (already-failed) description. Treat as a parse
+        failure so wf-feedback can re-run the architect with an explicit
+        envelope reminder.
+        """
+        if self.verdict == "supersede" and not (
+            self.rewritten_description and self.rewritten_description.strip()
+        ):
+            raise ValueError(
+                "ArchitectVerdict.verdict='supersede' requires a non-empty "
+                "``rewritten_description`` (the corrected task text that "
+                "becomes the child task's description). Per ADR-0049, "
+                "supersede creates a new task row carrying this field's "
+                "value; an empty rewrite has no child-task content."
+            )
+        return self
