@@ -232,7 +232,10 @@ def test_build_deployment_config_populates_every_yaml_key(synthetic_outputs):
     assert isinstance(config["aws_account_id"], str)
 
     # aws block — substring matching pulled the right values out of
-    # hash-suffixed keys.
+    # hash-suffixed keys. The synthetic outputs above do NOT include
+    # ``TreadmillObservabilityStack`` CFN outputs (the normal dev_local
+    # case: that stack is fully_remote-only), so the dev-local default
+    # for ``observability_collector_endpoint`` is stamped in.
     assert config["aws"] == {
         "events_topic_arn": (
             "arn:aws:sns:us-east-1:111111111111:treadmill-test-events"
@@ -261,6 +264,9 @@ def test_build_deployment_config_populates_every_yaml_key(synthetic_outputs):
         "deploy_events_dlq_url": (
             "https://sqs.us-east-1.amazonaws.com/111111111111/"
             "treadmill-test-deploy-events-dlq"
+        ),
+        "observability_collector_endpoint": (
+            "http://treadmill-otel-collector:4318"
         ),
     }
 
@@ -372,6 +378,52 @@ def test_build_deployment_config_missing_deploy_events_dlq_raises(synthetic_outp
             aws_account_id="111111111111",
             outputs=incomplete,
         )
+
+
+def test_build_deployment_config_stamps_dev_local_otel_collector_default(
+    synthetic_outputs,
+):
+    """When ``TreadmillObservabilityStack`` was not deployed (the normal
+    dev_local case), ``build_deployment_config`` stamps a container-DNS
+    default for ``observability_collector_endpoint`` so worker + API
+    containers on the ``treadmill-local`` docker network reach the
+    sibling ``treadmill-otel-collector`` container by name (not via
+    ``127.0.0.1``, which inside a container is the container itself)."""
+    # synthetic_outputs deliberately has no ObservabilityCollectorEndpoint;
+    # the absence is the normal dev_local case.
+    assert not any(
+        "ObservabilityCollectorEndpoint" in k for k in synthetic_outputs
+    )
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=synthetic_outputs,
+    )
+    assert config["aws"]["observability_collector_endpoint"] == (
+        "http://treadmill-otel-collector:4318"
+    )
+
+
+def test_build_deployment_config_cfn_observability_output_wins_over_default(
+    synthetic_outputs,
+):
+    """When ``TreadmillObservabilityStack`` IS deployed (fully_remote
+    crossover, or a dev_local operator who opted in), the CFN-provided
+    endpoint wins over the dev-local container-DNS default."""
+    outputs = dict(synthetic_outputs)
+    outputs["ObservabilityCollectorEndpointDEADBEEF"] = "http://10.0.1.42:4318"
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=outputs,
+    )
+    assert config["aws"]["observability_collector_endpoint"] == (
+        "http://10.0.1.42:4318"
+    )
 
 
 def test_build_deployment_config_matches_unhashed_output_keys(synthetic_outputs):

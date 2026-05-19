@@ -75,6 +75,28 @@ the YAML when the stack was not deployed (graceful no-op).
 """
 
 
+# ── Dev-local observability defaults ──────────────────────────────────────────
+#
+# ADR-0043 commits dev_local to running the observability stack as a local
+# docker compose unit (rather than CFN-managed EC2 like fully_remote). The
+# OTel Collector container is named ``treadmill-otel-collector`` and joins
+# the ``treadmill-local`` docker network (per ``docker-compose.local.yml``).
+# Worker + API containers run on the same network, so they resolve the
+# collector by container DNS — NOT by host loopback (``127.0.0.1``), which
+# inside a container is the container itself, not the host.
+#
+# These defaults are written into the dev_local YAML at ``init`` time when
+# the matching ``TreadmillObservabilityStack`` CFN outputs are absent (the
+# normal dev_local case — that stack is not deployed). The operator-facing
+# host-side URL (``http://localhost:4318`` for OTLP, ``http://localhost:3000``
+# for Grafana) is still served by the compose port mapping; that's a
+# separate concern from what we inject into the container env.
+
+_DEV_LOCAL_OBSERVABILITY_DEFAULTS: dict[str, str] = {
+    "observability_collector_endpoint": "http://treadmill-otel-collector:4318",
+}
+
+
 # ── Local-side defaults (compute lives on the laptop) ────────────────────────
 #
 # ADR-0016 commits dev-local to running Postgres + Redis + API as
@@ -264,6 +286,17 @@ def build_deployment_config(
         if yaml_key == "observability_grafana_admin_secret_name":
             raw_value = _extract_secret_name_from_arn(raw_value)
         aws_block[yaml_key] = raw_value
+
+    # ── Dev-local observability defaults ──────────────────────────────────
+    # When the CFN output is absent (the normal dev_local case —
+    # TreadmillObservabilityStack is fully_remote-only), fall back to the
+    # local container-DNS endpoint so worker + API containers reach the
+    # ``treadmill-otel-collector`` sibling on the ``treadmill-local``
+    # docker network. ``http://127.0.0.1:4318`` would resolve to the
+    # container itself, not the host; the compose port mapping serves the
+    # host-side URL but is irrelevant for container-to-container traffic.
+    for yaml_key, default_value in _DEV_LOCAL_OBSERVABILITY_DEFAULTS.items():
+        aws_block.setdefault(yaml_key, default_value)
 
     return {
         "deployment_id": deployment_id,

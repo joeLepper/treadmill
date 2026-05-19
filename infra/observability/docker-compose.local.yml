@@ -22,18 +22,38 @@ version: "3.8"
 #   - Tempo's environment block is overridden to clear the
 #     ${TEMPO_S3_BUCKET} / ${AWS_DEFAULT_REGION} requirement (the
 #     local backend doesn't read them).
+#   - Each service joins the external ``treadmill-local`` docker network
+#     in addition to the compose-default network. Worker + API
+#     containers run on ``treadmill-local`` (per ``runtime.NETWORK_NAME``)
+#     and need to reach ``treadmill-otel-collector:4318`` by container
+#     DNS to export OTLP traffic. The default compose network is kept so
+#     intra-stack traffic (Grafana → Loki/Tempo/Prometheus queries)
+#     continues to work unchanged. The ``treadmill-local`` network is
+#     declared ``external: true`` because ``treadmill-local up`` creates
+#     it before invoking ``docker compose up`` on this file.
 
 services:
+  otel-collector:
+    networks:
+      - default
+      - treadmill-local
+
   loki:
     volumes:
       - ./loki-config.yaml:/etc/loki/config.yaml:ro
       - treadmill-loki-data:/mnt/loki
     # Drop the host /mnt/loki bind mount from the base file.
+    networks:
+      - default
+      - treadmill-local
 
   prometheus:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - treadmill-prometheus-data:/prometheus
+    networks:
+      - default
+      - treadmill-local
 
   tempo:
     volumes:
@@ -46,6 +66,9 @@ services:
       # when the operator hasn't exported the var.
       - TEMPO_S3_BUCKET=
       - AWS_DEFAULT_REGION=
+    networks:
+      - default
+      - treadmill-local
 
   grafana:
     environment:
@@ -55,6 +78,17 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_SERVER_HTTP_PORT=3000
+    networks:
+      - default
+      - treadmill-local
+
+networks:
+  treadmill-local:
+    # Created by ``treadmill-local up`` before this compose stack is
+    # brought up (see ``runtime.NETWORK_NAME``). Declaring it external
+    # means compose attaches services to the existing network rather
+    # than creating a new project-prefixed network.
+    external: true
 
 volumes:
   treadmill-loki-data:
