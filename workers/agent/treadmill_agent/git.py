@@ -360,6 +360,36 @@ def head_sha(repo_dir: Path) -> str:
     ).strip()
 
 
+def get_head_diff_text(
+    repo_dir: Path, *, max_chars: int,
+) -> tuple[str, bool]:
+    """Return the diff of HEAD vs its parent, capped at ``max_chars``.
+
+    Returns ``(diff_text, truncated)`` where ``truncated`` is True iff the
+    original diff exceeded ``max_chars`` and the returned text was shortened.
+
+    Uses ``git show --no-color HEAD`` so the output excludes terminal color
+    codes (would inflate size + confuse the architect's prompt). The format
+    string is empty to suppress the commit-message preamble; the architect
+    only needs the unified diff body.
+
+    Used by the code disposition to capture the rejected diff when
+    author-side validation fails (the repo_dir is torn down at step end,
+    so this is the only surviving copy of the worker's attempted change).
+    See ADR-0048 follow-on (PR for ``capture-rejected-diff-for-architect``).
+    """
+    text = _capture(
+        [
+            "git", "-C", str(repo_dir), "show",
+            "--no-color", "--format=", "HEAD",
+        ],
+    )
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars]
+    return text, truncated
+
+
 def _capture(cmd: list[str], *, cwd: Path | None = None) -> str:
     logger.info("$ %s", " ".join(cmd))
     result = subprocess.run(

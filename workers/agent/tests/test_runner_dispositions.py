@@ -482,6 +482,135 @@ def test_code_handler_captures_validation_stderr(tmp_path: Path) -> None:
     assert "error message" in results[0]["log_excerpt"]
 
 
+def test_code_handler_captures_rejected_diff_on_validation_fail(
+    tmp_path: Path,
+) -> None:
+    """When author-side validation fails, the rejected diff is bundled
+    into the StepOutput payload so a downstream architect can inspect
+    the actual code change. (ADR-0048 follow-on, PR
+    ``capture-rejected-diff-for-architect``.)"""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello rejected world\n")
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="test-check",
+                kind="deterministic",
+                description="always fails",
+                script="exit 1",
+                prompt=None,
+            )
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "fail"
+    # The diff text the worker committed is in the payload.
+    assert "rejected_diff" in out.payload
+    diff_text = out.payload["rejected_diff"]
+    assert diff_text  # non-empty
+    # Unified-diff shape: ``+`` lines for the added file content.
+    assert "NEW.md" in diff_text
+    assert "hello rejected world" in diff_text
+    # Small diff → not truncated.
+    assert out.payload["rejected_diff_truncated"] is False
+
+
+def test_code_handler_truncates_large_rejected_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A diff larger than ``_REJECTED_DIFF_MAX_CHARS`` is truncated and
+    flagged via ``rejected_diff_truncated: True``."""
+    from treadmill_agent.api_client import TaskValidationInfo
+    from treadmill_agent.runner_dispositions import code as code_mod
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("a\n")
+
+    # Shrink the cap so we don't have to materialize 50K+ chars on disk.
+    monkeypatch.setattr(code_mod, "_REJECTED_DIFF_MAX_CHARS", 20)
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="test-check",
+                kind="deterministic",
+                description="always fails",
+                script="exit 1",
+                prompt=None,
+            )
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "fail"
+    assert out.payload["rejected_diff_truncated"] is True
+    assert len(out.payload["rejected_diff"]) == 20
+
+
+def test_code_handler_survives_rejected_diff_capture_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If diff capture itself fails (e.g., ``git show`` errors), the
+    step still returns its validation-failure StepOutput; the diff
+    enhancement is non-fatal."""
+    from treadmill_agent.api_client import TaskValidationInfo
+    from treadmill_agent.runner_dispositions import code as code_mod
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    def _boom(*a: Any, **kw: Any) -> tuple[str, bool]:
+        raise git.GitOpsError("synthetic failure")
+
+    monkeypatch.setattr(code_mod.git, "get_head_diff_text", _boom)
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="test-check",
+                kind="deterministic",
+                description="always fails",
+                script="exit 1",
+                prompt=None,
+            )
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "fail"
+    # validation_results still present — that's the load-bearing field.
+    assert "validation_results" in out.payload
+    assert len(out.payload["validation_results"]) == 1
+    # Diff fields omitted on capture failure.
+    assert "rejected_diff" not in out.payload
+    assert "rejected_diff_truncated" not in out.payload
+
+
+def test_code_handler_does_not_capture_rejected_diff_when_passing(
+    tmp_path: Path,
+) -> None:
+    """When all validations pass, the push proceeds — the diff-capture
+    code path is not reached and ``rejected_diff`` does not leak into
+    the success payload."""
+    from treadmill_agent.api_client import TaskValidationInfo
+
+    _bare, clone = _init_bare_and_clone(tmp_path)
+    (clone / "NEW.md").write_text("hello\n")
+
+    ctx = _disp_ctx(repo_dir=clone, task_validations=[
+            TaskValidationInfo(
+                id="test-check",
+                kind="deterministic",
+                description="always passes",
+                script="exit 0",
+                prompt=None,
+            )
+        ])
+
+    out = handle_code(ctx)
+    assert out.decision == "pushed"
+    assert "rejected_diff" not in out.payload
+    assert "rejected_diff_truncated" not in out.payload
+
+
 # ── review handler ──────────────────────────────────────────────────────────
 
 

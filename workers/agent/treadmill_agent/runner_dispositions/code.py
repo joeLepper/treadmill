@@ -39,6 +39,15 @@ logger = logging.getLogger("treadmill.agent.code")
 
 _SOFT_EMPTY_DIFF_WORKFLOWS: frozenset[str] = frozenset({"wf-feedback"})
 
+# Cap on the rejected-diff text we bundle into the validation-fail
+# StepOutput payload. 50_000 chars (~1 MB UTF-8 worst case) is well under
+# Postgres JSONB practical size limits and large enough to capture the
+# kind of feedback diff the architect actually needs to evaluate
+# (typically a few hundred lines). When the worker's diff exceeds this
+# cap we truncate + flag ``rejected_diff_truncated`` so the architect
+# prompt can mention the truncation in its reasoning.
+_REJECTED_DIFF_MAX_CHARS: int = 50_000
+
 
 def handle(ctx: DispositionContext) -> StepOutput:
     """Stage everything, fail on empty diff (real-Claude path),
@@ -235,6 +244,27 @@ def _run_author_validations(ctx: DispositionContext) -> StepOutput | None:
                 for r in results
             ]
         }
+        # Capture the rejected diff so a downstream architect (PR #198's
+        # ``maybe_dispatch_architect_on_feedback_validation_fail``) can
+        # inspect the actual code change that was rejected, not just the
+        # worker's prose summary + log excerpts. The diff was committed
+        # locally above via ``git.commit_all`` but is never pushed; the
+        # repo_dir is torn down at step end so this is the only surviving
+        # artifact of the worker's attempted change. Wrapped in try/except
+        # so a failure here can't crash the step (validation_results is
+        # the load-bearing field — the diff is an enhancement).
+        try:
+            rejected_diff, truncated = git.get_head_diff_text(
+                ctx.repo_dir, max_chars=_REJECTED_DIFF_MAX_CHARS,
+            )
+            payload["rejected_diff"] = rejected_diff
+            payload["rejected_diff_truncated"] = truncated
+        except Exception as e:  # noqa: BLE001 — non-fatal enhancement
+            logger.warning(
+                "Failed to capture rejected diff for architect "
+                "(step %s): %s; continuing without it",
+                ctx.ctx.step_id, e,
+            )
         return StepOutput(
             summary=summary,
             decision="fail",

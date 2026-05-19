@@ -525,3 +525,53 @@ def test_github_mode_round_trip_never_leaks_pat_sentinel(
             assert _PAT_SENTINEL not in arg, (
                 f"PAT sentinel leaked into argv of {call['bin']}: {call}"
             )
+
+
+# ── get_head_diff_text (rejected-diff capture for architect) ─────────────────
+
+
+def test_get_head_diff_text_returns_unified_diff(
+    bare_repos_dir: Path, workspace_dir: Path,
+) -> None:
+    """``get_head_diff_text`` returns the unified diff of HEAD vs its
+    parent, without color codes and without the commit-message preamble.
+    Used by the code disposition to capture the worker's rejected diff
+    when author-side validation fails."""
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    git.checkout_branch(repo_dir, "task/diff-capture")
+    (repo_dir / "feature.py").write_text("def f():\n    return 42\n")
+    git.commit_all(repo_dir, "add feature")
+
+    text, truncated = git.get_head_diff_text(repo_dir, max_chars=10_000)
+    assert truncated is False
+    # Unified-diff anatomy: file header + hunk header + added lines.
+    assert "diff --git" in text
+    assert "feature.py" in text
+    assert "+def f():" in text
+    assert "+    return 42" in text
+    # The empty ``--format=`` suppresses the commit-message preamble.
+    assert "add feature" not in text
+
+
+def test_get_head_diff_text_truncates_when_over_cap(
+    bare_repos_dir: Path, workspace_dir: Path,
+) -> None:
+    """When the diff exceeds ``max_chars``, the returned text is exactly
+    ``max_chars`` long and the truncated flag is True."""
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    git.checkout_branch(repo_dir, "task/big-diff")
+    # 5K lines of distinct content → diff is many KB.
+    (repo_dir / "big.txt").write_text("\n".join(f"line {i}" for i in range(5000)))
+    git.commit_all(repo_dir, "big file")
+
+    text, truncated = git.get_head_diff_text(repo_dir, max_chars=500)
+    assert truncated is True
+    assert len(text) == 500
