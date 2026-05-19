@@ -125,12 +125,34 @@ class DeployWatcher:
     def _process_message(self, message: dict[str, Any]) -> None:
         receipt = message["ReceiptHandle"]
 
-        # SQS body is an SNS notification; inner Message is the Treadmill event.
+        # SQS body is an SNS notification; inner Message is the Treadmill event
+        # record produced by ``eventbus._build_record``. Its shape is::
+        #
+        #   {"event_id", "entity_type", "action",
+        #    "task_id", "plan_id", "run_id", "step_id",
+        #    "payload": {<typed-payload fields>}}
+        #
+        # For ``github.pr_merged`` (the only action subscribed via the SNS
+        # filter policy on the deploy-events topic), the inner ``payload``
+        # carries ``pr_number`` + ``merged_sha`` per ``GithubPrMerged``.
         sns_notification = json.loads(message["Body"])
-        payload = json.loads(sns_notification["Message"])
+        record = json.loads(sns_notification["Message"])
+        payload = record.get("payload") or {}
 
-        pr_number: int = payload["pr_number"]
-        merge_commit_sha: str = payload["merge_commit_sha"]
+        try:
+            pr_number: int = payload["pr_number"]
+            merge_commit_sha: str = payload["merged_sha"]
+        except KeyError as exc:
+            # Malformed message — log + ack so we don't re-receive into the DLQ
+            # forever. The filter policy is supposed to gate this to pr_merged
+            # only, but a schema drift on the producer side shouldn't wedge the
+            # watcher; surface clearly + move on.
+            logger.error(
+                "skipping malformed deploy-event (missing %s); record=%s",
+                exc, record,
+            )
+            self._ack_fn(receipt)
+            return
 
         logger.info("processing pr=#%d sha=%.8s", pr_number, merge_commit_sha)
 

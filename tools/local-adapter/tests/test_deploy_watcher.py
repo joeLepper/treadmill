@@ -20,16 +20,53 @@ from treadmill_local.deploy_watcher import (
 
 
 def _sqs_msg(pr_number: int, sha: str) -> dict:
-    """Build a minimal SQS message with the SNS notification wrapper."""
+    """Build a minimal SQS message with the SNS notification wrapper.
+
+    The inner ``Message`` matches the record shape produced by the API's
+    ``eventbus._build_record`` for a ``github.pr_merged`` event: top-level
+    metadata (entity_type/action/...) plus a nested ``payload`` carrying
+    the typed ``GithubPrMerged`` fields (``pr_number``, ``merged_sha``).
+    Earlier versions of this helper put the typed fields at the top level,
+    which masked an envelope bug in the watcher (KeyError 'pr_number' on
+    real SNS messages) — keep this contract aligned with eventbus.py.
+    """
     return {
         "ReceiptHandle": f"rh-{pr_number}",
         "Body": json.dumps({
             "Type": "Notification",
             "MessageId": "mid",
             "Message": json.dumps({
-                "pr_number": pr_number,
-                "merge_commit_sha": sha,
+                "event_id": f"evt-{pr_number}",
+                "entity_type": "github",
+                "action": "pr_merged",
+                "task_id": None,
+                "plan_id": None,
+                "run_id": None,
+                "step_id": None,
+                "payload": {
+                    "repo": "joeLepper/treadmill",
+                    "pr_number": pr_number,
+                    "sender": "tester",
+                    "merged_sha": sha,
+                    "head_branch": f"feat-{pr_number}",
+                },
             }),
+        }),
+    }
+
+
+def _sqs_msg_malformed(receipt: str, inner_message: dict) -> dict:
+    """Build a minimal SQS message with an explicitly-shaped inner Message.
+
+    Lets tests force missing/extra fields to verify the watcher acks-and-skips
+    rather than re-receiving forever on a schema-drift event.
+    """
+    return {
+        "ReceiptHandle": receipt,
+        "Body": json.dumps({
+            "Type": "Notification",
+            "MessageId": "mid",
+            "Message": json.dumps(inner_message),
         }),
     }
 
@@ -242,3 +279,45 @@ def test_pr_not_found_acks_and_skips(mock_run, tmp_path):
 
     mock_run.assert_not_called()
     assert acked == ["rh-99"]
+
+
+# ── Malformed-message handling (regression for KeyError stall) ───────────────
+
+
+@patch("subprocess.run")
+def test_missing_pr_number_acks_and_skips(mock_run, tmp_path):
+    """A pr_merged record that's missing ``pr_number`` should be logged + acked,
+    not stuck on the queue. Earlier code raised KeyError out of the poll loop,
+    which left the message visible and Treadmill's pollers re-receiving it
+    every 30s indefinitely (until maxReceiveCount=3 → DLQ)."""
+    watcher, acked = _make_watcher(tmp_path)
+    msg = _sqs_msg_malformed(
+        "rh-missing-pr",
+        {
+            "event_id": "evt-x",
+            "entity_type": "github",
+            "action": "pr_merged",
+            "payload": {"repo": "x/y", "sender": "z", "merged_sha": "abc"},
+        },
+    )
+
+    watcher._process_message(msg)
+
+    mock_run.assert_not_called()
+    assert acked == ["rh-missing-pr"]
+
+
+@patch("subprocess.run")
+def test_missing_payload_block_acks_and_skips(mock_run, tmp_path):
+    """A record with no ``payload`` block at all (schema drift / truncated
+    publish) should also ack-and-skip rather than wedge the watcher."""
+    watcher, acked = _make_watcher(tmp_path)
+    msg = _sqs_msg_malformed(
+        "rh-no-payload",
+        {"event_id": "evt-x", "entity_type": "github", "action": "pr_merged"},
+    )
+
+    watcher._process_message(msg)
+
+    mock_run.assert_not_called()
+    assert acked == ["rh-no-payload"]
