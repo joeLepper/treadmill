@@ -218,15 +218,20 @@ def test_role_model_tier_invariant() -> None:
       not a concern, structured-output reliability is — bumped 2026-05-15
       after haiku failed to emit the required JSON envelope on a
       deadlock arbitration)
-    * everyone else        → haiku (analyzers, reviewer, validator,
-      code-author, doc-author, documentarian — cheap tier; rules
-      override per ADR-0029 Q29.b when an llm-judge needs more
-      capability. role-code-author was briefly on sonnet 2026-05-14 but
-      reverted same-day after the bump didn't address the actual failure
-      modes, which turned out to be harness gaps not model quality.)
+    * ``role-reviewer``    → sonnet (binary approve/request_changes call
+      on nuanced diffs; haiku defaulted to changes_requested under
+      uncertainty even with PR #162's anti-spurious forbid, triggering
+      expensive architect-override cycles on most PRs — bumped
+      2026-05-18 after observing the cycle on PR #169)
+    * everyone else        → haiku (analyzers, validator, code-author,
+      doc-author, documentarian — cheap tier; rules override per
+      ADR-0029 Q29.b when an llm-judge needs more capability.
+      role-code-author was briefly on sonnet 2026-05-14 but reverted
+      same-day after the bump didn't address the actual failure modes,
+      which turned out to be harness gaps not model quality.)
     """
     SONNET_MODEL = "claude-sonnet-4-6"
-    SONNET_ROLES = {"role-architect"}
+    SONNET_ROLES = {"role-architect", "role-reviewer"}
     roles_by_id = {r["id"]: r for r in _all_roles()}
     assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
         f"role-planner must use {PLANNER_MODEL!r}"

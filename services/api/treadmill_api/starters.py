@@ -312,7 +312,30 @@ _ROLES: list[dict[str, Any]] = [
     },
     {
         "id": "role-reviewer",
-        "model": WORKER_MODEL,
+        # Bumped to sonnet 2026-05-18. Haiku struggled with the binary
+        # approve/request_changes call on nuanced diffs and defaulted
+        # to changes_requested under uncertainty despite the
+        # default-to-approve prompt + the PR #162 anti-spurious forbid.
+        # Observed today: PR #169 cycled wf-review → wf-feedback →
+        # wf-architecture-resolve → accept-as-is override before the
+        # auto-merge cooling-off fired. Each cycle was a worker step
+        # plus an LLM call; the architect (already sonnet) eventually
+        # made the same approve call the reviewer should have made.
+        #
+        # Sonnet matches the architect's tier for the same kind of
+        # binary judgment, eliminating the override-cycle on most PRs.
+        # Net cost trade-off: one sonnet call per PR's review step
+        # vs. roughly three to five LLM calls across the
+        # review→feedback→architect-resolve loop. Sonnet wins on cost
+        # when the deadlock-resolution path was firing on a majority
+        # of PRs (which it was, 2026-05-18 evidence).
+        #
+        # Reviewer-only bump — wf-author / wf-feedback / wf-ci-fix
+        # stay on haiku. Those roles are higher-frequency (per retry,
+        # per PR cycle), and haiku's prompt-adherence is sufficient
+        # when the role's output is open-ended code rather than a
+        # binary judgment.
+        "model": "claude-sonnet-4-6",
         "output_kind": OutputKind.REVIEW,
         "system_prompt": (
             "You are the Treadmill reviewer — single step of "
