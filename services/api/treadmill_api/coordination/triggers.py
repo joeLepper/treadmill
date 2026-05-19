@@ -127,6 +127,15 @@ DOCS_CURRENT_CHECK_ID = "docs-current-with-pr"
 # instead of wf-feedback (which requires an existing PR to remediate).
 _NO_CHANGES_ERROR_SIGNATURE = "Claude Code produced no changes to commit"
 
+# Substring present in git push stderr when GitHub (or the lease check)
+# rejects the push — branch protection rule, stale force-with-lease, etc.
+# Appears in both "[remote rejected]" and "[rejected] ... (stale info)"
+# cases because git always appends "error: failed to push some refs to ..."
+# when any ref is rejected.  Used to route step.failed to
+# wf-architecture-resolve (ADR-0048) so the architect can supersede the
+# rejected branch rather than cycling through wf-feedback.
+_REMOTE_REJECTION_ERROR_SIGNATURE = "failed to push some refs"
+
 
 # Conclusions that represent a genuine CI failure — the only ones that
 # should fire the CI-fix workflow. Mirrors bunkhouse's
@@ -642,6 +651,12 @@ async def maybe_dispatch_feedback_on_step_failed(
             session, dispatcher, step_id=step_id, workflow_id=workflow_id
         )
 
+    # Route: remote-rejected push goes to the architect (ADR-0048).
+    if row.step_error and _REMOTE_REJECTION_ERROR_SIGNATURE in row.step_error:
+        return await maybe_dispatch_architect_on_author_remote_rejection(
+            session, dispatcher, step_id=step_id, workflow_id=workflow_id
+        )
+
     if await _is_capped(session, row.task_id, FEEDBACK_WORKFLOW_ID):
         logger.warning(
             "feedback (step.failed): %s capped for task %s (>=%d prior runs); skipping",
@@ -761,6 +776,102 @@ async def maybe_dispatch_architect_on_author_no_diff(
             task=task,
             workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
             trigger="self:wf-author-no-diff",
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
+async def maybe_dispatch_architect_on_author_remote_rejection(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    workflow_id: str,
+) -> uuid.UUID | None:
+    """Dispatch ``wf-architecture-resolve`` when a wf-author step.failed
+    carries a remote-rejected push error (ADR-0048).
+
+    When ``git push --force-with-lease`` is rejected — by GitHub branch
+    protection, a stale lease from a concurrent writer, or any other
+    remote-side guard — the step fails with stderr containing
+    ``_REMOTE_REJECTION_ERROR_SIGNATURE``.  No PR was opened, so
+    wf-feedback has nothing to remediate.  The architect reviews the
+    situation and almost always verdicts ``supersede`` to close the
+    rejected branch and start fresh.
+
+    Skip conditions are identical to ``maybe_dispatch_architect_on_author_no_diff``:
+      * ``workflow_id`` is not ``'wf-author'``.
+      * The step's error doesn't contain ``_REMOTE_REJECTION_ERROR_SIGNATURE``.
+      * Owning task can't be resolved.
+      * No ``WorkflowVersion`` for ``wf-architecture-resolve`` (un-seeded).
+      * Task already has >= ``ARCHITECTURE_RESOLVE_MAX_ATTEMPTS`` runs (cap).
+
+    Dedup key:
+        ``wf-architecture-resolve:<repo>:remote-rejected-run=<wf_author_run_id>``
+
+    Distinct namespace from ``author-no-diff-run`` so both failure shapes
+    can each fire one architecture-resolve without colliding.
+    """
+    if workflow_id != AUTHOR_WORKFLOW_ID:
+        return None
+
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+            WorkflowRunStep.error.label("step_error"),
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(
+            WorkflowVersion,
+            WorkflowVersion.id == WorkflowRun.workflow_version_id,
+        )
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "architect (author-remote-rejection): no run/task resolvable for step %s; skipping",
+            step_id,
+        )
+        return None
+    if row.workflow_id != AUTHOR_WORKFLOW_ID:
+        return None
+
+    if not row.step_error or _REMOTE_REJECTION_ERROR_SIGNATURE not in row.step_error:
+        return None
+
+    if await _is_capped(session, row.task_id, ARCHITECTURE_RESOLVE_WORKFLOW_ID):
+        logger.warning(
+            "architect (author-remote-rejection): %s capped for task %s "
+            "(>=%d prior runs); operator must intervene",
+            ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            row.task_id,
+            ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {"repo": row.repo, "author_remote_reject_run_id": str(row.run_id)}
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            trigger="self:wf-author-remote-rejection",
         )
 
     return await maybe_dispatch_with_dedup(

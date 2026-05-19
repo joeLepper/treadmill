@@ -1,4 +1,5 @@
-"""Unit tests for wf-author no-diff routing to wf-architecture-resolve.
+"""Unit tests for wf-author no-diff and remote-rejection routing to
+wf-architecture-resolve.
 
 When a wf-author step.failed carries the no-changes error signature
 ("Claude Code produced no changes to commit"), the trigger must dispatch
@@ -6,12 +7,18 @@ wf-architecture-resolve — NOT wf-feedback. The no-diff case means no PR
 was ever opened, so wf-feedback has nothing to remediate; the architect
 reviews the task spec and emits amend/supersede/accept-as-is.
 
+When a wf-author step.failed carries a remote-rejected push error
+("failed to push some refs"), the trigger must also dispatch
+wf-architecture-resolve — NOT wf-feedback. No PR was opened, so the
+architect decides (almost always supersede to start fresh on a new branch).
+
 Other step.failed shapes (worker crash, author-validations rejected)
 continue to route to wf-feedback as before.
 
 Dedup coverage:
   - The dedup key is keyed on the wf-author run id, not the step id.
-  - Namespace: ``wf-architecture-resolve:<repo>:author-no-diff-run=<run_id>``
+  - No-diff namespace:  ``wf-architecture-resolve:<repo>:author-no-diff-run=<run_id>``
+  - Remote-rejection namespace: ``wf-architecture-resolve:<repo>:remote-rejected-run=<run_id>``
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ import pytest
 
 from treadmill_api.coordination.triggers import (
     maybe_dispatch_architect_on_author_no_diff,
+    maybe_dispatch_architect_on_author_remote_rejection,
     maybe_dispatch_feedback_on_step_failed,
 )
 
@@ -512,3 +520,297 @@ def test_deadlock_feedback_key_still_works() -> None:
         },
     )
     assert key == f"wf-architecture-resolve:example/repo:deadlock-feedback-run={run_id}"
+
+
+# ── Remote-rejection routing ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_remote_rejection_error_dispatches_architect_not_feedback() -> None:
+    """A wf-author step.failed with the remote-rejected push error must dispatch
+    wf-architecture-resolve, NOT wf-feedback."""
+    step_id = str(uuid.uuid4())
+    run_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    row = _make_row(
+        run_id=run_id,
+        task_id=task_id,
+        step_error=(
+            "command failed: git push --force-with-lease -u origin task/abc\n"
+            "stdout:\nstderr:\n"
+            "To https://github.com/example/repo\n"
+            " ! [rejected]        task/abc -> task/abc (stale info)\n"
+            "error: failed to push some refs to 'https://github.com/example/repo'"
+        ),
+    )
+    architect_calls: list[dict] = []
+
+    async def _stub_architect(
+        session: Any,
+        dispatcher: Any,
+        *,
+        step_id: str,
+        workflow_id: str,
+    ) -> uuid.UUID:
+        architect_calls.append({"step_id": step_id, "workflow_id": workflow_id})
+        return uuid.uuid4()
+
+    session = AsyncMock()
+    r1 = MagicMock()
+    r1.first.return_value = row
+    session.execute = AsyncMock(return_value=r1)
+    session.get = AsyncMock(return_value=None)
+
+    dispatcher = MagicMock()
+
+    with patch(
+        "treadmill_api.coordination.triggers.maybe_dispatch_architect_on_author_remote_rejection",
+        side_effect=_stub_architect,
+    ):
+        result = await maybe_dispatch_feedback_on_step_failed(
+            session,
+            dispatcher,
+            step_id=step_id,
+            workflow_id="wf-author",
+        )
+
+    assert len(architect_calls) == 1, (
+        "remote-rejection error must route to maybe_dispatch_architect_on_author_remote_rejection"
+    )
+    assert architect_calls[0]["step_id"] == step_id
+    assert architect_calls[0]["workflow_id"] == "wf-author"
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_remote_rejection_error_does_not_dispatch_feedback() -> None:
+    """Confirming the negative: wf-feedback must NOT be dispatched when the
+    error contains the remote-rejection signature."""
+    step_id = str(uuid.uuid4())
+    row = _make_row(
+        step_error="error: failed to push some refs to 'https://github.com/example/repo'",
+    )
+
+    session = AsyncMock()
+    r1 = MagicMock()
+    r1.first.return_value = row
+    session.execute = AsyncMock(return_value=r1)
+
+    feedback_dispatched: list[str] = []
+
+    async def _stub_architect(*args: Any, **kwargs: Any) -> uuid.UUID:
+        return uuid.uuid4()
+
+    async def _stub_dedup(
+        session: Any,
+        *,
+        workflow_id: str,
+        payload: Any,
+        dispatch_fn: Any,
+    ) -> uuid.UUID:
+        feedback_dispatched.append(workflow_id)
+        return uuid.uuid4()
+
+    dispatcher = MagicMock()
+
+    with (
+        patch(
+            "treadmill_api.coordination.triggers.maybe_dispatch_architect_on_author_remote_rejection",
+            side_effect=_stub_architect,
+        ),
+        patch(
+            "treadmill_api.coordination.triggers.maybe_dispatch_with_dedup",
+            side_effect=_stub_dedup,
+        ),
+    ):
+        await maybe_dispatch_feedback_on_step_failed(
+            session,
+            dispatcher,
+            step_id=step_id,
+            workflow_id="wf-author",
+        )
+
+    assert "wf-feedback" not in feedback_dispatched, (
+        "wf-feedback must NOT be dispatched for the remote-rejection error shape"
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_rejection_distinguished_from_no_diff() -> None:
+    """Remote-rejection and no-diff use different dedup namespaces, so both
+    can fire independently for the same task when each shape occurs."""
+    from treadmill_api.coordination.dispatch_dedup import build_dedup_key
+
+    run_id = str(uuid.uuid4())
+
+    no_diff_key = build_dedup_key(
+        "wf-architecture-resolve",
+        {"repo": "example/repo", "author_no_diff_run_id": run_id},
+    )
+    remote_reject_key = build_dedup_key(
+        "wf-architecture-resolve",
+        {"repo": "example/repo", "author_remote_reject_run_id": run_id},
+    )
+
+    assert no_diff_key != remote_reject_key, (
+        "no-diff and remote-rejection dedup keys must be distinct"
+    )
+    assert "author-no-diff-run=" in (no_diff_key or "")
+    assert "remote-rejected-run=" in (remote_reject_key or "")
+
+
+# ── maybe_dispatch_architect_on_author_remote_rejection unit tests ────────────
+
+
+@pytest.mark.asyncio
+async def test_remote_rejection_helper_skips_non_wf_author() -> None:
+    """The helper short-circuits for non-wf-author workflows."""
+    session = AsyncMock()
+
+    result = await maybe_dispatch_architect_on_author_remote_rejection(
+        session,
+        None,  # type: ignore[arg-type]
+        step_id=str(uuid.uuid4()),
+        workflow_id="wf-feedback",
+    )
+
+    assert result is None
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_rejection_helper_skips_when_error_not_rejection() -> None:
+    """The helper returns None when the step error is not the remote-rejection
+    signature."""
+    step_id = str(uuid.uuid4())
+    row = _make_row(step_error="worker terminated: OOM killed")
+
+    session = AsyncMock()
+    r1 = MagicMock()
+    r1.first.return_value = row
+    session.execute = AsyncMock(return_value=r1)
+
+    result = await maybe_dispatch_architect_on_author_remote_rejection(
+        session,
+        None,  # type: ignore[arg-type]
+        step_id=step_id,
+        workflow_id="wf-author",
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_remote_rejection_helper_dispatches_on_rejection_error() -> None:
+    """Happy path: remote-rejection error dispatches wf-architecture-resolve
+    with the remote-rejected-run dedup key."""
+    step_id = str(uuid.uuid4())
+    run_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+    task = _fake_task(task_id)
+
+    row = _make_row(
+        run_id=run_id,
+        task_id=task_id,
+        step_error="error: failed to push some refs to 'https://github.com/example/repo'",
+    )
+
+    dispatched: list[dict] = []
+
+    async def _stub_dedup(
+        session: Any,
+        *,
+        workflow_id: str,
+        payload: Any,
+        dispatch_fn: Any,
+    ) -> uuid.UUID:
+        dispatched.append({"workflow_id": workflow_id, "payload": payload})
+        return uuid.uuid4()
+
+    session = _make_session(row=row, cap_count=0, task=task)
+    dispatcher = MagicMock()
+
+    with patch(
+        "treadmill_api.coordination.triggers.maybe_dispatch_with_dedup",
+        side_effect=_stub_dedup,
+    ):
+        result = await maybe_dispatch_architect_on_author_remote_rejection(
+            session,
+            dispatcher,
+            step_id=step_id,
+            workflow_id="wf-author",
+        )
+
+    assert len(dispatched) == 1
+    assert dispatched[0]["workflow_id"] == "wf-architecture-resolve"
+    assert dispatched[0]["payload"]["author_remote_reject_run_id"] == str(run_id)
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_remote_rejection_helper_respects_cap() -> None:
+    """The helper skips when wf-architecture-resolve is already at its cap."""
+    step_id = str(uuid.uuid4())
+    run_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    row = _make_row(
+        run_id=run_id,
+        task_id=task_id,
+        step_error="error: failed to push some refs to 'https://github.com/example/repo'",
+    )
+
+    from treadmill_api.coordination.triggers import ARCHITECTURE_RESOLVE_MAX_ATTEMPTS
+
+    session = _make_session(row=row, cap_count=ARCHITECTURE_RESOLVE_MAX_ATTEMPTS)
+    dispatcher = MagicMock()
+
+    result = await maybe_dispatch_architect_on_author_remote_rejection(
+        session,
+        dispatcher,
+        step_id=step_id,
+        workflow_id="wf-author",
+    )
+
+    assert result is None
+
+
+# ── Remote-rejection dedup key shape ─────────────────────────────────────────
+
+
+def test_remote_rejected_run_dedup_key_shape() -> None:
+    """The dedup key for remote-rejection uses the
+    ``remote-rejected-run=<wf_author_run_id>`` namespace."""
+    from treadmill_api.coordination.dispatch_dedup import build_dedup_key
+
+    run_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    key = build_dedup_key(
+        "wf-architecture-resolve",
+        {
+            "repo": "example/repo",
+            "author_remote_reject_run_id": run_id,
+        },
+    )
+    assert key == f"wf-architecture-resolve:example/repo:remote-rejected-run={run_id}"
+
+
+def test_remote_rejected_dedup_key_keyed_on_run_id_not_step_id() -> None:
+    """The remote-rejection dedup key discriminator is the wf-author run id."""
+    from treadmill_api.coordination.dispatch_dedup import build_dedup_key
+
+    run_id_a = str(uuid.uuid4())
+    run_id_b = str(uuid.uuid4())
+
+    key_a = build_dedup_key(
+        "wf-architecture-resolve",
+        {"repo": "example/repo", "author_remote_reject_run_id": run_id_a},
+    )
+    key_b = build_dedup_key(
+        "wf-architecture-resolve",
+        {"repo": "example/repo", "author_remote_reject_run_id": run_id_b},
+    )
+
+    assert key_a != key_b, "different run ids must produce different dedup keys"
+    assert "remote-rejected-run=" in (key_a or "")
+    assert run_id_a in (key_a or "")

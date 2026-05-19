@@ -243,7 +243,7 @@ def _build_wf_author_key(payload: dict[str, Any]) -> str | None:
 
 
 def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
-    """Two dispatch sources; namespace determined by discriminator field.
+    """Three dispatch sources; namespace determined by discriminator field.
 
     ``deadlock-feedback-run=<run_id>``
         ADR-0038 ralph-loop deadlock arbitration. One arbitration per
@@ -256,6 +256,12 @@ def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
         ADR-0048 wf-author no-diff trigger. One arbitration per
         wf-author run that produced no changes to commit. The architect
         reviews the task spec (amend/supersede/accept-as-is).
+
+    ``remote-rejected-run=<run_id>``
+        ADR-0048 wf-author remote-rejection trigger. One arbitration per
+        wf-author run whose git push was rejected (branch protection,
+        stale force-with-lease, etc.). The architect almost always
+        verdicts supersede to start fresh on a new branch.
     """
     repo = payload.get("repo")
     if not repo:
@@ -271,6 +277,12 @@ def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
         return (
             f"wf-architecture-resolve:{repo}:"
             f"author-no-diff-run={author_no_diff_run_id}"
+        )
+    author_remote_reject_run_id = payload.get("author_remote_reject_run_id")
+    if author_remote_reject_run_id:
+        return (
+            f"wf-architecture-resolve:{repo}:"
+            f"remote-rejected-run={author_remote_reject_run_id}"
         )
     return None
 
