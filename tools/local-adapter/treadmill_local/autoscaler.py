@@ -25,6 +25,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,58 @@ class AutoscalerTick:
     current: int
     desired: int
     started: int
+    reaped: int = 0
+
+
+# Worker containers exit fast (ADR-0018: one-shot per message). Without
+# reaping they pile up — 102 exited workers observed in dev-local on
+# 2026-05-19. The autoscaler reaps any container matching the worker
+# label set whose FinishedAt is older than this threshold. The grace
+# window lets an operator inspect logs from a just-exited worker before
+# the container disappears.
+_REAP_AGE_SECONDS = 30
+
+
+def _container_age_seconds(finished_at: str | None, now: float) -> float | None:
+    """Return age in seconds from a Docker ``FinishedAt`` ISO timestamp.
+
+    Returns ``None`` when the timestamp is missing or the
+    ``0001-01-01T00:00:00Z`` sentinel Docker returns for containers
+    that haven't finished yet (which shouldn't appear under a
+    ``status=exited`` filter, but be defensive).
+    """
+    if not finished_at:
+        return None
+    if finished_at.startswith("0001-01-01"):
+        return None
+    # Docker emits e.g. "2026-05-19T12:34:56.123456789Z". Python's
+    # fromisoformat doesn't accept the trailing Z and chokes on
+    # nanosecond precision pre-3.11. Normalize both.
+    s = finished_at
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    if "." in s:
+        head, _, tail = s.partition(".")
+        # tail looks like "123456789+00:00" — split fractional from tz.
+        frac = ""
+        tz = ""
+        for i, ch in enumerate(tail):
+            if ch in "+-":
+                frac = tail[:i]
+                tz = tail[i:]
+                break
+        else:
+            frac = tail
+        # Truncate fractional seconds to microseconds (6 digits).
+        frac = frac[:6]
+        s = f"{head}.{frac}{tz}" if frac else f"{head}{tz}"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return now - dt.timestamp()
 
 
 class Autoscaler:
@@ -59,6 +112,7 @@ class Autoscaler:
         min_count: int,
         max_count: int,
         tick_seconds: float = 2.0,
+        reap_dead_workers_fn: Callable[[], int] | None = None,
     ) -> None:
         if min_count < 0:
             raise ValueError(f"min_count must be >= 0, got {min_count}")
@@ -67,13 +121,20 @@ class Autoscaler:
         self.queue_depth_fn = queue_depth_fn
         self.worker_count_fn = worker_count_fn
         self.start_worker_fn = start_worker_fn
+        self.reap_dead_workers_fn = reap_dead_workers_fn or (lambda: 0)
         self.min_count = min_count
         self.max_count = max_count
         self.tick_seconds = tick_seconds
         self._stop_event = threading.Event()
 
     def tick(self) -> AutoscalerTick:
-        """Run one iteration of the control loop."""
+        """Run one iteration of the control loop.
+
+        Order matters: scale first (worker_count_fn() reads running
+        containers, which is unaffected by exited ones), then reap.
+        Reap errors are swallowed by the closure itself so they never
+        break the tick.
+        """
         depth = self.queue_depth_fn()
         current = self.worker_count_fn()
         desired = self._compute_desired(depth)
@@ -81,7 +142,10 @@ class Autoscaler:
         started = max(0, delta)
         for _ in range(started):
             self.start_worker_fn()
-        return AutoscalerTick(depth=depth, current=current, desired=desired, started=started)
+        reaped = self.reap_dead_workers_fn()
+        return AutoscalerTick(
+            depth=depth, current=current, desired=desired, started=started, reaped=reaped
+        )
 
     def _compute_desired(self, depth: int) -> int:
         """Track depth, clamped to [min_count, max_count]."""
@@ -105,9 +169,13 @@ class Autoscaler:
         while not self._stop_event.is_set():
             try:
                 t = self.tick()
+                # The tick line stays at INFO unconditionally — it's the
+                # liveness heartbeat that ``treadmill-local status``
+                # reads via log mtime. The reaped column lets operators
+                # see reap activity in the same line.
                 logger.info(
-                    "tick: depth=%d current=%d desired=%d started=%d",
-                    t.depth, t.current, t.desired, t.started,
+                    "tick: depth=%d current=%d desired=%d started=%d reaped=%d",
+                    t.depth, t.current, t.desired, t.started, t.reaped,
                 )
             except Exception:
                 logger.exception("tick failed; continuing")
@@ -205,15 +273,17 @@ def main() -> int:
         # Visible only — in-flight messages are already being processed.
         return int(attrs.get("ApproximateNumberOfMessages", "0"))
 
+    worker_labels = [
+        f"{LABEL_KEY}=true",
+        "treadmill.role=worker",
+        f"treadmill.family={family}",
+    ]
+
     def count_workers() -> int:
         return len(
             docker_client.containers.list(
                 filters={
-                    "label": [
-                        f"{LABEL_KEY}=true",
-                        "treadmill.role=worker",
-                        f"treadmill.family={family}",
-                    ],
+                    "label": worker_labels,
                     "status": "running",
                 }
             )
@@ -222,10 +292,44 @@ def main() -> int:
     def start_worker() -> None:
         runtime.start_worker_once(family)
 
+    def reap_dead_workers() -> int:
+        """Remove exited worker containers older than ``_REAP_AGE_SECONDS``.
+
+        Label filter is the same set ``count_workers`` uses
+        (``treadmill.managed=true`` + ``treadmill.role=worker`` +
+        ``treadmill.family=<family>``) so this can never touch a
+        non-worker container. Each ``.remove()`` is guarded so one
+        failed reap (already gone, racing operator, etc.) doesn't
+        break the tick.
+        """
+        now = time.time()
+        try:
+            exited = docker_client.containers.list(
+                filters={"label": worker_labels, "status": "exited"}
+            )
+        except docker.errors.APIError as exc:
+            logger.warning("reap: list call failed: %s", exc)
+            return 0
+        reaped = 0
+        for container in exited:
+            finished_at = container.attrs.get("State", {}).get("FinishedAt")
+            age = _container_age_seconds(finished_at, now)
+            if age is None or age < _REAP_AGE_SECONDS:
+                continue
+            try:
+                container.remove()
+                reaped += 1
+            except docker.errors.APIError as exc:
+                logger.warning(
+                    "reap: remove %s failed: %s", container.name, exc
+                )
+        return reaped
+
     autoscaler = Autoscaler(
         queue_depth_fn=get_depth,
         worker_count_fn=count_workers,
         start_worker_fn=start_worker,
+        reap_dead_workers_fn=reap_dead_workers,
         min_count=min_count,
         max_count=max_count,
         tick_seconds=tick,
