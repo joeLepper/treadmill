@@ -34,13 +34,26 @@ logger = logging.getLogger("treadmill.autoscaler")
 
 @dataclass
 class AutoscalerTick:
-    """Snapshot of one control-loop iteration. Useful for observability and tests."""
+    """Snapshot of one control-loop iteration. Useful for observability and tests.
 
-    depth: int
+    ``visible`` + ``in_flight`` together describe the *total* workload the
+    autoscaler is sizing against. Sizing against visible-only under-
+    provisions when long-running messages are in flight (see ADR-0018 +
+    2026-05-19 observation: a 16-minute author step blocked the queue
+    even though max=8).
+    """
+
+    visible: int
+    in_flight: int
     current: int
     desired: int
     started: int
     reaped: int = 0
+
+    @property
+    def total(self) -> int:
+        """Total workload = visible + in_flight. The autoscaler sizes on this."""
+        return self.visible + self.in_flight
 
 
 # Worker containers exit fast (ADR-0018: one-shot per message). Without
@@ -95,9 +108,17 @@ def _container_age_seconds(finished_at: str | None, now: float) -> float | None:
 
 
 class Autoscaler:
-    """A target-tracking-style autoscaler driven by SQS queue depth.
+    """A target-tracking-style autoscaler driven by SQS workload.
 
-    Policy: ``desired = clamp(depth, min, max)``. With ``max=1`` this scales
+    Workload = ``ApproximateNumberOfMessages`` (visible) +
+    ``ApproximateNumberOfMessagesNotVisible`` (in-flight). Visible-only
+    sizing under-provisions: with one long-running message in flight and
+    one queued, visible=1 yields desired=1 even though the queued message
+    has no worker to pick it up until the in-flight message completes.
+    Summing the two restores the autoscaler's whole point — match worker
+    count to *total* work, not just unclaimed work.
+
+    Policy: ``desired = clamp(total, min, max)``. With ``max=1`` this scales
     one worker at a time; with higher max it scales out to match demand up
     to the cap. Scale-down is not emulated — workers exit after each step
     and the loop simply stops launching replacements when desired drops.
@@ -106,7 +127,7 @@ class Autoscaler:
     def __init__(
         self,
         *,
-        queue_depth_fn: Callable[[], int],
+        queue_depth_fn: Callable[[], tuple[int, int]],
         worker_count_fn: Callable[[], int],
         start_worker_fn: Callable[[], None],
         min_count: int,
@@ -118,6 +139,8 @@ class Autoscaler:
             raise ValueError(f"min_count must be >= 0, got {min_count}")
         if max_count < min_count:
             raise ValueError(f"max_count ({max_count}) must be >= min_count ({min_count})")
+        # queue_depth_fn returns (visible, in_flight). The autoscaler sums
+        # them into the workload signal used for sizing — see class docstring.
         self.queue_depth_fn = queue_depth_fn
         self.worker_count_fn = worker_count_fn
         self.start_worker_fn = start_worker_fn
@@ -135,21 +158,27 @@ class Autoscaler:
         Reap errors are swallowed by the closure itself so they never
         break the tick.
         """
-        depth = self.queue_depth_fn()
+        visible, in_flight = self.queue_depth_fn()
+        total = visible + in_flight
         current = self.worker_count_fn()
-        desired = self._compute_desired(depth)
+        desired = self._compute_desired(total)
         delta = desired - current
         started = max(0, delta)
         for _ in range(started):
             self.start_worker_fn()
         reaped = self.reap_dead_workers_fn()
         return AutoscalerTick(
-            depth=depth, current=current, desired=desired, started=started, reaped=reaped
+            visible=visible,
+            in_flight=in_flight,
+            current=current,
+            desired=desired,
+            started=started,
+            reaped=reaped,
         )
 
-    def _compute_desired(self, depth: int) -> int:
-        """Track depth, clamped to [min_count, max_count]."""
-        return max(self.min_count, min(depth, self.max_count))
+    def _compute_desired(self, total: int) -> int:
+        """Track total workload, clamped to [min_count, max_count]."""
+        return max(self.min_count, min(total, self.max_count))
 
     def run(self) -> None:
         """Loop until stop() is called or SIGTERM is received.
@@ -174,8 +203,10 @@ class Autoscaler:
                 # reads via log mtime. The reaped column lets operators
                 # see reap activity in the same line.
                 logger.info(
-                    "tick: depth=%d current=%d desired=%d started=%d reaped=%d",
-                    t.depth, t.current, t.desired, t.started, t.reaped,
+                    "tick: visible=%d in_flight=%d total=%d current=%d "
+                    "desired=%d started=%d reaped=%d",
+                    t.visible, t.in_flight, t.total, t.current,
+                    t.desired, t.started, t.reaped,
                 )
             except Exception:
                 logger.exception("tick failed; continuing")
@@ -262,7 +293,13 @@ def main() -> int:
     else:
         runtime = LocalRuntime(infra_dir=infra_dir)
 
-    def get_depth() -> int:
+    def get_depth() -> tuple[int, int]:
+        """Return (visible, in_flight) message counts in one SQS call.
+
+        The autoscaler sums these into the workload signal it sizes on.
+        Visible-only under-provisioned by ignoring long-running in-flight
+        messages — see Autoscaler class docstring + ADR-0018.
+        """
         attrs = sqs.get_queue_attributes(
             QueueUrl=queue_url,
             AttributeNames=[
@@ -270,8 +307,9 @@ def main() -> int:
                 "ApproximateNumberOfMessagesNotVisible",
             ],
         )["Attributes"]
-        # Visible only — in-flight messages are already being processed.
-        return int(attrs.get("ApproximateNumberOfMessages", "0"))
+        visible = int(attrs.get("ApproximateNumberOfMessages", "0"))
+        in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", "0"))
+        return visible, in_flight
 
     worker_labels = [
         f"{LABEL_KEY}=true",

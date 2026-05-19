@@ -18,17 +18,28 @@ from treadmill_local.autoscaler import (
 
 class _Fake:
     """Test double exposing the four callables Autoscaler depends on, plus
-    a mutable depth + worker count and counters of starts and reaps."""
+    mutable workload counts and counters of starts and reaps.
 
-    def __init__(self, depth: int = 0, current: int = 0, reap_return: int = 0):
-        self.depth = depth
+    ``queue_depth`` returns ``(visible, in_flight)`` to match the shape
+    the real SQS closure returns. The Autoscaler sums them.
+    """
+
+    def __init__(
+        self,
+        visible: int = 0,
+        in_flight: int = 0,
+        current: int = 0,
+        reap_return: int = 0,
+    ):
+        self.visible = visible
+        self.in_flight = in_flight
         self.current = current
         self.starts = 0
         self.reap_calls = 0
         self.reap_return = reap_return
 
-    def queue_depth(self) -> int:
-        return self.depth
+    def queue_depth(self) -> tuple[int, int]:
+        return self.visible, self.in_flight
 
     def worker_count(self) -> int:
         return self.current
@@ -64,18 +75,20 @@ def _autoscaler(
 # ── tick logic ────────────────────────────────────────────────────────────────
 
 
-def test_tick_starts_worker_when_depth_exceeds_current():
-    fake = _Fake(depth=1, current=0)
+def test_tick_starts_worker_when_visible_exceeds_current():
+    fake = _Fake(visible=1, current=0)
     a = _autoscaler(fake)
     snap = a.tick()
-    assert snap.depth == 1
+    assert snap.visible == 1
+    assert snap.in_flight == 0
+    assert snap.total == 1
     assert snap.desired == 1
     assert snap.started == 1
     assert fake.starts == 1
 
 
 def test_tick_caps_starts_at_max():
-    fake = _Fake(depth=10, current=0)
+    fake = _Fake(visible=10, current=0)
     a = _autoscaler(fake, max_count=3)
     snap = a.tick()
     assert snap.desired == 3
@@ -84,7 +97,7 @@ def test_tick_caps_starts_at_max():
 
 
 def test_tick_does_not_start_when_desired_le_current():
-    fake = _Fake(depth=5, current=2)
+    fake = _Fake(visible=5, current=2)
     a = _autoscaler(fake, max_count=2)
     snap = a.tick()
     assert snap.desired == 2
@@ -92,8 +105,8 @@ def test_tick_does_not_start_when_desired_le_current():
     assert fake.starts == 0
 
 
-def test_tick_zero_depth_zero_workers():
-    fake = _Fake(depth=0, current=0)
+def test_tick_zero_workload_zero_workers():
+    fake = _Fake(visible=0, in_flight=0, current=0)
     a = _autoscaler(fake)
     snap = a.tick()
     assert snap.desired == 0
@@ -101,19 +114,19 @@ def test_tick_zero_depth_zero_workers():
 
 
 def test_tick_respects_min_count():
-    """If min=2 and depth=0, desired floors at 2 — so the loop will start
+    """If min=2 and workload=0, desired floors at 2 — so the loop will start
     workers up to the minimum even with no work."""
-    fake = _Fake(depth=0, current=0)
+    fake = _Fake(visible=0, in_flight=0, current=0)
     a = _autoscaler(fake, min_count=2, max_count=5)
     snap = a.tick()
     assert snap.desired == 2
     assert snap.started == 2
 
 
-def test_tick_natural_drain_when_depth_drops():
-    """Workers exit after each step. When depth falls, the loop simply does
-    not start replacements; current decays naturally as workers finish."""
-    fake = _Fake(depth=3, current=1)  # one worker already running
+def test_tick_natural_drain_when_workload_drops():
+    """Workers exit after each step. When workload falls, the loop simply
+    does not start replacements; current decays naturally as workers finish."""
+    fake = _Fake(visible=3, current=1)  # one worker already running
     a = _autoscaler(fake, max_count=1)
     snap = a.tick()
     assert snap.desired == 1
@@ -121,10 +134,58 @@ def test_tick_natural_drain_when_depth_drops():
 
     # Worker finishes and exits — outside the autoscaler's control.
     fake.current = 0
-    fake.depth = 0
+    fake.visible = 0
     snap = a.tick()
     assert snap.desired == 0
     assert snap.started == 0
+
+
+# ── total-workload sizing (the bug this PR fixes) ─────────────────────────────
+
+
+def test_tick_sums_visible_and_in_flight_for_desired():
+    """visible=3, in_flight=2 → total=5; with max=8 we want desired=5.
+
+    This is the property that distinguishes the new behavior from the
+    visible-only sizing it replaces.
+    """
+    fake = _Fake(visible=3, in_flight=2, current=0)
+    a = _autoscaler(fake, max_count=8)
+    snap = a.tick()
+    assert snap.total == 5
+    assert snap.desired == 5
+
+
+def test_tick_sizes_on_in_flight_alone_when_visible_is_zero():
+    """The motivating case: a long-running message holds a worker, the
+    queue is otherwise empty, but the autoscaler should still keep the
+    in-flight worker counted so it doesn't scale down prematurely. With
+    visible=0, in_flight=5, max=8 we expect desired=5."""
+    fake = _Fake(visible=0, in_flight=5, current=0)
+    a = _autoscaler(fake, max_count=8)
+    snap = a.tick()
+    assert snap.visible == 0
+    assert snap.in_flight == 5
+    assert snap.total == 5
+    assert snap.desired == 5
+
+
+def test_tick_caps_total_at_max():
+    """visible=10 + in_flight=2 = 12, capped to max=8."""
+    fake = _Fake(visible=10, in_flight=2, current=0)
+    a = _autoscaler(fake, max_count=8)
+    snap = a.tick()
+    assert snap.total == 12
+    assert snap.desired == 8
+
+
+def test_tick_zero_workload_means_zero_desired():
+    """visible=0 + in_flight=0 → desired=min_count=0."""
+    fake = _Fake(visible=0, in_flight=0, current=0)
+    a = _autoscaler(fake, min_count=0, max_count=8)
+    snap = a.tick()
+    assert snap.total == 0
+    assert snap.desired == 0
 
 
 # ── invariants on construction ────────────────────────────────────────────────
@@ -168,14 +229,14 @@ def test_parse_bounds_rejects_non_int():
 
 def test_tick_reports_zero_reaped_by_default():
     """No reap_dead_workers_fn provided → snap.reaped is 0, the default."""
-    fake = _Fake(depth=0, current=0)
+    fake = _Fake(visible=0, current=0)
     a = _autoscaler(fake)  # no reap closure
     snap = a.tick()
     assert snap.reaped == 0
 
 
 def test_tick_calls_reap_when_provided_and_reports_count():
-    fake = _Fake(depth=0, current=0, reap_return=0)
+    fake = _Fake(visible=0, current=0, reap_return=0)
     a = _autoscaler(fake, with_reap=True)
     snap = a.tick()
     assert fake.reap_calls == 1
@@ -183,16 +244,16 @@ def test_tick_calls_reap_when_provided_and_reports_count():
 
 
 def test_tick_reports_reaped_count_when_nonzero():
-    fake = _Fake(depth=0, current=0, reap_return=4)
+    fake = _Fake(visible=0, current=0, reap_return=4)
     a = _autoscaler(fake, with_reap=True)
     snap = a.tick()
     assert snap.reaped == 4
 
 
 def test_tick_reaping_does_not_perturb_scaling_decision():
-    """Scaling decision is independent of reap output. Depth=2, current=0,
+    """Scaling decision is independent of reap output. visible=2, current=0,
     max=2 → start 2 workers and also report whatever reap returns."""
-    fake = _Fake(depth=2, current=0, reap_return=7)
+    fake = _Fake(visible=2, current=0, reap_return=7)
     a = _autoscaler(fake, max_count=2, with_reap=True)
     snap = a.tick()
     assert snap.desired == 2
@@ -222,7 +283,7 @@ def _run_one_tick(a: Autoscaler) -> None:
 
 def test_run_log_includes_reaped_column(caplog):
     """The per-tick log line carries the new reaped=N column."""
-    fake = _Fake(depth=0, current=0, reap_return=2)
+    fake = _Fake(visible=0, current=0, reap_return=2)
     a = _autoscaler(fake, with_reap=True)
     with caplog.at_level(logging.INFO, logger="treadmill.autoscaler"):
         _run_one_tick(a)
@@ -232,13 +293,30 @@ def test_run_log_includes_reaped_column(caplog):
 
 
 def test_run_log_reaped_zero_renders_in_tick_line(caplog):
-    fake = _Fake(depth=0, current=0, reap_return=0)
+    fake = _Fake(visible=0, current=0, reap_return=0)
     a = _autoscaler(fake, with_reap=True)
     with caplog.at_level(logging.INFO, logger="treadmill.autoscaler"):
         _run_one_tick(a)
     tick_lines = [r.getMessage() for r in caplog.records if "tick:" in r.getMessage()]
     assert tick_lines
     assert "reaped=0" in tick_lines[-1]
+
+
+def test_run_log_includes_visible_in_flight_total_breakdown(caplog):
+    """The per-tick log line carries the new visible/in_flight/total breakdown
+    so operators can see at a glance whether the autoscaler is responding
+    to real workload (in-flight) or unclaimed work (visible)."""
+    fake = _Fake(visible=2, in_flight=3, current=0, reap_return=0)
+    a = _autoscaler(fake, max_count=8, with_reap=True)
+    with caplog.at_level(logging.INFO, logger="treadmill.autoscaler"):
+        _run_one_tick(a)
+    tick_lines = [r.getMessage() for r in caplog.records if "tick:" in r.getMessage()]
+    assert tick_lines
+    line = tick_lines[-1]
+    assert "visible=2" in line
+    assert "in_flight=3" in line
+    assert "total=5" in line
+    assert "desired=5" in line
 
 
 # ── _container_age_seconds parser ─────────────────────────────────────────────
@@ -392,3 +470,68 @@ def test_reap_closure_swallows_remove_failures(monkeypatch):
     assert reap_dead_workers() == 1
     good.remove.assert_called_once_with()
     bad.remove.assert_called_once_with()
+
+
+# ── workload closure against a fake SQS client ────────────────────────────────
+
+
+def test_get_depth_closure_returns_visible_and_in_flight_in_one_call():
+    """The closure built in main() asks SQS for both attribute counts in a
+    single get_queue_attributes call and returns them as a tuple. Verifying
+    this here pins the contract the Autoscaler depends on — visible-only
+    sizing under-provisioned, see ADR-0018."""
+
+    queue_url = "https://sqs.example/queue.fifo"
+    fake_sqs = MagicMock()
+    fake_sqs.get_queue_attributes.return_value = {
+        "Attributes": {
+            "ApproximateNumberOfMessages": "4",
+            "ApproximateNumberOfMessagesNotVisible": "7",
+        }
+    }
+
+    def get_depth() -> tuple[int, int]:
+        attrs = fake_sqs.get_queue_attributes(
+            QueueUrl=queue_url,
+            AttributeNames=[
+                "ApproximateNumberOfMessages",
+                "ApproximateNumberOfMessagesNotVisible",
+            ],
+        )["Attributes"]
+        visible = int(attrs.get("ApproximateNumberOfMessages", "0"))
+        in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", "0"))
+        return visible, in_flight
+
+    visible, in_flight = get_depth()
+    assert visible == 4
+    assert in_flight == 7
+
+    # One API call per tick — both attributes requested together.
+    fake_sqs.get_queue_attributes.assert_called_once_with(
+        QueueUrl=queue_url,
+        AttributeNames=[
+            "ApproximateNumberOfMessages",
+            "ApproximateNumberOfMessagesNotVisible",
+        ],
+    )
+
+
+def test_get_depth_closure_defaults_missing_attributes_to_zero():
+    """If SQS omits an attribute (shouldn't happen for these two, but be
+    defensive), the closure treats it as zero rather than raising."""
+    fake_sqs = MagicMock()
+    fake_sqs.get_queue_attributes.return_value = {"Attributes": {}}
+
+    def get_depth() -> tuple[int, int]:
+        attrs = fake_sqs.get_queue_attributes(
+            QueueUrl="q",
+            AttributeNames=[
+                "ApproximateNumberOfMessages",
+                "ApproximateNumberOfMessagesNotVisible",
+            ],
+        )["Attributes"]
+        visible = int(attrs.get("ApproximateNumberOfMessages", "0"))
+        in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", "0"))
+        return visible, in_flight
+
+    assert get_depth() == (0, 0)
