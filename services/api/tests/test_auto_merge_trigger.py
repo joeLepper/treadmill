@@ -101,14 +101,19 @@ async def test_skip_when_step_not_found() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skip_when_workflow_not_wf_validate_or_review() -> None:
+async def test_fires_on_any_workflow_when_mergeable() -> None:
+    """Workflow-set gate removed 2026-05-18: the predicate fires on any
+    step.completed when mergeability is satisfied. The predicate's own
+    state checks (mergeability + validate + review + fired-key) gate
+    the deadline-set; a non-traditional workflow (e.g. wf-author here)
+    no longer short-circuits at the workflow-id check."""
     wf = _workflow_row(workflow_id="wf-author")
     session = _make_session(wf, _merge_row())
     redis = _make_redis()
 
     result = await maybe_auto_merge_on_mergeable(session, redis, step_id="step-1")
-    assert result is False
-    redis.set.assert_not_awaited()
+    assert result is True
+    redis.set.assert_awaited_once()
 
 
 @pytest.mark.asyncio

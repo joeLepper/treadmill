@@ -1744,27 +1744,26 @@ AUTO_MERGE_COOLDOWN_SECONDS = 30
 _AUTO_MERGE_KEY_TTL_SECONDS = AUTO_MERGE_COOLDOWN_SECONDS + 60
 _AUTO_MERGE_FIRED_TTL_SECONDS = 86400  # 24h
 
-# Workflow completions that drive the cooling-off window.
-#
-# - ``wf-validate`` / ``wf-review`` are the canonical gates that fire
-#   the predicate when they complete (the typical path: author opens
-#   PR → validate runs → review runs → mergeable → cooling-off).
-# - ``wf-architecture-resolve`` is the override path (ADR-0038/ADR-0042).
-#   When the architect verdicts ``accept-as-is`` it emits
-#   ``review.override`` / ``validate.override`` events that flip
-#   mergeability — but those events arrive *after* the original
-#   validate/review step.completed already fired the predicate (and
-#   bailed because mergeability wasn't yet ``mergeable``). Without
-#   firing the predicate on the architect's completion too, the
-#   override never reaches the cooling-off deadline and the PR sits
-#   open with ``derived_mergeability=mergeable`` indefinitely (the
-#   architect's accept-as-is becomes operator-mediated rather than
-#   hands-free). Observed 2026-05-18 on PR #153 (task 07c71852):
-#   3 architect accept-as-is verdicts, both override events emitted,
-#   mergeability=mergeable, 0 auto-merge fires.
-_AUTO_MERGE_TRIGGER_WORKFLOWS: frozenset[str] = frozenset(
-    {"wf-validate", "wf-review", "wf-architecture-resolve"}
-)
+# Workflow-set gate removed 2026-05-18 (round-down of the architectural
+# fragility surfaced by PR #154). Previously, the predicate fired only
+# on step.completed for an explicit allowlist of workflows
+# (``wf-validate`` / ``wf-review`` / later ``wf-architecture-resolve``).
+# Every new override-emitting workflow required extending the set or
+# the PR sat at ``derived_mergeability=mergeable`` indefinitely. The
+# predicate's own mergeability-state checks already short-circuit on
+# non-relevant signals, so the workflow gate added only architectural
+# coupling without protective value. Removing the gate makes the
+# predicate self-correcting: it fires on every step.completed, the
+# task_mergeability VIEW evaluates fresh, and the deadline is set iff
+# the current mergeability state warrants it. Cost: one VIEW read per
+# step.completed (predicate fast-bails when mergeability isn't ready).
+# Benefit: future override channels — `ci.override`, hypothetical
+# `conflict.override`, etc. — fire naturally without trigger-set
+# bookkeeping. Closes the architectural gap captured in
+# docs/learnings/2026-05-18-auto-merge-misses-architect-override-
+# completion.md §"long-term design proposal" without taking on the
+# full task_mergeability.changed-event projection (still a future
+# refinement).
 
 
 async def maybe_auto_merge_on_mergeable(
@@ -1782,8 +1781,8 @@ async def maybe_auto_merge_on_mergeable(
     The 30-second window absorbs event races between the two workflows.
 
     Skip conditions (any one short-circuits):
-      * Not a wf-validate or wf-review step.
       * ``redis_client`` not wired (auto-merge poll loop inoperable).
+      * Step has no owning task (orphan or deleted).
       * ``plan.auto_merge IS FALSE`` — plan has opted out (ADR-0031 Q31.c).
       * ``derived_mergeability != 'mergeable'`` — task is not ready.
       * ``validate_decision != 'pass'`` — ADR-0031 Q31.b: ``uncertain``
@@ -1818,9 +1817,6 @@ async def maybe_auto_merge_on_mergeable(
         logger.debug(
             "auto-merge: no run/task for step %s; skipping", step_id,
         )
-        return False
-
-    if row.workflow_id not in _AUTO_MERGE_TRIGGER_WORKFLOWS:
         return False
 
     task_id = row.task_id
