@@ -299,6 +299,10 @@ def main() -> int:
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
     )
 
+    # State file lives next to the rest of the .treadmill-local state under
+    # the repo root. The parent runtime spawns the watcher with cwd anchored
+    # to the repo root (see runtime.py spawn cwd + cli.py typer callback),
+    # so this relative path resolves there.
     state_file = Path(".treadmill-local") / "deploy-watcher-state.json"
 
     def receive() -> list[dict[str, Any]]:

@@ -52,6 +52,12 @@ MOTO_HOST_PORT = 5001
 MOTO_CONTAINER_PORT = 5000
 
 STATE_DIR = Path(".treadmill-local")
+"""Resolved against the process's working directory. The CLI sets cwd to
+the repo root before any command runs (``cli.py`` typer callback), so in
+production this lands at ``<repo>/.treadmill-local/``. Tests use
+``monkeypatch.chdir(tmp_path)`` to sandbox state, which depends on the
+relative-path semantics."""
+
 AUTOSCALER_PID_FILE = STATE_DIR / "autoscaler.pid"
 AUTOSCALER_LOG_FILE = STATE_DIR / "autoscaler.log"
 """Autoscaler log file. Doubles as the heartbeat substrate — the

@@ -11,6 +11,7 @@ Commands:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import boto3
@@ -24,7 +25,7 @@ from treadmill_local.deployment_config import (
     write_deployment_yaml,
 )
 from treadmill_local.repos import init_bare_repo
-from treadmill_local.runtime import BARE_REPOS_DIR, LocalRuntime
+from treadmill_local.runtime import BARE_REPOS_DIR, LocalRuntime, find_repo_root
 
 app = typer.Typer(
     name="treadmill-local",
@@ -32,6 +33,26 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+@app.callback()
+def _chdir_to_repo_root() -> None:
+    """Anchor cwd to the repo root before any subcommand runs.
+
+    The runtime's ``STATE_DIR`` (and all derived PID / log / state-file
+    paths) is a relative ``Path(".treadmill-local")`` that resolves against
+    cwd. Without this callback, where the operator invoked
+    ``treadmill-local`` from changes where state ends up — e.g.,
+    ``uv run --project tools/local-adapter ...`` would write to
+    ``tools/local-adapter/.treadmill-local/`` while a bare invocation from
+    the repo root wrote to ``./.treadmill-local/``. The latter is the
+    canonical home, so we chdir there once at command boundary.
+
+    Spawned subprocesses (autoscaler, scheduler, deploy-watcher) inherit
+    this cwd via ``subprocess.Popen(..., cwd=str(Path.cwd()))`` in the
+    runtime, so their relative state paths land in the same dir.
+    """
+    os.chdir(find_repo_root())
 repo_app = typer.Typer(
     name="repo",
     help="Manage local bare repos for the agent worker's REPO_MODE=local.",
