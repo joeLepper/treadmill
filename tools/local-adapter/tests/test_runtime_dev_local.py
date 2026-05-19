@@ -1404,6 +1404,13 @@ def test_start_deploy_watcher_dev_local_spawns_subprocess_with_expected_env(
         return _FakeProc()
 
     monkeypatch.setattr(runtime_module.subprocess, "Popen", _fake_popen)
+    # The spawn path reads (owner, repo) from the local checkout's origin
+    # remote via parse_github_origin → subprocess.run. The Popen patch
+    # above intercepts that call too, so stub the parser directly to keep
+    # this test focused on the env-shaping assertion below.
+    monkeypatch.setattr(
+        runtime_module, "parse_github_origin", lambda _root: ("joeLepper", "treadmill")
+    )
 
     rt._start_deploy_watcher_dev_local()
 
@@ -1421,6 +1428,11 @@ def test_start_deploy_watcher_dev_local_spawns_subprocess_with_expected_env(
     assert env["AWS_PROFILE"] == "treadmill-from-env"
     # GITHUB_TOKEN injected from the host-fetched credential, not from env.
     assert env["GITHUB_TOKEN"] == "ghp_injected_token"
+    # GitHub repo coordinates derived from origin so the watcher can call
+    # the PR-files API without operator-set env vars.
+    assert env["GITHUB_OWNER"] == "joeLepper"
+    assert env["GITHUB_REPO"] == "treadmill"
+    assert "TREADMILL_REPO_ROOT" in env
     # Moto override MUST NOT leak through — dev-local hits real AWS.
     assert "AWS_ENDPOINT_URL" not in env
 
@@ -1456,6 +1468,11 @@ def test_start_deploy_watcher_dev_local_uses_yaml_profile_when_env_absent(
         return _FakeProc()
 
     monkeypatch.setattr(runtime_module.subprocess, "Popen", _fake_popen)
+    # See sibling test: the global Popen patch intercepts the git-remote
+    # subprocess.run inside parse_github_origin too, so stub the parser.
+    monkeypatch.setattr(
+        runtime_module, "parse_github_origin", lambda _root: ("joeLepper", "treadmill")
+    )
     rt._start_deploy_watcher_dev_local()
     assert captured["env"]["AWS_PROFILE"] == cfg["aws_profile"]
 

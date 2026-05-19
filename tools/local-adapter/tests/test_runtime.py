@@ -108,3 +108,59 @@ def test_volumes_for_agent_family_skips_credentials_when_absent(
         spec["bind"] == "/var/treadmill/repos"
         for spec in mounts.values()
     )
+
+
+# ── parse_github_origin (dev-local deploy-watcher spawn env) ──────────────────
+
+
+def _init_repo_with_origin(repo_root: Path, origin_url: str) -> None:
+    """Create a bare-bones git repo with a single ``origin`` remote."""
+    import subprocess
+
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo_root, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", origin_url],
+        cwd=repo_root,
+        check=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "origin_url, expected",
+    [
+        ("https://github.com/joeLepper/treadmill.git", ("joeLepper", "treadmill")),
+        ("https://github.com/joeLepper/treadmill", ("joeLepper", "treadmill")),
+        ("git@github.com:joeLepper/treadmill.git", ("joeLepper", "treadmill")),
+        ("git@github.com:joeLepper/treadmill", ("joeLepper", "treadmill")),
+        ("http://github.com/acme/repo-with-dashes.git", ("acme", "repo-with-dashes")),
+    ],
+)
+def test_parse_github_origin_extracts_owner_and_repo(
+    tmp_path: Path, origin_url: str, expected: tuple[str, str]
+) -> None:
+    """The deploy-watcher spawn derives ``GITHUB_OWNER``/``GITHUB_REPO`` from
+    the local checkout's ``origin`` remote, so the operator doesn't have to
+    export them by hand. Cover both URL styles GitHub serves."""
+    _init_repo_with_origin(tmp_path, origin_url)
+    assert runtime.parse_github_origin(tmp_path) == expected
+
+
+def test_parse_github_origin_rejects_non_github_remote(tmp_path: Path) -> None:
+    """A non-GitHub remote isn't usable by the watcher (which calls the
+    GitHub REST API). Fail loudly at spawn time, not at the watcher's first
+    HTTP call."""
+    _init_repo_with_origin(tmp_path, "https://gitlab.com/group/proj.git")
+    with pytest.raises(RuntimeError, match="does not look like a GitHub URL"):
+        runtime.parse_github_origin(tmp_path)
+
+
+def test_parse_github_origin_errors_without_origin_remote(tmp_path: Path) -> None:
+    """No ``origin`` remote — say so clearly rather than letting the watcher
+    crash with a less-informative ``KeyError`` after start-up."""
+    import subprocess
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    with pytest.raises(RuntimeError, match="could not read 'origin' remote"):
+        runtime.parse_github_origin(tmp_path)

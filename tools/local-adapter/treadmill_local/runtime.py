@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -142,6 +143,49 @@ def _is_repo_root(path: Path) -> bool:
         if "[tool.uv.workspace]" in text:
             return True
     return (path / "infra" / "cdk.json").exists()
+
+
+_GITHUB_HTTPS_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$"
+)
+_GITHUB_SSH_RE = re.compile(
+    r"^git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$"
+)
+
+
+def parse_github_origin(repo_root: Path) -> tuple[str, str]:
+    """Read ``origin`` from ``repo_root``'s git config and return (owner, repo).
+
+    The deploy-watcher subprocess needs ``GITHUB_OWNER`` + ``GITHUB_REPO`` to
+    call the GitHub PR-files API (deploy_watcher.py reads them from env at
+    startup). Deriving them from the local checkout's git remote keeps the
+    operator out of the loop — same value the watcher needs is already
+    sitting in ``.git/config``.
+
+    Supports both URL forms:
+      * ``https://github.com/<owner>/<repo>(.git)?``
+      * ``git@github.com:<owner>/<repo>(.git)?``
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise RuntimeError(
+            f"could not read 'origin' remote from {repo_root}: {exc}"
+        ) from exc
+    url = result.stdout.strip()
+    match = _GITHUB_HTTPS_RE.match(url) or _GITHUB_SSH_RE.match(url)
+    if match is None:
+        raise RuntimeError(
+            f"'origin' remote {url!r} does not look like a GitHub URL; "
+            "expected https://github.com/<owner>/<repo> or "
+            "git@github.com:<owner>/<repo>."
+        )
+    return match.group(1), match.group(2)
 
 
 @dataclass
@@ -1640,6 +1684,11 @@ class LocalRuntime:
             ``_ensure_dev_local_credentials`` and injected here so the
             subprocess can call the GitHub PR-files API without reading
             from Secrets Manager itself.
+          * ``GITHUB_OWNER`` / ``GITHUB_REPO`` — parsed from the local
+            checkout's ``origin`` remote so the watcher can build PR-files
+            API URLs without the operator exporting anything by hand.
+          * ``TREADMILL_REPO_ROOT`` — absolute path to the same checkout
+            the watcher reconciles against on PR-merged events.
           * NOTABLY ABSENT: ``AWS_ENDPOINT_URL`` (moto override;
             dev-local talks to real AWS).
         """
@@ -1656,6 +1705,9 @@ class LocalRuntime:
         self._ensure_dev_local_credentials()
         assert self._github_token is not None
 
+        repo_root = find_repo_root()
+        github_owner, github_repo = parse_github_origin(repo_root)
+
         STATE_DIR.mkdir(exist_ok=True)
         log_handle = open(DEPLOY_WATCHER_LOG_FILE, "ab")
         env = {
@@ -1664,6 +1716,9 @@ class LocalRuntime:
             "AWS_DEFAULT_REGION": cfg["aws_region"],
             "AWS_PROFILE": os.environ.get("AWS_PROFILE", cfg["aws_profile"]),
             "GITHUB_TOKEN": self._github_token,
+            "GITHUB_OWNER": github_owner,
+            "GITHUB_REPO": github_repo,
+            "TREADMILL_REPO_ROOT": str(repo_root),
         }
         # Defensive: drop the moto endpoint override if it leaked into the env.
         env.pop("AWS_ENDPOINT_URL", None)
