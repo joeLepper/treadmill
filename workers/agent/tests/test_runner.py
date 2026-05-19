@@ -976,3 +976,198 @@ def test_runner_stops_heartbeat_in_finally_even_on_disposition_raise(
     assert not captured["thread"].is_alive(), (
         "heartbeat thread did not exit after stop_event.set()"
     )
+
+
+# ── Queue-hygiene contract (ADR-0049 verification) ───────────────────────────
+#
+# The contract:
+#
+#   A worker must NOT ack/delete an SQS message it didn't successfully
+#   process. When the worker raises an uncaught exception mid-task — for
+#   any reason — the message stays in flight, SQS expires the visibility
+#   lease (~60s), and the message is redelivered. After maxReceiveCount=5
+#   it lands in the DLQ for operator inspection.
+#
+# This is the recovery mechanism for the ``validate-crash-no-retry`` and
+# ``review-crash-no-retry`` dead-end classes that appear in the
+# ``docs/diagrams/task-flow-dead-ends.md`` catalog: they aren't actually
+# terminal — queue redelivery handles them — but only if this contract
+# holds. The tests below cover every distinct exception class the spec
+# called out:
+#
+#   * subprocess crash (CodeAuthorError raised by the claude_code module
+#     when the LLM subprocess exits non-zero)
+#   * Python uncaught exception in the work path
+#   * network failure mid-work (e.g. boto3 ClientError reaching GitHub)
+#   * subprocess SIGKILL-style non-zero exit propagated through
+#     subprocess.CalledProcessError
+#
+# Each test asserts ``delete_message`` was NEVER called even though the
+# worker entered and started the step. Together with the existing
+# ``test_runner_does_not_delete_when_*`` tests above, this nails the
+# contract down at the dispatch boundary.
+
+
+def test_queue_hygiene_no_ack_on_subprocess_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subprocess crash: the Claude Code child process exits non-zero
+    mid-task and ``claude_code.run_claude_code`` raises ``CodeAuthorError``.
+
+    The runner must catch it for ``step.failed`` publication, then re-raise
+    without ever calling ``delete_message``. SQS visibility expiry handles
+    the redelivery.
+    """
+    from treadmill_agent.claude_code import CodeAuthorError
+
+    ctx = _ctx()
+
+    def _subprocess_died(*args, **kwargs):
+        # Mirrors what ``claude_code._run_claude_code`` raises when the
+        # subprocess exits with returncode != 0 — see claude_code.py:243.
+        raise CodeAuthorError("claude exited 137\n<stderr: OOM-killed>")
+    monkeypatch.setattr(runner, "_execute", _subprocess_died)
+
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-subproc")])
+    pub = _FakePublisher()
+    with pytest.raises(CodeAuthorError, match="claude exited 137"):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
+
+    # The defining contract assertion: NO delete on subprocess crash.
+    assert sqs.deleted == [], (
+        "queue-hygiene contract broken: worker acked SQS message after "
+        "subprocess crash; SQS would never redeliver and the task would "
+        "stick at validate-crash-no-retry / review-crash-no-retry"
+    )
+    # The audit trail still tells the operator the step failed.
+    assert [name for name, _ in pub.events] == ["started", "failed"]
+
+
+def test_queue_hygiene_no_ack_on_network_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Network failure mid-work: e.g. boto3 ``ClientError`` reaching out
+    to GitHub or AWS. The work didn't succeed; the message must NOT be
+    acked.
+    """
+    from botocore.exceptions import ClientError
+
+    ctx = _ctx()
+
+    def _network_died(*args, **kwargs):
+        raise ClientError(
+            error_response={"Error": {"Code": "RequestTimeout", "Message": "timed out"}},
+            operation_name="PutObject",
+        )
+    monkeypatch.setattr(runner, "_execute", _network_died)
+
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-net")])
+    pub = _FakePublisher()
+    with pytest.raises(ClientError):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
+
+    assert sqs.deleted == [], (
+        "queue-hygiene contract broken: worker acked SQS message after "
+        "transient network failure; the work didn't succeed so SQS must "
+        "redeliver via visibility expiry"
+    )
+    assert [name for name, _ in pub.events] == ["started", "failed"]
+
+
+def test_queue_hygiene_no_ack_on_subprocess_called_process_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``subprocess.CalledProcessError`` — what a non-Claude subprocess
+    (e.g. ``git push``, ``gh pr create``) raises when ``check=True`` and
+    the exit code is non-zero. The runner must NOT ack on this either.
+
+    This catches an OS-level kill of a child process the worker
+    spawned: SIGKILL from OOM-killer manifests as a non-zero returncode
+    + ``CalledProcessError`` when ``check=True`` is set on the
+    subprocess call (which the worker's git + gh modules do).
+    """
+    import subprocess as _subprocess
+
+    ctx = _ctx()
+
+    def _called_process_died(*args, **kwargs):
+        raise _subprocess.CalledProcessError(
+            returncode=-9,  # SIGKILL
+            cmd=["git", "push", "origin", "task/x"],
+            stderr=b"Killed",
+        )
+    monkeypatch.setattr(runner, "_execute", _called_process_died)
+
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-killed")])
+    pub = _FakePublisher()
+    with pytest.raises(_subprocess.CalledProcessError):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
+
+    assert sqs.deleted == [], (
+        "queue-hygiene contract broken: worker acked SQS message after "
+        "child subprocess was SIGKILL'd / exited non-zero"
+    )
+    assert [name for name, _ in pub.events] == ["started", "failed"]
+
+
+def test_queue_hygiene_delete_strictly_inside_try_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structural test: ``_delete`` must run AFTER ``_handle_step`` returns
+    normally, both inside the same try block, with no path between
+    ``_handle_step`` raising and ``_delete`` being called.
+
+    This proves the call order at the runner level rather than via a
+    handler stub — if a future refactor moves the delete to a ``finally``
+    or to the ``except`` branch, the assertions here catch it.
+    """
+    ctx = _ctx()
+    call_order: list[str] = []
+
+    def _spy_handle(*args, **kwargs):
+        call_order.append("_handle_step")
+
+    def _spy_delete(*args, **kwargs):
+        call_order.append("_delete")
+
+    monkeypatch.setattr(runner, "_handle_step", _spy_handle)
+    monkeypatch.setattr(runner, "_delete", _spy_delete)
+
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-order")])
+    pub = _FakePublisher()
+    n = runner.run(
+        settings=_settings(), api=_FakeApi(ctx),
+        sqs_client=sqs, publisher=pub,
+    )
+    assert n == 1
+    # Success path: handle first, then delete. Never the other order.
+    assert call_order == ["_handle_step", "_delete"], call_order
+
+    # And the failure path: when _handle_step raises, _delete is NEVER
+    # entered.
+    call_order.clear()
+    def _spy_handle_raises(*args, **kwargs):
+        call_order.append("_handle_step")
+        raise RuntimeError("simulated mid-work failure")
+    monkeypatch.setattr(runner, "_handle_step", _spy_handle_raises)
+
+    sqs2 = _FakeSqs([_claim(ctx.step_id, receipt="rh-order-fail")])
+    pub2 = _FakePublisher()
+    with pytest.raises(RuntimeError, match="simulated mid-work failure"):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs2, publisher=pub2,
+        )
+    assert call_order == ["_handle_step"], (
+        f"_delete was called after _handle_step raised; order={call_order}"
+    )
+    assert sqs2.deleted == []

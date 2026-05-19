@@ -175,13 +175,21 @@ def run(
             daemon=True,
         )
         heartbeat.start()
+        # Queue-hygiene contract (ADR-0025, ADR-0049): we do NOT ack on
+        # uncaught exception. ``_delete`` lives strictly inside the try
+        # block AFTER ``_handle_step`` returns normally. Any path that
+        # raises — subprocess crash, claude_code timeout, network error,
+        # disposition raise, OOM-killed mid-execute — skips the delete and
+        # re-raises. SQS visibility expiry (~60s) then redelivers the
+        # message; after maxReceiveCount=5 it lands in the DLQ. This is
+        # the recovery mechanism for ``validate-crash-no-retry`` /
+        # ``review-crash-no-retry`` style dead-ends — they're queue
+        # hygiene, not architecture. The ``finally`` only stops the
+        # heartbeat thread; it must NEVER call delete_message.
         try:
             _handle_step(claim, settings, api, publisher)
             _delete(sqs_client, settings.work_queue_url, claim.receipt_handle)
         except Exception:
-            # Do NOT delete — leave the message in flight so SQS expires
-            # the lease (~60s) and redelivers; after maxReceiveCount=5
-            # the message lands in the DLQ for operator inspection.
             logger.error(
                 "unhandled error processing step %s; leaving message "
                 "in flight for SQS redelivery / DLQ",
