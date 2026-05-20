@@ -1,6 +1,6 @@
 # ADR-0017: GitHub webhook ingestion via API Gateway + Lambda + SQS
 
-- **Status:** accepted
+- **Status:** accepted — amended by ADR-0049 (webhook signing migrates to App secret)
 - **Date:** 2026-05-12
 - **Related:** ADR-0007, ADR-0011, ADR-0016
 

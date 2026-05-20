@@ -1,6 +1,6 @@
 # ADR-0016: Dev-local deployment topology
 
-- **Status:** accepted
+- **Status:** accepted — amended by ADR-0049 (GitHub-App vs PAT clause, Q16.d)
 - **Date:** 2026-05-12
 - **Related:** ADR-0002, ADR-0007, ADR-0011, ADR-0017
 
