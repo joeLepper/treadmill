@@ -21,6 +21,7 @@ from treadmill_api import __version__
 from treadmill_api.cache import make_redis
 from treadmill_api.config import DeploymentMode, Settings, get_settings
 from treadmill_api.database import make_engine
+from treadmill_api.github_auth import build_github_clients
 from treadmill_api.dependencies import (
     CoordinationProbe,
     DependencyProbe,
@@ -82,26 +83,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ):
         sqs_client = boto3.client("sqs", region_name=settings.aws_region)
 
-    # GitHub client for the conflict-detection sweep (Week 3 B.3). Stays
-    # ``None`` when GITHUB_TOKEN is unset — the consumer's pr_merged
-    # handler short-circuits cleanly in that case. Bunkhouse precedent:
-    # ``httpx.AsyncClient`` with a Bearer token + the standard
-    # ``application/vnd.github+json`` Accept header.
-    github_client: httpx.AsyncClient | None = None
-    if settings.github_token:
-        github_client = httpx.AsyncClient(
-            base_url="https://api.github.com",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {settings.github_token}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            timeout=10.0,
-        )
-    else:
+    # GitHub client for merge / PR / conflict-sweep calls. Per ADR-0049,
+    # ``build_github_clients`` returns the GitHub App per-repo
+    # installation-token client when the App is configured
+    # (``GITHUB_APP_ID`` + ``GITHUB_APP_PRIVATE_KEY``), else the legacy
+    # static-PAT client, else ``None`` (handlers short-circuit cleanly).
+    github_clients = build_github_clients(settings)
+    github_client = github_clients.client
+    if github_client is None:
         logger.warning(
-            "GITHUB_TOKEN unset; conflict-detection sweep on pr_merged will "
-            "be skipped (Week 3 B.3 / ADR-0013)"
+            "no GitHub auth configured (GITHUB_APP_* / GITHUB_TOKEN unset); "
+            "conflict-detection sweep + merge on pr_merged will be skipped "
+            "(ADR-0013 / ADR-0049)"
         )
 
     publisher = make_publisher(settings, sns_client)
@@ -222,8 +215,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await consumer.stop()
             if webhook_inbox_poller is not None:
                 await webhook_inbox_poller.stop()
-            if github_client is not None:
-                await github_client.aclose()
+            await github_clients.aclose()
             if engine is not None:
                 await engine.dispose()
             if redis is not None:
