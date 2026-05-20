@@ -16,6 +16,8 @@ dependencies = [
     "redis>=5.0.0",
     "boto3>=1.35.0",
     "pyyaml>=6.0.0",
+    # RS256 signing for GitHub App JWTs (ADR-0049, treadmill_api.github_app).
+    "cryptography>=43.0.0",
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp>=0.41b0",

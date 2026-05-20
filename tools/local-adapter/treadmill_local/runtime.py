@@ -575,6 +575,38 @@ class LocalRuntime:
             )
         return pat.strip()
 
+    @staticmethod
+    def _fetch_secret_string(cfg: dict[str, Any], secret_name: str) -> str:
+        """Fetch a secret's ``SecretString`` from Secrets Manager.
+
+        Generalizes ``_fetch_github_pat`` for ADR-0049's GitHub App private
+        key (and any future host-side secret), with the same expired-SSO
+        handling.
+        """
+        profile = cfg["aws_profile"]
+        region = cfg["aws_region"]
+        session = boto3.Session(profile_name=profile, region_name=region)
+        secrets = session.client("secretsmanager")
+        try:
+            resp = secrets.get_secret_value(SecretId=secret_name)
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"ExpiredToken", "ExpiredTokenException"}:
+                console.print(
+                    f"[red]AWS credentials for profile {profile!r} have expired "
+                    f"mid-fetch of {secret_name!r}.[/red]"
+                )
+                console.print(
+                    f"[red]→ Run `aws sso login --profile {profile}` and re-run "
+                    f"`treadmill-local up`.[/red]"
+                )
+                raise SystemExit(1) from exc
+            raise
+        value = resp.get("SecretString")
+        if not value:
+            raise RuntimeError(f"secret {secret_name!r} has no SecretString")
+        return value
+
     def _build_dev_local_service_specs(
         self,
         cfg: dict[str, Any],
@@ -715,6 +747,24 @@ class LocalRuntime:
         # same Secrets Manager entry the worker uses for git operations.
         assert self._github_token is not None
         env["GITHUB_TOKEN"] = self._github_token
+        # ADR-0049: GitHub App identity. When the deployment configures an
+        # App id + private-key secret, inject them so the API mints per-repo
+        # installation tokens (``build_github_clients`` selects the App path);
+        # absent → the API stays on the PAT above. The App webhook-secret name
+        # is injected too for the dual-secret webhook verifier (phase 6).
+        app_id = cfg.get("github_app_id")
+        secrets_cfg = cfg.get("secrets", {})
+        app_key_secret = secrets_cfg.get("github_app_private_key_secret_name")
+        if app_id and app_key_secret:
+            env["GITHUB_APP_ID"] = str(app_id)
+            env["GITHUB_APP_PRIVATE_KEY"] = self._fetch_secret_string(
+                cfg, app_key_secret,
+            )
+            app_webhook_secret_name = secrets_cfg.get(
+                "github_app_webhook_secret_name"
+            )
+            if app_webhook_secret_name:
+                env["GITHUB_APP_WEBHOOK_SECRET_NAME"] = app_webhook_secret_name
         # ADR-0020: inject OTLP endpoint when the observability stack is
         # deployed. The OTel SDK no-ops silently when the var is unset
         # (fully-local mode). Value from the deployment YAML under
