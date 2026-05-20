@@ -302,6 +302,17 @@ def _build_wf_architecture_resolve_key(payload: dict[str, Any]) -> str | None:
             f"wf-architecture-resolve:{repo}:"
             f"feedback-validation-fail-step={feedback_validation_fail_step_id}"
         )
+    feedback_no_progress_step_id = payload.get("feedback_no_progress_step_id")
+    if feedback_no_progress_step_id:
+        # Dead-end audit (2026-05-19) SDE-1: wf-feedback action terminated on a
+        # no-PR task without producing a mergeable diff (responded-without-
+        # change, or a bare decision=fail with no validation_results) and with
+        # no blocking gate. Sibling of feedback-validation-fail-step; keyed on
+        # the action step so a redelivery doesn't double-dispatch.
+        return (
+            f"wf-architecture-resolve:{repo}:"
+            f"feedback-no-progress-step={feedback_no_progress_step_id}"
+        )
     return None
 
 

@@ -444,6 +444,13 @@ class CoordinationConsumer:
                 await self._maybe_fire_feedback_validation_fail_arbitration(
                     session, step_id, typed,
                 )
+            # SDE-1: no-progress wf-feedback terminal on a no-PR task
+            # (responded-without-change / bare fail) → architect-on-plan.
+            # MUST run after the deadlock + validation-fail helpers above.
+            if action == "completed":
+                await self._maybe_fire_feedback_no_progress_arbitration(
+                    session, step_id, typed,
+                )
             # Dead-end audit (2026-05-19): when a recovery workflow
             # (wf-ci-fix / wf-conflict / wf-doc-amend) completes with
             # decision=fail and has no productive next dispatch, surface to
@@ -1382,6 +1389,41 @@ class CoordinationConsumer:
                 "_maybe_fire_feedback_validation_fail_arbitration: "
                 "dispatch failed for step %s; prior projection committed, "
                 "will retry on redelivery",
+                step_id,
+            )
+
+    async def _maybe_fire_feedback_no_progress_arbitration(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """SDE-1 (2026-05-19 dead-end audit): when wf-feedback's action step
+        terminates without progress on a no-PR task (responded-without-change,
+        or a bare decision=fail with no validation_results), route to
+        wf-architecture-resolve. MUST run after the deadlock and
+        validation-fail helpers so those claim the gate-bearing and
+        validation-fail cases first.
+
+        Failures are logged but do not propagate; the prior projection has
+        already committed.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_architect_on_feedback_no_progress,
+        )
+        try:
+            await maybe_dispatch_architect_on_feedback_no_progress(
+                session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_feedback_no_progress_arbitration: dispatch "
+                "failed for step %s; prior projection committed, will retry "
+                "on redelivery",
                 step_id,
             )
 

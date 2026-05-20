@@ -1495,6 +1495,131 @@ async def maybe_dispatch_architect_on_feedback_validation_fail(
     )
 
 
+async def maybe_dispatch_architect_on_feedback_no_progress(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """Dead-end audit (2026-05-19) SDE-1: route a no-progress wf-feedback
+    terminal on a no-PR task to ``wf-architecture-resolve``.
+
+    Sibling of ``maybe_dispatch_architect_on_feedback_validation_fail``. That
+    helper owns the ``decision='fail'`` + ``validation_results`` shape (a diff
+    was produced and rejected by author-side validation). This helper owns the
+    *other* no-progress shapes that otherwise terminate silently when no PR
+    exists and no blocking gate signal is present:
+
+      * ``decision='responded-without-change'`` — the feedback worker decided
+        nothing should change. With a blocking gate this is the deadlock path
+        (``maybe_dispatch_arbitration_on_deadlock``); with no PR there is no
+        gate, so that path short-circuits and this one picks it up.
+      * ``decision='fail'`` WITHOUT a ``validation_results`` fail entry — e.g.
+        a feedback worker that failed for some other reason and produced no
+        diff (the retry-CLI path that re-dispatches wf-feedback on a task that
+        never had a PR).
+
+    Predicate (mirrors the validation-fail sibling):
+      * step belongs to ``wf-feedback``; ``step_name == 'action'``
+      * decision is ``responded-without-change`` OR a bare ``fail`` (a ``fail``
+        carrying a ``validation_results`` fail entry is the sibling's)
+      * task has no open PR (PR-bearing cases stay on the deadlock path)
+      * the ``wf-architecture-resolve`` cap applies (surfaces to operator)
+
+    Dedup namespace:
+        ``wf-architecture-resolve:<repo>:feedback-no-progress-step=<step_id>``
+
+    Ordering invariant: callers MUST invoke this AFTER both
+    ``maybe_dispatch_arbitration_on_deadlock`` and
+    ``maybe_dispatch_architect_on_feedback_validation_fail`` so the
+    gate-bearing and validation-fail cases are claimed first.
+    """
+    decision = typed.output.decision if typed.output else None
+    if decision not in ("responded-without-change", "fail"):
+        return None
+    # A decision=fail carrying a validation_results fail entry is owned by
+    # maybe_dispatch_architect_on_feedback_validation_fail — skip it here.
+    if decision == "fail":
+        validation_results = (typed.output.payload or {}).get("validation_results")
+        if isinstance(validation_results, list) and any(
+            isinstance(r, dict) and r.get("verdict") == "fail"
+            for r in validation_results
+        ):
+            return None
+
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.id.label("run_id"),
+            WorkflowRun.task_id,
+            Task.repo,
+            WorkflowRunStep.step_name,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None:
+        return None
+    if row.workflow_id != FEEDBACK_WORKFLOW_ID or row.step_name != "action":
+        return None
+
+    open_pr_result = await session.execute(
+        select(TaskPR.pr_number)
+        .where(TaskPR.task_id == row.task_id, TaskPR.closed_at.is_(None))
+        .limit(1)
+    )
+    if open_pr_result.first() is not None:
+        logger.debug(
+            "architect (feedback-no-progress): task %s has an open PR; "
+            "deferring to the deadlock-arbitration trigger",
+            row.task_id,
+        )
+        return None
+
+    if await _is_capped(session, row.task_id, ARCHITECTURE_RESOLVE_WORKFLOW_ID):
+        logger.warning(
+            "architect (feedback-no-progress): %s capped for task %s "
+            "(>=%d prior runs); operator must intervene",
+            ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            row.task_id,
+            ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
+        )
+        await _emit_arch_cap_reached(
+            session, dispatcher, task_id=row.task_id, repo=row.repo,
+        )
+        return None
+
+    task = await session.get(Task, row.task_id)
+    if task is None:
+        return None
+
+    payload = {
+        "repo": row.repo,
+        "feedback_no_progress_step_id": str(step_id),
+    }
+
+    async def _dispatch() -> uuid.UUID | None:
+        return await _create_and_publish_run(
+            session,
+            dispatcher,
+            task=task,
+            workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+            trigger="self:wf-feedback-no-progress",
+            source_step_id=step_id,
+        )
+
+    return await maybe_dispatch_with_dedup(
+        session,
+        workflow_id=ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+        payload=payload,
+        dispatch_fn=_dispatch,
+    )
+
+
 async def maybe_dispatch_feedback_on_architect_amend(
     session: AsyncSession,
     dispatcher: Any,
