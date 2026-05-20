@@ -444,6 +444,14 @@ class CoordinationConsumer:
                 await self._maybe_fire_feedback_validation_fail_arbitration(
                     session, step_id, typed,
                 )
+            # Dead-end audit (2026-05-19): when a recovery workflow
+            # (wf-ci-fix / wf-conflict / wf-doc-amend) completes with
+            # decision=fail and has no productive next dispatch, surface to
+            # operator instead of terminating silently.
+            if action == "completed":
+                await self._maybe_escalate_terminal_give_up(
+                    session, step_id, typed,
+                )
             # ADR-0038: companion to the dispatch helper above — when an
             # architect step.completed carries
             # ``payload.dispatch.review_override``, emit the
@@ -1374,6 +1382,41 @@ class CoordinationConsumer:
                 "_maybe_fire_feedback_validation_fail_arbitration: "
                 "dispatch failed for step %s; prior projection committed, "
                 "will retry on redelivery",
+                step_id,
+            )
+
+    # ── Operator backstop: recovery-workflow give-up (dead-end audit) ───────
+
+    async def _maybe_escalate_terminal_give_up(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """SDE-2/4b/6 (2026-05-19 dead-end audit): when wf-ci-fix /
+        wf-conflict / wf-doc-amend completes with ``decision='fail'`` and has
+        no productive next dispatch, emit ``task.escalated_to_operator`` so the
+        needs_operator query surfaces it. Previously these terminated silently
+        (no consumer handler keyed on these workflows' own terminals).
+
+        Failures are logged but do not propagate; the prior projection has
+        already committed.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_escalate_operator_on_terminal_give_up,
+        )
+        try:
+            await maybe_escalate_operator_on_terminal_give_up(
+                session, self.dispatcher, step_id=step_id, typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_escalate_terminal_give_up: escalation failed for "
+                "step %s; prior projection committed, will retry on redelivery",
                 step_id,
             )
 

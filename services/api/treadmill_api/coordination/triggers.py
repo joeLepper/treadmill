@@ -260,6 +260,22 @@ async def evaluate_triggers(
                 "skipping dispatch for %s",
                 workflow_id, task.id, _cap_for(workflow_id), event_type,
             )
+            # SDE-3/4: ci-fix / conflict caps leave the PR gate-blocked with
+            # no further recovery — surface to operator rather than silently
+            # dropping the candidate. (Other capped workflows re-dispatch via
+            # their own paths or are inherently non-terminal.)
+            if workflow_id in (CI_FIX_WORKFLOW_ID, CONFLICT_WORKFLOW_ID):
+                await _emit_operator_escalation(
+                    session,
+                    dispatcher,
+                    task_id=task.id,
+                    repo=task.repo,
+                    signal=f"{workflow_id}-cap-reached",
+                    detail=(
+                        f"{workflow_id} reached its {_cap_for(workflow_id)}-"
+                        "attempt cap; operator intervention needed."
+                    ),
+                )
             continue
 
         # Bind loop variables to avoid the late-binding closure pitfall.
@@ -761,6 +777,12 @@ async def maybe_dispatch_architect_on_author_no_diff(
             row.task_id,
             ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
         )
+        # SDE-5: surface to operator. This cap site previously logged
+        # "operator must intervene" but emitted nothing the needs_operator
+        # query (GET /tasks?status=needs_operator) could see.
+        await _emit_arch_cap_reached(
+            session, dispatcher, task_id=row.task_id, repo=row.repo,
+        )
         return None
 
     task = await session.get(Task, row.task_id)
@@ -856,6 +878,10 @@ async def maybe_dispatch_architect_on_author_remote_rejection(
             ARCHITECTURE_RESOLVE_WORKFLOW_ID,
             row.task_id,
             ARCHITECTURE_RESOLVE_MAX_ATTEMPTS,
+        )
+        # SDE-5: surface to operator (see author-no-diff cap site above).
+        await _emit_arch_cap_reached(
+            session, dispatcher, task_id=row.task_id, repo=row.repo,
         )
         return None
 
@@ -985,6 +1011,127 @@ async def _emit_arch_cap_reached(
             "operator must check logs",
             task_id,
         )
+
+
+# Recovery workflows whose own terminal give-up (decision=fail) or cap leaves
+# the PR gate-blocked with no productive next dispatch. Per the 2026-05-19
+# dead-end audit these must surface to operator instead of silently no-op'ing.
+_TERMINAL_GIVE_UP_WORKFLOWS = frozenset(
+    {CI_FIX_WORKFLOW_ID, CONFLICT_WORKFLOW_ID, DOC_AMEND_WORKFLOW_ID}
+)
+
+
+async def _emit_operator_escalation(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    task_id: uuid.UUID,
+    signal: str,
+    repo: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Persist + publish ``task.escalated_to_operator`` for a non-architect
+    terminal that has no productive next step (a cap or a give-up).
+
+    ``signal`` is a short slug stored in ``last_verdict`` (e.g.
+    ``'wf-ci-fix-cap-reached'``); ``detail`` goes to ``last_reasoning``.
+    ``repo`` defaults to the task's own repo when not supplied. The operator
+    surface is ``GET /api/v1/tasks?status=needs_operator`` (PR #184), which
+    uses ``EXISTS`` on the escalation event. We still guard against duplicate
+    rows for the same ``(task, signal)`` so reprocessing or repeated cap hits
+    don't pile up escalations. No-op when the dispatcher is absent (test stubs)
+    or the task row is missing — the caller's warning log already recorded the
+    signal.
+    """
+    if dispatcher is None:
+        return
+    task = await session.get(Task, task_id)
+    if task is None:
+        logger.warning(
+            "operator-escalation: task %s not found; skipping %s",
+            task_id, signal,
+        )
+        return
+    repo = repo or task.repo
+    existing = await session.execute(
+        select(Event.id)
+        .where(
+            Event.task_id == task_id,
+            Event.entity_type == "task",
+            Event.action == "escalated_to_operator",
+            Event.payload["last_verdict"].astext == signal,
+        )
+        .limit(1)
+    )
+    if existing.first() is not None:
+        return
+    try:
+        await dispatcher.persist_and_publish(
+            session,
+            entity_type="task",
+            action="escalated_to_operator",
+            payload=TaskEscalatedToOperator(
+                task_id=task_id,
+                repo=repo,
+                last_verdict=signal,
+                last_reasoning=detail,
+                run_ids=[],
+            ),
+            plan_id=task.plan_id,
+            task_id=task_id,
+        )
+    except Exception:
+        logger.exception(
+            "operator-escalation: failed to emit %s for task %s; "
+            "operator must check logs",
+            signal, task_id,
+        )
+
+
+async def maybe_escalate_operator_on_terminal_give_up(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> None:
+    """SDE-2/4b/6: surface to operator when a recovery workflow gives up.
+
+    ``wf-ci-fix`` / ``wf-conflict`` / ``wf-doc-amend`` completing with
+    ``decision='fail'`` has no productive downstream dispatch — the PR stays
+    gate-blocked. Before the 2026-05-19 audit this terminated silently (no
+    consumer handler keys on these workflows' own terminals). Emit
+    ``task.escalated_to_operator`` so the needs_operator query finds it.
+    Short-circuits cleanly for any other workflow or decision.
+    """
+    decision = typed.output.decision if typed.output else None
+    if decision != "fail":
+        return
+    result = await session.execute(
+        select(
+            WorkflowVersion.workflow_id,
+            WorkflowRun.task_id,
+            Task.repo,
+        )
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_id)
+    )
+    row = result.first()
+    if row is None or row.workflow_id not in _TERMINAL_GIVE_UP_WORKFLOWS:
+        return
+    await _emit_operator_escalation(
+        session,
+        dispatcher,
+        task_id=row.task_id,
+        repo=row.repo,
+        signal=f"{row.workflow_id}-gave-up",
+        detail=(
+            f"{row.workflow_id} completed with decision=fail and has no "
+            "productive next step; operator intervention needed."
+        ),
+    )
 
 
 async def maybe_dispatch_arbitration_on_deadlock(
@@ -2190,6 +2337,21 @@ async def maybe_dispatch_doc_amend_on_docs_check_fail(
         logger.warning(
             "doc-amend trigger: %s capped for task %s (>=%d prior runs); skipping",
             DOC_AMEND_WORKFLOW_ID, row.task_id, DOC_AMEND_MAX_ATTEMPTS,
+        )
+        # SDE-6: docs-current-with-pr.fail → doc-amend at cap leaves the docs
+        # gate failed → PR gate-blocked with no further recovery. Surface to
+        # operator. (The rule-tuning doc-amend path produces a separate
+        # proposal PR and is not gate-blocking, so it does not escalate.)
+        await _emit_operator_escalation(
+            session,
+            dispatcher,
+            task_id=row.task_id,
+            signal=f"{DOC_AMEND_WORKFLOW_ID}-cap-reached",
+            detail=(
+                f"{DOC_AMEND_WORKFLOW_ID} reached its {DOC_AMEND_MAX_ATTEMPTS}-"
+                "attempt cap on a docs-current gate failure; the PR stays "
+                "gate-blocked. Operator intervention needed."
+            ),
         )
         return None
 
