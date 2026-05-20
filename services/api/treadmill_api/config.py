@@ -122,6 +122,18 @@ class Settings(BaseSettings):
         default=None, alias="GITHUB_WEBHOOK_SECRET_NAME",
     )
 
+    # ── GitHub App webhook secret (App-secret cutover prep) ───────────────────
+    # The GitHub App has its own webhook secret, distinct from the legacy
+    # ``github_webhook_secret`` configured on the pre-App webhook. During the
+    # cutover the verifier accepts a payload signed by either secret; once
+    # all traffic is on the App's webhook, the legacy field can be retired.
+    github_app_webhook_secret: str | None = Field(
+        default=None, alias="GITHUB_APP_WEBHOOK_SECRET",
+    )
+    github_app_webhook_secret_name: str | None = Field(
+        default=None, alias="GITHUB_APP_WEBHOOK_SECRET_NAME",
+    )
+
     # ── GitHub App identity (ADR-0049) ────────────────────────────────────────
     # Treadmill authenticates as a GitHub App: short-lived, per-installation
     # tokens minted from the App id + RS256 private key, replacing the single
