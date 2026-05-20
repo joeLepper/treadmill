@@ -181,8 +181,13 @@ class FixtureBuilder:
         workflow_slug: str,
         step_states: list[str],
         trigger: str = "registered",
+        step_outputs: list[dict | None] | None = None,
     ) -> uuid.UUID:
-        """Create a workflow_run with the given step statuses, in order."""
+        """Create a workflow_run with the given step statuses, in order.
+
+        ``step_outputs``, when given, sets each step's ``output`` JSONB (e.g.
+        ``[{"decision": "approved"}]``); ``None`` entries leave output NULL.
+        """
         with self.engine.begin() as conn:
             wv_id = self.make_workflow_version(conn, workflow_slug)
             self.make_role(conn)
@@ -194,13 +199,23 @@ class FixtureBuilder:
                 {"t": task_id, "wv": wv_id, "trig": trigger},
             ).scalar()
             for idx, state in enumerate(step_states):
+                output = None
+                if step_outputs is not None and idx < len(step_outputs):
+                    output = step_outputs[idx]
                 conn.execute(
                     sa.text(
                         "INSERT INTO workflow_run_steps "
-                        "(run_id, step_index, step_name, role_id, status) "
-                        "VALUES (:r, :i, :n, 'role-author', :s)"
+                        "(run_id, step_index, step_name, role_id, status, output) "
+                        "VALUES (:r, :i, :n, 'role-author', :s, "
+                        "CAST(:o AS jsonb))"
                     ),
-                    {"r": run_id, "i": idx, "n": f"step-{idx}", "s": state},
+                    {
+                        "r": run_id,
+                        "i": idx,
+                        "n": f"step-{idx}",
+                        "s": state,
+                        "o": _json_encode(output) if output is not None else None,
+                    },
                 )
         return run_id
 
@@ -372,15 +387,53 @@ def test_status_pr_merged(engine: Engine, fixtures: FixtureBuilder) -> None:
     assert _status_for(engine, task_id) == "pr_merged"
 
 
-def test_status_review_passed(engine: Engine, fixtures: FixtureBuilder) -> None:
-    """When the latest run is wf-review and PR has merged, status = review_passed."""
+def test_status_merged_via_review_is_pr_merged(
+    engine: Engine, fixtures: FixtureBuilder,
+) -> None:
+    """A merged task whose latest run is wf-review derives 'pr_merged', not
+    'review_passed'. pr_merged is authoritative whenever a merge event exists —
+    auto-merge creates no later run, so the happy path lands here. (Regression
+    guard for the 20260520_0500 precedence fix.)"""
     plan_id = fixtures.make_plan()
     task_id = fixtures.make_task(plan_id)
     fixtures.add_run_with_steps(task_id, "wf-author", ["completed"])
     fixtures.add_task_pr(task_id)
     fixtures.add_event(task_id, "github", "pr_merged")
-    fixtures.add_run_with_steps(task_id, "wf-review", ["completed"])
+    fixtures.add_run_with_steps(
+        task_id, "wf-review", ["completed"],
+        step_outputs=[{"decision": "approved"}],
+    )
+    assert _status_for(engine, task_id) == "pr_merged"
+
+
+def test_status_review_passed_is_pre_merge(
+    engine: Engine, fixtures: FixtureBuilder,
+) -> None:
+    """review_passed is the PRE-merge state: open PR, no merge event, latest run
+    wf-review with a completed step decision='approved' (the auto-merge
+    cooling-off window)."""
+    plan_id = fixtures.make_plan()
+    task_id = fixtures.make_task(plan_id)
+    fixtures.add_run_with_steps(task_id, "wf-author", ["completed"])
+    fixtures.add_task_pr(task_id)
+    fixtures.add_run_with_steps(
+        task_id, "wf-review", ["completed"],
+        step_outputs=[{"decision": "approved"}],
+    )
     assert _status_for(engine, task_id) == "review_passed"
+
+
+def test_status_pr_opened_when_review_not_yet_approved(
+    engine: Engine, fixtures: FixtureBuilder,
+) -> None:
+    """An open PR whose latest wf-review run has no approved decision is
+    'pr_opened', not 'review_passed'."""
+    plan_id = fixtures.make_plan()
+    task_id = fixtures.make_task(plan_id)
+    fixtures.add_run_with_steps(task_id, "wf-author", ["completed"])
+    fixtures.add_task_pr(task_id)
+    fixtures.add_run_with_steps(task_id, "wf-review", ["completed"])
+    assert _status_for(engine, task_id) == "pr_opened"
 
 
 def test_status_done_when_no_pr(engine: Engine, fixtures: FixtureBuilder) -> None:
