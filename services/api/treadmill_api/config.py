@@ -122,6 +122,23 @@ class Settings(BaseSettings):
         default=None, alias="GITHUB_WEBHOOK_SECRET_NAME",
     )
 
+    # ── GitHub App identity (ADR-0049) ────────────────────────────────────────
+    # Treadmill authenticates as a GitHub App: short-lived, per-installation
+    # tokens minted from the App id + RS256 private key, replacing the single
+    # PAT. ``github_app_id`` is non-secret. The private key (PEM) may be
+    # supplied directly via ``GITHUB_APP_PRIVATE_KEY`` (adapter-injected env,
+    # mirroring GITHUB_TOKEN) or fetched from Secrets Manager by name in
+    # dev_local / fully_remote. When neither the id nor a key is set, the App
+    # path is inactive and the existing PAT path remains in force (parallel
+    # operation through the migration; see ADR-0049 + the migration plan).
+    github_app_id: str | None = Field(default=None, alias="GITHUB_APP_ID")
+    github_app_private_key: str | None = Field(
+        default=None, alias="GITHUB_APP_PRIVATE_KEY",
+    )
+    github_app_private_key_secret_name: str | None = Field(
+        default=None, alias="GITHUB_APP_PRIVATE_KEY_SECRET_NAME",
+    )
+
     # ── SNS topic for runtime events ──────────────────────────────────────────
     # The API publishes typed events here per ADR-0011. When unset, the
     # publisher logs to stderr instead — useful for local dev / test
