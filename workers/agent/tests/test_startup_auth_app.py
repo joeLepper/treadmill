@@ -53,11 +53,12 @@ def test_via_app_mints_then_pipes_to_gh(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_via_app_posts_to_installation_token_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
     def fake_urlopen(req, timeout=None):  # type: ignore[no-untyped-def]
         seen["url"] = req.full_url
         seen["method"] = req.get_method()
+        seen["body"] = req.data
         return _FakeResp(json.dumps({"token": "ghs_x"}).encode())
 
     monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
@@ -70,6 +71,41 @@ def test_via_app_posts_to_installation_token_endpoint(monkeypatch: pytest.Monkey
 
     assert seen["url"] == "http://api:9/api/v1/github/installation-token"
     assert seen["method"] == "POST"
+    # No-repo (startup home-token) bootstrap POSTs an empty JSON object.
+    assert json.loads(seen["body"]) == {}
+
+
+def test_via_app_with_repo_posts_repo_in_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When ``repo`` is provided, the worker POSTs ``{"repo": ...}`` so the
+    API scopes the installation token to that repo's installation — used by
+    the runner per task once ``ctx.repo`` is known (ADR-0049). The returned
+    token is handed to ``gh`` exactly like the no-repo path.
+    """
+    captured: dict[str, object] = {}
+    gh_inputs: list[bytes | None] = []
+
+    def fake_urlopen(req, timeout=None):  # type: ignore[no-untyped-def]
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        captured["body"] = req.data
+        return _FakeResp(json.dumps({"token": "ghs_repo_scoped"}).encode())
+
+    def fake_run(args, **kw):  # type: ignore[no-untyped-def]
+        gh_inputs.append(kw.get("input"))
+        return mock.MagicMock(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(startup_auth.subprocess, "run", fake_run)
+
+    startup_auth.bootstrap_github_auth_via_app(
+        settings=_settings("http://api:9/"), repo="o/n",
+    )
+
+    assert captured["url"] == "http://api:9/api/v1/github/installation-token"
+    assert captured["method"] == "POST"
+    assert json.loads(captured["body"]) == {"repo": "o/n"}
+    # Token from the response was piped to ``gh auth login --with-token``.
+    assert gh_inputs[0] == b"ghs_repo_scoped"
 
 
 def test_via_app_raises_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:

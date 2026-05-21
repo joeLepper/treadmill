@@ -108,19 +108,35 @@ def bootstrap_github_auth(
     logger.info("gh auth bootstrap complete (PAT)")
 
 
-def bootstrap_github_auth_via_app(*, settings: "Settings") -> None:
+def bootstrap_github_auth_via_app(
+    *,
+    settings: "Settings",
+    repo: str | None = None,
+) -> None:
     """App path: mint a short-lived installation token from the API, hand to ``gh``.
 
     The worker never holds the App private key — it POSTs to the API's
-    ``/api/v1/github/installation-token`` (no repo → the sole installation, the
-    dev-local case) and applies the returned token. Uses stdlib ``urllib`` so
-    the worker takes on no new dependency.
+    ``/api/v1/github/installation-token`` and applies the returned token. Uses
+    stdlib ``urllib`` so the worker takes on no new dependency.
+
+    When ``repo`` is ``None`` (the startup home-token bootstrap), POSTs an
+    empty body so the API returns a token for the sole installation. When
+    ``repo`` is set (``owner/name``), POSTs ``{"repo": repo}`` so the API
+    scopes the token to that repo's installation — used by the runner per
+    task once ``ctx.repo`` is known.
     """
     url = settings.api_url.rstrip("/") + "/api/v1/github/installation-token"
-    logger.info("minting GitHub App installation token via API: %s", url)
+    body = {"repo": repo} if repo else {}
+    if repo:
+        logger.info(
+            "minting GitHub App installation token via API: %s repo=%s",
+            url, repo,
+        )
+    else:
+        logger.info("minting GitHub App installation token via API: %s", url)
     req = urllib.request.Request(
         url,
-        data=b"{}",
+        data=json.dumps(body).encode(),
         method="POST",
         headers={"Content-Type": "application/json"},
     )
@@ -138,4 +154,10 @@ def bootstrap_github_auth_via_app(*, settings: "Settings") -> None:
         _apply_token_to_gh(token)
     finally:
         token = None  # noqa: F841 - intentional dereference
-    logger.info("gh auth bootstrap complete (GitHub App installation token)")
+    if repo:
+        logger.info(
+            "gh auth bootstrap complete (GitHub App installation token, repo=%s)",
+            repo,
+        )
+    else:
+        logger.info("gh auth bootstrap complete (GitHub App installation token)")

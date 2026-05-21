@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from treadmill_agent import claude_code, git, workspace
+from treadmill_agent import claude_code, git, startup_auth, workspace
 from treadmill_agent.api_client import ApiClient, WorkerContext
 from treadmill_agent.config import Settings
 from treadmill_agent.events import StepOutput
@@ -279,6 +279,28 @@ def _handle_step(
             "fetched context: step=%s task=%s repo=%s role=%s model=%s",
             ctx.step_id, ctx.task_id, ctx.repo, ctx.role.id, ctx.role.model,
         )
+        # ADR-0049: in app-mode the startup bootstrap mints a home-token; now
+        # that ``ctx.repo`` is known, re-mint a token scoped to the task's
+        # repo so ``gh`` can clone / push against repos outside the home
+        # installation. A mint failure must fail the step cleanly (publish
+        # ``step.failed``) — a per-task mint failure must NOT crash the worker
+        # process and take down the loop (the outage lesson).
+        if settings.repo_mode == "github" and settings.github_auth_mode == "app":
+            try:
+                startup_auth.bootstrap_github_auth_via_app(
+                    settings=settings, repo=ctx.repo,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "step %s failed minting repo-scoped GitHub App token",
+                    ctx.step_id,
+                )
+                publisher.publish_step_failed(
+                    task_id=ctx.task_id, plan_id=ctx.plan_id,
+                    run_id=ctx.run_id, step_id=ctx.step_id,
+                    error=str(exc),
+                )
+                raise
         try:
             output = _execute(ctx, settings)
         except Exception as exc:
