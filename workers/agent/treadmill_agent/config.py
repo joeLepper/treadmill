@@ -66,6 +66,13 @@ class Settings:
     ``gh`` ends up with the token in its keyring without the value
     crossing the host/container env-var boundary."""
 
+    github_auth_mode: str = "pat"
+    """``pat`` (legacy) or ``app`` (ADR-0049). In ``app`` mode the worker mints
+    a short-lived GitHub App installation token from the API
+    (``bootstrap_github_auth_via_app``) instead of fetching the personal PAT —
+    the App private key never reaches the worker. Injected by the local-adapter
+    as ``GITHUB_AUTH_MODE`` when the deployment configures a GitHub App."""
+
 
 _TRUE_VALUES = {"true", "1", "yes"}
 _FALSE_VALUES = {"false", "0", "no"}
@@ -111,6 +118,7 @@ def load() -> Settings:
             "/root/.claude/.credentials.json",
         ),
         github_pat_secret_name=os.environ.get("GITHUB_PAT_SECRET_NAME"),
+        github_auth_mode=os.environ.get("GITHUB_AUTH_MODE", "pat"),
     )
 
 

@@ -102,6 +102,26 @@ async def resolve_installation_id(
     return int(resp.json()["id"])
 
 
+async def list_installation_ids(
+    client: httpx.AsyncClient,
+    *,
+    app_id: str,
+    private_key_pem: str,
+) -> list[int]:
+    """List the App's installation ids (``GET /app/installations``).
+
+    Used to resolve "the installation" when no specific repo is given — the
+    dev-local single-installation case. Multi-installation callers should
+    resolve by repo via :func:`resolve_installation_id` instead.
+    """
+    resp = await client.get(
+        f"{_GITHUB_API}/app/installations",
+        headers=_app_jwt_headers(app_id, private_key_pem),
+    )
+    resp.raise_for_status()
+    return [int(item["id"]) for item in resp.json()]
+
+
 async def fetch_installation_token(
     client: httpx.AsyncClient,
     *,

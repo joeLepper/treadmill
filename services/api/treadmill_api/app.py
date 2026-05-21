@@ -32,6 +32,7 @@ from treadmill_api.dependencies import (
 from treadmill_api.observability import get_tracer
 from treadmill_api.health import router as health_router
 from treadmill_api.routers.event_triggers import router as event_triggers_router
+from treadmill_api.routers.github import router as github_router
 from treadmill_api.routers.hooks import router as hooks_router
 from treadmill_api.routers.plans import router as plans_router
 from treadmill_api.routers.roles import router as roles_router
@@ -268,6 +269,7 @@ def create_app() -> FastAPI:
     app.include_router(skills_router)
     app.include_router(hooks_router)
     app.include_router(event_triggers_router)
+    app.include_router(github_router)
     app.include_router(webhooks_router)
     return app
 

@@ -41,14 +41,18 @@ def main() -> int:
     # them. Region is the only thing we set explicitly.
     aws_session = startup_auth.resolve_worker_aws_session(settings)
 
-    # GitHub-mode workers authenticate via ``gh``'s keyring; the PAT is
-    # fetched from Secrets Manager and handed to ``gh`` here so that
-    # subsequent ``git clone`` / ``gh pr create`` calls in the runner
-    # need no token at all in their argv or env.
+    # GitHub-mode workers authenticate via ``gh``'s keyring (ADR-0049):
+    # ``app`` mode mints a short-lived installation token from the API (the
+    # App private key stays on the API); ``pat`` mode fetches the legacy
+    # personal PAT from Secrets Manager. Either way ``gh`` ends up with a
+    # token and subsequent git / ``gh pr create`` calls need none in argv/env.
     if settings.repo_mode == "github":
-        startup_auth.bootstrap_github_auth(
-            settings=settings, aws_session=aws_session,
-        )
+        if settings.github_auth_mode == "app":
+            startup_auth.bootstrap_github_auth_via_app(settings=settings)
+        else:
+            startup_auth.bootstrap_github_auth(
+                settings=settings, aws_session=aws_session,
+            )
 
     sqs = aws_session.client(
         "sqs",

@@ -1,23 +1,30 @@
-"""GitHub PAT bootstrap for the worker.
+"""GitHub auth bootstrap for the worker.
 
 Per ADR-0019, the worker's AWS credentials arrive as
 ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` env vars injected by
 the local-adapter at container-spawn time. The worker never authenticates
-with SSO and never fetches its own credentials secret — its boto3
-session is just ``boto3.Session(region_name=...)``, with the standard
-env-var credential resolution picking up the injected keys.
+with SSO and never fetches its own credentials secret.
 
-When ``REPO_MODE=github``, the worker still fetches the GitHub PAT from
-Secrets Manager at startup (using the same env-var-resolved boto3
-session) and hands it to ``gh`` via stdin so subsequent ``git`` /
-``gh`` calls authenticate via ``gh``'s keyring — no PAT in argv, env,
-or git URLs.
+When ``REPO_MODE=github`` the worker authenticates to GitHub via ``gh``'s
+keyring. Two modes (ADR-0049):
+
+  * ``GITHUB_AUTH_MODE=pat`` (legacy): fetch the personal PAT from Secrets
+    Manager and hand it to ``gh``.
+  * ``GITHUB_AUTH_MODE=app``: ask the API to mint a short-lived GitHub App
+    installation token (the App private key stays on the API, never on the
+    worker) and hand *that* to ``gh``. This is what lets the personal PAT be
+    decommissioned.
+
+Either way the token is handed to ``gh`` via stdin so it never appears in
+argv, env, or git URLs, then dropped.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
+import urllib.request
 from typing import TYPE_CHECKING
 
 import boto3
@@ -38,16 +45,36 @@ def resolve_worker_aws_session(settings: "Settings") -> boto3.session.Session:
     Per ADR-0019: the local-adapter injects the worker's IAM-User keys
     into the container as env vars before the worker process starts.
     Boto3's default credential chain reads them from the environment;
-    this function just returns a region-scoped session and lets that
-    standard resolution happen.
-
-    The previous bootstrap-then-worker pattern (fetch a credentials
-    secret from Secrets Manager using a default-chain session, then
-    rebuild a session from the fetched keys) is gone — that path
-    required ``~/.aws`` mounted into the container, which broke on the
-    SSO-cache-refresh writeback path. See ADR-0019 for the full story.
+    this function just returns a region-scoped session.
     """
     return boto3.Session(region_name=settings.aws_region)
+
+
+def _apply_token_to_gh(token: str) -> None:
+    """Hand a token to ``gh`` via stdin and install the git credential helper.
+
+    Shared by both the PAT and App paths. ``input=`` routes the token through
+    stdin — the supported channel for ``gh auth login --with-token`` — so it
+    never lands in argv (``/proc/<pid>/cmdline``) or the environment.
+    """
+    result = subprocess.run(
+        ["gh", "auth", "login", "--with-token"],
+        input=token.encode(),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise StartupAuthError(
+            f"`gh auth login --with-token` exited {result.returncode}: "
+            f"{result.stderr.decode(errors='replace')}"
+        )
+    # Install the credential helper so plain ``git clone https://github.com/...``
+    # URLs route through ``gh``.
+    result = subprocess.run(["gh", "auth", "setup-git"], capture_output=True)
+    if result.returncode != 0:
+        raise StartupAuthError(
+            f"`gh auth setup-git` exited {result.returncode}: "
+            f"{result.stderr.decode(errors='replace')}"
+        )
 
 
 def bootstrap_github_auth(
@@ -55,24 +82,13 @@ def bootstrap_github_auth(
     settings: "Settings",
     aws_session: boto3.session.Session,
 ) -> None:
-    """Fetch the PAT from Secrets Manager and hand it to ``gh``.
-
-    Called once at worker startup when ``repo_mode='github'``. The PAT
-    is held in a local variable for the duration of two subprocess
-    calls (``gh auth login --with-token`` + ``gh auth setup-git``) and
-    is then dereferenced.
-
-    Fail-fast: any non-zero exit from ``gh`` or any failure to retrieve
-    the secret raises ``StartupAuthError`` and the worker exits.
-    """
+    """Legacy PAT path: fetch the PAT from Secrets Manager and hand it to ``gh``."""
     secret_name = settings.github_pat_secret_name
     if not secret_name:
         raise StartupAuthError(
-            "repo_mode='github' requires GITHUB_PAT_SECRET_NAME to be set"
+            "repo_mode='github' (pat) requires GITHUB_PAT_SECRET_NAME to be set"
         )
-    logger.info(
-        "fetching GitHub PAT from Secrets Manager: secret=%s", secret_name,
-    )
+    logger.info("fetching GitHub PAT from Secrets Manager: secret=%s", secret_name)
     secrets = aws_session.client("secretsmanager")
     try:
         resp = secrets.get_secret_value(SecretId=secret_name)
@@ -85,37 +101,41 @@ def bootstrap_github_auth(
         raise StartupAuthError(
             f"GitHub PAT secret {secret_name!r} has no SecretString"
         )
-
     try:
-        # ``input=`` routes the PAT through stdin — the supported channel
-        # for ``gh auth login --with-token``. The PAT never appears in
-        # argv (which would land in /proc/<pid>/cmdline) and is not put
-        # into the environment (which would propagate to every child
-        # process the worker spawns).
-        result = subprocess.run(
-            ["gh", "auth", "login", "--with-token"],
-            input=pat.encode(),
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            raise StartupAuthError(
-                f"`gh auth login --with-token` exited {result.returncode}: "
-                f"{result.stderr.decode(errors='replace')}"
-            )
-        # Install the credential helper so plain ``git clone
-        # https://github.com/...`` URLs route through ``gh``.
-        result = subprocess.run(
-            ["gh", "auth", "setup-git"],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            raise StartupAuthError(
-                f"`gh auth setup-git` exited {result.returncode}: "
-                f"{result.stderr.decode(errors='replace')}"
-            )
+        _apply_token_to_gh(pat)
     finally:
-        # Drop the PAT reference immediately. ``gh`` has it in its
-        # keyring now; the worker process must not.
         pat = None  # noqa: F841 - intentional dereference
+    logger.info("gh auth bootstrap complete (PAT)")
 
-    logger.info("gh auth bootstrap complete")
+
+def bootstrap_github_auth_via_app(*, settings: "Settings") -> None:
+    """App path: mint a short-lived installation token from the API, hand to ``gh``.
+
+    The worker never holds the App private key — it POSTs to the API's
+    ``/api/v1/github/installation-token`` (no repo → the sole installation, the
+    dev-local case) and applies the returned token. Uses stdlib ``urllib`` so
+    the worker takes on no new dependency.
+    """
+    url = settings.api_url.rstrip("/") + "/api/v1/github/installation-token"
+    logger.info("minting GitHub App installation token via API: %s", url)
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        raise StartupAuthError(
+            f"failed to mint installation token via {url}: {exc}"
+        ) from exc
+    token = payload.get("token")
+    if not token:
+        raise StartupAuthError("installation-token response had no 'token'")
+    try:
+        _apply_token_to_gh(token)
+    finally:
+        token = None  # noqa: F841 - intentional dereference
+    logger.info("gh auth bootstrap complete (GitHub App installation token)")

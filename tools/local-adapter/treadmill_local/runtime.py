@@ -828,6 +828,12 @@ class LocalRuntime:
         # Worker IAM-User keys, fetched once on the host (see
         # ``_fetch_worker_credentials``) and injected here.
         env.update(self._worker_aws_env)
+        # ADR-0049: when the deployment configures a GitHub App, the worker
+        # mints a short-lived installation token from the API at startup
+        # (GITHUB_AUTH_MODE=app) instead of fetching the personal PAT. The
+        # PAT secret name stays set as a fallback until phase-8 decommission.
+        if cfg.get("github_app_id"):
+            env["GITHUB_AUTH_MODE"] = "app"
         # ADR-0020: inject OTLP endpoint when the observability stack is
         # deployed. No-ops when unset (fully-local or obs stack absent).
         collector = cfg.get("aws", {}).get("observability_collector_endpoint")
