@@ -1,8 +1,8 @@
 # ADR-0050: Onboarding repositories Treadmill did not create
 
-- **Status:** accepted
+- **Status:** accepted — decision 1 (discovery mechanism) amended by ADR-0051
 - **Date:** 2026-05-21
-- **Related:** ADR-0049 (auth substrate), ADR-0030 (in-repo context this lacks), ADR-0016 (per-account topology), ADR-0031 (auto-merge), ADR-0034 (the future KB store)
+- **Related:** ADR-0049 (auth substrate), ADR-0030 (in-repo context this lacks), ADR-0016 (per-account topology), ADR-0031 (auto-merge), ADR-0034 (the future KB store), ADR-0051 (operator-initiated bootstrap / client-side discovery v1)
 
 ## Context
 
