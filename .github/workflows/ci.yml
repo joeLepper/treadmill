@@ -45,3 +45,35 @@ jobs:
       - name: Run ${{ matrix.component }} tests
         working-directory: ${{ matrix.component }}
         run: uv run pytest tests/ -q
+
+      # Colliding migration revisions from parallel PRs produce multiple
+      # alembic heads, which silently breaks `alembic upgrade head`. Gate it.
+      - name: Alembic single-head check
+        if: matrix.component == 'services/api'
+        working-directory: services/api
+        run: |
+          heads=$(uv run alembic heads | grep -c '(head)')
+          echo "alembic heads: $heads"
+          if [ "$heads" != "1" ]; then
+            echo "::error::expected exactly one alembic head, found $heads (colliding migrations — rebase + chain)"
+            uv run alembic heads
+            exit 1
+          fi
+
+  # The pytest job runs in the uv workspace, whose env carries transitive deps
+  # a component may import without declaring. The container image installs only
+  # the component's *direct* deps (`pip install .`), so a missing declaration
+  # passes CI yet crashes the container. Build the image and import the app to
+  # close that gap. See docs/learnings/2026-05-20-ci-workspace-env-masks-
+  # missing-container-deps.md (the cryptography incident).
+  api-image-smoke:
+    name: services/api image smoke-import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -t treadmill-api:ci services/api
+
+      - name: Smoke-import the app in the built image
+        run: docker run --rm treadmill-api:ci python -c "import treadmill_api.app; print('app import ok')"
