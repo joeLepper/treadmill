@@ -127,6 +127,7 @@ Filled in when the plan transitions to `completed` or `abandoned`.
 - **Success criteria must be observable.** "The adapter handles autoscaling" is unmeasurable; "publishing 3 messages results in 3 workers spawning sequentially and 0 workers after the idle window" is measurable.
 - **The Out-of-scope list is required.** A plan without explicit non-goals will accrue them silently.
 - **Tasks size to ~1 day.** Sequencing reads cleanly; estimate accuracy is acceptable.
+- **Scope the docs-currency surface into every code task.** ADR-0030's `docs-current-with-pr` is a *blocking* llm-judge: a PR that adds or changes a code module must also update the touched component's `AGENT.md` (and any cited ADRs/plans). A `sequence_of_work` task whose `scope.files` omits that surface is structurally guaranteed to trip the rule — it bounces to review and then leans on the architect to override, which is both wasteful and a source of false "architect is too permissive" signal. So for every task that creates or modifies code: (a) list the component `AGENT.md` in `scope.files`, and (b) have the `intent` instruct the doc update (a "Key surfaces" + "Recent changes" entry). Author tasks that *pass* the gates; never rely on downstream roles to backfill the docs the gate requires.
 - **No emojis, no marketing language.** Plans are operational, not promotional.
 
 ## Status transitions
