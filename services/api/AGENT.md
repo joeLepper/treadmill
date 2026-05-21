@@ -13,9 +13,11 @@ This directory contains the Treadmill API, the event-driven control plane that c
 - `treadmill_api/dispatch.py` — task dispatch logic; decides when to enqueue a step, applies dependency gates, deduplicates by composite key (plan SHA + step name).
 - `treadmill_api/database.py` — Postgres schema: workflows, plans, steps, tasks, mergeability state, long-lived task output.
 - `treadmill_api/parsers/plan_doc.py` — parses `docs/plans/*.md` frontmatter and extracts the task tree structure.
+- `treadmill_api/onboarding_store.py` + `treadmill_api/models/onboarding.py` — ADR-0050 onboarding persistence: repo config (mode + auto-merge block), wf-discover repo profile, and the S3 context-doc index. Typed columns + Postgres ARRAYs per ADR-0011 (no JSONB).
 
 ## Recent changes
 
+- [#TBD](https://github.com/anthropics/treadmill/pull/TBD) — ADR-0050 onboarding persistence: new `repo_configs`, `repo_profiles`, `repo_context_docs` tables (typed columns + ARRAY per ADR-0011); `OnboardingStore` accessor over the existing `RepoConfig` / `RepoProfile` dataclasses.
 - [#TBD](https://github.com/anthropics/treadmill/pull/TBD) — `treadmill_api/scheduler/` package: `SchedulerRunner` (30 s poll + 4 h replay), `cron.py` (croniter wrapper), `policy.py` (RAMJAC jitter + quiet hours + backoff), `events/schedule.py` (`ScheduledTick` payload registered in registry).
 - [#38](https://github.com/anthropics/treadmill/pull/38) — AGENT.md schema document + validation rules.
 - [#37](https://github.com/anthropics/treadmill/pull/37) — Document the post-deploy operator action for API credentials (ADR-0023 followup).
