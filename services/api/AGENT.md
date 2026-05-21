@@ -14,9 +14,11 @@ This directory contains the Treadmill API, the event-driven control plane that c
 - `treadmill_api/database.py` — Postgres schema: workflows, plans, steps, tasks, mergeability state, long-lived task output.
 - `treadmill_api/parsers/plan_doc.py` — parses `docs/plans/*.md` frontmatter and extracts the task tree structure.
 - `treadmill_api/onboarding_store.py` + `treadmill_api/models/onboarding.py` — ADR-0050 onboarding persistence: repo config (mode + auto-merge block), wf-discover repo profile, and the S3 context-doc index. Typed columns + Postgres ARRAYs per ADR-0011 (no JSONB).
+- `treadmill_api/coordination/triggers.py` — auto-merge trigger (ADR-0031) now also honors the ADR-0050 per-repo `auto_merge_blocked` config in addition to the plan-level flag. Both the deadline-arming path (`maybe_auto_merge_on_mergeable`) and the fire-time gate (`_check_still_mergeable_for_auto_merge`) consult `OnboardingStore.get_repo_config` via the `_repo_auto_merge_blocked` helper; missing config or any lookup error fails OPEN to preserve pre-ADR-0050 behavior.
 
 ## Recent changes
 
+- [#TBD](https://github.com/anthropics/treadmill/pull/TBD) — ADR-0050 d.5: live auto-merge trigger reads the per-repo `auto_merge_blocked` config from `OnboardingStore` and skips deadline-arm + fire-time merge if set; fails OPEN on missing config or lookup error.
 - [#TBD](https://github.com/anthropics/treadmill/pull/TBD) — ADR-0050 onboarding persistence: new `repo_configs`, `repo_profiles`, `repo_context_docs` tables (typed columns + ARRAY per ADR-0011); `OnboardingStore` accessor over the existing `RepoConfig` / `RepoProfile` dataclasses.
 - [#TBD](https://github.com/anthropics/treadmill/pull/TBD) — `treadmill_api/scheduler/` package: `SchedulerRunner` (30 s poll + 4 h replay), `cron.py` (croniter wrapper), `policy.py` (RAMJAC jitter + quiet hours + backoff), `events/schedule.py` (`ScheduledTick` payload registered in registry).
 - [#38](https://github.com/anthropics/treadmill/pull/38) — AGENT.md schema document + validation rules.

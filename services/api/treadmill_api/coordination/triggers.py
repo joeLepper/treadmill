@@ -86,6 +86,7 @@ from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.events.task import TaskEscalatedToOperator
+from treadmill_api.onboarding_store import OnboardingStore
 from treadmill_api.models import (
     Event,
     EventTrigger,
@@ -2919,6 +2920,24 @@ _AUTO_MERGE_FIRED_TTL_SECONDS = 86400  # 24h
 # refinement).
 
 
+async def _repo_auto_merge_blocked(session: AsyncSession, repo: str) -> bool:
+    """True iff the repo's onboarding config blocks all auto-merge
+    (ADR-0050 d.5). Fail-OPEN: missing config or any error -> False,
+    preserving pre-ADR-0050 behavior for repos without a config row."""
+    if not repo:
+        return False
+    try:
+        config = await OnboardingStore().get_repo_config(session, repo)
+    except Exception:
+        logger.warning(
+            "auto-merge: repo_config lookup failed for %s; fail-open",
+            repo,
+            exc_info=True,
+        )
+        return False
+    return bool(config and config.auto_merge_blocked)
+
+
 async def maybe_auto_merge_on_mergeable(
     session: AsyncSession,
     redis_client: Any,
@@ -3010,6 +3029,13 @@ async def maybe_auto_merge_on_mergeable(
     if merge_row.auto_merge is False:
         logger.debug(
             "auto-merge: plan.auto_merge=false for task %s; skipping", task_id,
+        )
+        return False
+
+    if await _repo_auto_merge_blocked(session, merge_row.repo):
+        logger.info(
+            "auto-merge: repo %s auto_merge_blocked (ADR-0050); "
+            "skipping task %s", merge_row.repo, task_id,
         )
         return False
 
@@ -3221,7 +3247,7 @@ async def _check_still_mergeable_for_auto_merge(
     """
     result = await session.execute(
         text("""
-            SELECT tm.derived_mergeability, p.auto_merge
+            SELECT tm.derived_mergeability, tm.repo, p.auto_merge
             FROM task_mergeability tm
             JOIN tasks t ON t.id = tm.task_id
             JOIN plans p ON p.id = t.plan_id
@@ -3233,5 +3259,7 @@ async def _check_still_mergeable_for_auto_merge(
     if row is None:
         return False
     if row.auto_merge is False:
+        return False
+    if await _repo_auto_merge_blocked(session, row.repo):
         return False
     return row.derived_mergeability == "mergeable"
