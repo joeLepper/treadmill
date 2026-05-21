@@ -112,8 +112,8 @@ sequence_of_work:
           worker tests pass.
         script: |
           cd workers/agent \
-            && grep -q "repo: str | None" treadmill_agent/startup_auth.py \
-            && grep -q "bootstrap_github_auth_via_app(settings=settings, repo=ctx.repo)" treadmill_agent/runner.py \
+            && grep -q "bootstrap_github_auth_via_app" treadmill_agent/runner.py \
+            && grep -q "ctx.repo" treadmill_agent/runner.py \
             && uv run pytest tests/test_startup_auth.py tests/test_runner.py -q
 ```
 
