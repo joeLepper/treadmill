@@ -11,9 +11,11 @@ This directory contains the Treadmill agent worker, the execution substrate that
 - `treadmill_agent/runner_dispositions/` — pluggable step-type handlers: `code.py` (wf-author), `plan_doc.py` (wf-plan), `validation.py` (wf-validate), `review.py` (wf-review), `analysis.py` (wf-analyze).
 - `treadmill_agent/workspace.py` — Git workspace lifecycle; creates isolated per-task directories, initializes repos, manages branch state, triggers Claude Code, captures outputs.
 - `treadmill_agent/claude_code.py` — Wrapper that invokes the Claude Code CLI, parses its output, and routes to appropriate event channels.
+- `treadmill_agent/validation_runtime.py` — Deterministic + LLM-judge check execution. `run_llm_judge` injects the touched components' AGENT.md content into the judge prompt (via `gather_agent_md_context`) so rule prompts that reference an `AGENT_MD` input (e.g. ADR-0030's docs-current-with-pr) actually see the documentation they're asked to evaluate.
 
 ## Recent changes
 
+- ADR-0052 — `run_llm_judge` now walks each touched path up to the nearest ancestor AGENT.md and embeds the content under an `## AGENT_MD` section before the PR diff. Closes the docs-currency false-pass where the judge previously reported "no AGENT.md exists" because the input was never supplied.
 - [#36](https://github.com/anthropics/treadmill/pull/36) — Local-adapter fetches API credentials at startup and injects them into the agent container environment.
 - [#29](https://github.com/anthropics/treadmill/pull/29) — Worker validation_runtime — deterministic + llm-judge primitives for running validation rules as a disposition.
 - [#28](https://github.com/anthropics/treadmill/pull/28) — Multi-step workflow support; task depends_on dependencies gated by API before dispatch.
