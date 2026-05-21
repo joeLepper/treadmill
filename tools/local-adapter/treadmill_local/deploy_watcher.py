@@ -107,14 +107,22 @@ class DeployWatcher:
 
     def run(self) -> None:
         """Poll until stop() is called or a signal is received."""
+        from treadmill_local.subprocess_logging import RateLimitedErrorLogger
+        # Rate-limit the loop's error path so a persistent failure
+        # (queue unreachable, GitHub auth expired) doesn't dump a full
+        # traceback every iteration. First occurrence logs in full;
+        # repeats are summarized; ``reset()`` after a clean poll
+        # re-arms a fresh traceback for the next incident.
+        error_logger = RateLimitedErrorLogger(logger)
         logger.info("deploy watcher starting (state=%s)", self._state_file)
         while not self._stop_event.is_set():
             try:
                 messages = self._receive_fn()
                 for msg in messages:
                     self._process_message(msg)
-            except Exception:
-                logger.exception("poll iteration failed; continuing")
+                error_logger.reset()
+            except Exception as exc:
+                error_logger.log(exc, "poll iteration failed; continuing")
         logger.info("deploy watcher stopped")
 
     def stop(self) -> None:
@@ -276,10 +284,16 @@ def main() -> int:
     # Imports are local to keep DeployWatcher itself dependency-free for tests.
     import boto3
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-    )
+    from treadmill_local.runtime import DEPLOY_WATCHER_LOG_FILE
+    from treadmill_local.subprocess_logging import configure_rotating_logging
+
+    # The subprocess owns its own log file — the parent passes the
+    # path via env. Fall back to the package default if unset so a
+    # bare ``python -m treadmill_local.deploy_watcher`` still has
+    # somewhere to write.
+    log_file_env = os.environ.get("TREADMILL_DEPLOY_WATCHER_LOG_FILE")
+    log_file = Path(log_file_env) if log_file_env else DEPLOY_WATCHER_LOG_FILE
+    configure_rotating_logging(log_file)
 
     github_owner = os.environ["GITHUB_OWNER"]
     github_repo_name = os.environ["GITHUB_REPO"]

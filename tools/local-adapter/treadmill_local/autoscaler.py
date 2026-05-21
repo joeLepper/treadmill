@@ -191,6 +191,13 @@ class Autoscaler:
         observable as soon as the log mtime falls outside the
         threshold.
         """
+        from treadmill_local.subprocess_logging import RateLimitedErrorLogger
+        # Rate-limit the loop's error path so a persistent failure
+        # (queue unreachable, expired credentials) doesn't dump a full
+        # traceback every tick. First occurrence logs in full; repeats
+        # are summarized; ``reset()`` after a successful tick re-arms
+        # a fresh traceback for the next incident.
+        error_logger = RateLimitedErrorLogger(logger)
         logger.info(
             "autoscaler starting (min=%d, max=%d, tick=%.1fs)",
             self.min_count, self.max_count, self.tick_seconds,
@@ -208,8 +215,9 @@ class Autoscaler:
                     t.visible, t.in_flight, t.total, t.current,
                     t.desired, t.started, t.reaped,
                 )
-            except Exception:
-                logger.exception("tick failed; continuing")
+                error_logger.reset()
+            except Exception as exc:
+                error_logger.log(exc, "tick failed; continuing")
             self._stop_event.wait(self.tick_seconds)
         logger.info("autoscaler stopped")
 
@@ -257,12 +265,16 @@ def main() -> int:
     import boto3
     import docker
 
-    from treadmill_local.runtime import LABEL_KEY, LocalRuntime
+    from treadmill_local.runtime import AUTOSCALER_LOG_FILE, LABEL_KEY, LocalRuntime
+    from treadmill_local.subprocess_logging import configure_rotating_logging
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-    )
+    # The subprocess owns its own log file — the parent passes the
+    # path via env. Fall back to the package default if unset so a
+    # bare ``python -m treadmill_local.autoscaler`` still has somewhere
+    # to write.
+    log_file_env = os.environ.get("TREADMILL_AUTOSCALER_LOG_FILE")
+    log_file = Path(log_file_env) if log_file_env else AUTOSCALER_LOG_FILE
+    configure_rotating_logging(log_file)
 
     infra_dir = Path(os.environ["TREADMILL_INFRA_DIR"])
     family = os.environ["TREADMILL_AUTOSCALER_FAMILY"]
