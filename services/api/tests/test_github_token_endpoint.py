@@ -51,10 +51,20 @@ def test_no_repo_uses_sole_installation(monkeypatch, _token) -> None:
     assert resp.json()["installation_id"] == 77
 
 
-def test_no_repo_multiple_installations_is_400(monkeypatch, _token) -> None:
-    monkeypatch.setattr(github_app, "list_installation_ids", AsyncMock(return_value=[1, 2]))
+def test_no_repo_multiple_installations_uses_home(monkeypatch, _token) -> None:
+    # No repo + several installations → default to the home (lowest-id)
+    # installation rather than 400, so the worker's startup mint succeeds on a
+    # multi-installation deployment (HOTFIX 2026-05-21).
+    monkeypatch.setattr(github_app, "list_installation_ids", AsyncMock(return_value=[22, 7, 9]))
     resp = _client(_configured()).post("/api/v1/github/installation-token", json={})
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    assert resp.json()["installation_id"] == 7
+
+
+def test_no_repo_no_installations_is_503(monkeypatch, _token) -> None:
+    monkeypatch.setattr(github_app, "list_installation_ids", AsyncMock(return_value=[]))
+    resp = _client(_configured()).post("/api/v1/github/installation-token", json={})
+    assert resp.status_code == 503
 
 
 def test_app_not_configured_is_503() -> None:

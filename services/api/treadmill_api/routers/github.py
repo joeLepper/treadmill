@@ -12,18 +12,23 @@ auth is a follow-up for fully_remote hardening.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
 from treadmill_api import github_app
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/github", tags=["github"])
 
 
 class InstallationTokenRequest(BaseModel):
     repo: str | None = None
-    """``owner/name``. Omit to use the sole installation (dev-local case)."""
+    """``owner/name``. Omit to use the App owner's home installation (the
+    worker's startup mint, before it knows the task's repo)."""
 
 
 class InstallationTokenResponse(BaseModel):
@@ -39,9 +44,15 @@ async def mint_installation_token(
 ) -> InstallationTokenResponse:
     """Mint a short-lived installation access token.
 
-    With ``repo``, resolves that repo's installation. Without it, uses the sole
-    installation (400 if there are zero or several — multi-org callers must pass
-    a repo). 503 when the App is not configured.
+    With ``repo``, resolves that repo's installation. Without it, defaults to
+    the App owner's home installation (the earliest-created = lowest id) so the
+    worker's startup mint succeeds even on a multi-installation deployment; 503
+    when the App is not configured or has no installations.
+
+    HOTFIX (2026-05-21): the no-repo default exists because the worker mints at
+    startup *before* it knows the task's repo. The proper fix is per-repo worker
+    auth (mint scoped to the task repo). A token for a NON-home repo still
+    requires passing ``repo``.
     """
     settings = request.app.state.settings
     if not (settings.github_app_id and settings.github_app_private_key):
@@ -62,15 +73,20 @@ async def mint_installation_token(
                 ids = await github_app.list_installation_ids(
                     client, app_id=app_id, private_key_pem=pk,
                 )
-                if len(ids) != 1:
+                if not ids:
                     raise HTTPException(
-                        status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"repo required: {len(ids)} installations exist "
-                            "(cannot disambiguate)"
-                        ),
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="GitHub App has no installations",
                     )
-                installation_id = ids[0]
+                # No repo supplied — default to the App owner's home
+                # installation (earliest-created = lowest id) instead of 400.
+                installation_id = min(ids)
+                if len(ids) > 1:
+                    logger.info(
+                        "installation-token: no repo; defaulting to home "
+                        "installation %s (of %d installations)",
+                        installation_id, len(ids),
+                    )
             tok = await github_app.fetch_installation_token(
                 client, app_id=app_id, private_key_pem=pk,
                 installation_id=installation_id,
