@@ -27,6 +27,23 @@ from treadmill_api.coordination.triggers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_repo_auto_merge_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralize the ADR-0050 repo-level auto-merge block for these tests.
+
+    These tests pre-date the block and drive the trigger with loose mock
+    sessions; the real ``OnboardingStore`` lookup would read a truthy mock
+    and spuriously report "blocked", flipping every expected result. The
+    block has its own coverage in ``test_auto_merge_block.py``; here we pin
+    the helper to its default (not blocked).
+    """
+    from treadmill_api.coordination import triggers
+
+    monkeypatch.setattr(
+        triggers, "_repo_auto_merge_blocked", AsyncMock(return_value=False)
+    )
+
+
 # ── Fixture helpers ────────────────────────────────────────────────────────────
 
 
