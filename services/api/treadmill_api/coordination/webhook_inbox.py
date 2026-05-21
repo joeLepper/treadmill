@@ -66,7 +66,7 @@ from treadmill_api.webhooks.normalize import (
 from treadmill_api.webhooks.signatures import (
     InvalidSignatureError,
     SignatureMissingError,
-    verify_github_signature,
+    verify_github_signature_any,
 )
 
 HealthStatus = Literal["starting", "running", "degraded", "dead"]
@@ -168,6 +168,7 @@ class WebhookInboxPoller:
         verifier: Any = None,
         normalizer: Any = None,
         staleness_seconds: float = 120.0,
+        app_webhook_secret: str | None = None,
     ) -> None:
         self.sqs = sqs_client
         self.queue_url = queue_url
@@ -177,7 +178,7 @@ class WebhookInboxPoller:
         self.publisher = publisher
         self.wait_time_seconds = wait_time_seconds
         self.max_messages = max_messages
-        self._verifier = verifier or verify_github_signature
+        self._verifier = verifier or verify_github_signature_any
         self._normalizer = normalizer or normalize_github_event
         self.staleness_seconds = staleness_seconds
 
@@ -185,6 +186,13 @@ class WebhookInboxPoller:
         self._task: asyncio.Task[None] | None = None
         self._health_status: HealthStatus = "starting"
         self._webhook_secret: str | None = None
+        # ADR-0049 phase 6: the GitHub App webhook secret VALUE, injected by
+        # the adapter (host-side fetch, like the App private key) because the
+        # API's IAM user cannot read the manually-created secret. When set, the
+        # poller verifies each delivery against EITHER this or the legacy
+        # secret, so deliveries from the old repo webhook and the App webhook
+        # both validate during/after cutover.
+        self._app_webhook_secret: str | None = app_webhook_secret
         # ``time.monotonic`` of the last successful poll (raises on the
         # SQS receive_message call do not count). Used by the staleness
         # probe — ``None`` means "no successful poll yet."
@@ -235,8 +243,8 @@ class WebhookInboxPoller:
 
     # ── Secret fetch ──────────────────────────────────────────────────────────
 
-    async def _fetch_webhook_secret(self) -> str:
-        """Fetch the GitHub webhook secret from Secrets Manager.
+    async def _fetch_secret(self, secret_name: str) -> str:
+        """Fetch a secret's value from Secrets Manager.
 
         Wrapped in ``asyncio.to_thread`` so the boto3 sync call doesn't
         block the event loop during startup. Raises on failure so the
@@ -244,15 +252,19 @@ class WebhookInboxPoller:
         """
         resp = await asyncio.to_thread(
             self.secrets_manager.get_secret_value,
-            SecretId=self.webhook_secret_name,
+            SecretId=secret_name,
         )
         secret = resp.get("SecretString")
         if not secret:
             raise RuntimeError(
-                f"Secrets Manager secret {self.webhook_secret_name!r} "
+                f"Secrets Manager secret {secret_name!r} "
                 "has no SecretString value (was it populated?)",
             )
         return secret
+
+    async def _fetch_webhook_secret(self) -> str:
+        """Fetch the (legacy) webhook secret. Thin wrapper over ``_fetch_secret``."""
+        return await self._fetch_secret(self.webhook_secret_name)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
 
@@ -366,7 +378,7 @@ class WebhookInboxPoller:
         signature = _header_lookup(envelope.headers, "x-hub-signature-256")
         try:
             self._verifier(
-                self._webhook_secret,
+                [self._webhook_secret, self._app_webhook_secret],
                 envelope.body.encode("utf-8"),
                 signature,
             )

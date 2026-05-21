@@ -173,6 +173,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             queue_url=settings.webhook_inbox_queue_url,
             secrets_manager_client=secrets_client,
             webhook_secret_name=settings.github_webhook_secret_name,
+            app_webhook_secret=settings.github_app_webhook_secret,
             sessionmaker=poller_sessionmaker,
             publisher=publisher,
         )

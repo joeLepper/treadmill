@@ -774,11 +774,17 @@ class LocalRuntime:
             env["GITHUB_APP_PRIVATE_KEY"] = self._fetch_secret_string(
                 cfg, app_key_secret,
             )
+            # Inject the App webhook secret VALUE (host-side fetch via the
+            # operator's creds), not the name — the API's IAM user has no
+            # GetSecretValue on this manually-created secret, so the poller
+            # can't fetch it itself (ADR-0049 phase 6).
             app_webhook_secret_name = secrets_cfg.get(
                 "github_app_webhook_secret_name"
             )
             if app_webhook_secret_name:
-                env["GITHUB_APP_WEBHOOK_SECRET_NAME"] = app_webhook_secret_name
+                env["GITHUB_APP_WEBHOOK_SECRET"] = self._fetch_secret_string(
+                    cfg, app_webhook_secret_name,
+                )
         # ADR-0020: inject OTLP endpoint when the observability stack is
         # deployed. The OTel SDK no-ops silently when the var is unset
         # (fully-local mode). Value from the deployment YAML under
