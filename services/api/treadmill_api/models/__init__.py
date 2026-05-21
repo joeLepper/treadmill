@@ -7,6 +7,11 @@ schema.
 """
 
 from treadmill_api.models.event import Event
+from treadmill_api.models.onboarding import (
+    RepoConfigRow,
+    RepoContextDocRow,
+    RepoProfileRow,
+)
 from treadmill_api.models.plan import Plan
 from treadmill_api.models.run import WorkflowRun, WorkflowRunStep
 from treadmill_api.models.task import Task, TaskDependency, TaskPR, TaskValidation
@@ -32,6 +37,9 @@ __all__ = [
     "Hook",
     "OutputKind",
     "Plan",
+    "RepoConfigRow",
+    "RepoContextDocRow",
+    "RepoProfileRow",
     "Role",
     "RoleHook",
     "RoleSkill",
