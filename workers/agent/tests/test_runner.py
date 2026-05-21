@@ -1119,6 +1119,151 @@ def test_queue_hygiene_no_ack_on_subprocess_called_process_error(
     assert [name for name, _ in pub.events] == ["started", "failed"]
 
 
+# ── ADR-0049: per-task repo-scoped GitHub App token mint ─────────────────────
+
+
+def test_handle_step_mints_repo_scoped_token_before_execute_in_app_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0049: when the worker is in ``repo_mode='github'`` +
+    ``github_auth_mode='app'``, ``_handle_step`` must call
+    ``startup_auth.bootstrap_github_auth_via_app(settings=..., repo=ctx.repo)``
+    AFTER fetching the context (so ``ctx.repo`` is known) and BEFORE
+    ``_execute``. The startup home-token bootstrap in ``__main__`` stays;
+    this re-mint scopes the token to the task's repo so ``gh`` can clone /
+    push outside the home installation.
+    """
+    from treadmill_agent.events import Artifact, StepOutput
+    from treadmill_agent import startup_auth as startup_auth_mod
+
+    ctx = _ctx(repo="owner/some-other-repo")
+
+    call_order: list[tuple[str, dict[str, Any]]] = []
+
+    def _fake_bootstrap(*, settings, repo=None):  # type: ignore[no-untyped-def]
+        call_order.append(("bootstrap", {"repo": repo}))
+
+    def _fake_execute(c, s):
+        call_order.append(("_execute", {"repo": c.repo}))
+        return StepOutput(
+            summary="ok", decision="pushed", commit_sha="abc",
+            artifacts=[Artifact(kind="branch", value="task/x")],
+        )
+
+    monkeypatch.setattr(
+        startup_auth_mod, "bootstrap_github_auth_via_app", _fake_bootstrap,
+    )
+    monkeypatch.setattr(runner, "_execute", _fake_execute)
+
+    sqs = _FakeSqs([_claim(
+        ctx.step_id, task_id=ctx.task_id, plan_id=ctx.plan_id,
+        run_id=ctx.run_id, receipt="rh-mint",
+    )])
+    pub = _FakePublisher()
+    n = runner.run(
+        settings=_settings(repo_mode="github", github_auth_mode="app"),
+        api=_FakeApi(ctx),
+        sqs_client=sqs,
+        publisher=pub,
+    )
+    assert n == 1
+    # Mint happened first, with ctx.repo; then _execute ran with the same repo.
+    assert call_order == [
+        ("bootstrap", {"repo": "owner/some-other-repo"}),
+        ("_execute", {"repo": "owner/some-other-repo"}),
+    ], call_order
+    assert sqs.deleted == ["rh-mint"]
+
+
+def test_handle_step_skips_repo_scoped_mint_when_not_github_app_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-task mint only fires for ``repo_mode='github'`` +
+    ``github_auth_mode='app'``. Local mode (or PAT mode) leaves ``gh``
+    alone — the startup bootstrap already configured it (or it's not used
+    at all in local mode).
+    """
+    from treadmill_agent.events import Artifact, StepOutput
+    from treadmill_agent import startup_auth as startup_auth_mod
+
+    ctx = _ctx()
+    mint_calls: list[dict[str, Any]] = []
+
+    def _track_bootstrap(*, settings, repo=None):  # type: ignore[no-untyped-def]
+        mint_calls.append({"repo": repo})
+
+    monkeypatch.setattr(
+        startup_auth_mod, "bootstrap_github_auth_via_app", _track_bootstrap,
+    )
+    monkeypatch.setattr(
+        runner, "_execute",
+        lambda c, s: StepOutput(
+            summary="ok", decision="pushed", commit_sha="abc",
+            artifacts=[Artifact(kind="branch", value="task/x")],
+        ),
+    )
+
+    sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-local")])
+    pub = _FakePublisher()
+    runner.run(
+        settings=_settings(repo_mode="local"),  # default — no app-mode mint
+        api=_FakeApi(ctx),
+        sqs_client=sqs,
+        publisher=pub,
+    )
+    assert mint_calls == []
+
+
+def test_handle_step_publishes_failed_when_repo_scoped_mint_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0049 + the outage lesson: a per-task mint failure must publish
+    ``step.failed`` (audit trail) and leave the SQS message in flight (per
+    ADR-0025). ``_execute`` must NOT run if the mint failed.
+    """
+    from treadmill_agent import startup_auth as startup_auth_mod
+
+    ctx = _ctx(repo="owner/forbidden-repo")
+    execute_called: list[bool] = []
+
+    def _boom_bootstrap(*, settings, repo=None):  # type: ignore[no-untyped-def]
+        raise startup_auth_mod.StartupAuthError(
+            f"installation not found for {repo}"
+        )
+
+    def _track_execute(c, s):
+        execute_called.append(True)
+        from treadmill_agent.events import StepOutput
+        return StepOutput(summary="x", decision="pushed", commit_sha="a")
+
+    monkeypatch.setattr(
+        startup_auth_mod, "bootstrap_github_auth_via_app", _boom_bootstrap,
+    )
+    monkeypatch.setattr(runner, "_execute", _track_execute)
+
+    sqs = _FakeSqs([_claim(
+        ctx.step_id, task_id=ctx.task_id, plan_id=ctx.plan_id,
+        run_id=ctx.run_id, receipt="rh-mint-fail",
+    )])
+    pub = _FakePublisher()
+    with pytest.raises(startup_auth_mod.StartupAuthError, match="installation not found"):
+        runner.run(
+            settings=_settings(repo_mode="github", github_auth_mode="app"),
+            api=_FakeApi(ctx),
+            sqs_client=sqs,
+            publisher=pub,
+        )
+
+    # _execute never ran — the mint failed first.
+    assert execute_called == []
+    # Audit trail: started, then failed with the mint error.
+    names = [name for name, _ in pub.events]
+    assert names == ["started", "failed"]
+    assert "installation not found" in pub.events[1][1]["error"]
+    # Queue-hygiene: SQS message stays in flight.
+    assert sqs.deleted == []
+
+
 def test_queue_hygiene_delete_strictly_inside_try_after_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
