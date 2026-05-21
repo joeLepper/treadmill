@@ -414,7 +414,14 @@ class LocalRuntime:
             self._api_aws_env = self._fetch_api_credentials(cfg)
         if self._worker_aws_env is None:
             self._worker_aws_env = self._fetch_worker_credentials(cfg)
-        if self._github_token is None:
+        # ADR-0049: skip the personal-PAT fetch once the GitHub App is
+        # configured — components mint installation tokens instead, and the
+        # PAT secret may be deleted (phase-8 decommission).
+        _app_mode = bool(
+            cfg.get("github_app_id")
+            and cfg.get("secrets", {}).get("github_app_private_key_secret_name")
+        )
+        if self._github_token is None and not _app_mode:
             self._github_token = self._fetch_github_pat(cfg)
 
     @staticmethod
@@ -745,8 +752,15 @@ class LocalRuntime:
         # ADR-0021's plan-doc trigger handler. Without it the handler
         # silently no-ops on pr_merged events. The token comes from the
         # same Secrets Manager entry the worker uses for git operations.
-        assert self._github_token is not None
-        env["GITHUB_TOKEN"] = self._github_token
+        # ADR-0049: inject the legacy PAT only when the App is not configured.
+        # With the App active the API mints per-repo installation tokens
+        # (GITHUB_APP_ID + key injected above) and needs no PAT.
+        if not (
+            cfg.get("github_app_id")
+            and cfg.get("secrets", {}).get("github_app_private_key_secret_name")
+        ):
+            assert self._github_token is not None
+            env["GITHUB_TOKEN"] = self._github_token
         # ADR-0049: GitHub App identity. When the deployment configures an
         # App id + private-key secret, inject them so the API mints per-repo
         # installation tokens (``build_github_clients`` selects the App path);
@@ -1824,7 +1838,6 @@ class LocalRuntime:
 
         # Credentials must already be fetched (called after _ensure_dev_local_credentials).
         self._ensure_dev_local_credentials()
-        assert self._github_token is not None
 
         repo_root = find_repo_root()
         github_owner, github_repo = parse_github_origin(repo_root)
@@ -1836,11 +1849,20 @@ class LocalRuntime:
             "TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID": deployment_id,
             "AWS_DEFAULT_REGION": cfg["aws_region"],
             "AWS_PROFILE": os.environ.get("AWS_PROFILE", cfg["aws_profile"]),
-            "GITHUB_TOKEN": self._github_token,
             "GITHUB_OWNER": github_owner,
             "GITHUB_REPO": github_repo,
             "TREADMILL_REPO_ROOT": str(repo_root),
         }
+        # ADR-0049: in App mode the watcher mints installation tokens from the
+        # API (reachable on the host port) per call instead of holding the PAT.
+        if cfg.get("github_app_id") and cfg.get("secrets", {}).get(
+            "github_app_private_key_secret_name"
+        ):
+            env["GITHUB_AUTH_MODE"] = "app"
+            env["TREADMILL_API_URL"] = "http://localhost:8088"
+        else:
+            assert self._github_token is not None
+            env["GITHUB_TOKEN"] = self._github_token
         # Defensive: drop the moto endpoint override if it leaked into the env.
         env.pop("AWS_ENDPOINT_URL", None)
 

@@ -281,10 +281,33 @@ def main() -> int:
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     )
 
-    github_token = os.environ["GITHUB_TOKEN"]
     github_owner = os.environ["GITHUB_OWNER"]
     github_repo_name = os.environ["GITHUB_REPO"]
     repo_root = Path(os.environ["TREADMILL_REPO_ROOT"])
+
+    # ADR-0049 GitHub auth. ``app`` mode mints a short-lived installation
+    # token from the API per call (the App private key stays on the API;
+    # tokens expire ~1h, so the long-running watcher fetches fresh each time).
+    # ``pat`` mode uses the injected personal PAT (legacy, pre-decommission).
+    github_auth_mode = os.environ.get("GITHUB_AUTH_MODE", "pat")
+    if github_auth_mode == "app":
+        _api_url = os.environ["TREADMILL_API_URL"].rstrip("/")
+        _repo_slug = f"{github_owner}/{github_repo_name}"
+
+        def _resolve_token() -> str:
+            req = urllib.request.Request(
+                _api_url + "/api/v1/github/installation-token",
+                data=json.dumps({"repo": _repo_slug}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read())["token"]
+    else:
+        _pat = os.environ["GITHUB_TOKEN"]
+
+        def _resolve_token() -> str:
+            return _pat
 
     deployment_id = os.environ.get("TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID")
     if deployment_id is not None:
@@ -324,7 +347,7 @@ def main() -> int:
         req = urllib.request.Request(
             url,
             headers={
-                "Authorization": f"Bearer {github_token}",
+                "Authorization": f"Bearer {_resolve_token()}",
                 "Accept": "application/vnd.github.v3+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
