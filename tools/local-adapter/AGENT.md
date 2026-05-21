@@ -6,15 +6,17 @@ This directory contains the Treadmill-native local adapter, the bridge between C
 
 ## Key surfaces
 
-- `treadmill_local/cli.py` — entry point; `treadmill-local up` brings the substrate online, `down` tears it down, `logs` streams container output.
+- `treadmill_local/cli.py` — entry point; `treadmill-local up` brings the substrate online, `down` tears it down, `logs` streams container output. The `repo onboard` subcommand registers the cwd's repo with the running deployment per ADR-0051.
 - `treadmill_local/runtime.py` — core orchestrator; loads CDK JSON, dispatches to provisioners, starts containers, runs the autoscaler loop.
 - `treadmill_local/provisioner.py` — provisions AWS primitives (SNS, SQS, S3, IAM, Secrets, SSM) into moto.
 - `treadmill_local/autoscaler.py` — target-tracking control loop; reads SQS depth from moto, docker stats from Docker daemon, computes desired worker count from scaling policy, launches/drains containers.
 - `treadmill_local/deployment_config.py` — writes `~/.treadmill/<deployment_id>.yaml` with container ports and endpoint URLs per ADR-0016's schema.
+- `treadmill_local/onboard.py` — pure helpers for client-side onboarding discovery (ADR-0051): `infer_repo` parses git remotes, `build_profile` produces a minimal `repo_profile` from the local checkout, `onboard_payload` assembles the POST body.
 
 ## Recent changes
 
-- PR (this change) — Extended `treadmill-local init` to also try reading from `TreadmillObservabilityStack` CFN outputs (merged when deployed; gracefully skipped when absent). Extended `_dev_local_api_env` + `_dev_local_worker_env` in `runtime.py` to inject `OTEL_EXPORTER_OTLP_ENDPOINT` from `aws.observability_collector_endpoint` per ADR-0020.
+- PR (this change) — Added `treadmill-local repo onboard` (ADR-0051): infers `owner/name` from the cwd's git origin remote, builds a minimal `repo_profile` from the checkout, and POSTs to `{api_url}/api/v1/onboarding/repos`. New `onboard.py` holds the pure helpers; the CLI stays decoupled from `treadmill_api` (the endpoint owns the schema + `recommend_mode`).
+- PR — Extended `treadmill-local init` to also try reading from `TreadmillObservabilityStack` CFN outputs (merged when deployed; gracefully skipped when absent). Extended `_dev_local_api_env` + `_dev_local_worker_env` in `runtime.py` to inject `OTEL_EXPORTER_OTLP_ENDPOINT` from `aws.observability_collector_endpoint` per ADR-0020.
 - [#36](https://github.com/anthropics/treadmill/pull/36) — Fetches API credentials at startup and injects them into the agent container environment.
 - [#34](https://github.com/anthropics/treadmill/pull/34) — Reads CDK synth output into the deployment config YAML so containers can discover each other.
 - [#2](https://github.com/anthropics/treadmill/pull/2) — Initial spike: moto + Docker Compose proof-of-concept (now evolved to docker run + autoscaler).
