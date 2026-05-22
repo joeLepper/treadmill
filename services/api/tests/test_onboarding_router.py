@@ -45,6 +45,8 @@ class _FakeStore:
     def __init__(self) -> None:
         self.profiles: list[RepoProfile] = []
         self.configs: list[RepoConfig] = []
+        # Seeds the GET handler's lookup; defaults to None (404).
+        self.config_by_repo: dict[str, RepoConfig] = {}
 
     async def upsert_repo_profile(
         self, session: Any, profile: RepoProfile
@@ -55,6 +57,11 @@ class _FakeStore:
         self, session: Any, config: RepoConfig
     ) -> None:
         self.configs.append(config)
+
+    async def get_repo_config(
+        self, session: Any, repo: str
+    ) -> RepoConfig | None:
+        return self.config_by_repo.get(repo)
 
 
 def _build_app(
@@ -227,3 +234,45 @@ def test_onboard_repo_rejects_invalid_mode(
     assert not session.committed
     assert store.profiles == []
     assert store.configs == []
+
+
+# ── GET /repos/{repo} — mode lookup for the authoring skill ───────────────────
+
+
+def test_get_repo_returns_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _StubSession()
+    store = _FakeStore()
+    store.config_by_repo["owner/example"] = RepoConfig(
+        repo="owner/example",
+        mode="adapt",
+        auto_merge_blocked=True,
+        test_command="make unit_test",
+        lint_command=None,
+    )
+    app = _build_app(session, store, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/onboarding/repos/owner/example")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "repo": "owner/example",
+        "mode": "adapt",
+        "auto_merge_blocked": True,
+        "test_command": "make unit_test",
+        "lint_command": None,
+    }
+
+
+def test_get_repo_404_when_not_onboarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _StubSession()
+    store = _FakeStore()  # empty config_by_repo
+    app = _build_app(session, store, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/onboarding/repos/owner/missing")
+
+    assert response.status_code == 404, response.text
+    assert "not onboarded" in response.json()["detail"]
