@@ -785,6 +785,13 @@ class LocalRuntime:
                 env["GITHUB_APP_WEBHOOK_SECRET"] = self._fetch_secret_string(
                     cfg, app_webhook_secret_name,
                 )
+        # ADR-0054: the adapt-mode context-docs S3 bucket (REAL AWS, even in
+        # dev_local — docs are durable state, never moto). The API's
+        # ContextStore reads/writes docs here; absent → the doc API returns 503.
+        context_docs_bucket = cfg.get("aws", {}).get("context_docs_bucket")
+        if context_docs_bucket:
+            env["CONTEXT_DOCS_BUCKET"] = context_docs_bucket
+
         # ADR-0020: inject OTLP endpoint when the observability stack is
         # deployed. The OTel SDK no-ops silently when the var is unset
         # (fully-local mode). Value from the deployment YAML under

@@ -276,7 +276,7 @@ def test_resource_count_is_minimal():
     template.resource_count_is("AWS::CloudWatch::Alarm", 1)
     template.resource_count_is("AWS::EC2::VPC", 0)
     template.resource_count_is("AWS::ECS::Cluster", 0)
-    template.resource_count_is("AWS::S3::Bucket", 0)
+    template.resource_count_is("AWS::S3::Bucket", 1)
 
 
 # ── Tagging (every taggable resource inherits deployment_id tag) ──────────────

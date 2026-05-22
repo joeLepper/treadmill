@@ -300,6 +300,16 @@ def build_deployment_config(
             raw_value = _extract_secret_name_from_arn(raw_value)
         aws_block[yaml_key] = raw_value
 
+    # ── Optional: context-docs bucket (ADR-0054) ──────────────────────────
+    # Absent on stacks deployed before the bucket was added; populated once
+    # cloud_lite is redeployed. The API reads it as CONTEXT_DOCS_BUCKET.
+    try:
+        aws_block["context_docs_bucket"] = _find_output(
+            outputs, "ContextDocsBucketName",
+        )
+    except KeyError:
+        pass
+
     # ── Dev-local observability defaults ──────────────────────────────────
     # When the CFN output is absent (the normal dev_local case —
     # TreadmillObservabilityStack is fully_remote-only), fall back to the
