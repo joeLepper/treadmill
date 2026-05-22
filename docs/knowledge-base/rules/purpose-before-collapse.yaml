@@ -31,7 +31,20 @@ checks:
       artifact type, an infrastructure specialization (per-role container
       images, separate deployment pipelines), a configuration boundary.
 
-      Decide one of three outcomes:
+      FIRST decide whether this rule even applies. It applies ONLY when the
+      artifact actually proposes REMOVING or COLLAPSING an existing structural
+      element. If the change is purely additive — it introduces new files,
+      modules, tables, events, commands, or routes and does NOT remove or
+      collapse any existing directory, layer, artifact sequence, artifact type,
+      infrastructure specialization, or configuration boundary — then the rule
+      DOES NOT APPLY: return ``pass`` with rationale "no removal/collapse
+      proposed; rule not applicable". Inline edits, import reordering,
+      comment/docstring rewrites, status-frontmatter lifecycle transitions, and
+      single-line changes are NOT removals of a structural separator. Do not
+      conflate "out of scope for this PR" with "ambiguous within the rule" — the
+      former is a clean pass.
+
+      Only when a removal/collapse IS proposed, decide one of three outcomes:
         pass        — the artifact names the purpose the structure served
                        AND argues that the purpose has dissolved or moved
                        elsewhere. The reasoning need not be exhaustive but
