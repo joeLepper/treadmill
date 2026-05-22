@@ -1754,7 +1754,11 @@ class LocalRuntime:
 
         deployment_id = cfg["deployment_id"]
         STATE_DIR.mkdir(exist_ok=True)
-        log_handle = open(SCHEDULER_LOG_FILE, "ab")
+        # The subprocess owns its log file via
+        # ``treadmill_api.scheduler.bounded_logging.configure_rotating_logging``
+        # (size-rotating, bounded total bytes). The parent's stdout/stderr
+        # redirect goes to DEVNULL so the unbounded-append failure mode
+        # (dev-local disk fill, 2026-05-20) cannot recur.
         env = {
             **os.environ,
             # Host-side Postgres URL — the subprocess runs on the host, so it
@@ -1762,6 +1766,7 @@ class LocalRuntime:
             "DATABASE_URL": _SCHEDULER_HOST_DB_URL,
             "EVENTS_TOPIC_ARN": cfg["aws"]["events_topic_arn"],
             "AWS_DEFAULT_REGION": cfg["aws_region"],
+            "TREADMILL_SCHEDULER_LOG_FILE": str(SCHEDULER_LOG_FILE),
             # Reuse the API's IAM-User keys — same principal, same SNS permissions.
             **self._api_aws_env,
         }
@@ -1771,8 +1776,8 @@ class LocalRuntime:
         proc = subprocess.Popen(
             [sys.executable, "-m", "treadmill_api.scheduler.runner"],
             env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
             cwd=str(Path.cwd()),
         )

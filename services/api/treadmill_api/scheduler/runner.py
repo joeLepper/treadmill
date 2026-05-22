@@ -36,6 +36,7 @@ from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.models.event import Event
 from treadmill_api.models.schedule import Schedule
 from treadmill_api.observability import get_tracer
+from treadmill_api.scheduler.bounded_logging import RateLimitedErrorLogger
 from treadmill_api.scheduler.cron import iter_fires, next_fire_time
 from treadmill_api.scheduler.policy import calculate_jitter_seconds, is_quiet
 
@@ -81,11 +82,18 @@ class SchedulerRunner:
     # ── internal ──────────────────────────────────────────────────────────────
 
     async def _run(self) -> None:
+        # Rate-limit the loop's error path so a persistent failure (DB
+        # unreachable, SNS credentials expired) doesn't dump a full
+        # traceback every poll. First occurrence logs in full; repeats
+        # are summarized; ``reset()`` after a successful tick re-arms
+        # a fresh traceback for the next incident.
+        error_logger = RateLimitedErrorLogger(logger)
         while True:
             try:
                 await self._tick()
-            except Exception:
-                logger.exception("scheduler: tick failed")
+                error_logger.reset()
+            except Exception as exc:
+                error_logger.log(exc, "scheduler: tick failed")
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     async def _tick(self) -> None:
@@ -310,10 +318,18 @@ async def _amain() -> None:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-    )
+    import os
+    from pathlib import Path
+
+    from treadmill_api.scheduler.bounded_logging import configure_rotating_logging
+
+    # The subprocess owns its own log file — the parent passes the path
+    # via env. Fall back to a sensible default if unset so a bare
+    # ``python -m treadmill_api.scheduler.runner`` still has somewhere
+    # to write.
+    log_file_env = os.environ.get("TREADMILL_SCHEDULER_LOG_FILE")
+    log_file = Path(log_file_env) if log_file_env else Path(".treadmill-local") / "scheduler.log"
+    configure_rotating_logging(log_file)
     asyncio.run(_amain())
     return 0
 
