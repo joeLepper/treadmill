@@ -2718,8 +2718,16 @@ async def handle_scheduled_tick(
     migration making ``workflow_runs.task_id`` nullable before use against a
     real database.
 
+    One slug — ``wf-stuck-task-sweep`` — short-circuits the
+    ``WorkflowVersion`` lookup and runs a deterministic detector
+    (``stuck_task_sweep.run_stuck_task_sweep``) instead. Per ADR-0047 the
+    silent-stall signal is a pure query, no role step needed; intercepting
+    here keeps the sweep on the same scheduler primitive that drives the
+    role-step bots without forcing it through a one-step wrapper workflow.
+
     Returns the new run's id, or ``None`` if any skip condition fired
-    (schedule not found, paused, no WorkflowVersion seeded).
+    (schedule not found, paused, no WorkflowVersion seeded, or the
+    deterministic stuck-task sweep ran — no run is materialized).
     """
     schedule = await session.get(Schedule, typed.schedule_id)
     if schedule is None:
@@ -2733,6 +2741,16 @@ async def handle_scheduled_tick(
             "scheduled-tick: schedule %s is %s; skipping dispatch",
             typed.schedule_id, schedule.status,
         )
+        return None
+
+    # Deterministic-detector intercept (ADR-0047): the stuck-task sweep is
+    # a query, not a role. Drive it directly off the scheduled tick.
+    from treadmill_api.coordination.stuck_task_sweep import (
+        STUCK_TASK_SWEEP_WORKFLOW_ID,
+        run_stuck_task_sweep,
+    )
+    if schedule.workflow_id == STUCK_TASK_SWEEP_WORKFLOW_ID:
+        await run_stuck_task_sweep(session, dispatcher)
         return None
 
     repo = typed.rendered_payload.get("repo", "")
