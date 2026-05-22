@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 
 import aws_cdk as cdk
+from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
 from treadmill_infra.constructs import (
@@ -128,4 +129,29 @@ class TreadmillCloudLite(cdk.Stack):
         )
         self.observability = ObservabilityConstruct(
             self, "Observability", deployment_id=deployment_id,
+        )
+
+        # ── Context-docs bucket (ADR-0054) ────────────────────────────────────
+        # Durable store for adapt-mode repo docs (ADRs/plans/etc. that can't
+        # live in a pristine onboarded repo). REAL S3 even for dev_local — the
+        # docs are durable state and must survive moto/container restarts, so
+        # the API always uses a real boto3 S3 client against this bucket.
+        # RETAIN so a stack teardown never silently drops authored docs.
+        self.context_docs_bucket = s3.Bucket(
+            self,
+            "ContextDocsBucket",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            versioned=True,
+            removal_policy=cdk.RemovalPolicy.RETAIN,
+        )
+        # API IAM user reads + writes the bucket (grant added in the same
+        # change as the bucket — the ADR-0049 webhook-secret AccessDenied
+        # precedent: never deploy a resource the API can't reach).
+        self.context_docs_bucket.grant_read_write(self.secrets.api_user)
+        cdk.CfnOutput(
+            self,
+            "ContextDocsBucketName",
+            value=self.context_docs_bucket.bucket_name,
+            description="Name of the adapt-mode context-docs S3 bucket (ADR-0054).",
         )
