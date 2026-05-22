@@ -17,6 +17,7 @@ import pytest
 from treadmill_agent.validation_runtime import (
     CheckResult,
     ValidationVerdict,
+    gather_agent_md_context,
     run_deterministic,
     run_llm_judge,
 )
@@ -280,6 +281,146 @@ def test_llm_judge_uses_provided_model(tmp_path: Path) -> None:
     call_args = mock_run.call_args
     assert call_args is not None
     assert call_args.kwargs["model"] == model
+
+
+# ── gather_agent_md_context tests ────────────────────────────────────────────
+
+
+def test_gather_agent_md_context_returns_nearest(tmp_path: Path) -> None:
+    """Diff touching a file under services/api returns that component's
+    AGENT.md content, prefixed with a ### relpath header."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    agent_md = component / "AGENT.md"
+    agent_md.write_text("# services/api\n\nKey surfaces: foo.py\n")
+
+    diff = (
+        "diff --git a/services/api/foo.py b/services/api/foo.py\n"
+        "--- a/services/api/foo.py\n"
+        "+++ b/services/api/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    result = gather_agent_md_context(tmp_path, diff)
+
+    assert "### services/api/AGENT.md" in result
+    assert "Key surfaces: foo.py" in result
+
+
+def test_gather_agent_md_context_no_ancestor_returns_empty(tmp_path: Path) -> None:
+    """Diff touching a path with no ancestor AGENT.md returns ''."""
+    (tmp_path / "lonely").mkdir()
+    diff = (
+        "diff --git a/lonely/bar.py b/lonely/bar.py\n"
+        "--- a/lonely/bar.py\n"
+        "+++ b/lonely/bar.py\n"
+        "@@ -1 +1 @@\n"
+        "-x\n"
+        "+y\n"
+    )
+
+    assert gather_agent_md_context(tmp_path, diff) == ""
+
+
+def test_gather_agent_md_context_dedupes(tmp_path: Path) -> None:
+    """Two touched files sharing one AGENT.md ancestor produce one block."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    (component / "AGENT.md").write_text("# services/api\nDOC_CONTENT\n")
+
+    diff = (
+        "diff --git a/services/api/foo.py b/services/api/foo.py\n"
+        "--- a/services/api/foo.py\n"
+        "+++ b/services/api/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "diff --git a/services/api/bar.py b/services/api/bar.py\n"
+        "--- a/services/api/bar.py\n"
+        "+++ b/services/api/bar.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    result = gather_agent_md_context(tmp_path, diff)
+
+    assert result.count("### services/api/AGENT.md") == 1
+    assert result.count("DOC_CONTENT") == 1
+
+
+def test_gather_agent_md_context_walks_up_to_repo_root(tmp_path: Path) -> None:
+    """When no nearer AGENT.md exists, the walk finds an ancestor's."""
+    (tmp_path / "AGENT.md").write_text("# repo\nROOT_DOCS\n")
+    nested = tmp_path / "services" / "api"
+    nested.mkdir(parents=True)
+
+    diff = (
+        "--- a/services/api/foo.py\n"
+        "+++ b/services/api/foo.py\n"
+    )
+
+    result = gather_agent_md_context(tmp_path, diff)
+
+    assert "### AGENT.md" in result
+    assert "ROOT_DOCS" in result
+
+
+def test_gather_agent_md_context_empty_diff(tmp_path: Path) -> None:
+    """Empty or None diff returns ''."""
+    assert gather_agent_md_context(tmp_path, "") == ""
+    assert gather_agent_md_context(tmp_path, None) == ""  # type: ignore[arg-type]
+
+
+def test_gather_agent_md_context_skips_dev_null(tmp_path: Path) -> None:
+    """+++ /dev/null lines (file deletions) are ignored."""
+    diff = "--- a/foo.py\n+++ /dev/null\n"
+    assert gather_agent_md_context(tmp_path, diff) == ""
+
+
+def test_run_llm_judge_includes_agent_md(tmp_path: Path) -> None:
+    """run_llm_judge injects component AGENT.md content into the prompt
+    under an ## AGENT_MD section placed before ## PR diff."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    (component / "AGENT.md").write_text("# services/api\nINJECTED_DOC_CONTENT\n")
+
+    check = _check(kind="llm-judge", prompt="Are the docs current?")
+    diff = (
+        "diff --git a/services/api/foo.py b/services/api/foo.py\n"
+        "--- a/services/api/foo.py\n"
+        "+++ b/services/api/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with patch("treadmill_agent.claude_code.run_claude") as mock_run:
+        mock_run.return_value = '```json\n{"verdict":"pass","rationale":"ok"}\n```'
+        run_llm_judge(check, tmp_path, diff, "spec", "model", timeout_seconds=5)
+
+    prompt = mock_run.call_args.kwargs["prompt"]
+    assert "## AGENT_MD" in prompt
+    assert "INJECTED_DOC_CONTENT" in prompt
+    assert "### services/api/AGENT.md" in prompt
+    # AGENT_MD section sits before the PR diff section.
+    assert prompt.index("## AGENT_MD") < prompt.index("## PR diff")
+
+
+def test_run_llm_judge_no_agent_md_section_when_absent(tmp_path: Path) -> None:
+    """When no AGENT.md governs the touched paths, the prompt omits the
+    ## AGENT_MD section (avoids confusing the judge with an empty block)."""
+    check = _check(kind="llm-judge", prompt="criterion")
+    diff = "--- a/orphan.py\n+++ b/orphan.py\n"
+
+    with patch("treadmill_agent.claude_code.run_claude") as mock_run:
+        mock_run.return_value = '```json\n{"verdict":"pass","rationale":"ok"}\n```'
+        run_llm_judge(check, tmp_path, diff, "spec", "model", timeout_seconds=5)
+
+    prompt = mock_run.call_args.kwargs["prompt"]
+    assert "## AGENT_MD" not in prompt
 
 
 # ── ValidationVerdict model tests ────────────────────────────────────────────

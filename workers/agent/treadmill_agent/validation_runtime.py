@@ -174,6 +174,57 @@ def run_deterministic(
         )
 
 
+def gather_agent_md_context(repo_dir: Path, diff: str) -> str:
+    """Return the content of every AGENT.md that governs a file touched
+    by ``diff`` — the nearest AGENT.md walking up from each touched
+    path to ``repo_dir``. Empty string if none. Repo-agnostic (no
+    dependency on a rule file) so it works for any onboarded repo."""
+    if not diff:
+        return ""
+
+    repo_dir = Path(repo_dir).resolve()
+
+    touched: list[Path] = []
+    for line in diff.splitlines():
+        if not line.startswith("+++ b/"):
+            continue
+        rel = line[len("+++ b/") :].strip()
+        if not rel or rel == "/dev/null":
+            continue
+        touched.append(repo_dir / rel)
+
+    agent_md_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in touched:
+        cur = path.parent.resolve()
+        while True:
+            if cur != repo_dir and repo_dir not in cur.parents:
+                break
+            candidate = cur / "AGENT.md"
+            if candidate.is_file():
+                if candidate not in seen:
+                    seen.add(candidate)
+                    agent_md_paths.append(candidate)
+                break
+            if cur == repo_dir:
+                break
+            cur = cur.parent
+
+    blocks: list[str] = []
+    for agent_md in agent_md_paths:
+        try:
+            content = agent_md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            relpath = agent_md.relative_to(repo_dir)
+        except ValueError:
+            continue
+        blocks.append(f"### {relpath}\n{content}")
+
+    return "\n\n".join(blocks)
+
+
 def run_llm_judge(
     check: Any,
     repo_dir: Path,
@@ -189,6 +240,11 @@ def run_llm_judge(
     envelope (ValidationVerdict). Verdict 'pass' / 'fail' from the
     parsed model; parse failure or unknown verdict → error.
 
+    The composed prompt also includes the content of every AGENT.md
+    that governs a file touched by ``diff`` (nearest ancestor walk),
+    so judges like ADR-0030's docs-current-with-pr can see the
+    component-level documentation they're asked to evaluate.
+
     Args:
         check: object with .id, .kind, .severity, .prompt attributes
         repo_dir: working directory (for context; not used by Claude)
@@ -202,8 +258,12 @@ def run_llm_judge(
     """
     from treadmill_agent import claude_code
 
+    agent_md = gather_agent_md_context(repo_dir, diff or "")
+    agent_md_section = f"## AGENT_MD\n{agent_md}\n\n" if agent_md else ""
+
     prompt = (
         f"{check.prompt}\n\n"
+        f"{agent_md_section}"
         f"## PR diff\n{diff}\n\n"
         f"## Task spec\n{task_spec}\n\n"
         f"Respond with a JSON block containing 'verdict' ('pass' or 'fail') "

@@ -12,9 +12,11 @@ Commands:
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import boto3
+import httpx
 import typer
 from rich.console import Console
 
@@ -24,6 +26,7 @@ from treadmill_local.deployment_config import (
     read_stack_outputs,
     write_deployment_yaml,
 )
+from treadmill_local.onboard import build_profile, infer_repo, onboard_payload
 from treadmill_local.repos import init_bare_repo
 from treadmill_local.runtime import BARE_REPOS_DIR, LocalRuntime, find_repo_root
 
@@ -33,6 +36,13 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+# Captured at callback time so commands that need the operator's original
+# working directory (e.g. ``repo onboard``, which inspects the cwd's git
+# remote and checkout) can recover it after the chdir-to-repo-root anchor
+# fires. ``None`` until the callback has run.
+_INVOCATION_CWD: Path | None = None
 
 
 @app.callback()
@@ -52,6 +62,8 @@ def _chdir_to_repo_root() -> None:
     this cwd via ``subprocess.Popen(..., cwd=str(Path.cwd()))`` in the
     runtime, so their relative state paths land in the same dir.
     """
+    global _INVOCATION_CWD
+    _INVOCATION_CWD = Path.cwd()
     os.chdir(find_repo_root())
 repo_app = typer.Typer(
     name="repo",
@@ -528,6 +540,83 @@ def repo_list() -> None:
         return
     for p in bares:
         console.print(f"  {p.name}")
+
+
+@repo_app.command(name="onboard")
+def repo_onboard(
+    api_url: str = typer.Option(
+        "http://localhost:8088",
+        "--api-url",
+        help="Base URL of the running Treadmill deployment API.",
+    ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help='Override the onboarding mode ("conform" or "adapt"). When '
+             "omitted the server picks via recommend_mode.",
+    ),
+    allow_auto_merge: bool = typer.Option(
+        False,
+        "--allow-auto-merge",
+        help="Allow auto-merge for this repo. Default is to block — never "
+             "auto-merge an external repo unless the operator opts in.",
+    ),
+) -> None:
+    """Onboard the repo in the current working directory (ADR-0051).
+
+    Infers ``owner/name`` from the cwd's git origin remote, builds a
+    minimal ``repo_profile`` from the checkout, and POSTs to
+    ``{api_url}/api/v1/onboarding/repos``. The server owns the schema
+    and ``recommend_mode``; we just hand it a plain dict.
+    """
+    # The chdir-to-repo-root callback already fired; use the captured
+    # invocation cwd so we inspect the operator's target repo, not the
+    # Treadmill checkout the CLI lives in.
+    root = (_INVOCATION_CWD or Path.cwd()).resolve()
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            check=True, capture_output=True, text=True, cwd=str(root),
+        )
+    except subprocess.CalledProcessError as exc:
+        console.print(
+            "[red]could not read origin remote — run this from inside a "
+            "git checkout with an 'origin' remote[/red]"
+        )
+        raise typer.Exit(code=2) from exc
+
+    remote_url = result.stdout.strip()
+    try:
+        repo = infer_repo(remote_url)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    profile = build_profile(root)
+    body = onboard_payload(
+        repo,
+        profile,
+        mode=mode,
+        auto_merge_blocked=not allow_auto_merge,
+    )
+
+    console.print(f"[bold]treadmill-local repo onboard[/bold]")
+    console.print(f"  repo:    [cyan]{repo}[/cyan]")
+    console.print(f"  mode:    [cyan]{mode or '(server recommends)'}[/cyan]")
+    console.print(f"  api_url: [dim]{api_url}[/dim]")
+
+    url = f"{api_url.rstrip('/')}/api/v1/onboarding/repos"
+    try:
+        response = httpx.post(url, json=body, timeout=30.0)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        console.print(f"[red]POST {url} failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    data = response.json()
+    console.print(f"[green]• onboarded {data.get('repo', repo)}[/green]")
+    console.print(f"  resolved mode:       [cyan]{data.get('mode')}[/cyan]")
+    console.print(f"  auto_merge_blocked:  [cyan]{data.get('auto_merge_blocked')}[/cyan]")
 
 
 if __name__ == "__main__":
