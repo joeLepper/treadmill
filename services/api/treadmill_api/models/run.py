@@ -31,10 +31,10 @@ class WorkflowRun(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    task_id: Mapped[uuid.UUID] = mapped_column(
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("tasks.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
     workflow_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
