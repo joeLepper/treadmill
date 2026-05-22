@@ -73,7 +73,7 @@ def deployment_yaml(tmp_path: Path) -> dict[str, Any]:
         "local": {
             "database_url": "postgresql://treadmill:treadmill@localhost:5432/treadmill",
             "redis_url": "redis://localhost:6379/0",
-            "api_url": "http://localhost:8000",
+            "api_url": "http://localhost:8088",
         },
     }
     path = tmp_path / "test.yaml"

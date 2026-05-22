@@ -102,7 +102,7 @@ def _valid_yaml_dict(deployment_id: str = "personal") -> dict[str, Any]:
         "local": {
             "database_url": "postgresql://treadmill:treadmill@localhost:5432/treadmill",
             "redis_url": "redis://localhost:6379/0",
-            "api_url": "http://localhost:8000",
+            "api_url": "http://localhost:8088",
         },
         # ADR-0018: optional autoscaler block. Including the explicit
         # defaults here so fixtures exercise the post-load shape
@@ -490,6 +490,78 @@ def test_dev_local_service_specs_includes_postgres_redis_api(
     assert pg.port_mappings == [(5432, 15432)]
     rd = next(s for s in specs if s.family == REDIS_FAMILY)
     assert rd.port_mappings == [(6379, 16379)]
+
+
+# ── recreate_api_container (deploy-watcher auto-deploy, ADR-0024) ────────────
+
+
+def test_recreate_api_container_force_removes_existing_and_runs_new(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """``recreate_api_container`` must force-remove any existing
+    ``treadmill-api`` container (regardless of status — including
+    ``running``, which ``_start_service_container``'s normal path
+    skips as already-OK) and then ``docker run`` a new container from
+    ``treadmill-api:dev``.
+
+    This is what swaps the live container to the freshly-built image
+    on a ``services/api/**`` PR merge. ``docker restart`` (the
+    pre-ADR-0024 watcher behavior) re-ran the OLD container's image,
+    so api code + migrations never went live."""
+    import docker as docker_lib
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+
+    existing = MagicMock(name="existing_api_container")
+    existing.status = "running"
+    fake_docker.containers.get.return_value = existing
+    # ``_ensure_image`` checks the image is present; satisfy it so the
+    # path doesn't try to pull a ``:dev`` tag (which is local-only).
+    fake_docker.images.get.return_value = MagicMock()
+
+    rt.recreate_api_container()
+
+    # Old container force-removed (status==running would normally skip).
+    existing.remove.assert_called_once_with(force=True)
+
+    # New container started from the dev image with the API family name,
+    # publishing 8088 1:1 on the same docker network ``up`` uses.
+    fake_docker.containers.run.assert_called_once()
+    call = fake_docker.containers.run.call_args
+    assert call.args[0] == "treadmill-api:dev"
+    assert call.kwargs["name"] == API_FAMILY
+    assert call.kwargs["network"] == "treadmill-local"
+    assert call.kwargs["ports"] == {"8088/tcp": 8088}
+
+    # Sanity: nothing in this path issues a ``docker restart`` shell-out —
+    # the recreate goes through docker-py, not subprocess. (The
+    # subprocess-level guard against ``docker restart`` lives in the
+    # deploy-watcher tests; this assertion guards the runtime helper.)
+    _ = docker_lib  # quiet "imported but unused" under strict linters
+
+
+def test_recreate_api_container_when_no_existing_container(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """A first deploy after ``down`` (no existing ``treadmill-api``
+    container on the host) still runs the new container — the NotFound
+    on ``containers.get`` is swallowed and the run proceeds."""
+    import docker as docker_lib
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+    fake_docker.containers.get.side_effect = docker_lib.errors.NotFound(
+        "no such container"
+    )
+    fake_docker.images.get.return_value = MagicMock()
+
+    rt.recreate_api_container()
+
+    fake_docker.containers.run.assert_called_once()
+    assert (
+        fake_docker.containers.run.call_args.args[0] == "treadmill-api:dev"
+    )
 
 
 # ── ~/.aws mount: gone in dev-local (ADR-0019) ──────────────────────────────

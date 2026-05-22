@@ -291,7 +291,7 @@ def test_build_deployment_config_populates_every_yaml_key(synthetic_outputs):
             "postgresql://treadmill:treadmill@localhost:5432/treadmill"
         ),
         "redis_url": "redis://localhost:6379/0",
-        "api_url": "http://localhost:8000",
+        "api_url": "http://localhost:8088",
     }
 
 

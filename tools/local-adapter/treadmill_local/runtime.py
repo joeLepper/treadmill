@@ -114,6 +114,13 @@ DEV_LOCAL_REDIS_IMAGE = "redis:7-alpine"
 DEV_LOCAL_API_IMAGE = "treadmill-api:dev"
 DEV_LOCAL_AGENT_IMAGE = "treadmill-agent:dev"
 
+# Single source of truth for the dev-local API port. The container
+# listens on this port and the host publishes it 1:1, so the same value
+# appears in ``_build_api_service_spec`` (container + port mapping) and
+# in operator-facing strings (``_report_up_dev_local``,
+# ``TREADMILL_API_URL`` env injection, the deploy-watcher's health URL).
+DEV_LOCAL_API_HOST_PORT = 8088
+
 # Container-network DNS hostnames the API + worker reach internal
 # services through. The service container name doubles as the DNS name
 # on the docker network (per ``_start_service_container``), so these
@@ -661,22 +668,37 @@ class LocalRuntime:
                 ],
                 port_mappings=[(6379, 16379)],
             ),
-            ServiceSpec(
-                family=API_FAMILY,
-                desired_count=1,
-                container_specs=[
-                    ContainerSpec(
-                        family=API_FAMILY,
-                        name=API_FAMILY,
-                        image=DEV_LOCAL_API_IMAGE,
-                        env=self._dev_local_api_env(cfg),
-                        network=NETWORK_NAME,
-                        container_ports=[8088],
-                    ),
-                ],
-                port_mappings=[(8088, 8088)],
-            ),
+            self._build_api_service_spec(cfg),
         ]
+
+    def _build_api_service_spec(self, cfg: dict[str, Any]) -> ServiceSpec:
+        """Return the API ServiceSpec used by both ``up`` and
+        ``recreate_api_container``.
+
+        Factored out so the deploy-watcher's auto-deploy (which recreates
+        the API container from a freshly-built image on every
+        ``services/api/**`` PR merge) and the initial ``up`` boot share a
+        single source of truth for the container's run config (image,
+        env, network, ports). Drifting the two would re-introduce the
+        silent-no-op bug we just fixed.
+        """
+        return ServiceSpec(
+            family=API_FAMILY,
+            desired_count=1,
+            container_specs=[
+                ContainerSpec(
+                    family=API_FAMILY,
+                    name=API_FAMILY,
+                    image=DEV_LOCAL_API_IMAGE,
+                    env=self._dev_local_api_env(cfg),
+                    network=NETWORK_NAME,
+                    container_ports=[DEV_LOCAL_API_HOST_PORT],
+                ),
+            ],
+            port_mappings=[
+                (DEV_LOCAL_API_HOST_PORT, DEV_LOCAL_API_HOST_PORT),
+            ],
+        )
 
     def _build_dev_local_agent_spec(
         self,
@@ -890,7 +912,7 @@ class LocalRuntime:
             f"  aws_account_id:    [cyan]{cfg['aws_account_id']}[/cyan]"
         )
         console.print(
-            f"  api:               [cyan]http://localhost:8088[/cyan]"
+            f"  api:               [cyan]http://localhost:{DEV_LOCAL_API_HOST_PORT}[/cyan]"
         )
         console.print(
             f"  webhook_inbox:     [dim]{cfg['aws']['webhook_inbox_queue_url']}[/dim]"
@@ -1286,6 +1308,46 @@ class LocalRuntime:
             name=name,
             role="service",
             port_mappings=port_mappings,
+        )
+
+    def recreate_api_container(self) -> Container:
+        """Recreate the ``treadmill-api`` container from the current image.
+
+        Used by the deploy-watcher's ``services/api/**`` PR-merge action
+        (ADR-0024): after ``docker build -t treadmill-api:dev .`` builds a
+        fresh image, the running container still holds the old image —
+        ``docker restart`` re-runs the OLD bits, so api code + migrations
+        never go live. The fix is to force-remove the existing container
+        and ``docker run`` a new one from the freshly-tagged image, reusing
+        the exact run config (env, ports, network, name) that ``up``
+        originally created the container with.
+        ``_start_service_container`` is no-op on a running container, so
+        this method has its own force-remove path.
+
+        Returns the newly-started container.
+        """
+        assert self.deployment_config is not None, (
+            "recreate_api_container requires dev-local mode (deployment_config set)"
+        )
+        # Credentials must be in memory before building the API env —
+        # a fresh CLI process (the deploy-watcher subprocess) starts
+        # with empty creds and needs the host-side fetch first.
+        self._ensure_dev_local_credentials()
+        svc = self._build_api_service_spec(self.deployment_config)
+        # Service has exactly one container (the API itself).
+        spec = svc.container_specs[0]
+        name = spec.family
+        try:
+            existing = self.docker.containers.get(name)
+            existing.remove(force=True)
+            console.print(f"• Removed existing [cyan]{name}[/cyan] container.")
+        except docker.errors.NotFound:
+            pass
+        return self._run_container(
+            spec,
+            name=name,
+            role="service",
+            port_mappings=svc.port_mappings,
         )
 
     @staticmethod
