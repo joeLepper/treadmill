@@ -711,19 +711,20 @@ def docs_pull(
     ),
     directory: Path = typer.Option(
         Path(".treadmill-docs"), "--dir",
-        help="Local mirror directory.",
+        help="Local mirror root; docs land under <dir>/<owner>/<name>/.",
     ),
 ) -> None:
-    """Sync all docs from the API to a local directory."""
+    """Sync all docs from the API to the repo-scoped local mirror."""
     resolved = _resolve_repo(repo)
+    mirror = directory / resolved
     try:
-        paths = pull(api_url, resolved, directory)
+        paths = pull(api_url, resolved, mirror)
     except RuntimeError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
     for p in paths:
         console.print(f"  pulled: {p}")
-    console.print(f"[green]• {len(paths)} doc(s) pulled to {directory}[/green]")
+    console.print(f"[green]• {len(paths)} doc(s) pulled to {mirror}[/green]")
 
 
 @docs_app.command(name="push")
@@ -738,13 +739,14 @@ def docs_push(
     ),
     directory: Path = typer.Option(
         Path(".treadmill-docs"), "--dir",
-        help="Local mirror directory.",
+        help="Local mirror root; docs are read from <dir>/<owner>/<name>/.",
     ),
 ) -> None:
-    """Upload docs from a local directory to the API (last-write-wins)."""
+    """Upload docs from the repo-scoped local mirror (last-write-wins)."""
     resolved = _resolve_repo(repo)
+    mirror = directory / resolved
     try:
-        results = push(api_url, resolved, directory)
+        results = push(api_url, resolved, mirror)
     except RuntimeError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)

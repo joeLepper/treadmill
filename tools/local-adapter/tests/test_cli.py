@@ -94,13 +94,19 @@ def test_docs_get_prints_content(monkeypatch):
 def test_docs_pull_reports_paths(monkeypatch, tmp_path: Path):
     import treadmill_local.cli as cli
 
-    monkeypatch.setattr(
-        cli, "pull", lambda api_url, repo, directory: ["AGENT.md", "adrs/x.md"],
-    )
+    seen: dict[str, Path] = {}
+
+    def fake_pull(api_url, repo, directory):
+        seen["dir"] = directory
+        return ["AGENT.md", "adrs/x.md"]
+
+    monkeypatch.setattr(cli, "pull", fake_pull)
     result = runner.invoke(
         app, ["docs", "pull", "--repo", "owner/repo", "--dir", str(tmp_path)]
     )
     assert result.exit_code == 0
+    # The mirror is repo-scoped: <dir>/<owner>/<name>/.
+    assert seen["dir"] == tmp_path / "owner" / "repo"
     assert "AGENT.md" in result.stdout
     assert "adrs/x.md" in result.stdout
     assert "2 doc(s) pulled" in result.stdout
@@ -109,13 +115,18 @@ def test_docs_pull_reports_paths(monkeypatch, tmp_path: Path):
 def test_docs_push_reports_versions(monkeypatch, tmp_path: Path):
     import treadmill_local.cli as cli
 
-    monkeypatch.setattr(
-        cli, "push", lambda api_url, repo, directory: [("AGENT.md", 1)],
-    )
+    seen: dict[str, Path] = {}
+
+    def fake_push(api_url, repo, directory):
+        seen["dir"] = directory
+        return [("AGENT.md", 1)]
+
+    monkeypatch.setattr(cli, "push", fake_push)
     result = runner.invoke(
         app, ["docs", "push", "--repo", "owner/repo", "--dir", str(tmp_path)]
     )
     assert result.exit_code == 0
+    assert seen["dir"] == tmp_path / "owner" / "repo"
     assert "AGENT.md" in result.stdout
     assert "v1" in result.stdout
     assert "1 doc(s) pushed" in result.stdout
