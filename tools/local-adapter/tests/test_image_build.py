@@ -108,7 +108,7 @@ def _valid_yaml_dict() -> dict[str, Any]:
         "local": {
             "database_url": "postgresql://treadmill:treadmill@localhost:5432/treadmill",
             "redis_url": "redis://localhost:6379/0",
-            "api_url": "http://localhost:8000",
+            "api_url": "http://localhost:8088",
         },
         # ADR-0018: autoscaler block (defaults — exercised here only for
         # spec completeness; the image-build tests don't depend on values).

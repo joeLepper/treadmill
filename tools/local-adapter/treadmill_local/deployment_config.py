@@ -123,7 +123,14 @@ _DEV_LOCAL_OBSERVABILITY_DEFAULTS: dict[str, Any] = {
 _LOCAL_DEFAULTS: dict[str, str] = {
     "database_url": "postgresql://treadmill:treadmill@localhost:5432/treadmill",
     "redis_url": "redis://localhost:6379/0",
-    "api_url": "http://localhost:8000",
+    # Host-side dev-local API URL. Port 8088 matches the runtime's
+    # ``DEV_LOCAL_API_HOST_PORT`` (the container listens on 8088 and the
+    # host publishes it 1:1, see ``_build_api_service_spec``). The
+    # deploy-watcher reads this to compose its post-deploy health check
+    # URL, so the value must track the actual port the API binds — a
+    # stale ``:8000`` here makes the watcher's health probe time out
+    # against the wrong port and report the deploy as failed.
+    "api_url": "http://localhost:8088",
 }
 
 

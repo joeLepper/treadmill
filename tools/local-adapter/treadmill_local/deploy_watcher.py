@@ -5,20 +5,21 @@ deploy_events SQS queue, parses SNS-wrapped Treadmill events, and applies
 changes to local containers based on a dispatch table keyed by file path globs.
 
 Dispatch table (first-match wins; order is significant):
-  - ``services/api/**``      → api     (docker build + restart + health check)
+  - ``services/api/**``      → api     (docker build + RECREATE container + health check)
   - ``workers/agent/**``     → agent   (docker build only; workers are one-shot per ADR-0018)
   - ``infra/**``             → infra   (notify-only; do NOT shell out)
   - ``tools/local-adapter/**`` → adapter (notify-only)
   - other                    → ignored
 
 The class is split from its subprocess entrypoint deliberately.
-``DeployWatcher`` takes injectable callables for SQS and GitHub API so it can
-be unit-tested without real AWS or network access. Subprocess calls
-(``docker build`` / ``docker restart``) are made via the standard
-``subprocess`` module and can be patched in tests.
+``DeployWatcher`` takes injectable callables for SQS, the GitHub API, and the
+"recreate the API container from the freshly-built image" runtime helper so
+it can be unit-tested without real AWS, network, or docker access. Subprocess
+calls (``docker build``) are made via the standard ``subprocess`` module and
+can be patched in tests.
 
 The ``main()`` function is the production wiring that constructs real
-callables against boto3 / the GitHub API.
+callables against boto3 / the GitHub API / ``LocalRuntime``.
 """
 
 from __future__ import annotations
@@ -83,10 +84,17 @@ def _categorize_files(paths: list[str]) -> dict[str, list[str]]:
 class DeployWatcher:
     """Event-driven watcher that reconciles local containers from deploy events.
 
-    Takes injectable callables for its two external dependencies — SQS and the
-    GitHub PR files API — so unit tests can operate without real AWS or network
-    access. Subprocess calls (``docker build`` / ``docker restart``) use the
-    standard ``subprocess`` module and are patchable in tests.
+    Takes injectable callables for its three external dependencies — SQS, the
+    GitHub PR files API, and the "recreate the API container from the
+    freshly-built image" runtime helper — so unit tests can operate without
+    real AWS, network, or docker access. The remaining subprocess call
+    (``docker build``) goes through the standard ``subprocess`` module and is
+    patchable in tests.
+
+    ``api_health_url`` is the URL ``_action_api`` polls after the recreate to
+    confirm the new container has come up healthy. Production wiring derives
+    it from ``cfg["local"]["api_url"]`` (the dev-local deployment YAML); tests
+    pass any URL they want and patch ``_wait_healthy`` to no-op.
     """
 
     def __init__(
@@ -95,12 +103,16 @@ class DeployWatcher:
         receive_fn: Callable[[], list[dict[str, Any]]],
         ack_fn: Callable[[str], None],
         get_pr_files_fn: Callable[[int], list[str] | None],
+        recreate_api_fn: Callable[[], None],
+        api_health_url: str,
         state_file: Path,
         repo_root: Path,
     ) -> None:
         self._receive_fn = receive_fn
         self._ack_fn = ack_fn
         self._get_pr_files_fn = get_pr_files_fn
+        self._recreate_api_fn = recreate_api_fn
+        self._api_health_url = api_health_url
         self._state_file = state_file
         self._repo_root = repo_root
         self._stop_event = threading.Event()
@@ -208,17 +220,26 @@ class DeployWatcher:
     # ── Category actions ──────────────────────────────────────────────────────
 
     def _action_api(self) -> None:
+        # ``docker restart`` re-runs the EXISTING container's image, so the
+        # freshly-built ``treadmill-api:dev`` would never go live — the
+        # silent-no-op the operator captured ADR-0024 to retire. We
+        # ``docker build`` the new image, then call the injected
+        # ``recreate_api_fn`` which force-removes the running container
+        # and ``docker run``s a new one from the just-built image with the
+        # same env/ports/network as the original ``up`` boot
+        # (``LocalRuntime.recreate_api_container``, sharing
+        # ``_build_api_service_spec`` so the two creation paths can't drift).
         api_dir = self._repo_root / "services" / "api"
         subprocess.run(
             ["docker", "build", "-t", "treadmill-api:dev", str(api_dir)],
             check=True,
         )
-        subprocess.run(["docker", "restart", "treadmill-api"], check=True)
+        self._recreate_api_fn()
         self._wait_healthy(
-            "http://localhost:8000/health/ready",
+            self._api_health_url,
             timeout_seconds=_HEALTH_TIMEOUT_SECONDS,
         )
-        logger.info("api container updated and healthy")
+        logger.info("api container recreated from new image and healthy")
 
     def _action_agent(self) -> None:
         dockerfile = self._repo_root / "workers" / "agent" / "Dockerfile"
@@ -324,11 +345,13 @@ def main() -> int:
             return _pat
 
     deployment_id = os.environ.get("TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID")
+    cfg: dict[str, Any] | None
     if deployment_id is not None:
         from treadmill_local.deployment_config import load_deployment_yaml
         cfg = load_deployment_yaml(deployment_id)
         queue_url: str = cfg["aws"]["deploy_events_queue_url"]
     else:
+        cfg = None
         queue_url = os.environ["TREADMILL_DEPLOY_WATCHER_QUEUE_URL"]
 
     sqs = boto3.client(
@@ -375,10 +398,42 @@ def main() -> int:
                 return None
             raise
 
+    # Wire the runtime helper that shares the API-container creation path
+    # with ``treadmill-local up`` — calling ``recreate_api_container`` here
+    # force-removes the existing container and ``docker run``s a new one
+    # from the freshly-built image with the same env/ports/network. In
+    # fully-local (no-deployment-id) mode the watcher has no ``LocalRuntime``
+    # to drive and the API action is a no-op — that path only exists for
+    # legacy/test scenarios; production ``services/api/**`` PR merges always
+    # come through the dev-local watcher.
+    if cfg is not None:
+        from treadmill_local.runtime import LocalRuntime
+        runtime = LocalRuntime(
+            infra_dir=repo_root / "infra",
+            deployment_config=cfg,
+        )
+
+        def recreate_api() -> None:
+            runtime.recreate_api_container()
+
+        api_health_url = (
+            cfg["local"]["api_url"].rstrip("/") + "/health/ready"
+        )
+    else:
+        def recreate_api() -> None:
+            logger.warning(
+                "API recreate requested without a deployment_id; "
+                "no-op (fully-local / test mode)."
+            )
+
+        api_health_url = "http://localhost:8088/health/ready"
+
     watcher = DeployWatcher(
         receive_fn=receive,
         ack_fn=ack,
         get_pr_files_fn=get_pr_files,
+        recreate_api_fn=recreate_api,
+        api_health_url=api_health_url,
         state_file=state_file,
         repo_root=repo_root,
     )
