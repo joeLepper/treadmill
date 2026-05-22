@@ -32,3 +32,9 @@ Thumbs.db
 
 # Treadmill local adapter runtime state
 .treadmill-local/
+
+# Analysis / training corpus — stored in S3, not git (see docs/analysis-corpus.md)
+docs/analysis/
+
+# Treadmill adapt-mode doc mirror (other repos' context — never commit)
+.treadmill-docs/
