@@ -7,6 +7,7 @@ Commands:
   logs    — tail logs for a specific container or all containers
   init    — populate ``~/.treadmill/<deployment_id>.yaml`` from a deployed
             ``TreadmillCloudLite`` stack's CloudFormation outputs
+  docs    — pull/push/list/get docs over the doc REST API (ADR-0054)
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from treadmill_local.deployment_config import (
     read_stack_outputs,
     write_deployment_yaml,
 )
+from treadmill_local.docs_sync import get_doc, list_docs, pull, push
 from treadmill_local.onboard import build_profile, infer_repo, onboard_payload
 from treadmill_local.repos import init_bare_repo
 from treadmill_local.runtime import BARE_REPOS_DIR, LocalRuntime, find_repo_root
@@ -617,6 +619,138 @@ def repo_onboard(
     console.print(f"[green]• onboarded {data.get('repo', repo)}[/green]")
     console.print(f"  resolved mode:       [cyan]{data.get('mode')}[/cyan]")
     console.print(f"  auto_merge_blocked:  [cyan]{data.get('auto_merge_blocked')}[/cyan]")
+
+
+docs_app = typer.Typer(
+    name="docs",
+    help="Sync docs between the local mirror and the Treadmill API (ADR-0054).",
+    no_args_is_help=True,
+)
+app.add_typer(docs_app)
+
+
+def _try_infer_repo_from_cwd() -> str | None:
+    """Try to infer owner/name from the cwd's git origin remote."""
+    root = (_INVOCATION_CWD or Path.cwd()).resolve()
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            check=True, capture_output=True, text=True, cwd=str(root),
+        )
+        return infer_repo(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+
+
+def _resolve_repo(repo: str | None) -> str:
+    resolved = repo or _try_infer_repo_from_cwd()
+    if resolved is None:
+        console.print(
+            "[red]--repo is required (could not infer from cwd git remote)[/red]"
+        )
+        raise typer.Exit(code=2)
+    return resolved
+
+
+@docs_app.command(name="list")
+def docs_list(
+    repo: str | None = typer.Option(
+        None, "--repo",
+        help="Repo as owner/name. Inferred from cwd git remote if omitted.",
+    ),
+    api_url: str = typer.Option(
+        "http://localhost:8088", "--api-url",
+        help="Base URL of the Treadmill API.",
+    ),
+) -> None:
+    """List docs for a repo."""
+    resolved = _resolve_repo(repo)
+    try:
+        docs = list_docs(api_url, resolved)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    if not docs:
+        console.print("[dim]no docs[/dim]")
+        return
+    for doc in docs:
+        console.print(f"  {doc['path']}")
+
+
+@docs_app.command(name="get")
+def docs_get(
+    doc_path: str = typer.Argument(..., help="Doc path (e.g. AGENT.md)."),
+    repo: str | None = typer.Option(
+        None, "--repo",
+        help="Repo as owner/name. Inferred from cwd git remote if omitted.",
+    ),
+    api_url: str = typer.Option(
+        "http://localhost:8088", "--api-url",
+        help="Base URL of the Treadmill API.",
+    ),
+) -> None:
+    """Fetch and print a single doc."""
+    resolved = _resolve_repo(repo)
+    try:
+        content = get_doc(api_url, resolved, doc_path)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    console.print(content)
+
+
+@docs_app.command(name="pull")
+def docs_pull(
+    repo: str | None = typer.Option(
+        None, "--repo",
+        help="Repo as owner/name. Inferred from cwd git remote if omitted.",
+    ),
+    api_url: str = typer.Option(
+        "http://localhost:8088", "--api-url",
+        help="Base URL of the Treadmill API.",
+    ),
+    directory: Path = typer.Option(
+        Path(".treadmill-docs"), "--dir",
+        help="Local mirror directory.",
+    ),
+) -> None:
+    """Sync all docs from the API to a local directory."""
+    resolved = _resolve_repo(repo)
+    try:
+        paths = pull(api_url, resolved, directory)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    for p in paths:
+        console.print(f"  pulled: {p}")
+    console.print(f"[green]• {len(paths)} doc(s) pulled to {directory}[/green]")
+
+
+@docs_app.command(name="push")
+def docs_push(
+    repo: str | None = typer.Option(
+        None, "--repo",
+        help="Repo as owner/name. Inferred from cwd git remote if omitted.",
+    ),
+    api_url: str = typer.Option(
+        "http://localhost:8088", "--api-url",
+        help="Base URL of the Treadmill API.",
+    ),
+    directory: Path = typer.Option(
+        Path(".treadmill-docs"), "--dir",
+        help="Local mirror directory.",
+    ),
+) -> None:
+    """Upload docs from a local directory to the API (last-write-wins)."""
+    resolved = _resolve_repo(repo)
+    try:
+        results = push(api_url, resolved, directory)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    for doc_path, version in results:
+        console.print(f"  pushed: {doc_path} (v{version})")
+    console.print(f"[green]• {len(results)} doc(s) pushed[/green]")
 
 
 if __name__ == "__main__":
