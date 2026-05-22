@@ -1539,7 +1539,10 @@ class LocalRuntime:
             return
 
         STATE_DIR.mkdir(exist_ok=True)
-        log_handle = open(AUTOSCALER_LOG_FILE, "ab")
+        # The subprocess owns its log file via ``configure_rotating_logging``
+        # (size-rotating, bounded total bytes). The parent's stdout/stderr
+        # redirect goes to DEVNULL so the unbounded-append failure mode
+        # (dev-local disk fill, 2026-05-20) cannot recur.
         env = {
             **os.environ,
             "TREADMILL_INFRA_DIR": str(self.infra_dir),
@@ -1548,6 +1551,7 @@ class LocalRuntime:
             "TREADMILL_AUTOSCALER_MIN": str(min_count),
             "TREADMILL_AUTOSCALER_MAX": str(max_count),
             "TREADMILL_AUTOSCALER_TICK_SECONDS": "2",
+            "TREADMILL_AUTOSCALER_LOG_FILE": str(AUTOSCALER_LOG_FILE),
             "AWS_ENDPOINT_URL": self.state.moto_endpoint or "",
             "AWS_DEFAULT_REGION": "us-east-1",
             "AWS_ACCESS_KEY_ID": "test",
@@ -1556,8 +1560,8 @@ class LocalRuntime:
         proc = subprocess.Popen(
             [sys.executable, "-m", "treadmill_local.autoscaler"],
             env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
             cwd=str(Path.cwd()),
         )
@@ -1609,7 +1613,11 @@ class LocalRuntime:
         # deployment_id. When multi-deployment lands (operator running
         # personal + employer concurrently), these need
         # deployment-suffixed paths so the two scalers don't collide.
-        log_handle = open(AUTOSCALER_LOG_FILE, "ab")
+        #
+        # The subprocess owns its log file via ``configure_rotating_logging``
+        # (size-rotating, bounded total bytes). The parent's stdout/stderr
+        # redirect goes to DEVNULL so the unbounded-append failure mode
+        # (dev-local disk fill, 2026-05-20) cannot recur.
         env = {
             **os.environ,
             "TREADMILL_INFRA_DIR": str(self.infra_dir),
@@ -1620,6 +1628,7 @@ class LocalRuntime:
             "TREADMILL_AUTOSCALER_TICK_SECONDS": str(
                 autoscaler_cfg["tick_seconds"]
             ),
+            "TREADMILL_AUTOSCALER_LOG_FILE": str(AUTOSCALER_LOG_FILE),
             # The subprocess entrypoint branches on this env var: when set
             # it constructs ``LocalRuntime(deployment_config=cfg)`` so
             # ``start_worker_once`` runs the dev-local credential-injection
@@ -1640,8 +1649,8 @@ class LocalRuntime:
         proc = subprocess.Popen(
             [sys.executable, "-m", "treadmill_local.autoscaler"],
             env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
             cwd=str(Path.cwd()),
         )
@@ -1849,10 +1858,14 @@ class LocalRuntime:
         github_owner, github_repo = parse_github_origin(repo_root)
 
         STATE_DIR.mkdir(exist_ok=True)
-        log_handle = open(DEPLOY_WATCHER_LOG_FILE, "ab")
+        # The subprocess owns its log file via ``configure_rotating_logging``
+        # (size-rotating, bounded total bytes). The parent's stdout/stderr
+        # redirect goes to DEVNULL so the unbounded-append failure mode
+        # (dev-local disk fill, 2026-05-20) cannot recur.
         env = {
             **os.environ,
             "TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID": deployment_id,
+            "TREADMILL_DEPLOY_WATCHER_LOG_FILE": str(DEPLOY_WATCHER_LOG_FILE),
             "AWS_DEFAULT_REGION": cfg["aws_region"],
             "AWS_PROFILE": os.environ.get("AWS_PROFILE", cfg["aws_profile"]),
             "GITHUB_OWNER": github_owner,
@@ -1875,8 +1888,8 @@ class LocalRuntime:
         proc = subprocess.Popen(
             [sys.executable, "-m", "treadmill_local.deploy_watcher"],
             env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
             cwd=str(Path.cwd()),
         )

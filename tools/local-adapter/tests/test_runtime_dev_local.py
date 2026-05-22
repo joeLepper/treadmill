@@ -1289,6 +1289,11 @@ def test_autoscaler_main_branches_on_deployment_id_env_var(
     monkeypatch.setenv("TREADMILL_AUTOSCALER_MAX", "2")
     monkeypatch.setenv("TREADMILL_AUTOSCALER_TICK_SECONDS", "5")
     monkeypatch.setenv("TREADMILL_AUTOSCALER_DEPLOYMENT_ID", "personal")
+    # Pin the rotating log file to tmp_path so main()'s logging setup
+    # doesn't create state in the test's working directory.
+    monkeypatch.setenv(
+        "TREADMILL_AUTOSCALER_LOG_FILE", str(tmp_path / "autoscaler.log"),
+    )
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
 
     # Replace LocalRuntime.__init__ so we don't need a real docker daemon.
@@ -1358,6 +1363,11 @@ def test_autoscaler_main_legacy_path_when_deployment_id_unset(
     monkeypatch.setenv("TREADMILL_AUTOSCALER_MIN", "0")
     monkeypatch.setenv("TREADMILL_AUTOSCALER_MAX", "1")
     monkeypatch.delenv("TREADMILL_AUTOSCALER_DEPLOYMENT_ID", raising=False)
+    # Pin the rotating log file to tmp_path so main()'s logging setup
+    # doesn't create state in the test's working directory.
+    monkeypatch.setenv(
+        "TREADMILL_AUTOSCALER_LOG_FILE", str(tmp_path / "autoscaler.log"),
+    )
 
     init_calls: list[dict[str, Any]] = []
 
