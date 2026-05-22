@@ -154,7 +154,7 @@ sequence_of_work:
   - id: token-report
     title: Token-usage report — aggregate durable per-step tokens (API + CLI)
     workflow: wf-author
-    depends_on: [token-persist]
+    depends_on: [task.token-persist.pr_merged]
     intent: |
       Surface the durable token columns (added by ``token-persist``) as an
       aggregation report. Read first: ``services/api/treadmill_api/models/run.py``
