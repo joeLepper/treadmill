@@ -178,6 +178,15 @@ class Settings(BaseSettings):
         default=None, alias="WEBHOOK_INBOX_QUEUE_URL"
     )
 
+    # ── S3 bucket for the context-doc store (ADR-0050 d.4) ────────────────────
+    # The context-doc REST API (ADR-0054) writes per-repo context docs to
+    # this bucket via ``ContextStore``. When unset, the
+    # ``/api/v1/repos/{repo}/docs*`` endpoints return 503 — mirrors the
+    # GitHub App "service not configured" pattern in routers/github.py.
+    context_docs_bucket: str | None = Field(
+        default=None, alias="CONTEXT_DOCS_BUCKET",
+    )
+
     # ── GitHub token for the conflict-detection sweep ─────────────────────────
     # The consumer's pr_merged handler polls GitHub's mergeable API for
     # open PRs in the repo (per Week 3 B.3 / ADR-0013). When unset, the
