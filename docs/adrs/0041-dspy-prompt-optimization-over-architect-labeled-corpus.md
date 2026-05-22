@@ -1,6 +1,6 @@
 # ADR-0041: DSPy-based prompt optimization over the architect-labeled corpus
 
-- **Status:** proposed
+- **Status:** proposed — amended by ADR-0052 (its architect-verdict-as-label mechanism is replaced by human-labeled corpora; scope generalized from the validator to all judgment roles) and ADR-0053 (its DSPy-library mechanism is replaced by agentic optimization run via workers' Claude Code, no raw LLM API)
 - **Date:** 2026-05-16
 - **Related:** ADR-0006 (rules + remediations primitive — the YAML format where prompts live), ADR-0029 (validator + rule engine — what we are optimizing the prompts of), ADR-0032 (role-architect — produces the labels), ADR-0034 (learnings crystallization — sibling system also writing to `docs/knowledge-base/rules/`), ADR-0035 (scheduler primitive — delivers the periodic optimization run), ADR-0040 (architect tunes validator — provides the corpus; this ADR generalizes from per-incident to corpus-wide)
 
