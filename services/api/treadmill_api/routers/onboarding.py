@@ -88,3 +88,40 @@ async def onboard_repo(
         mode=mode,
         auto_merge_blocked=body.auto_merge_blocked,
     )
+
+
+class RepoConfigResponse(BaseModel):
+    repo: str
+    mode: str
+    auto_merge_blocked: bool
+    test_command: str | None = None
+    lint_command: str | None = None
+
+
+@router.get(
+    "/repos/{repo:path}",
+    response_model=RepoConfigResponse,
+)
+async def get_repo(
+    repo: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RepoConfigResponse:
+    """Return a registered repo's config (mode, auto-merge block, commands).
+
+    The mode-aware authoring skill (ADR-0054 d.4) calls this to route
+    adapt (pull→author→push) vs conform (in-repo + commit). 404 when the
+    repo was never onboarded.
+    """
+    config = await OnboardingStore().get_repo_config(session, repo)
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"repo {repo!r} is not onboarded",
+        )
+    return RepoConfigResponse(
+        repo=config.repo,
+        mode=config.mode,
+        auto_merge_blocked=config.auto_merge_blocked,
+        test_command=config.test_command,
+        lint_command=config.lint_command,
+    )
