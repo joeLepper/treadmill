@@ -674,7 +674,7 @@ def docs_list(
         console.print("[dim]no docs[/dim]")
         return
     for doc in docs:
-        console.print(f"  {doc['path']}")
+        console.print(f"  {doc['doc_path']}  [dim](v{doc['version']})[/dim]")
 
 
 @docs_app.command(name="get")
