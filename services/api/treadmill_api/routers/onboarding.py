@@ -42,12 +42,16 @@ class OnboardRepoRequest(BaseModel):
     """Optional ``"conform"`` / ``"adapt"`` override. When ``None`` the
     handler runs :func:`recommend_mode` on the parsed profile."""
     auto_merge_blocked: bool = False
+    claude_account: str | None = None
+    """Named Claude account for workers operating on this repo (ADR-0055).
+    ``None`` defers to the deployment's ``claude_default_account``."""
 
 
 class OnboardRepoResponse(BaseModel):
     repo: str
     mode: str
     auto_merge_blocked: bool
+    claude_account: str | None = None
 
 
 @router.post(
@@ -76,6 +80,7 @@ async def onboard_repo(
         auto_merge_blocked=body.auto_merge_blocked,
         test_command=profile.test_command,
         lint_command=profile.lint_command,
+        claude_account=body.claude_account,
     )
 
     store = OnboardingStore()
@@ -87,6 +92,7 @@ async def onboard_repo(
         repo=body.repo,
         mode=mode,
         auto_merge_blocked=body.auto_merge_blocked,
+        claude_account=body.claude_account,
     )
 
 
@@ -96,6 +102,7 @@ class RepoConfigResponse(BaseModel):
     auto_merge_blocked: bool
     test_command: str | None = None
     lint_command: str | None = None
+    claude_account: str | None = None
 
 
 @router.get(
@@ -124,4 +131,5 @@ async def get_repo(
         auto_merge_blocked=config.auto_merge_blocked,
         test_command=config.test_command,
         lint_command=config.lint_command,
+        claude_account=config.claude_account,
     )

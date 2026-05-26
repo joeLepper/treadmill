@@ -173,6 +173,34 @@ async def test_repo_config_upsert_and_get_round_trip(
 
 @integration
 @pytest.mark.asyncio
+async def test_repo_config_round_trips_claude_account(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0055: ``claude_account`` survives upsert/get and an overwrite-to-None."""
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    config = RepoConfig(repo=repo, claude_account="secondary")
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, config)
+        await session.commit()
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None and fetched.claude_account == "secondary"
+
+    # Clearing it (back to deployment default) is a valid update path.
+    cleared = RepoConfig(repo=repo, claude_account=None)
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, cleared)
+        await session.commit()
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None and fetched.claude_account is None
+
+
+@integration
+@pytest.mark.asyncio
 async def test_repo_profile_upsert_and_get_round_trip(
     session_factory: async_sessionmaker[AsyncSession],
     truncate: None,

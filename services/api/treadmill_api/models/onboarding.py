@@ -51,6 +51,11 @@ class RepoConfigRow(Base):
     )
     test_command: Mapped[str | None] = mapped_column(String, nullable=True)
     lint_command: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Named Claude account for workers operating on this repo (ADR-0055).
+    # ``NULL`` defers to the deployment's ``claude_default_account``.
+    claude_account: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
