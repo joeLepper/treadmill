@@ -50,10 +50,18 @@ keys manually post-deploy and populates ``api-aws-credentials``.
 
 from __future__ import annotations
 
+import re
+
 import aws_cdk as cdk
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_secretsmanager as secretsmanager
 from constructs import Construct
+
+
+def _to_pascal(name: str) -> str:
+    """``account-foo_bar.baz`` → ``AccountFooBarBaz`` for a CDK logical id."""
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", name) if p]
+    return "".join(p[:1].upper() + p[1:] for p in parts) or "Account"
 
 
 class SecretsConstruct(Construct):
@@ -79,10 +87,12 @@ class SecretsConstruct(Construct):
         construct_id: str,
         *,
         deployment_id: str,
+        claude_account_names: list[str] | None = None,
     ) -> None:
         super().__init__(scope, construct_id)
 
         self.deployment_id = deployment_id
+        self.claude_account_names = list(claude_account_names or [])
         prefix = f"treadmill-{deployment_id}"
 
         github_webhook_secret_name = f"{prefix}/github-webhook-secret"
@@ -124,6 +134,27 @@ class SecretsConstruct(Construct):
             ),
         )
 
+        # ── Per-account Claude credential secrets (ADR-0055) ─────────────────
+        # One secret per named Claude account; the API resolver fetches the
+        # ``SecretString`` (an OAuth token from ``claude setup-token`` or an
+        # Anthropic API key) and the worker sets the matching env var on the
+        # Claude Code subprocess. Names come from the ``claude_accounts`` CDK
+        # context flag; ``put-secret-value`` populates the value out of band.
+        self.claude_account_secrets: dict[str, secretsmanager.Secret] = {}
+        self._claude_account_secret_names: dict[str, str] = {}
+        for account_name in self.claude_account_names:
+            sec_name = f"{prefix}/claude-account-{account_name}"
+            self._claude_account_secret_names[account_name] = sec_name
+            self.claude_account_secrets[account_name] = self._make_secret(
+                f"ClaudeAccountSecret{_to_pascal(account_name)}",
+                secret_name=sec_name,
+                description=(
+                    f"Claude credential for account {account_name!r} on "
+                    f"deployment {deployment_id} (ADR-0055). Populate via "
+                    "`aws secretsmanager put-secret-value`."
+                ),
+            )
+
         # ── API IAM user + AWS credentials ────────────────────────────────────
         # Per ADR-0023: the API gets a long-lived IAM user with a narrowly
         # scoped policy granting only the actions it actually performs.
@@ -148,6 +179,12 @@ class SecretsConstruct(Construct):
         secrets_github_webhook_arn = self._secret_arn(
             deployment_id, "github-webhook-secret"
         )
+        # ADR-0055: extend the API's GetSecretValue grant to every configured
+        # Claude account secret so the resolver can fetch them at request time.
+        claude_account_arns = [
+            self._secret_arn(deployment_id, f"claude-account-{name}")
+            for name in self.claude_account_names
+        ]
 
         api_policy = iam.Policy(
             self,
@@ -173,7 +210,7 @@ class SecretsConstruct(Construct):
                 ),
                 iam.PolicyStatement(
                     actions=["secretsmanager:GetSecretValue"],
-                    resources=[secrets_github_webhook_arn],
+                    resources=[secrets_github_webhook_arn, *claude_account_arns],
                 ),
             ],
         )
@@ -233,6 +270,19 @@ class SecretsConstruct(Construct):
             value=api_aws_credentials_secret_name,
             description="Name of the API AWS credentials secret.",
         )
+        # ADR-0055: per-account Claude secret names. Operator-facing CFN
+        # outputs so ``treadmill-local init`` (and humans) can stitch them
+        # into the YAML's ``aws.claude_accounts`` entries.
+        for account_name in self.claude_account_names:
+            cdk.CfnOutput(
+                self,
+                f"ClaudeAccountSecret{_to_pascal(account_name)}Name",
+                value=self._claude_account_secret_names[account_name],
+                description=(
+                    f"Name of the Claude credential secret for account "
+                    f"{account_name!r} (ADR-0055)."
+                ),
+            )
 
     def _make_secret(
         self,

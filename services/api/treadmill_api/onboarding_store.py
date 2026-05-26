@@ -50,6 +50,7 @@ class OnboardingStore:
                     auto_merge_blocked=config.auto_merge_blocked,
                     test_command=config.test_command,
                     lint_command=config.lint_command,
+                    claude_account=config.claude_account,
                 )
             )
             return
@@ -57,6 +58,7 @@ class OnboardingStore:
         existing.auto_merge_blocked = config.auto_merge_blocked
         existing.test_command = config.test_command
         existing.lint_command = config.lint_command
+        existing.claude_account = config.claude_account
         existing.updated_at = sa.func.now()
 
     async def get_repo_config(
@@ -73,6 +75,7 @@ class OnboardingStore:
             auto_merge_blocked=row.auto_merge_blocked,
             test_command=row.test_command,
             lint_command=row.lint_command,
+            claude_account=row.claude_account,
         )
 
     async def upsert_repo_profile(

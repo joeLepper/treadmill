@@ -17,20 +17,46 @@ the prompt as plain text.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
 import shutil
 import subprocess
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, TYPE_CHECKING
 
 from treadmill_agent.api_client import PriorStep, Role
 from treadmill_agent import observability
 
+if TYPE_CHECKING:
+    from treadmill_agent.startup_auth import ClaudeCreds
+
 logger = logging.getLogger("treadmill.agent.claude_code")
+
+
+# ADR-0055 — per-step Claude credential routing. The runner sets this around
+# ``_execute`` (via :func:`set_claude_creds`) so every ``Popen`` site that
+# launches Claude — ``run_claude``, ``run_claude_code``, plus the calls from
+# ``validation_runtime`` / ``judge_eval`` / dispositions — picks up the right
+# account's token without each call site growing a kwarg. ``None`` (the
+# default) preserves the legacy ``CLAUDE_CREDENTIALS_PATH`` bind-mount.
+_CURRENT_CREDS: contextvars.ContextVar["ClaudeCreds | None"] = (
+    contextvars.ContextVar("claude_creds", default=None)
+)
+
+
+def set_claude_creds(creds: "ClaudeCreds | None"):
+    """Bind ``creds`` for the calling context; returns a token for ``reset``."""
+    return _CURRENT_CREDS.set(creds)
+
+
+def reset_claude_creds(token) -> None:
+    """Undo a prior :func:`set_claude_creds`; pair them in ``try/finally``."""
+    _CURRENT_CREDS.reset(token)
 
 
 @dataclass(frozen=True)
@@ -45,6 +71,44 @@ class CodeAuthorError(RuntimeError):
     """Surface non-zero exit codes from the Claude Code CLI."""
 
 
+def build_claude_env(
+    parent_env: Mapping[str, str], creds: "ClaudeCreds | None",
+) -> dict[str, str]:
+    """Build the child env for a Claude Code ``Popen`` (ADR-0055).
+
+    ``creds=None`` (no per-account routing) returns the parent env unchanged
+    — the existing ``CLAUDE_CREDENTIALS_PATH`` bind-mount stays in effect.
+
+    With creds, we clear any inherited auth-bearing env vars *and* the
+    file-mount path so the child sees exactly one credential of the chosen
+    type:
+
+      * ``oauth``   → ``CLAUDE_CODE_OAUTH_TOKEN``
+      * ``api_key`` → ``ANTHROPIC_API_KEY``
+
+    This is what makes "no silent cross-account fallback" true at the
+    process boundary, not just the API one.
+    """
+    env = dict(parent_env)
+    if creds is None:
+        return env
+    # Clear every auth env Claude Code recognises, then set exactly one.
+    for key in (
+        "CLAUDE_CREDENTIALS_PATH",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ):
+        env.pop(key, None)
+    if creds.type == "oauth":
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = creds.token
+    elif creds.type == "api_key":
+        env["ANTHROPIC_API_KEY"] = creds.token
+    else:  # pragma: no cover — Pydantic on the API side rejects this
+        raise ValueError(f"unknown claude_account type: {creds.type!r}")
+    return env
+
+
 def run_claude(
     *,
     prompt: str,
@@ -56,6 +120,10 @@ def run_claude(
     Lightweight wrapper for simple Claude invocations that don't need
     the full role machinery. Used by validation_runtime for LLM-judge
     checks and other simple evaluation tasks.
+
+    Credential routing per ADR-0055: the subprocess env is built from
+    :data:`_CURRENT_CREDS` (set by the runner around ``_execute``); when
+    unset, the legacy ``CLAUDE_CREDENTIALS_PATH`` mount path stays in scope.
 
     Args:
         prompt: The prompt to send to Claude
@@ -82,6 +150,7 @@ def run_claude(
         cmd,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1,
+        env=build_claude_env(os.environ, _CURRENT_CREDS.get()),
     )
     assert proc.stdout is not None and proc.stderr is not None
     stdout_thread = threading.Thread(
@@ -208,6 +277,7 @@ def run_claude_code(
         cmd, cwd=str(repo_dir),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1,
+        env=build_claude_env(os.environ, _CURRENT_CREDS.get()),
     )
     assert proc.stdout is not None and proc.stderr is not None
     stdout_thread = threading.Thread(

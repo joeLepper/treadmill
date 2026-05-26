@@ -317,6 +317,30 @@ def build_deployment_config(
     except KeyError:
         pass
 
+    # ── Optional: Claude account secrets (ADR-0055) ───────────────────────
+    # CDK emits one output per Claude account (logical id
+    # ``ClaudeAccountSecret<Pascal>Name``); CDK then prefixes the construct
+    # path and appends a hash, so the key form is unstable. Scan output
+    # *values* for the deterministic ``treadmill-<id>/claude-account-<name>``
+    # shape instead — the value is the operator-facing string the secret was
+    # named with. ``type`` defaults to ``oauth``; the operator edits the YAML
+    # to flip an account to ``api_key`` when migrating it. ``claude_default_account``
+    # is left unset — the operator picks which account is default.
+    claude_accounts: list[dict[str, str]] = []
+    for output_value in outputs.values():
+        if not isinstance(output_value, str):
+            continue
+        prefix, sep, name = output_value.rpartition("/claude-account-")
+        if sep and name and prefix.startswith("treadmill-"):
+            claude_accounts.append({
+                "name": name,
+                "type": "oauth",
+                "secret_name": output_value,
+            })
+    if claude_accounts:
+        claude_accounts.sort(key=lambda a: a["name"])
+        aws_block["claude_accounts"] = claude_accounts
+
     # ── Dev-local observability defaults ──────────────────────────────────
     # When the CFN output is absent (the normal dev_local case —
     # TreadmillObservabilityStack is fully_remote-only), fall back to the

@@ -112,6 +112,7 @@ def test_onboard_repo_explicit_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         "repo": "owner/example",
         "mode": "adapt",
         "auto_merge_blocked": True,
+        "claude_account": None,
     }
     assert session.committed
     assert len(store.profiles) == 1
@@ -261,7 +262,49 @@ def test_get_repo_returns_config(monkeypatch: pytest.MonkeyPatch) -> None:
         "auto_merge_blocked": True,
         "test_command": "make unit_test",
         "lint_command": None,
+        "claude_account": None,
     }
+
+
+def test_onboard_repo_accepts_claude_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0055: POST forwards ``claude_account`` to the persisted RepoConfig."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "owner/example",
+        "claude_account": "secondary",
+        "profile": {"languages": ["python"]},
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["claude_account"] == "secondary"
+    assert store.configs[0].claude_account == "secondary"
+
+
+def test_get_repo_returns_claude_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _StubSession()
+    store = _FakeStore()
+    store.config_by_repo["owner/example"] = RepoConfig(
+        repo="owner/example",
+        mode="conform",
+        claude_account="secondary",
+    )
+    app = _build_app(session, store, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/onboarding/repos/owner/example")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["claude_account"] == "secondary"
 
 
 def test_get_repo_404_when_not_onboarded(

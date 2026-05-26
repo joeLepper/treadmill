@@ -7,9 +7,8 @@ is configured.
 
 from __future__ import annotations
 
-import importlib
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 def _fresh_module():
@@ -79,14 +78,14 @@ def test_configure_is_idempotent(monkeypatch):
 def test_real_providers_registered_when_endpoint_set(monkeypatch):
     """When OTEL_EXPORTER_OTLP_ENDPOINT is set, the SDK configures real
     TracerProvider / MeterProvider and registers them globally."""
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
     monkeypatch.setenv("OTEL_SERVICE_NAME", "treadmill-api-test")
     mod = _fresh_module()
 
-    # Mock out the exporters and instrumentors so no real gRPC connection fires.
+    # Mock out the instrumentors so no real instrumentation side effects fire.
+    # Exporters are constructed for real to catch a regression where the
+    # ``insecure=`` kwarg (gRPC-only) gets passed and raises TypeError.
     with (
-        patch("opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"),
-        patch("opentelemetry.exporter.otlp.proto.grpc.metric_exporter.OTLPMetricExporter"),
         patch("opentelemetry.instrumentation.fastapi.FastAPIInstrumentor"),
         patch("opentelemetry.instrumentation.sqlalchemy.SQLAlchemyInstrumentor"),
         patch("opentelemetry.instrumentation.httpx.HTTPXClientInstrumentor"),
@@ -105,3 +104,75 @@ def test_real_providers_registered_when_endpoint_set(monkeypatch):
     # Global registration is the key correctness invariant.
     mock_set_tracer.assert_called_once_with(mod._tracer_provider)
     mock_set_meter.assert_called_once_with(mod._meter_provider)
+
+
+def test_http_otlp_exporters_configured(monkeypatch):
+    """ADR-0030: span + metric exporters must be the HTTP/protobuf variants
+    pointed at per-signal paths (``/v1/traces``, ``/v1/metrics``) on :4318.
+    The gRPC exporter cannot speak to the collector's HTTP port, so a naive
+    import would silently lose all telemetry. The HTTP exporter also rejects
+    the gRPC-only ``insecure=`` kwarg with TypeError — configure() must not
+    pass it."""
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "treadmill-api-test")
+    mod = _fresh_module()
+
+    with (
+        patch(
+            "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+        ) as mock_span_exporter,
+        patch(
+            "opentelemetry.exporter.otlp.proto.http.metric_exporter.OTLPMetricExporter"
+        ) as mock_metric_exporter,
+        patch("opentelemetry.instrumentation.fastapi.FastAPIInstrumentor"),
+        patch("opentelemetry.instrumentation.sqlalchemy.SQLAlchemyInstrumentor"),
+        patch("opentelemetry.instrumentation.httpx.HTTPXClientInstrumentor"),
+        patch("opentelemetry.instrumentation.botocore.BotocoreInstrumentor"),
+        patch("opentelemetry.instrumentation.logging.LoggingInstrumentor"),
+        patch("opentelemetry.trace.set_tracer_provider"),
+        patch("opentelemetry.metrics.set_meter_provider"),
+    ):
+        mod.configure()
+
+        # Patch target = HTTP module path; the call landing here is what
+        # proves configure() imported the HTTP exporter rather than gRPC.
+        # No ``insecure=`` kwarg — that's gRPC-only and raises TypeError
+        # against the HTTP exporter.
+        mock_span_exporter.assert_called_once_with(
+            endpoint="http://localhost:4318/v1/traces"
+        )
+        mock_metric_exporter.assert_called_once_with(
+            endpoint="http://localhost:4318/v1/metrics"
+        )
+
+
+def test_endpoint_trailing_slash_is_normalized(monkeypatch):
+    """Trailing slash on OTEL_EXPORTER_OTLP_ENDPOINT must not produce a
+    double-slash signal path (``//v1/traces``) that the collector rejects."""
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/")
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "treadmill-api-test")
+    mod = _fresh_module()
+
+    with (
+        patch(
+            "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+        ) as mock_span_exporter,
+        patch(
+            "opentelemetry.exporter.otlp.proto.http.metric_exporter.OTLPMetricExporter"
+        ) as mock_metric_exporter,
+        patch("opentelemetry.instrumentation.fastapi.FastAPIInstrumentor"),
+        patch("opentelemetry.instrumentation.sqlalchemy.SQLAlchemyInstrumentor"),
+        patch("opentelemetry.instrumentation.httpx.HTTPXClientInstrumentor"),
+        patch("opentelemetry.instrumentation.botocore.BotocoreInstrumentor"),
+        patch("opentelemetry.instrumentation.logging.LoggingInstrumentor"),
+        patch("opentelemetry.trace.set_tracer_provider"),
+        patch("opentelemetry.metrics.set_meter_provider"),
+    ):
+        mod.configure()
+
+        mock_span_exporter.assert_called_once_with(
+            endpoint="http://localhost:4318/v1/traces"
+        )
+        mock_metric_exporter.assert_called_once_with(
+            endpoint="http://localhost:4318/v1/metrics"
+        )

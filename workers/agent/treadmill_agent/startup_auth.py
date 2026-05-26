@@ -24,8 +24,10 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 import boto3
 
@@ -37,6 +39,75 @@ logger = logging.getLogger("treadmill.agent.startup_auth")
 
 class StartupAuthError(RuntimeError):
     """Worker bootstrap failed in a way the runner cannot recover from."""
+
+
+@dataclass(frozen=True)
+class ClaudeCreds:
+    """Resolved Claude credential for a step (ADR-0055).
+
+    Returned by :func:`fetch_claude_credentials`; consumed by
+    :func:`treadmill_agent.claude_code.build_claude_env` to set
+    ``CLAUDE_CODE_OAUTH_TOKEN`` (``oauth``) or ``ANTHROPIC_API_KEY``
+    (``api_key``) on the Claude Code subprocess env.
+    """
+
+    account: str
+    type: Literal["oauth", "api_key"]
+    token: str
+
+
+def fetch_claude_credentials(
+    *, settings: "Settings", repo: str
+) -> ClaudeCreds | None:
+    """Resolve the Claude credential for ``repo`` via the API (ADR-0055).
+
+    POSTs ``/api/v1/claude/credentials {repo}``. Returns the resolved
+    ``ClaudeCreds`` on 200. Returns ``None`` on 503 — feature unconfigured,
+    so the worker falls back to the existing ``CLAUDE_CREDENTIALS_PATH``
+    bind-mount (backward compatibility with unmigrated deployments).
+    Any other failure raises ``StartupAuthError`` so the step fails cleanly
+    rather than silently routing to the wrong account.
+    """
+    url = settings.api_url.rstrip("/") + "/api/v1/claude/credentials"
+    body = json.dumps({"repo": repo}).encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 503:
+            logger.info(
+                "claude credential resolver returned 503 (feature off); "
+                "falling back to mounted credentials",
+            )
+            return None
+        raise StartupAuthError(
+            f"claude credential resolver returned {exc.code} for repo={repo!r}: "
+            f"{exc.reason}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise StartupAuthError(
+            f"failed to fetch claude credentials via {url}: {exc}"
+        ) from exc
+    try:
+        creds = ClaudeCreds(
+            account=payload["account"],
+            type=payload["type"],
+            token=payload["token"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise StartupAuthError(
+            f"claude credential response malformed: missing field {exc}"
+        ) from exc
+    # Never log the token; account+type identifies the routing decision.
+    logger.info(
+        "fetched claude credential: account=%s type=%s repo=%s",
+        creds.account, creds.type, repo,
+    )
+    return creds
 
 
 def resolve_worker_aws_session(settings: "Settings") -> boto3.session.Session:

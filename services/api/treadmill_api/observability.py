@@ -35,12 +35,12 @@ def _configure_otel() -> None:
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
         OTLPSpanExporter,
     )
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-    from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+    from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
         OTLPMetricExporter,
     )
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -50,10 +50,11 @@ def _configure_otel() -> None:
     from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
     resource = Resource(attributes={SERVICE_NAME: service_name})
+    base = endpoint.rstrip("/")
 
     _tracer_provider = TracerProvider(resource=resource)
     _tracer_provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True))
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=base + "/v1/traces"))
     )
     trace.set_tracer_provider(_tracer_provider)
 
@@ -61,7 +62,7 @@ def _configure_otel() -> None:
         resource=resource,
         metric_readers=[
             PeriodicExportingMetricReader(
-                OTLPMetricExporter(endpoint=endpoint, insecure=True)
+                OTLPMetricExporter(endpoint=base + "/v1/metrics")
             )
         ],
     )
