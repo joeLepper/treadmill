@@ -198,3 +198,14 @@ def test_push_version_extracted(tmp_path: Path):
     put = make_put((200, json.dumps({"version": 42}).encode()))
     results = push("http://localhost:8088", "owner/repo", tmp_path, put=put)
     assert results[0][1] == 42
+
+
+def test_push_missing_dir_returns_empty(tmp_path: Path):
+    # The repo-scoped mirror subdir may not exist before first author —
+    # push must be a no-op, not raise.
+    put = make_put()  # never called
+    results = push(
+        "http://localhost:8088", "owner/repo", tmp_path / "absent", put=put
+    )
+    assert results == []
+    assert put.calls == []

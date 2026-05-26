@@ -100,6 +100,8 @@ def push(
     Last-write-wins per ADR-0054.
     """
     results: list[tuple[str, int]] = []
+    if not src.is_dir():
+        return results
     for file in sorted(src.rglob("*")):
         if not file.is_file():
             continue
