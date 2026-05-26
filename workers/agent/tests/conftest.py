@@ -17,7 +17,34 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from treadmill_agent import git
+
+
+@pytest.fixture(autouse=True)
+def _default_claude_creds_off(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``fetch_claude_credentials`` to "feature off" (ADR-0055).
+
+    The runner now calls ``startup_auth.fetch_claude_credentials`` for every
+    step. Without this autouse default, every existing test would try to hit
+    a real API endpoint via urllib and fail with a DNS error. Tests that
+    exercise per-account routing override this with their own monkeypatch.
+
+    Skipped for ``test_startup_auth`` which exercises the real function
+    directly — shadowing it there would defeat the tests' purpose.
+    """
+    if request.module.__name__.endswith("test_startup_auth"):
+        return
+    from treadmill_agent import startup_auth
+
+    monkeypatch.setattr(
+        startup_auth, "fetch_claude_credentials",
+        lambda *, settings, repo: None,
+    )
+
 
 
 def init_bare_repo(bare_repos_dir: Path, repo: str) -> Path:

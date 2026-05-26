@@ -308,3 +308,111 @@ def test_github_mode_clone_after_bootstrap_has_no_token_in_url(
     assert url == "https://github.com/owner/test-repo.git"
     assert _PAT_SENTINEL not in url
     assert "@" not in url
+
+
+# ── ADR-0055: fetch_claude_credentials ──────────────────────────────────────
+
+
+class _FakeResp:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._body = json.dumps(payload).encode()
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_fetch_claude_credentials_returns_resolved_creds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["body"] = req.data
+        return _FakeResp(
+            {"repo": "o/r", "account": "primary", "type": "oauth",
+             "token": "tok-1"}
+        )
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    creds = startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+    assert creds is not None
+    assert creds.account == "primary"
+    assert creds.type == "oauth"
+    assert creds.token == "tok-1"
+    # Sanity: targeted the right endpoint with the repo body.
+    assert captured["url"].endswith("/api/v1/claude/credentials")
+    assert b"o/r" in captured["body"]
+
+
+def test_fetch_claude_credentials_returns_none_on_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """503 means feature unconfigured → fall back to the mounted credential."""
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        import urllib.error
+        raise urllib.error.HTTPError(
+            req.full_url, 503, "Service Unavailable", {}, None
+        )
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    creds = startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+    assert creds is None
+
+
+def test_fetch_claude_credentials_raises_on_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """404 = misconfigured account name → fail step, never silently substitute."""
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        import urllib.error
+        raise urllib.error.HTTPError(
+            req.full_url, 404, "Not Found", {}, None
+        )
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(StartupAuthError, match="404"):
+        startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+
+
+def test_fetch_claude_credentials_raises_on_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(StartupAuthError, match="failed to fetch"):
+        startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+
+
+def test_fetch_claude_credentials_raises_on_malformed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        # Missing ``token`` field.
+        return _FakeResp({"repo": "o/r", "account": "p", "type": "oauth"})
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(StartupAuthError, match="malformed|missing field"):
+        startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
