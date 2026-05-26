@@ -19,8 +19,34 @@ from __future__ import annotations
 from datetime import datetime
 from typing import ClassVar
 
+from pydantic import BaseModel, ConfigDict
+
 from treadmill_api.events.base import EventPayload
 from treadmill_api.events.step_output import StepOutput
+
+
+class StepTokenUsage(BaseModel):
+    """Per-step LLM token counters (ADR-0020, Wave 1).
+
+    Mirrors the ``usage`` block parsed from Claude Code's JSON envelope.
+    Sub-model fields are all required so a worker that emits
+    ``token_usage`` must emit every counter — the consumer NULLs the
+    five DB columns wholesale when ``token_usage`` is absent on the
+    outer ``StepCompleted``, so partial sub-model payloads would create
+    an ambiguous half-recorded row.
+
+    ``model`` is the role's model id (e.g. ``claude-opus-4-7``) the
+    counters are attributable to; persisted alongside so a future
+    cost-per-model rollup doesn't have to join through ``roles``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    model: str
 
 
 # ── Step lifecycle event payloads ─────────────────────────────────────────────
@@ -67,6 +93,14 @@ class StepCompleted(EventPayload):
 
     completed_at: datetime
     output: StepOutput
+    token_usage: StepTokenUsage | None = None
+    """Per-step LLM token usage telemetry (ADR-0020, Wave 1). Distinct
+    from ``output.metadata`` because token usage is step-execution
+    telemetry, not part of the polymorphic role/workflow output
+    envelope. The consumer writes the five counters + ``model`` into
+    the dedicated ``workflow_run_steps`` columns; absent ⇒ the columns
+    stay NULL (validation steps, dry-run, or workers that bypass the
+    LLM)."""
 
 
 class StepFailed(EventPayload):

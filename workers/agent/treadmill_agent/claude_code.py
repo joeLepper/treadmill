@@ -40,6 +40,21 @@ class CodeAuthorResult:
     Stored on ``step.output.summary`` so the user can see what changed
     without diffing."""
 
+    token_usage: dict[str, int] | None = None
+    """Per-step token counters parsed from the Claude Code JSON envelope:
+    ``input_tokens``, ``output_tokens``, ``cache_creation_tokens``,
+    ``cache_read_tokens`` (all ``int``). ``None`` when the step made no
+    LLM call (dry-run, wf-validate) or the stub binary in unit tests
+    emits non-JSON. Threaded into ``step.completed.token_usage`` so the
+    API durably records per-step usage alongside the OTel counters
+    (ADR-0020 token tracking, Wave 1)."""
+
+    model: str | None = None
+    """The role's model id (e.g. ``claude-opus-4-7``) for the LLM call
+    that produced ``token_usage``. ``None`` when ``token_usage`` is
+    ``None``. Persisted alongside the token counters so each row of
+    usage is attributable to a model."""
+
 
 class CodeAuthorError(RuntimeError):
     """Surface non-zero exit codes from the Claude Code CLI."""
@@ -267,7 +282,11 @@ def run_claude_code(
             extra=base_extra,
         )
 
-    return CodeAuthorResult(summary=summary.strip() or "(no summary)")
+    return CodeAuthorResult(
+        summary=summary.strip() or "(no summary)",
+        token_usage=usage,
+        model=role.model if usage is not None else None,
+    )
 
 
 def _pump_stream(

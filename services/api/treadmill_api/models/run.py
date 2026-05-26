@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -130,6 +130,17 @@ class WorkflowRunStep(Base):
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+
+    # ADR-0020 Wave 1: per-step LLM token usage telemetry, written by the
+    # coordination consumer when ``step.completed.token_usage`` is present.
+    # Nullable across the board — populated only for LLM-driven steps
+    # (action / analyzer roles that ran Claude Code); validation, dry-run,
+    # and pre-Wave-1 historical rows leave them NULL.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cache_creation_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cache_read_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

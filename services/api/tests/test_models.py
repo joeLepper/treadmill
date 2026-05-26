@@ -163,6 +163,32 @@ def test_workflow_run_step_output_is_jsonb():
     assert isinstance(output_col.type, JSONB)
 
 
+def test_workflow_run_step_has_token_usage_columns():
+    """ADR-0020 Wave 1: per-step token usage telemetry is persisted via
+    five dedicated columns. All must be nullable — validation steps,
+    dry-run paths, and historical rows from before Wave 1 leave them
+    NULL."""
+    from sqlalchemy import BigInteger
+
+    cols = WorkflowRunStep.__table__.columns
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_tokens",
+        "cache_read_tokens",
+    ):
+        assert name in cols, f"{name} column missing on workflow_run_steps"
+        assert cols[name].nullable, f"{name} must be nullable"
+        # BigInteger so a long-running deployment doesn't bump into INT32
+        # rollover on aggregate rollups.
+        assert isinstance(cols[name].type, BigInteger), (
+            f"{name} must be BigInteger so aggregates don't overflow"
+        )
+    assert "model" in cols
+    assert cols["model"].nullable
+    assert isinstance(cols["model"].type, Text)
+
+
 def test_no_unexpected_jsonb_columns():
     """ADR-0011 restricts JSONB to explicit allowed sites only.
 

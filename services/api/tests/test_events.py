@@ -182,6 +182,42 @@ def test_step_completed_round_trip():
     assert parsed.completed_at == original.completed_at
     assert isinstance(parsed.output, StepOutput)
     assert parsed.output == original.output
+    # ADR-0020 Wave 1: token_usage defaults to None when the worker
+    # didn't make an LLM call (dry-run, validation step).
+    assert parsed.token_usage is None
+
+
+def test_step_completed_with_token_usage_round_trip():
+    """ADR-0020 Wave 1: ``StepCompleted.token_usage`` carries a typed
+    ``StepTokenUsage`` sub-model that round-trips through the
+    registry. The five counters + ``model`` survive JSON encoding."""
+    from treadmill_api.events import StepTokenUsage
+
+    original = StepCompleted(
+        completed_at=datetime.now(timezone.utc),
+        output=StepOutput(
+            summary="did the thing",
+            decision="pushed",
+            artifacts=[],
+            payload={},
+            metadata=Metadata(),
+        ),
+        token_usage=StepTokenUsage(
+            input_tokens=1200,
+            output_tokens=340,
+            cache_creation_tokens=50,
+            cache_read_tokens=800,
+            model="claude-opus-4-7",
+        ),
+    )
+    parsed = _round_trip(original)
+    assert isinstance(parsed, StepCompleted)
+    assert parsed.token_usage is not None
+    assert parsed.token_usage.input_tokens == 1200
+    assert parsed.token_usage.output_tokens == 340
+    assert parsed.token_usage.cache_creation_tokens == 50
+    assert parsed.token_usage.cache_read_tokens == 800
+    assert parsed.token_usage.model == "claude-opus-4-7"
 
 
 def test_step_failed_round_trip():

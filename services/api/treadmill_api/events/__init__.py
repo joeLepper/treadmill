@@ -45,6 +45,7 @@ from treadmill_api.events.step import (
     StepFailed,
     StepReady,
     StepStarted,
+    StepTokenUsage,
 )
 from treadmill_api.events.step_output import (
     Artifact,
@@ -96,6 +97,7 @@ __all__ = [
     "StepCompleted",
     "StepFailed",
     "StepCancelled",
+    "StepTokenUsage",
     # GitHub events
     "GithubPrOpened",
     "GithubPrSynchronize",

@@ -25,6 +25,7 @@ from treadmill_api.events.step import (  # noqa: F401  (re-exported)
     StepCompleted,
     StepFailed,
     StepStarted,
+    StepTokenUsage,
 )
 from treadmill_api.events.step_output import (  # noqa: F401  (re-exported)
     Artifact,
@@ -58,4 +59,5 @@ __all__ = [
     "StepFailed",
     "StepOutput",
     "StepStarted",
+    "StepTokenUsage",
 ]

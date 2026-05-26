@@ -30,6 +30,7 @@ from treadmill_agent.events import (
     StepFailed,
     StepOutput,
     StepStarted,
+    StepTokenUsage,
 )
 from treadmill_api.events.base import EventPayload
 
@@ -59,6 +60,7 @@ class EventPublisher:
         *,
         task_id: str, plan_id: str, run_id: str, step_id: str,
         output: StepOutput | dict[str, Any],
+        token_usage: StepTokenUsage | dict[str, Any] | None = None,
     ) -> None:
         # Envelope outputs are validated as part of publish (ADR-0012). If
         # the caller passes a dict that can't be coerced to ``StepOutput``
@@ -69,9 +71,16 @@ class EventPublisher:
             validated_output = output
         else:
             validated_output = StepOutput.model_validate(output)
+        # Same fail-fast contract for the per-step token-usage telemetry
+        # (ADR-0020 Wave 1). ``None`` when the step made no LLM call.
+        if token_usage is None or isinstance(token_usage, StepTokenUsage):
+            validated_token_usage = token_usage
+        else:
+            validated_token_usage = StepTokenUsage.model_validate(token_usage)
         payload = StepCompleted(
             completed_at=_utcnow(),
             output=validated_output,
+            token_usage=validated_token_usage,
         )
         self._publish(
             entity_type="step", action="completed",

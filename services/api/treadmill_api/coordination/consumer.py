@@ -1085,6 +1085,14 @@ class CoordinationConsumer:
             # holds the parser-stable shape the future consumer round-
             # trips through ``StepOutput.model_validate``.
             output_to_store = typed.output.model_dump(mode="json")
+            # ADR-0020 Wave 1: per-step token usage. The five columns are
+            # written in the same UPDATE that flips status→completed so
+            # the row reaches its terminal state atomically. Absent
+            # ``token_usage`` (validation step, dry-run, taskless schedule
+            # tick) leaves the columns NULL — explicit ``None`` overwrite
+            # is a no-op for the common pending/running → completed
+            # transition because the columns were already NULL.
+            token_usage = typed.token_usage
             await session.execute(
                 update(WorkflowRunStep)
                 .where(
@@ -1095,6 +1103,19 @@ class CoordinationConsumer:
                     status="completed",
                     completed_at=typed.completed_at,
                     output=output_to_store,
+                    input_tokens=(
+                        token_usage.input_tokens if token_usage else None
+                    ),
+                    output_tokens=(
+                        token_usage.output_tokens if token_usage else None
+                    ),
+                    cache_creation_tokens=(
+                        token_usage.cache_creation_tokens if token_usage else None
+                    ),
+                    cache_read_tokens=(
+                        token_usage.cache_read_tokens if token_usage else None
+                    ),
+                    model=(token_usage.model if token_usage else None),
                 )
             )
             return True

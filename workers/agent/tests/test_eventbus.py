@@ -234,6 +234,62 @@ def test_publish_validates_dict_into_step_output_at_publish() -> None:
     assert out["metadata"]["model"] is None
 
 
+def test_publish_step_completed_threads_token_usage_through() -> None:
+    """ADR-0020 Wave 1: ``publish_step_completed`` accepts a typed
+    ``StepTokenUsage`` and round-trips it into the wire payload so the
+    consumer can persist the five columns."""
+    from treadmill_agent.events import StepTokenUsage
+
+    pub, fake = _publisher()
+    ids = _ids()
+    pub.publish_step_completed(
+        **ids,
+        output={
+            "summary": "done",
+            "decision": "pushed",
+            "commit_sha": "deadbeef",
+            "artifacts": [],
+            "payload": {},
+        },
+        token_usage=StepTokenUsage(
+            input_tokens=1000,
+            output_tokens=200,
+            cache_creation_tokens=40,
+            cache_read_tokens=600,
+            model="claude-opus-4-7",
+        ),
+    )
+    body = json.loads(fake.calls[0]["Message"])
+    tu = body["payload"]["token_usage"]
+    assert tu == {
+        "input_tokens": 1000,
+        "output_tokens": 200,
+        "cache_creation_tokens": 40,
+        "cache_read_tokens": 600,
+        "model": "claude-opus-4-7",
+    }
+
+
+def test_publish_step_completed_omits_token_usage_when_absent() -> None:
+    """When the worker passes no ``token_usage`` (dry-run, wf-validate,
+    schedule tick), the wire payload carries ``token_usage: null`` —
+    the consumer's NULL columns branch on this."""
+    pub, fake = _publisher()
+    ids = _ids()
+    pub.publish_step_completed(
+        **ids,
+        output={
+            "summary": "done",
+            "decision": "pushed",
+            "commit_sha": "deadbeef",
+            "artifacts": [],
+            "payload": {},
+        },
+    )
+    body = json.loads(fake.calls[0]["Message"])
+    assert body["payload"]["token_usage"] is None
+
+
 def test_publish_step_started_serializes_iso_timestamp() -> None:
     """Wire format is JSON; the typed StepStarted.started_at must come
     back as an ISO-8601 string after model_dump(mode='json')."""

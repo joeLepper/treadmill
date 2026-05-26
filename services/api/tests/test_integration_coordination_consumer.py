@@ -277,6 +277,103 @@ async def test_step_completed_marks_completed_and_writes_output(
 
 
 @pytest.mark.asyncio
+async def test_step_completed_with_token_usage_persists_columns(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0020 Wave 1: ``step.completed.token_usage`` lands in the five
+    dedicated columns alongside the status flip. The five sub-model
+    fields are all required, so a fully-populated event yields a
+    fully-populated row."""
+    step_id = _seed_step_sync(engine, status="running")
+    consumer = CoordinationConsumer(
+        sqs_client=None, queue_url="unused", sessionmaker=session_factory
+    )
+    await consumer.handle({
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(step_id),
+        "payload": {
+            "completed_at": "2026-05-08T10:30:00+00:00",
+            "output": {
+                "summary": "did the thing",
+                "decision": "pushed",
+                "artifacts": [],
+                "payload": {},
+            },
+            "token_usage": {
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "cache_creation_tokens": 50,
+                "cache_read_tokens": 800,
+                "model": "claude-opus-4-7",
+            },
+        },
+    })
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text(
+                "SELECT status, input_tokens, output_tokens, "
+                "cache_creation_tokens, cache_read_tokens, model "
+                "FROM workflow_run_steps WHERE id = :id"
+            ),
+            {"id": step_id},
+        ).one()
+    assert row.status == "completed"
+    assert row.input_tokens == 1200
+    assert row.output_tokens == 340
+    assert row.cache_creation_tokens == 50
+    assert row.cache_read_tokens == 800
+    assert row.model == "claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_step_completed_without_token_usage_leaves_columns_null(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """When ``token_usage`` is absent (validation step, dry-run, taskless
+    scheduled tick) the five columns stay NULL — the consumer must NOT
+    coerce missing telemetry into zeroes (which would silently corrupt
+    any future cost-per-step rollup)."""
+    step_id = _seed_step_sync(engine, status="running")
+    consumer = CoordinationConsumer(
+        sqs_client=None, queue_url="unused", sessionmaker=session_factory
+    )
+    await consumer.handle({
+        "entity_type": "step",
+        "action": "completed",
+        "step_id": str(step_id),
+        "payload": {
+            "completed_at": "2026-05-08T10:30:00+00:00",
+            "output": {
+                "summary": "no llm call",
+                "decision": "pass",
+                "artifacts": [],
+                "payload": {},
+            },
+        },
+    })
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text(
+                "SELECT status, input_tokens, output_tokens, "
+                "cache_creation_tokens, cache_read_tokens, model "
+                "FROM workflow_run_steps WHERE id = :id"
+            ),
+            {"id": step_id},
+        ).one()
+    assert row.status == "completed"
+    assert row.input_tokens is None
+    assert row.output_tokens is None
+    assert row.cache_creation_tokens is None
+    assert row.cache_read_tokens is None
+    assert row.model is None
+
+
+@pytest.mark.asyncio
 async def test_step_failed_marks_failed_and_records_error(
     session_factory: async_sessionmaker[AsyncSession],
     truncate: None,

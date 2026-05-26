@@ -594,11 +594,44 @@ def test_run_claude_code_emits_token_metrics_from_json(
     )
 
 
+def test_run_claude_code_returns_token_usage_in_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0020 Wave 1: parsed token usage rides on ``CodeAuthorResult``
+    so the runner can fold it into ``step.completed.token_usage``. The
+    JSON stub's ``usage`` block surfaces as a fully-populated dict +
+    the role's model id."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    _json_stub(stub)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    result = claude_code.run_claude_code(
+        repo_dir=repo_dir, role=_role(),
+        task_title="t", task_description=None, plan_intent=None,
+    )
+
+    assert result.token_usage == {
+        "input_tokens": 100,
+        "output_tokens": 40,
+        "cache_creation_tokens": 8,
+        "cache_read_tokens": 16,
+    }
+    # ``model`` is the role's model id — it's bound to the usage row so
+    # a future cost-per-model rollup doesn't have to join roles.
+    assert result.model == "claude-opus-4-7"
+
+
 def test_run_claude_code_skips_token_metrics_for_plain_text_stub(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Plain-text stubs (non-JSON) must not raise; record_token_usage is
-    not called and the raw stdout is returned as the summary."""
+    not called and the raw stdout is returned as the summary.
+
+    Also asserts ``CodeAuthorResult.token_usage`` / ``.model`` are
+    ``None`` for plain-text stubs (Wave 1): the absent ``usage`` block
+    must NOT lead to a partially-populated event payload."""
     from unittest.mock import patch
 
     repo_dir = tmp_path / "repo"
@@ -615,4 +648,6 @@ def test_run_claude_code_skips_token_metrics_for_plain_text_stub(
         )
 
     assert result.summary == "did the thing"
+    assert result.token_usage is None
+    assert result.model is None
     mock_record.assert_not_called()

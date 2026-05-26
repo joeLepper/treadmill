@@ -34,7 +34,7 @@ from typing import Any, Callable
 from treadmill_agent import claude_code, git, startup_auth, workspace
 from treadmill_agent.api_client import ApiClient, WorkerContext
 from treadmill_agent.config import Settings
-from treadmill_agent.events import StepOutput
+from treadmill_agent.events import StepOutput, StepTokenUsage
 from treadmill_agent.eventbus import EventPublisher
 from treadmill_agent.observability import extract_trace_context, get_tracer
 from treadmill_agent.runner_dispositions import (
@@ -302,7 +302,7 @@ def _handle_step(
                 )
                 raise
         try:
-            output = _execute(ctx, settings)
+            output, token_usage = _execute(ctx, settings)
         except Exception as exc:
             logger.exception("step %s failed during execution", ctx.step_id)
             publisher.publish_step_failed(
@@ -315,13 +315,22 @@ def _handle_step(
             task_id=ctx.task_id, plan_id=ctx.plan_id,
             run_id=ctx.run_id, step_id=ctx.step_id,
             output=output,
+            token_usage=token_usage,
         )
 
 
-def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
-    """Do the actual work for a step. Returns the uniform ``StepOutput``
-    envelope (ADR-0012) that lands in ``step.output`` via the coordination
-    consumer.
+def _execute(
+    ctx: WorkerContext, settings: Settings,
+) -> tuple[StepOutput, StepTokenUsage | None]:
+    """Do the actual work for a step. Returns ``(StepOutput, token_usage)``:
+
+    * ``StepOutput`` — the uniform envelope (ADR-0012) that lands in
+      ``step.output`` via the coordination consumer.
+    * ``token_usage`` — per-step LLM token counters (ADR-0020 Wave 1),
+      or ``None`` when the step made no LLM call (wf-validate skips
+      Claude Code entirely; dry-run paths short-circuit before the
+      subprocess). Persisted into the five ``workflow_run_steps`` token
+      columns by the consumer.
 
     Per ADR-0022 — refactored into a shared prefix (clone, checkout,
     Claude Code) plus a per-kind dispatch via ``DISPOSITIONS``. The
@@ -366,7 +375,10 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
                 settings=settings,
                 is_dry_run=dry_run,
             )
-            return handle_validation(disposition_ctx)
+            # wf-validate skips Claude Code entirely (deterministic
+            # checks + LLM-judge primitives run inside the disposition).
+            # No per-step LLM call ⇒ no token_usage to persist.
+            return handle_validation(disposition_ctx), None
 
     # Standard path for non-wf-validate workflows
     branch = _branch_for_step(ctx)
@@ -380,8 +392,14 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
         git.checkout_branch(repo_dir, branch)
 
         dry_run = _is_dry_run()
+        # Per ADR-0022 — dispatch on role.output_kind to the right
+        # handler. ``claude_code.CodeAuthorResult`` carries the summary
+        # and (when the LLM was called) the parsed token usage.
+        from treadmill_agent.claude_code import CodeAuthorResult  # local import
+
         if dry_run:
-            summary = _dry_run_author(repo_dir, ctx)
+            # Dry-run path: no LLM call ⇒ no token_usage to surface.
+            claude_result = CodeAuthorResult(summary=_dry_run_author(repo_dir, ctx))
         else:
             # ADR-0020 phase 2: tag every streamed line from the Claude
             # Code subprocess with the step's context so the operator can
@@ -398,7 +416,7 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
                 "model": ctx.role.model,
                 "workflow": ctx.workflow_id,
             }
-            summary = claude_code.run_claude_code(
+            claude_result = claude_code.run_claude_code(
                 repo_dir=repo_dir,
                 role=ctx.role,
                 task_title=ctx.title,
@@ -412,22 +430,21 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
                 # runs pass through with an empty list.
                 prior_steps=ctx.prior_steps,
                 log_context=log_context,
-            ).summary
-
-        # Per ADR-0022 — dispatch on role.output_kind to the right
-        # handler. ``claude_code.CodeAuthorResult`` carries the summary;
-        # we wrap it inline to keep the dispatch context small without
-        # reaching for a Result type the dry-run path doesn't produce.
-        from treadmill_agent.claude_code import CodeAuthorResult  # local import
+            )
 
         disposition_ctx = DispositionContext(
             ctx=ctx,
-            claude_result=CodeAuthorResult(summary=summary),
+            claude_result=claude_result,
             repo_dir=repo_dir,
             branch=branch,
             settings=settings,
             is_dry_run=dry_run,
         )
+        # Per-step token telemetry threaded from the Claude Code result
+        # (ADR-0020 Wave 1). Built once here so every dispatch path
+        # below carries the same value; ``None`` for dry-run.
+        token_usage = _build_token_usage(claude_result)
+
         # role-crystallization-judge routes to the crystallization handler
         # for CrystallizationVerdict envelope parsing (step 1 of
         # wf-crystallize-learning). role-architect from
@@ -435,9 +452,9 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
         # rule-authoring step (step 2). Both branches on role.id /
         # workflow_id keep the output_kind schema stable.
         if ctx.role.id == "role-crystallization-judge":
-            return handle_crystallization(disposition_ctx)
+            return handle_crystallization(disposition_ctx), token_usage
         if ctx.role.id == "role-architect" and ctx.workflow_id == "wf-crystallize-learning":
-            return handle_crystallization(disposition_ctx)
+            return handle_crystallization(disposition_ctx), token_usage
 
         # ADR-0032 §wf-architecture-resolve: role-architect uses
         # output_kind=analysis but routes to a dedicated disposition
@@ -448,7 +465,7 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
         # adding a new output_kind — keeps the schema stable while
         # letting role-architect have its own routing logic.
         if ctx.role.id == "role-architect":
-            return handle_architecture(disposition_ctx)
+            return handle_architecture(disposition_ctx), token_usage
         try:
             handler = DISPOSITIONS[ctx.role.output_kind]
         except KeyError:
@@ -457,7 +474,29 @@ def _execute(ctx: WorkerContext, settings: Settings) -> StepOutput:
                 f"{ctx.role.output_kind!r} which is not in the worker's "
                 f"dispatch table; known kinds: {sorted(DISPOSITIONS)}"
             )
-        return handler(disposition_ctx)
+        return handler(disposition_ctx), token_usage
+
+
+def _build_token_usage(
+    result: claude_code.CodeAuthorResult,
+) -> StepTokenUsage | None:
+    """Promote the parsed Claude Code ``token_usage`` dict + ``model``
+    into a typed ``StepTokenUsage`` for the outbound event payload.
+
+    Returns ``None`` when no LLM call was made (dry-run, stub binary
+    that emits non-JSON). The five sub-model counters are all required
+    by the API schema, so we only build the model when the worker has
+    a complete usage dict from ``_try_parse_json_output``.
+    """
+    if result.token_usage is None or result.model is None:
+        return None
+    return StepTokenUsage(
+        input_tokens=result.token_usage["input_tokens"],
+        output_tokens=result.token_usage["output_tokens"],
+        cache_creation_tokens=result.token_usage["cache_creation_tokens"],
+        cache_read_tokens=result.token_usage["cache_read_tokens"],
+        model=result.model,
+    )
 
 
 def _is_dry_run() -> bool:
