@@ -1085,17 +1085,32 @@ class CoordinationConsumer:
             # holds the parser-stable shape the future consumer round-
             # trips through ``StepOutput.model_validate``.
             output_to_store = typed.output.model_dump(mode="json")
+            # ADR-0020: per-step token counters land in five dedicated
+            # nullable columns in the same UPDATE — NULL when the worker
+            # omitted ``token_usage`` (dry-run, wf-validate, or any step
+            # that made no LLM call). All five fields move together
+            # because the worker pairs counters with the model id; the
+            # consumer never persists a partial usage row.
+            usage = typed.token_usage
+            values: dict[str, Any] = {
+                "status": "completed",
+                "completed_at": typed.completed_at,
+                "output": output_to_store,
+                "input_tokens": usage.input_tokens if usage else None,
+                "output_tokens": usage.output_tokens if usage else None,
+                "cache_creation_tokens": (
+                    usage.cache_creation_tokens if usage else None
+                ),
+                "cache_read_tokens": usage.cache_read_tokens if usage else None,
+                "model": usage.model if usage else None,
+            }
             await session.execute(
                 update(WorkflowRunStep)
                 .where(
                     WorkflowRunStep.id == step_id,
                     WorkflowRunStep.status.in_(("pending", "running")),
                 )
-                .values(
-                    status="completed",
-                    completed_at=typed.completed_at,
-                    output=output_to_store,
-                )
+                .values(**values)
             )
             return True
         if action == "failed":

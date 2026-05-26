@@ -30,6 +30,7 @@ from treadmill_agent.events import (
     StepFailed,
     StepOutput,
     StepStarted,
+    StepTokenUsage,
 )
 from treadmill_api.events.base import EventPayload
 
@@ -59,6 +60,7 @@ class EventPublisher:
         *,
         task_id: str, plan_id: str, run_id: str, step_id: str,
         output: StepOutput | dict[str, Any],
+        token_usage: StepTokenUsage | dict[str, Any] | None = None,
     ) -> None:
         # Envelope outputs are validated as part of publish (ADR-0012). If
         # the caller passes a dict that can't be coerced to ``StepOutput``
@@ -69,9 +71,19 @@ class EventPublisher:
             validated_output = output
         else:
             validated_output = StepOutput.model_validate(output)
+        # ADR-0020: per-step token counters. ``None`` for steps that
+        # made no LLM call (dry-run, wf-validate). Same validate-at-publish
+        # contract as ``output`` so a malformed counter dict crashes here,
+        # not on the consumer side.
+        validated_usage: StepTokenUsage | None
+        if token_usage is None or isinstance(token_usage, StepTokenUsage):
+            validated_usage = token_usage
+        else:
+            validated_usage = StepTokenUsage.model_validate(token_usage)
         payload = StepCompleted(
             completed_at=_utcnow(),
             output=validated_output,
+            token_usage=validated_usage,
         )
         self._publish(
             entity_type="step", action="completed",

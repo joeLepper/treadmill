@@ -19,8 +19,36 @@ from __future__ import annotations
 from datetime import datetime
 from typing import ClassVar
 
+from pydantic import BaseModel, ConfigDict
+
 from treadmill_api.events.base import EventPayload
 from treadmill_api.events.step_output import StepOutput
+
+
+# ── Step-execution telemetry sub-models ───────────────────────────────────────
+
+
+class StepTokenUsage(BaseModel):
+    """Per-step LLM token counters + model attribution (ADR-0020).
+
+    Carried on ``StepCompleted`` as a distinct optional field — *not*
+    folded into ``StepOutput.metadata`` — because token usage is
+    step-execution telemetry that the consumer projects onto dedicated
+    columns on ``workflow_run_steps``, not workflow-content metadata
+    that belongs in the uniform envelope. Worker shape (claude_code's
+    ``CodeAuthorResult.token_usage`` + ``model``) mirrors this exactly.
+
+    All sub-fields are required when ``StepCompleted.token_usage`` is
+    present; the sub-model itself is optional on the parent (steps
+    that made no LLM call — dry-run, ``wf-validate`` — omit it)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    model: str
 
 
 # ── Step lifecycle event payloads ─────────────────────────────────────────────
@@ -67,6 +95,11 @@ class StepCompleted(EventPayload):
 
     completed_at: datetime
     output: StepOutput
+    token_usage: StepTokenUsage | None = None
+    """Per-step LLM token counters + model. ``None`` when the step made
+    no LLM call (dry-run, ``wf-validate``). The consumer projects this
+    onto five nullable columns on ``workflow_run_steps`` in the same
+    UPDATE that writes ``status='completed'`` (ADR-0020)."""
 
 
 class StepFailed(EventPayload):
