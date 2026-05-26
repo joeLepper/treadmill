@@ -4,8 +4,9 @@ idempotency, and 404 error handling."""
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,6 +15,22 @@ from treadmill_local.deploy_watcher import (
     _categorize_file,
     _categorize_files,
 )
+
+
+def _sync_ok_then_build():
+    """side_effect sequence: fetch ok, merge ok, rev-parse ok, docker build ok.
+
+    Matches the success path of ``_sync_local_to_origin``: fast-forward
+    succeeds, so the helper logs the new HEAD short sha (a third subprocess
+    call), then ``docker build`` runs. Returns a list suitable for
+    ``mock_run.side_effect``.
+    """
+    return [
+        MagicMock(returncode=0),
+        MagicMock(returncode=0, stderr=""),
+        MagicMock(returncode=0, stdout="abc1234\n"),
+        MagicMock(returncode=0),
+    ]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -167,9 +184,11 @@ def test_dispatch_ordering_infra_observability_dashboards():
 
 @patch("subprocess.run")
 def test_api_action_builds_and_recreates(mock_run, tmp_path):
-    """The api action must build the image AND call the runtime recreate
-    helper — NOT ``docker restart``, which re-runs the EXISTING container's
-    image (the silent-no-op ADR-0024 captured)."""
+    """The api action must sync the local clone to origin/main, build the
+    image, and call the runtime recreate helper — NOT ``docker restart``,
+    which re-runs the EXISTING container's image (the silent-no-op ADR-0024
+    captured)."""
+    mock_run.side_effect = _sync_ok_then_build()
     watcher, acked, recreate_calls = _make_watcher(
         tmp_path, pr_files=["services/api/main.py"],
     )
@@ -177,12 +196,21 @@ def test_api_action_builds_and_recreates(mock_run, tmp_path):
     with patch.object(watcher, "_wait_healthy"):
         watcher._process_message(_sqs_msg(1, "abc123"))
 
-    # Exactly one subprocess call — the docker build. The recreate path
-    # goes through the injected runtime helper, NOT a ``docker restart``
-    # subprocess shell-out.
-    assert mock_run.call_count == 1
-    build_call = mock_run.call_args_list[0]
-    assert build_call.args[0] == [
+    # Sequence: git fetch + git merge --ff-only origin/main (sibling fix to
+    # ADR-0024 — without this prefix the docker build packages stale local
+    # source), then ``docker build``. The recreate path goes through the
+    # injected runtime helper, NOT a ``docker restart`` subprocess shell-out.
+    assert mock_run.call_args_list[0].args[0] == [
+        "git", "-C", "/fake-repo", "fetch", "origin", "--quiet",
+    ]
+    assert mock_run.call_args_list[1].args[0] == [
+        "git", "-C", "/fake-repo", "merge", "--ff-only", "origin/main",
+    ]
+    build_calls = [
+        c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
+    ]
+    assert len(build_calls) == 1
+    assert build_calls[0].args[0] == [
         "docker", "build", "-t", "treadmill-api:dev", "/fake-repo/services/api",
     ]
     # No ``docker restart`` anywhere — guard against the regression.
@@ -195,6 +223,40 @@ def test_api_action_builds_and_recreates(mock_run, tmp_path):
     # this is what actually swaps the running container to the new image.
     assert recreate_calls == ["recreate"]
     assert acked == ["rh-1"]
+
+
+@patch("subprocess.run")
+def test_api_action_continues_when_ff_fails(mock_run, tmp_path, caplog):
+    """ff-only failure (operator has unpushed work, or a different branch
+    checked out) must NOT break the deploy — log a warning and fall back to
+    building from current local state. Preserves today's behavior; the
+    sync step must not introduce a new silent-skip vector."""
+    mock_run.side_effect = [
+        MagicMock(returncode=0),  # fetch ok
+        MagicMock(returncode=1, stderr="error: not possible to fast-forward\n"),
+        MagicMock(returncode=0),  # docker build still runs
+    ]
+    watcher, acked, recreate_calls = _make_watcher(
+        tmp_path, pr_files=["services/api/main.py"],
+    )
+
+    with patch.object(watcher, "_wait_healthy"), \
+         caplog.at_level(logging.WARNING, logger="treadmill.deploy_watcher"):
+        watcher._process_message(_sqs_msg(8, "ffnogood"))
+
+    # docker build must still have run despite the ff-only failure.
+    build_calls = [
+        c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
+    ]
+    assert len(build_calls) == 1
+    # Recreate still ran — fallback to local state is the whole point.
+    assert recreate_calls == ["recreate"]
+    assert acked == ["rh-8"]
+    # The merge stderr surfaces in the warning so the operator can see why.
+    assert any(
+        "merge --ff-only" in rec.getMessage() and "not possible to fast-forward" in rec.getMessage()
+        for rec in caplog.records
+    ), f"expected ff-only warning with stderr; got {[r.getMessage() for r in caplog.records]}"
 
 
 @patch("subprocess.run")
@@ -227,15 +289,28 @@ def test_api_action_health_url_uses_configured_port(mock_run, tmp_path):
 
 @patch("subprocess.run")
 def test_agent_action_builds_only(mock_run, tmp_path):
-    """Agent build must NOT restart a container (workers are one-shot per ADR-0018)."""
+    """Agent build must sync local→origin/main first, then build the image.
+    Must NOT restart a container (workers are one-shot per ADR-0018)."""
+    mock_run.side_effect = _sync_ok_then_build()
     watcher, acked, _ = _make_watcher(
         tmp_path, pr_files=["workers/agent/Dockerfile"],
     )
 
     watcher._process_message(_sqs_msg(2, "def456"))
 
-    assert mock_run.call_count == 1
-    cmd = mock_run.call_args_list[0].args[0]
+    # Same fetch+merge prefix as the api path — closes the stale-source
+    # sibling to ADR-0024 for agent builds too.
+    assert mock_run.call_args_list[0].args[0] == [
+        "git", "-C", "/fake-repo", "fetch", "origin", "--quiet",
+    ]
+    assert mock_run.call_args_list[1].args[0] == [
+        "git", "-C", "/fake-repo", "merge", "--ff-only", "origin/main",
+    ]
+    build_calls = [
+        c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
+    ]
+    assert len(build_calls) == 1
+    cmd = build_calls[0].args[0]
     assert "treadmill-agent:dev" in cmd
     assert "/fake-repo" in cmd
     assert "/fake-repo/workers/agent/Dockerfile" in cmd
@@ -275,18 +350,24 @@ def test_adapter_notify_only(mock_run, tmp_path):
 @patch("subprocess.run")
 def test_idempotency_skips_rebuild_for_same_sha(mock_run, tmp_path):
     """Re-delivered event with the same SHA + category must not trigger a rebuild."""
+    mock_run.side_effect = _sync_ok_then_build()
     watcher, acked, recreate_calls = _make_watcher(
         tmp_path, pr_files=["services/api/app.py"],
     )
     sha = "abc123deadbeef"
 
-    # First delivery: action runs (1 subprocess call: docker build + 1 recreate).
+    # First delivery: action runs (sync → docker build + recreate).
     with patch.object(watcher, "_wait_healthy"):
         watcher._process_message(_sqs_msg(5, sha))
-    assert mock_run.call_count == 1  # docker build only — recreate is injected
+    build_calls = [
+        c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
+    ]
+    assert len(build_calls) == 1
     assert recreate_calls == ["recreate"]
 
-    # Second delivery of the same event: no action, still acked.
+    # Second delivery of the same event: no action, still acked. No new
+    # subprocess calls (no fetch, no merge, no build) — the dispatch
+    # short-circuits before ``_action_api`` runs at all.
     mock_run.reset_mock()
     recreate_calls.clear()
     with patch.object(watcher, "_wait_healthy"):
@@ -300,20 +381,27 @@ def test_idempotency_skips_rebuild_for_same_sha(mock_run, tmp_path):
 @patch("subprocess.run")
 def test_idempotency_rebuilds_for_new_sha(mock_run, tmp_path):
     """A different SHA for the same category must trigger a fresh build."""
+    mock_run.side_effect = _sync_ok_then_build() + _sync_ok_then_build()
     watcher, acked, recreate_calls = _make_watcher(
         tmp_path, pr_files=["services/api/app.py"],
     )
 
     with patch.object(watcher, "_wait_healthy"):
         watcher._process_message(_sqs_msg(6, "sha-one"))
-    assert mock_run.call_count == 1
+    build_calls_first = [
+        c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
+    ]
+    assert len(build_calls_first) == 1
     assert recreate_calls == ["recreate"]
 
     mock_run.reset_mock()
     recreate_calls.clear()
     with patch.object(watcher, "_wait_healthy"):
         watcher._process_message(_sqs_msg(6, "sha-two"))
-    assert mock_run.call_count == 1  # rebuild triggered
+    build_calls_second = [
+        c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
+    ]
+    assert len(build_calls_second) == 1  # rebuild triggered
     assert recreate_calls == ["recreate"]
 
 

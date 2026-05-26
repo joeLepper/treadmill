@@ -219,6 +219,46 @@ class DeployWatcher:
 
     # ── Category actions ──────────────────────────────────────────────────────
 
+    def _sync_local_to_origin(self) -> None:
+        # Sibling to ADR-0024: ``docker build`` packages the LOCAL working tree,
+        # so if the operator's clone is behind ``origin/main`` the "fresh"
+        # image is built from pre-merge source — the same silent-no-op shape
+        # the recreate fix retired, one layer down. Fast-forward the clone
+        # before building. ff-only failure (unpushed work, different branch
+        # checked out) warns + falls back to current local state to preserve
+        # today's deploy behavior; no new silent-skip vector for normal
+        # merges.
+        repo_root_str = str(self._repo_root)
+        fetch = subprocess.run(
+            ["git", "-C", repo_root_str, "fetch", "origin", "--quiet"],
+            check=False,
+        )
+        if fetch.returncode != 0:
+            logger.warning(
+                "git fetch origin failed (rc=%d); building from current local state",
+                fetch.returncode,
+            )
+            return
+        merge = subprocess.run(
+            ["git", "-C", repo_root_str, "merge", "--ff-only", "origin/main"],
+            check=False, capture_output=True, text=True,
+        )
+        if merge.returncode != 0:
+            logger.warning(
+                "git merge --ff-only origin/main failed (rc=%d); "
+                "building from current local state. stderr=%s",
+                merge.returncode, (merge.stderr or "").strip(),
+            )
+            return
+        head = subprocess.run(
+            ["git", "-C", repo_root_str, "rev-parse", "--short", "HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        logger.info(
+            "synced local repo to origin/main (HEAD=%s)",
+            (head.stdout or "").strip(),
+        )
+
     def _action_api(self) -> None:
         # ``docker restart`` re-runs the EXISTING container's image, so the
         # freshly-built ``treadmill-api:dev`` would never go live — the
@@ -229,6 +269,7 @@ class DeployWatcher:
         # same env/ports/network as the original ``up`` boot
         # (``LocalRuntime.recreate_api_container``, sharing
         # ``_build_api_service_spec`` so the two creation paths can't drift).
+        self._sync_local_to_origin()
         api_dir = self._repo_root / "services" / "api"
         subprocess.run(
             ["docker", "build", "-t", "treadmill-api:dev", str(api_dir)],
@@ -242,6 +283,7 @@ class DeployWatcher:
         logger.info("api container recreated from new image and healthy")
 
     def _action_agent(self) -> None:
+        self._sync_local_to_origin()
         dockerfile = self._repo_root / "workers" / "agent" / "Dockerfile"
         subprocess.run(
             [
