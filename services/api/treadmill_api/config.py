@@ -178,6 +178,24 @@ class Settings(BaseSettings):
         default=None, alias="WEBHOOK_INBOX_QUEUE_URL"
     )
 
+    # ── Claude account routing (ADR-0055) ─────────────────────────────────────
+    # JSON map of named Claude accounts → ``{type, secret_name}`` consumed by
+    # the ``/api/v1/claude/credentials`` resolver. ``type`` is ``oauth`` (long-
+    # lived token from ``claude setup-token``, injected as
+    # ``CLAUDE_CODE_OAUTH_TOKEN``) or ``api_key`` (Anthropic Console key,
+    # injected as ``ANTHROPIC_API_KEY``). ``secret_name`` is the AWS Secrets
+    # Manager id whose ``SecretString`` is the raw token / key value.
+    # When unset the resolver returns 503 and workers fall back to the
+    # existing ``CLAUDE_CREDENTIALS_PATH`` bind-mount.
+    claude_accounts_json: str | None = Field(
+        default=None, alias="CLAUDE_ACCOUNTS_JSON",
+    )
+    # Name of the account that's used when ``RepoConfig.claude_account`` is NULL
+    # (or the repo isn't onboarded). Must be a key in ``claude_accounts_json``.
+    claude_default_account: str | None = Field(
+        default=None, alias="CLAUDE_DEFAULT_ACCOUNT",
+    )
+
     # ── S3 bucket for the context-doc store (ADR-0050 d.4) ────────────────────
     # The context-doc REST API (ADR-0054) writes per-repo context docs to
     # this bucket via ``ContextStore``. When unset, the
