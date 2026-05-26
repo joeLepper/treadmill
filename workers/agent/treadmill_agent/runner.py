@@ -301,16 +301,44 @@ def _handle_step(
                     error=str(exc),
                 )
                 raise
+
+        # ADR-0055: resolve the per-step Claude credential before any Claude
+        # subprocess fires. ``None`` is the "feature off" return — the legacy
+        # ``CLAUDE_CREDENTIALS_PATH`` mount stays in effect. Any other failure
+        # (404/502/network) fails the step cleanly — never silently routes to
+        # the wrong account.
         try:
-            output = _execute(ctx, settings)
+            claude_creds = startup_auth.fetch_claude_credentials(
+                settings=settings, repo=ctx.repo,
+            )
         except Exception as exc:
-            logger.exception("step %s failed during execution", ctx.step_id)
+            logger.exception(
+                "step %s failed resolving claude credential", ctx.step_id,
+            )
             publisher.publish_step_failed(
                 task_id=ctx.task_id, plan_id=ctx.plan_id,
                 run_id=ctx.run_id, step_id=ctx.step_id,
                 error=str(exc),
             )
             raise
+
+        creds_token = claude_code.set_claude_creds(claude_creds)
+        try:
+            try:
+                output = _execute(ctx, settings)
+            except Exception as exc:
+                logger.exception("step %s failed during execution", ctx.step_id)
+                publisher.publish_step_failed(
+                    task_id=ctx.task_id, plan_id=ctx.plan_id,
+                    run_id=ctx.run_id, step_id=ctx.step_id,
+                    error=str(exc),
+                )
+                raise
+        finally:
+            # ADR-0055: unbind the per-step credential regardless of outcome,
+            # so a subsequent step on this worker doesn't inherit the prior
+            # step's account routing.
+            claude_code.reset_claude_creds(creds_token)
         publisher.publish_step_completed(
             task_id=ctx.task_id, plan_id=ctx.plan_id,
             run_id=ctx.run_id, step_id=ctx.step_id,
