@@ -899,3 +899,60 @@ def test_init_cli_missing_stack_exits_nonzero(tmp_path: Path, patched_session):
     )
     assert result.exit_code == 1
     assert "TreadmillNonexistentCloudLite" in result.output
+
+
+# ── ADR-0055: per-account Claude credential secrets ──────────────────────────
+
+
+def test_build_deployment_config_omits_claude_accounts_when_outputs_absent(
+    synthetic_outputs,
+):
+    """Pre-ADR-0055 stacks have no ``ClaudeAccountSecret*Name`` outputs; the
+    YAML must not gain a phantom ``claude_accounts`` key."""
+    config = build_deployment_config(
+        outputs=synthetic_outputs,
+        deployment_id="acme",
+        aws_account_id="111111111111",
+        aws_profile="treadmill-acme",
+        aws_region="us-west-2",
+    )
+    assert "claude_accounts" not in config["aws"]
+
+
+def test_build_deployment_config_extracts_claude_accounts_from_outputs(
+    synthetic_outputs,
+):
+    """Each ``treadmill-<id>/claude-account-<name>`` value yields one entry
+    in ``aws.claude_accounts`` with the deterministic secret_name and the
+    default OAuth type. Sorted by name for stable YAML output."""
+    extra = dict(synthetic_outputs)
+    extra["SecretsClaudeAccountSecretOsmoNameDEADBEEF"] = (
+        "treadmill-acme/claude-account-osmo"
+    )
+    extra["SecretsClaudeAccountSecretPersonalNameDEADBEEF"] = (
+        "treadmill-acme/claude-account-personal"
+    )
+
+    config = build_deployment_config(
+        outputs=extra,
+        deployment_id="acme",
+        aws_account_id="111111111111",
+        aws_profile="treadmill-acme",
+        aws_region="us-west-2",
+    )
+
+    assert config["aws"]["claude_accounts"] == [
+        {
+            "name": "osmo",
+            "type": "oauth",
+            "secret_name": "treadmill-acme/claude-account-osmo",
+        },
+        {
+            "name": "personal",
+            "type": "oauth",
+            "secret_name": "treadmill-acme/claude-account-personal",
+        },
+    ]
+    # ``claude_default_account`` is intentionally not auto-populated; the
+    # operator picks which configured account is default.
+    assert "claude_default_account" not in config["aws"]

@@ -20,8 +20,8 @@ from treadmill_infra.stacks import TreadmillCloudLite
 from treadmill_infra.stacks.cloud_lite import _stack_name_for
 
 
-def _template(deployment_id: str = "test") -> assertions.Template:
-    app = cdk.App()
+def _template(deployment_id: str = "test", **context) -> assertions.Template:
+    app = cdk.App(context=context) if context else cdk.App()
     stack = TreadmillCloudLite(
         app, _stack_name_for(deployment_id), deployment_id=deployment_id,
     )
@@ -387,3 +387,66 @@ def test_non_string_deployment_id_rejected():
     app = cdk.App()
     with pytest.raises(ValueError, match="invalid deployment_id"):
         TreadmillCloudLite(app, "TestStack", deployment_id=None)  # type: ignore[arg-type]
+
+
+# ── ADR-0055: per-account Claude credential secrets ──────────────────────────
+
+
+def test_no_claude_accounts_keeps_secret_count_at_baseline():
+    """Without the ``claude_accounts`` CDK context flag, no extra secrets
+    are created and the IAM grant carries only the GitHub-webhook ARN."""
+    template = _template()
+    template.resource_count_is("AWS::SecretsManager::Secret", 4)
+
+
+def test_claude_accounts_create_per_account_secret_resources():
+    """``--context claude_accounts=personal,osmo`` adds two secrets named
+    ``treadmill-<id>/claude-account-<name>`` (deterministic so the operator
+    can populate via ``put-secret-value``)."""
+    template = _template(claude_accounts="personal,osmo")
+    template.resource_count_is("AWS::SecretsManager::Secret", 6)
+    template.has_resource_properties(
+        "AWS::SecretsManager::Secret",
+        {"Name": "treadmill-test/claude-account-personal"},
+    )
+    template.has_resource_properties(
+        "AWS::SecretsManager::Secret",
+        {"Name": "treadmill-test/claude-account-osmo"},
+    )
+
+
+def test_claude_accounts_emit_per_account_cfn_outputs():
+    """Operator needs the secret names to land in the deployment YAML; the
+    construct emits one output per account whose value is the deterministic
+    name string (not a CDK token that synthesizes to ``Fn::Join``-of-
+    ``Fn::Split``). The local-adapter's ``build_deployment_config`` matches
+    on the VALUE pattern (CDK hash-mangles the output key)."""
+    template = _template(claude_accounts="personal,osmo").to_json()
+    outputs = template.get("Outputs", {})
+    values = [
+        v["Value"] for v in outputs.values()
+        if isinstance(v.get("Value"), str)
+        and v["Value"].startswith("treadmill-test/claude-account-")
+    ]
+    assert "treadmill-test/claude-account-personal" in values
+    assert "treadmill-test/claude-account-osmo" in values
+
+
+def test_claude_accounts_extend_api_policy_get_secret_value_arns():
+    """The API IAM policy's ``GetSecretValue`` resource list must include
+    every claude-account ARN; without it the resolver gets AccessDenied
+    despite the secret existing."""
+    template = _template(claude_accounts="personal")
+    # The exact ARN format is ``arn:aws:secretsmanager:<region>:<account>:
+    # secret:treadmill-test/claude-account-personal-*`` (CDK appends the
+    # ``-*`` suffix to allow the random suffix CFN appends to secret names).
+    # We assert by substring match against the policy doc.
+    policies = template.find_resources("AWS::IAM::Policy")
+    api_policies = [
+        p for n, p in policies.items() if "ApiUserPolicy" in n
+    ]
+    assert api_policies, "expected ApiUserPolicy in template"
+    policy_doc_text = repr(api_policies[0])
+    assert "claude-account-personal" in policy_doc_text, (
+        "claude account secret not granted GetSecretValue on the API user"
+    )
