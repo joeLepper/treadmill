@@ -119,6 +119,131 @@
     {
       "collapsed": false,
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 20},
+      "id": 8,
+      "title": "Claude token usage (ADR-0020)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Stacked rate (tokens/sec) by type, sourced from treadmill_claude_tokens_*_total counters emitted by the worker via OTel (ADR-0020).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 50, "stacking": {"mode": "normal", "group": "A"}},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "id": 9,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(treadmill_claude_tokens_input_total[5m]))",
+          "legendFormat": "input",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(treadmill_claude_tokens_output_total[5m]))",
+          "legendFormat": "output",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(treadmill_claude_tokens_cache_creation_total[5m]))",
+          "legendFormat": "cache_creation",
+          "refId": "C"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(treadmill_claude_tokens_cache_read_total[5m]))",
+          "legendFormat": "cache_read",
+          "refId": "D"
+        }
+      ],
+      "title": "Token rate by type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Total tokens consumed by the selected $task_id, grouped by model. Filter via the dashboard's task_id variable at top.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "id": 10,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (model) (increase(treadmill_claude_tokens_input_total{task_id=~\"$task_id\"}[$__range]) + increase(treadmill_claude_tokens_output_total{task_id=~\"$task_id\"}[$__range]))",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tokens for selected task (by model)",
+      "type": "barchart"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Total tokens per role over the dashboard time range. Spend signal = input + output (cache_read is free; cache_creation is paid but small).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
+      "id": 11,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (role) (increase(treadmill_claude_tokens_input_total[$__range]) + increase(treadmill_claude_tokens_output_total[$__range]))",
+          "legendFormat": "{{role}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tokens by role (over window)",
+      "type": "barchart"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Total tokens per model over the dashboard time range. Spend signal = input + output (cache_read is free; cache_creation is paid but small).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29},
+      "id": 12,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (model) (increase(treadmill_claude_tokens_input_total[$__range]) + increase(treadmill_claude_tokens_output_total[$__range]))",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tokens by model (over window)",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 37},
       "id": 6,
       "title": "Trace Search",
       "type": "row"
@@ -127,7 +252,7 @@
       "datasource": {"type": "tempo", "uid": "tempo"},
       "description": "Search traces by service, duration, or tags. Click a trace to explore span lineage.",
       "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 21},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 38},
       "id": 7,
       "options": {
         "dedupStrategy": "none"
