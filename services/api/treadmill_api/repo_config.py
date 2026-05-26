@@ -26,6 +26,10 @@ class RepoConfig:
     auto_merge_blocked: bool = False
     test_command: str | None = None
     lint_command: str | None = None
+    # Per-repo Claude account name (ADR-0055). ``None`` => deployment default.
+    # The named account must exist in ``Settings.claude_accounts``; resolution
+    # happens at the worker's per-step credential fetch, not at onboarding.
+    claude_account: str | None = None
 
 
 def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
@@ -45,6 +49,7 @@ def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
         auto_merge_blocked=bool(data.get("auto_merge_blocked", False)),
         test_command=data.get("test_command"),
         lint_command=data.get("lint_command"),
+        claude_account=data.get("claude_account"),
     )
 
 
@@ -55,4 +60,5 @@ def to_dict(config: RepoConfig) -> dict[str, Any]:
         "auto_merge_blocked": config.auto_merge_blocked,
         "test_command": config.test_command,
         "lint_command": config.lint_command,
+        "claude_account": config.claude_account,
     }

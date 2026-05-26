@@ -51,6 +51,7 @@ def test_round_trip_via_to_dict():
         "auto_merge_blocked": True,
         "test_command": "pytest",
         "lint_command": "ruff check .",
+        "claude_account": "secondary",
     }
 
     assert to_dict(parse_repo_config(source)) == source
@@ -63,3 +64,14 @@ def test_round_trip_normalizes_defaults():
 
     assert once == twice
     assert isinstance(twice, RepoConfig)
+
+
+def test_parse_defaults_claude_account_to_none():
+    """ADR-0055: omitting ``claude_account`` defers to the deployment default."""
+    cfg = parse_repo_config({"repo": "o/r"})
+    assert cfg.claude_account is None
+
+
+def test_parse_keeps_claude_account():
+    cfg = parse_repo_config({"repo": "o/r", "claude_account": "secondary"})
+    assert cfg.claude_account == "secondary"
