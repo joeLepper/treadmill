@@ -42,6 +42,7 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-architecture-resolve",
     "wf-crystallize-learning",
     "wf-audit-rule-corpus",
+    "wf-tune-judge-prompts",
 }
 
 _EXPECTED_ROLE_IDS = {
@@ -57,6 +58,7 @@ _EXPECTED_ROLE_IDS = {
     "role-architect",
     "role-crystallization-judge",
     "role-rule-corpus-auditor",
+    "role-prompt-optimizer",
 }
 
 # Action-role ids that may appear as step 2 of a 2-step workflow. Per
@@ -70,17 +72,17 @@ _ACTION_ROLE_IDS = {"role-code-author", "role-doc-author", "role-architect"}
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 
-def test_starters_has_eleven_canonical_workflows() -> None:
+def test_starters_has_canonical_workflows() -> None:
     """The canonical workflows, exactly (per ADR-0015 + ADR-0032 +
-    ADR-0034). Future starters extend this list; the count is asserted
-    as a tripwire so additions are intentional."""
+    ADR-0034 + ADR-0053). Future starters extend this list; the set is
+    asserted as a tripwire so additions are intentional."""
     ids = {wf["id"] for wf in STARTERS}
     assert ids == _EXPECTED_WORKFLOW_IDS
 
 
-def test_starters_declares_twelve_canonical_roles() -> None:
-    """Per ADR-0015 §"Role taxonomy" + ADR-0032 + ADR-0034 — twelve
-    roles, exactly."""
+def test_starters_declares_canonical_roles() -> None:
+    """Per ADR-0015 §"Role taxonomy" + ADR-0032 + ADR-0034 + ADR-0053 —
+    the canonical role set, exactly."""
     ids = {role["id"] for role in _all_roles()}
     assert ids == _EXPECTED_ROLE_IDS
 
@@ -173,6 +175,7 @@ _EXPECTED_OUTPUT_KINDS: dict[str, OutputKind] = {
     "role-architect": OutputKind.ANALYSIS,
     "role-crystallization-judge": OutputKind.ANALYSIS,
     "role-rule-corpus-auditor": OutputKind.ANALYSIS,
+    "role-prompt-optimizer": OutputKind.ANALYSIS,
 }
 
 
@@ -231,7 +234,11 @@ def test_role_model_tier_invariant() -> None:
       which turned out to be harness gaps not model quality.)
     """
     SONNET_MODEL = "claude-sonnet-4-6"
-    SONNET_ROLES = {"role-architect", "role-reviewer"}
+    # ``role-prompt-optimizer`` is sonnet per ADR-0053 — rarely-dispatched
+    # (operator-triggered today; Wave 3 adds a schedule) and the role
+    # reasons about prompt design + emits a structured JSON envelope, so
+    # cost is not the relevant axis.
+    SONNET_ROLES = {"role-architect", "role-reviewer", "role-prompt-optimizer"}
     roles_by_id = {r["id"]: r for r in _all_roles()}
     assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
         f"role-planner must use {PLANNER_MODEL!r}"
@@ -641,16 +648,20 @@ def test_every_role_is_referenced_by_at_least_one_workflow() -> None:
 
 
 def test_single_step_workflows_match_adr_0015_and_0032_matrix() -> None:
-    """Tripwire — the six single-step workflows are wf-author, wf-review,
-    wf-validate, wf-doc-amend, wf-architecture-resolve, and
-    wf-audit-rule-corpus. Per ADR-0015, ``wf-author`` deliberately stays
-    single-step because its input is already structured. Per ADR-0032,
-    ``wf-doc-amend`` and ``wf-architecture-resolve`` are single-step (verdict
-    routing in disposition, not a second step)."""
+    """Tripwire — the single-step workflows are wf-author, wf-review,
+    wf-validate, wf-doc-amend, wf-architecture-resolve,
+    wf-audit-rule-corpus, and wf-tune-judge-prompts. Per ADR-0015,
+    ``wf-author`` deliberately stays single-step because its input is
+    already structured. Per ADR-0032, ``wf-doc-amend`` and
+    ``wf-architecture-resolve`` are single-step (verdict routing in
+    disposition, not a second step). Per ADR-0053, ``wf-tune-judge-
+    prompts`` is single-step (the optimizer self-directs propose +
+    evaluate + emit-PR within one role-step invocation)."""
     ids = {wf["id"] for wf in STARTERS if len(wf["steps"]) == 1}
     assert ids == {
         "wf-author", "wf-review", "wf-validate", "wf-doc-amend",
         "wf-architecture-resolve", "wf-audit-rule-corpus",
+        "wf-tune-judge-prompts",
     }
 
 

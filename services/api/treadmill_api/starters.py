@@ -1000,6 +1000,67 @@ _ROLES: list[dict[str, Any]] = [
             "outside the fenced block.**"
         ),
     },
+    {
+        # ADR-0053 Wave 2: the judge-prompt optimizer is the single step
+        # of ``wf-tune-judge-prompts``. It proposes ONE refined variant
+        # of a target judge prompt, scores both against a held-out slice
+        # of the labeled corpus via ``evaluate_judge_prompt``, and emits
+        # a PR (or "no improvement") through the standard role-step
+        # plumbing. Sonnet-tier because the role reasons about prompt
+        # design + must emit a structured JSON envelope; it is
+        # rarely-dispatched (operator-triggered today), so cost is not
+        # the relevant axis.
+        "id": "role-prompt-optimizer",
+        "model": "claude-sonnet-4-6",
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": (
+            "You are role-prompt-optimizer. Given a judge role's current prompt +\n"
+            "a held-out labeled corpus, propose ONE improved variant of the judge\n"
+            "prompt and report whether it scores higher than the current one.\n"
+            "\n"
+            "Inputs (provided via the step's payload + the workspace):\n"
+            "  - ``judge_role``: the judge role id (e.g. ``role-architect``).\n"
+            "  - ``judge_prompt_path``: the file containing the current prompt\n"
+            "    (e.g. ``docs/knowledge-base/rules/<rule>.yaml`` or the role's\n"
+            "    definition in ``services/api/treadmill_api/starters.py`` — find\n"
+            "    the canonical source).\n"
+            "  - ``corpus_s3_uri``: the S3 URI for the labeled corpus.\n"
+            "\n"
+            "Steps:\n"
+            "  1. Pull the corpus locally:\n"
+            "     ``TREADMILL_CORPUS_S3_URI=<corpus_s3_uri> tools/load-analysis-corpus.sh pull``\n"
+            "     (uses the worker's AWS creds). Read the labeled JSON.\n"
+            "  2. Split deterministically: the last 30% of rows by index are\n"
+            "     held-out; the first 70% are reference (do NOT use them for\n"
+            "     scoring — only for understanding what kinds of cases the judge\n"
+            "     sees).\n"
+            "  3. Read the current prompt from ``judge_prompt_path``. Score it on\n"
+            "     the held-out slice via ``evaluate_judge_prompt(prompt, examples,\n"
+            "     model=<judge_role's model>)``. Record ``current_score``.\n"
+            "  4. Propose ONE refined variant — a SMALL, targeted edit (sharpen\n"
+            "     one criterion, fix one ambiguity, add one missing failure mode).\n"
+            "     Do NOT rewrite the prompt wholesale. Show the unified diff.\n"
+            "  5. Score the variant on the same held-out slice. Record\n"
+            "     ``variant_score``.\n"
+            "  6. If ``variant_score - current_score >= 0.05``: open a PR with the\n"
+            "     rule-YAML patch + the rationale + both scores. Otherwise output\n"
+            "     ``\"NO IMPROVEMENT\"`` with the scores + a one-paragraph rationale.\n"
+            "\n"
+            "Output envelope (JSON, in ``payload``):\n"
+            "{\n"
+            "  \"judge_role\": \"<role-id>\",\n"
+            "  \"current_score\": <float 0..1>,\n"
+            "  \"variant_score\": <float 0..1>,\n"
+            "  \"improvement\": <float>,\n"
+            "  \"verdict\": \"improvement\" | \"no_improvement\",\n"
+            "  \"patch\": \"<unified diff text>\" | null,\n"
+            "  \"rationale\": \"<one paragraph>\"\n"
+            "}\n"
+            "\n"
+            "No silent cross-account fallback (ADR-0055). Never paste secret\n"
+            "values to chat — the corpus loader uses environment-driven AWS creds."
+        ),
+    },
 ]
 
 
@@ -1132,6 +1193,24 @@ STARTERS: list[dict[str, Any]] = [
         "roles": _roles_for("role-rule-corpus-auditor"),
         "steps": [
             {"name": "audit", "role_id": "role-rule-corpus-auditor"},
+        ],
+    },
+    {
+        # ADR-0053 Wave 2: single-step optimizer workflow. The operator
+        # triggers this manually with a payload of
+        # ``{judge_role, corpus_s3_uri}``; the role-prompt-optimizer
+        # proposes one variant, scores it on a held-out slice via
+        # ``evaluate_judge_prompt``, and either opens a PR or reports
+        # "no improvement". No schedule yet (Wave 3 — see ADR-0053).
+        "id": "wf-tune-judge-prompts",
+        "description": (
+            "Propose + score one refined variant of a judge role's "
+            "prompt against the held-out slice of its labeled corpus "
+            "(ADR-0053)."
+        ),
+        "roles": _roles_for("role-prompt-optimizer"),
+        "steps": [
+            {"name": "optimize", "role_id": "role-prompt-optimizer"},
         ],
     },
 ]
