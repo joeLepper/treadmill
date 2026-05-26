@@ -121,8 +121,19 @@ class TreadmillCloudLite(cdk.Stack):
             deployment_id=deployment_id,
             events_topic=self.messaging.events_topic,
         )
+        # ADR-0055: comma-separated list of Claude account names from the
+        # ``--context claude_accounts=<a,b,...>`` CDK flag. Each name produces
+        # a per-deployment ``treadmill-<id>/claude-account-<name>`` Secrets
+        # Manager entry (empty; operator populates via ``put-secret-value``)
+        # and an additional ``GetSecretValue`` ARN on the API IAM policy.
+        claude_accounts_raw = self.node.try_get_context("claude_accounts") or ""
+        claude_account_names = [
+            n.strip() for n in str(claude_accounts_raw).split(",") if n.strip()
+        ]
         self.secrets = SecretsConstruct(
-            self, "Secrets", deployment_id=deployment_id,
+            self, "Secrets",
+            deployment_id=deployment_id,
+            claude_account_names=claude_account_names,
         )
         self.webhook_receiver = WebhookReceiverConstruct(
             self, "WebhookReceiver", deployment_id=deployment_id,

@@ -814,6 +814,26 @@ class LocalRuntime:
         if context_docs_bucket:
             env["CONTEXT_DOCS_BUCKET"] = context_docs_bucket
 
+        # ADR-0055: per-account Claude credential routing. Operator YAML
+        # carries ``aws.claude_accounts`` (list of ``{name, type, secret_name}``)
+        # and ``aws.claude_default_account``. We materialize the list as a
+        # JSON env var so the API's pydantic settings can parse a single
+        # field. When the list is empty/absent the resolver returns 503 and
+        # workers fall back to the existing ``CLAUDE_CREDENTIALS_PATH``
+        # bind-mount (no behavior change vs. pre-ADR-0055).
+        claude_accounts_yaml = cfg.get("aws", {}).get("claude_accounts") or []
+        if claude_accounts_yaml:
+            env["CLAUDE_ACCOUNTS_JSON"] = json.dumps({
+                a["name"]: {
+                    "type": a["type"],
+                    "secret_name": a["secret_name"],
+                }
+                for a in claude_accounts_yaml
+            })
+        claude_default = cfg.get("aws", {}).get("claude_default_account")
+        if claude_default:
+            env["CLAUDE_DEFAULT_ACCOUNT"] = claude_default
+
         # ADR-0020: inject OTLP endpoint when the observability stack is
         # deployed. The OTel SDK no-ops silently when the var is unset
         # (fully-local mode). Value from the deployment YAML under
