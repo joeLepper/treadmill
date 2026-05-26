@@ -234,6 +234,122 @@ def test_publish_validates_dict_into_step_output_at_publish() -> None:
     assert out["metadata"]["model"] is None
 
 
+# ── ADR-0020: token_usage on step.completed ──────────────────────────────────
+
+
+def test_publish_step_completed_carries_token_usage_when_provided() -> None:
+    """ADR-0020: when the runner passes ``token_usage`` to
+    ``publish_step_completed``, the wire body's payload carries a
+    top-level ``token_usage`` block with all four counters + the model.
+    The block sits next to ``output`` — *not* nested inside
+    ``output.metadata`` — because token usage is step-execution telemetry
+    and the API projects it onto dedicated columns."""
+    pub, fake = _publisher()
+    ids = _ids()
+    pub.publish_step_completed(
+        **ids,
+        output={
+            "summary": "did it",
+            "decision": "pushed",
+            "artifacts": [{"kind": "branch", "value": "task/x"}],
+        },
+        token_usage={
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "cache_creation_tokens": 8,
+            "cache_read_tokens": 16,
+            "model": "claude-opus-4-7",
+        },
+    )
+    body = json.loads(fake.calls[0]["Message"])
+    usage = body["payload"]["token_usage"]
+    assert usage == {
+        "input_tokens": 100,
+        "output_tokens": 40,
+        "cache_creation_tokens": 8,
+        "cache_read_tokens": 16,
+        "model": "claude-opus-4-7",
+    }
+    # Sibling of ``output``, never folded into it.
+    assert "token_usage" not in body["payload"]["output"]
+    assert "token_usage" not in body["payload"]["output"].get("metadata", {})
+
+
+def test_publish_step_completed_omits_token_usage_when_absent() -> None:
+    """When the runner passes ``token_usage=None`` (dry-run, wf-validate,
+    or any step that made no LLM call), the wire body still parses but
+    ``payload['token_usage']`` is ``None`` — the consumer then writes
+    NULLs to the five workflow_run_steps columns."""
+    pub, fake = _publisher()
+    ids = _ids()
+    pub.publish_step_completed(
+        **ids,
+        output={
+            "summary": "did it",
+            "decision": "pushed",
+            "artifacts": [{"kind": "branch", "value": "task/x"}],
+        },
+    )
+    body = json.loads(fake.calls[0]["Message"])
+    assert body["payload"]["token_usage"] is None
+
+
+def test_publish_step_completed_round_trips_through_step_completed_parser() -> None:
+    """The wire body carrying ``token_usage`` must round-trip through the
+    API's typed ``StepCompleted`` parser — same drift contract as the
+    rest of the envelope. A missing or differently-named sub-field would
+    surface here."""
+    from treadmill_api.events.registry import parse_payload
+    from treadmill_api.events.step import StepCompleted, StepTokenUsage
+
+    pub, fake = _publisher()
+    ids = _ids()
+    pub.publish_step_completed(
+        **ids,
+        output={
+            "summary": "did the thing",
+            "decision": "pushed",
+            "artifacts": [{"kind": "branch", "value": "task/x"}],
+        },
+        token_usage={
+            "input_tokens": 11,
+            "output_tokens": 22,
+            "cache_creation_tokens": 33,
+            "cache_read_tokens": 44,
+            "model": "claude-haiku-4-5-20251001",
+        },
+    )
+    body = json.loads(fake.calls[0]["Message"])
+    typed = parse_payload(body["entity_type"], body["action"], body["payload"])
+    assert isinstance(typed, StepCompleted)
+    assert isinstance(typed.token_usage, StepTokenUsage)
+    assert typed.token_usage.input_tokens == 11
+    assert typed.token_usage.output_tokens == 22
+    assert typed.token_usage.cache_creation_tokens == 33
+    assert typed.token_usage.cache_read_tokens == 44
+    assert typed.token_usage.model == "claude-haiku-4-5-20251001"
+
+
+def test_publish_rejects_malformed_token_usage_dict() -> None:
+    """A malformed ``token_usage`` dict (missing required sub-field) fails
+    Pydantic validation at publish — the worker bug surfaces here, not
+    on the consumer."""
+    pub, _fake = _publisher()
+    ids = _ids()
+    # Missing ``model`` — every StepTokenUsage sub-field is required.
+    with pytest.raises(ValidationError):
+        pub.publish_step_completed(
+            **ids,
+            output={"summary": "x", "decision": "pushed"},
+            token_usage={
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+            },
+        )
+
+
 def test_publish_step_started_serializes_iso_timestamp() -> None:
     """Wire format is JSON; the typed StepStarted.started_at must come
     back as an ISO-8601 string after model_dump(mode='json')."""

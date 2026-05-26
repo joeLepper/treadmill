@@ -170,7 +170,7 @@ def test_runner_publishes_started_then_completed_on_success(
         ],
         payload={"pr_number": 7},
     )
-    monkeypatch.setattr(runner, "_execute", lambda c, s: envelope)
+    monkeypatch.setattr(runner, "_execute", lambda c, s: (envelope, None))
     sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-1")])
     api = _FakeApi(ctx)
     pub = _FakePublisher()
@@ -300,7 +300,7 @@ def test_runner_exits_after_one_step_when_flag_true(
         return StepOutput(
             summary="ok", decision="pushed", commit_sha="abc",
             artifacts=[Artifact(kind="branch", value="task/x")],
-        )
+        ), None
     monkeypatch.setattr(runner, "_execute", _fake_execute)
     ctx = _ctx()
     sqs = _FakeSqs([
@@ -333,7 +333,7 @@ def test_runner_continues_polling_when_exit_after_step_false(
         return StepOutput(
             summary="ok", decision="pushed", commit_sha="abc",
             artifacts=[Artifact(kind="branch", value="task/x")],
-        )
+        ), None
     monkeypatch.setattr(runner, "_execute", _fake_execute)
     ctx = _ctx()
     sqs = _FakeSqs([
@@ -576,7 +576,7 @@ def test_execute_returns_step_output_envelope(
     # commit + push succeed without invoking real Claude.
     monkeypatch.setenv("TREADMILL_AGENT_DRY_RUN", "1")
     ctx = _ctx(repo="owner/test-repo")
-    output = runner._execute(
+    output, token_usage = runner._execute(
         ctx,
         _settings(
             bare_repos_dir=str(bare_repos_dir),
@@ -593,6 +593,8 @@ def test_execute_returns_step_output_envelope(
     # ``metadata`` left empty for v0.
     from treadmill_agent.events import Metadata
     assert output.metadata == Metadata()
+    # Dry-run never invokes Claude, so token_usage is always None.
+    assert token_usage is None
 
 
 def test_execute_includes_branch_artifact(
@@ -607,7 +609,7 @@ def test_execute_includes_branch_artifact(
         task_id="abcdef12-3456-7890-abcd-ef1234567890",
         title="Add a thing",
     )
-    output = runner._execute(
+    output, _ = runner._execute(
         ctx,
         _settings(
             bare_repos_dir=str(bare_repos_dir),
@@ -631,7 +633,7 @@ def test_execute_includes_commit_sha_top_level(
     bare_repos_dir, workspace_dir = _setup_execute_fixture(tmp_path)
     monkeypatch.setenv("TREADMILL_AGENT_DRY_RUN", "1")
     ctx = _ctx(repo="owner/test-repo")
-    output = runner._execute(
+    output, _ = runner._execute(
         ctx,
         _settings(
             bare_repos_dir=str(bare_repos_dir),
@@ -659,7 +661,7 @@ def test_execute_local_mode_omits_pr_number_from_payload(
     bare_repos_dir, workspace_dir = _setup_execute_fixture(tmp_path)
     monkeypatch.setenv("TREADMILL_AGENT_DRY_RUN", "1")
     ctx = _ctx(repo="owner/test-repo")
-    output = runner._execute(
+    output, _ = runner._execute(
         ctx,
         _settings(
             bare_repos_dir=str(bare_repos_dir),
@@ -717,7 +719,7 @@ def test_execute_dry_run_analyzer_emits_task_directive(
             skills=[], hooks=[],
         ),
     )
-    output = runner._execute(
+    output, _ = runner._execute(
         ctx,
         _settings(
             bare_repos_dir=str(bare_repos_dir),
@@ -773,7 +775,7 @@ def test_execute_dispatches_to_handler_for_role_output_kind(
             skills=[], hooks=[],
         ),
     )
-    out = runner._execute(
+    out, _ = runner._execute(
         ctx,
         _settings(
             bare_repos_dir=str(bare_repos_dir),
@@ -805,7 +807,7 @@ def test_execute_dry_run_action_role_omits_task_directive(
             skills=[], hooks=[],
         ),
     )
-    output = runner._execute(
+    output, _ = runner._execute(
         ctx,
         _settings(
             bare_repos_dir=str(bare_repos_dir),
@@ -868,7 +870,7 @@ def test_runner_heartbeat_extends_visibility_during_long_work(
         return StepOutput(
             summary="ok", decision="pushed", commit_sha="abc",
             artifacts=[Artifact(kind="branch", value="task/x")],
-        )
+        ), None
 
     monkeypatch.setattr(runner, "_execute", _slow_execute)
 
@@ -1148,7 +1150,7 @@ def test_handle_step_mints_repo_scoped_token_before_execute_in_app_mode(
         return StepOutput(
             summary="ok", decision="pushed", commit_sha="abc",
             artifacts=[Artifact(kind="branch", value="task/x")],
-        )
+        ), None
 
     monkeypatch.setattr(
         startup_auth_mod, "bootstrap_github_auth_via_app", _fake_bootstrap,
@@ -1197,9 +1199,12 @@ def test_handle_step_skips_repo_scoped_mint_when_not_github_app_mode(
     )
     monkeypatch.setattr(
         runner, "_execute",
-        lambda c, s: StepOutput(
-            summary="ok", decision="pushed", commit_sha="abc",
-            artifacts=[Artifact(kind="branch", value="task/x")],
+        lambda c, s: (
+            StepOutput(
+                summary="ok", decision="pushed", commit_sha="abc",
+                artifacts=[Artifact(kind="branch", value="task/x")],
+            ),
+            None,
         ),
     )
 
@@ -1234,7 +1239,7 @@ def test_handle_step_publishes_failed_when_repo_scoped_mint_raises(
     def _track_execute(c, s):
         execute_called.append(True)
         from treadmill_agent.events import StepOutput
-        return StepOutput(summary="x", decision="pushed", commit_sha="a")
+        return StepOutput(summary="x", decision="pushed", commit_sha="a"), None
 
     monkeypatch.setattr(
         startup_auth_mod, "bootstrap_github_auth_via_app", _boom_bootstrap,

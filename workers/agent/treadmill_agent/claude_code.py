@@ -66,6 +66,20 @@ class CodeAuthorResult:
     Stored on ``step.output.summary`` so the user can see what changed
     without diffing."""
 
+    token_usage: dict[str, int] | None = None
+    """Per-step token counters parsed from Claude Code's JSON envelope:
+    ``input_tokens``, ``output_tokens``, ``cache_creation_tokens``,
+    ``cache_read_tokens``. ``None`` when the step made no LLM call
+    (dry-run, wf-validate) or the stub binary didn't emit a JSON
+    ``usage`` block. Threaded up to the runner so ``step.completed``
+    can persist it (ADR-0020 §"Token tracking"); the OTel emission via
+    :func:`observability.record_token_usage` stays unchanged."""
+
+    model: str | None = None
+    """The role's model id (e.g. ``claude-opus-4-7``) the run executed
+    against. Paired with ``token_usage`` so the API can attribute usage
+    rows to a specific model; ``None`` when ``token_usage`` is ``None``."""
+
 
 class CodeAuthorError(RuntimeError):
     """Surface non-zero exit codes from the Claude Code CLI."""
@@ -337,7 +351,15 @@ def run_claude_code(
             extra=base_extra,
         )
 
-    return CodeAuthorResult(summary=summary.strip() or "(no summary)")
+    return CodeAuthorResult(
+        summary=summary.strip() or "(no summary)",
+        token_usage=usage,
+        # Pair the model with token_usage so a downstream consumer
+        # never has to guess which model the counters belong to. When
+        # ``usage`` is None (no LLM call observed) the model is also
+        # None — the API persists NULLs for both.
+        model=role.model if usage is not None else None,
+    )
 
 
 def _pump_stream(

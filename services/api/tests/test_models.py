@@ -7,7 +7,7 @@ migration (upgrade + downgrade against live Postgres) lives in
 
 from __future__ import annotations
 
-from sqlalchemy import Text
+from sqlalchemy import BigInteger, Text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 
 from treadmill_api.database import Base
@@ -161,6 +161,37 @@ def test_workflow_run_step_output_is_jsonb():
     allowed site)."""
     output_col = WorkflowRunStep.__table__.columns["output"]
     assert isinstance(output_col.type, JSONB)
+
+
+def test_workflow_run_step_has_token_usage_columns():
+    """ADR-0020 — ``workflow_run_steps`` carries five nullable columns
+    that the coordination consumer projects from
+    ``step.completed.token_usage``. All must be nullable: steps that made
+    no LLM call (dry-run, ``wf-validate``) and rows written before this
+    migration legitimately have no usage data.
+
+    The four counter columns are ``BIGINT`` (Claude's per-request token
+    totals are tiny but row-level aggregates over a long-lived run can
+    blow past ``int4`` headroom); ``model`` is ``TEXT`` to match the
+    rest of the model-id columns in the schema.
+    """
+    table = WorkflowRunStep.__table__
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_tokens",
+        "cache_read_tokens",
+    ):
+        assert name in table.columns, f"missing column {name!r}"
+        col = table.columns[name]
+        assert isinstance(col.type, BigInteger), (
+            f"{name} must be BIGINT, got {type(col.type).__name__}"
+        )
+        assert col.nullable is True, f"{name} must be nullable"
+    assert "model" in table.columns
+    model_col = table.columns["model"]
+    assert isinstance(model_col.type, Text)
+    assert model_col.nullable is True
 
 
 def test_no_unexpected_jsonb_columns():

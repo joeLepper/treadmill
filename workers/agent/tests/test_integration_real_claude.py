@@ -194,7 +194,7 @@ def test_real_claude_authors_a_change_and_commits(
     ctx = _ctx(repo=repo, task_id=task_id, step_id=step_id)
     settings = _settings(bare_repos_dir, workspace_dir)
 
-    output = runner._execute(ctx, settings)
+    output, _ = runner._execute(ctx, settings)
 
     # ── Assertions on the runner's return shape ──────────────────────
 

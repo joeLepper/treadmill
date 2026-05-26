@@ -616,3 +616,58 @@ def test_run_claude_code_skips_token_metrics_for_plain_text_stub(
 
     assert result.summary == "did the thing"
     mock_record.assert_not_called()
+
+
+# ── ADR-0020: CodeAuthorResult carries the parsed token_usage + model ───────
+
+
+def test_run_claude_code_threads_token_usage_into_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0020: when Claude Code emits a JSON envelope with a ``usage``
+    block, ``CodeAuthorResult.token_usage`` carries the four parsed
+    counters and ``CodeAuthorResult.model`` carries the role's model id.
+    The runner reads these to publish ``step.completed.token_usage``."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    _json_stub(stub)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    result = claude_code.run_claude_code(
+        repo_dir=repo_dir, role=_role(),
+        task_title="t", task_description=None, plan_intent=None,
+    )
+
+    assert result.token_usage == {
+        "input_tokens": 100,
+        "output_tokens": 40,
+        "cache_creation_tokens": 8,
+        "cache_read_tokens": 16,
+    }
+    # ``role.model`` is paired with token_usage so the API can attribute
+    # the counters to a specific model without round-tripping through ctx.
+    assert result.model == "claude-opus-4-7"
+
+
+def test_run_claude_code_token_usage_none_for_plain_text_stub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When stdout isn't JSON (stub binaries, dry-run paths, future
+    Claude version drift), ``CodeAuthorResult.token_usage`` is ``None``
+    and ``model`` is also ``None`` — the runner publishes ``step.completed``
+    without a ``token_usage`` field and the API persists NULLs."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    stub = tmp_path / "fake-claude"
+    stub.write_text("#!/usr/bin/env bash\necho 'did the thing'\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    result = claude_code.run_claude_code(
+        repo_dir=repo_dir, role=_role(),
+        task_title="t", task_description=None, plan_intent=None,
+    )
+
+    assert result.token_usage is None
+    assert result.model is None

@@ -212,7 +212,7 @@ def test_real_claude_action_role_consumes_prior_step_directive(
     )
     settings = _settings(bare_repos_dir, workspace_dir)
 
-    output = runner._execute(ctx, settings)
+    output, _ = runner._execute(ctx, settings)
 
     # Branch landed, commit landed.
     assert output.commit_sha, output
