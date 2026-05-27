@@ -60,14 +60,29 @@ The page components consume `src/api/queries.ts`; they never reach into
 the mock call with a `fetch('/api/...').then(...)` and the page renders
 unchanged.
 
-Endpoints we'll need on the API side:
+Status:
 
-- `GET /api/dashboard/overview` — `{accounts, fleet, escalations, tasks, bucketCounts, events}`
-- `GET /api/dashboard/tasks/:taskId` — `{task, runs}`
-- `GET /api/dashboard/repos/:repo/docs` — `{arch, plans, last_updated}`
-- `POST /api/tasks/:id/cancel` — `{reason}`
-- `POST /api/tasks/:id/ack-escalation`
-- `GET /ws/events` — WebSocket; pushes the event-tail items + flash hints.
+- `useOverview` — **MIGRATED (PR-B8)** → `GET /api/v1/dashboard/overview`
+  (filters `repo`/`bucket`/`account`/`q` forwarded as query parameters).
+- `useTaskDetail` — **MIGRATED (PR-B8)** →
+  `GET /api/v1/dashboard/tasks/:taskId`.
+- `useRepoDocs` — **MIGRATED (PR-B8)** →
+  `GET /api/v1/dashboard/repos/:repo/docs`.
+- `useCancelTask`, `useAcknowledgeEscalation` — still call the mock.
+  HTTP swap lands in **PR-B9** against
+  `POST /api/v1/dashboard/tasks/:id/cancel` and
+  `POST /api/v1/dashboard/tasks/:id/ack-escalation`.
+- `/ws/events` — WebSocket migration lands in **PR-B11** (currently
+  driven by `sim.ts`).
+
+## Recent changes
+
+- **2026-05-27 (PR-B8)** — Swap the READ `queryFn` bodies in
+  `src/api/queries.ts` from in-process mock calls to `fetch()` against
+  the live dashboard endpoints (B1/B2/B3). Adds `_apiFetch` helper +
+  `src/api/queries.test.tsx` covering URL shape, query-parameter
+  forwarding, repo-name URL-encoding, and error surfacing on non-2xx /
+  network failure. Mutation hooks + WebSocket still pending (B9, B11).
 
 ## Running locally
 

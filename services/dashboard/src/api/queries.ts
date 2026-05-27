@@ -1,31 +1,44 @@
 /**
  * Query hooks the pages consume.
  *
- * Phase 1 (this PR): the `queryFn` bodies call the in-process mock
- * (`mock.ts`). They still go through TanStack Query so the cache /
- * refetch / stale-time machinery is in place from day one.
+ * READ hooks (`useOverview`, `useTaskDetail`, `useRepoDocs`) fetch live
+ * data from `services/api/treadmill_api/routers/dashboard/*.py`. Response
+ * shapes match `./types.ts` field-for-field — the page components don't
+ * know or care that the seam moved from in-process mock to HTTP.
  *
- * Phase 2 (follow-up PR): swap each `queryFn` body for a `fetch` call
- * against `services/api/treadmill_api/routers/dashboard.py`. Page
- * components do not change.
+ * Mutation hooks (`useCancelTask`, `useAcknowledgeEscalation`) still call
+ * the in-process mock; their HTTP swap lands with the cancel / ack
+ * endpoints in a follow-up PR.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Bucket, Task } from './types';
+import type {
+  Bucket,
+  Escalation,
+  Event,
+  Account,
+  Fleet,
+  RepoDocs,
+  Task,
+  TaskDetail,
+} from './types';
 import {
-  ACCOUNTS,
   acknowledgeEscalation as mockAck,
-  bucketCounts as mockBucketCounts,
   cancelTask as mockCancel,
-  FLEET,
-  getEscalations as mockEscalations,
-  getEvents as mockEvents,
-  getNonTerminalTasks as mockTasks,
-  getRepoDocs as mockRepoDocs,
-  getTaskDetail as mockTaskDetail,
 } from './mock';
 
 const STALE_MS = 3_000;
+
+async function _apiFetch<T>(url: string): Promise<T> {
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  });
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as T;
+}
 
 export interface OverviewFilters {
   repo?: string;
@@ -34,17 +47,37 @@ export interface OverviewFilters {
   q?: string;
 }
 
+interface BucketCounts {
+  blocked: number;
+  inflight: number;
+  hopper: number;
+  total: number;
+}
+
+interface OverviewResponse {
+  accounts: Account[];
+  fleet: Fleet;
+  escalations: Escalation[];
+  tasks: Task[];
+  bucketCounts: BucketCounts;
+  events: Event[];
+}
+
 export function useOverview(filters: OverviewFilters = {}) {
   return useQuery({
     queryKey: ['overview', filters],
-    queryFn: async () => ({
-      accounts: ACCOUNTS,
-      fleet: FLEET,
-      escalations: mockEscalations(),
-      tasks: mockTasks(filters),
-      bucketCounts: mockBucketCounts(),
-      events: mockEvents(),
-    }),
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (filters.repo) params.set('repo', filters.repo);
+      if (filters.bucket) params.set('bucket', filters.bucket);
+      if (filters.account) params.set('account', filters.account);
+      if (filters.q) params.set('q', filters.q);
+      const qs = params.toString();
+      const url = qs
+        ? `/api/v1/dashboard/overview?${qs}`
+        : '/api/v1/dashboard/overview';
+      return _apiFetch<OverviewResponse>(url);
+    },
     staleTime: STALE_MS,
     refetchInterval: 5_000,
   });
@@ -53,7 +86,8 @@ export function useOverview(filters: OverviewFilters = {}) {
 export function useTaskDetail(taskId: string) {
   return useQuery({
     queryKey: ['task', taskId],
-    queryFn: async () => mockTaskDetail(taskId),
+    queryFn: async () =>
+      _apiFetch<TaskDetail>('/api/v1/dashboard/tasks/' + taskId),
     staleTime: STALE_MS,
     refetchInterval: (query) => {
       // Poll only while the latest run is still active.
@@ -68,7 +102,10 @@ export function useTaskDetail(taskId: string) {
 export function useRepoDocs(repo: string) {
   return useQuery({
     queryKey: ['repo-docs', repo],
-    queryFn: async () => mockRepoDocs(repo),
+    queryFn: async () =>
+      _apiFetch<RepoDocs>(
+        '/api/v1/dashboard/repos/' + encodeURIComponent(repo) + '/docs',
+      ),
     staleTime: 60_000,
   });
 }
