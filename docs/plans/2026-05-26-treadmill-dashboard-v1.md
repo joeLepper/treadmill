@@ -240,3 +240,49 @@ gzip) + 9 kB CSS. No tree-shaking warnings.
 - Deploy-watcher hook for `services/dashboard/**` PR merges.
 - Confirm ADR-0042 `validate.override` surface before wiring the
   "override review" affordance — abort it if it doesn't exist.
+
+## PR B task breakdown (worker-dispatchable)
+
+The follow-up work splits along clean file seams so most of it can run in parallel as Treadmill worker tasks (no merge conflicts between siblings). Each task below is sized for a single PR — bounded inputs, bounded outputs, one reviewer pass.
+
+**Architectural anchor:** ADR-0056. Every dispatched worker should read it before touching `services/dashboard/` or `services/api/treadmill_api/routers/dashboard/`.
+
+### Parallel-safe tasks (can dispatch concurrently)
+
+Each one touches a distinct file. The API tasks deliberately split the router into per-endpoint files so concurrent PRs don't conflict.
+
+| # | Task | File(s) touched | Inputs (data) | Output |
+|---|---|---|---|---|
+| B1 | `GET /api/dashboard/overview` aggregation endpoint | `services/api/treadmill_api/routers/dashboard/overview.py` (new) + router registration in `routers/__init__.py` | Existing `tasks` / `events` / `accounts` / `workers` / `escalations` tables; `derived_status` + `last_activity` from `task_status` view | JSON payload matching `src/api/types.ts` `useOverview` queryFn return — `{accounts, fleet, escalations, tasks, bucketCounts, events}` |
+| B2 | `GET /api/dashboard/tasks/:taskId` task-detail endpoint | `services/api/treadmill_api/routers/dashboard/task_detail.py` (new) | `tasks`, `task_prs`, `workflow_runs`, `workflow_run_steps` (joins by task_id) | Payload matching `useTaskDetail`'s `TaskDetail` type — `{task, runs}` (with steps nested) |
+| B3 | `GET /api/dashboard/repos/:repo/docs` repo-docs endpoint | `services/api/treadmill_api/routers/dashboard/repo_docs.py` (new) | ADR-0054 context-docs S3 bucket — `arch.md` head + `plans/` index | `{arch, plans, last_updated}` matching `useRepoDocs` |
+| B4 | `POST /api/tasks/:id/cancel` action endpoint | `services/api/treadmill_api/routers/dashboard/actions.py` (new — both cancel + ack live here) | Body `{reason}`; existing event-insert path | Inserts `events (entity_type='task', action='cancelled', task_id, payload={"reason"})`; idempotent; returns 202 with the new event id |
+| B5 | `POST /api/tasks/:id/ack-escalation` action endpoint | same file as B4 | Existing event-insert path | Inserts acknowledgement event; idempotent |
+| B6 | Deploy-watcher hook for `services/dashboard/**` | `tools/local-adapter/treadmill_local/deploy_watcher.py` + `runtime.py` (add `recreate_dashboard_container`) | Existing API-recreate path is the template | A merged `services/dashboard/**` PR triggers a `docker build` + `docker rm -f treadmill-dashboard` + start, mirroring the API path; deploy-watcher log shows it; the AGENT.md follow-up is removed |
+| B7 | `validate.override` surface audit | `docs/adrs/0042-*.md` (read) + new ADR or comment if absent | ADR-0042 references | A one-paragraph confirmation that the surface exists (with endpoint shape) **or** a one-paragraph rationale for dropping the "override review" affordance from the UI. PR B8 reads this output. |
+
+### Sequenced tasks (must wait on parallel set)
+
+Each of these touches `src/api/queries.ts` or `src/api/sim.ts` and so cannot run alongside its peers without conflicts. Dispatch sequentially; they're each small.
+
+| # | Task | File(s) touched | Depends on | Output |
+|---|---|---|---|---|
+| B8 | Swap `useOverview`, `useTaskDetail`, `useRepoDocs` to `fetch(...)` | `src/api/queries.ts` | B1, B2, B3 merged | Each `queryFn` body becomes a `fetch('/api/dashboard/...').then(r => r.json())`; `mock.ts` imports removed for these three; `_simAdvance` import stays (still used by `sim.ts`); page components unchanged |
+| B9 | Wire `useCancelTask` + `useAcknowledgeEscalation` mutations to real endpoints | `src/api/queries.ts` | B4, B5 merged | Mutation `mutationFn` posts to the real endpoint; existing optimistic-update + rollback logic stays |
+| B10 | Wire "override review" action (conditional) | `src/pages/TaskDetail.tsx` + `src/api/queries.ts` | B7 outcome | If B7 confirmed the surface: render the action with real wiring. If B7 dropped it: remove the `needsReviewOverride` branch from `ActionBar` |
+| B11 | Real WebSocket subscription replacing `useLiveSim`'s `setInterval` | `src/api/sim.ts` + new `services/api/treadmill_api/routers/dashboard/ws.py` | B1 + B2 merged (events shape stable) | Server-side: subscribe to EventBus, relay events over WS with backpressure; client-side: `useLiveSim` opens a WS to `/ws/events`, updates `lastUpdated` + `flashIds` from real pushes, falls back to `mode='polling'` on disconnect |
+
+### Out-of-PR-B follow-ups
+
+Captured here so the worker dispatcher doesn't pick them up by accident:
+
+- **Auth.** Single-operator-local v1 has none. A future ADR governs multi-tenant auth; that's not PR B.
+- **Lift more bunkhouse routes.** ADR-0056 explicitly defers this until an operator reaches for one.
+- **Server-side event-tail `task_id` filter.** B1 returns all events; client filters. Server-side filter is a perf optimization when volume rises.
+
+### Dispatcher hints
+
+- All B1–B6 worker tasks should carry `claude_account: personal` (the operator's own dashboard work bills personal, not osmo/bunkhouse) — see ADR-0055.
+- All tasks should reference ADR-0056 and `docs/dashboard/DESIGN.md` in their initial prompt.
+- B7 is read-only; can run on any account.
+- The seven parallel tasks (B1–B7) collapse PR B from "one bigass PR" to a fan-out of seven small PRs that merge in any order, plus three small sequenced ones. Realistic wall-clock with the autoscaler at default capacity: ~one Treadmill ralph-loop per task = ~25–40 min/task, four in flight at once = PR B lands inside half a day instead of a focused multi-day session.
