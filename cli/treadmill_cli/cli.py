@@ -18,6 +18,7 @@ Command groups:
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Annotated, Any
@@ -486,6 +487,46 @@ def workflows_seed_starters(
             f"{len(result.role_prompts_reset)} role(s):[/yellow] "
             + ", ".join(result.role_prompts_reset)
         )
+
+
+# ── workflows trigger (ADR-0053 Wave 3) ──────────────────────────────────────
+
+
+@workflows_app.command("trigger")
+def workflows_trigger(
+    slug: Annotated[str, typer.Argument(help="Workflow slug to dispatch.")],
+    payload: Annotated[str, typer.Option(
+        "--payload",
+        help="JSON object passed as the dispatch payload; must contain 'repo'.",
+    )],
+) -> None:
+    """Trigger any workflow with a payload, independent of any task.
+
+    Wraps ``POST /api/v1/workflows/{slug}/trigger``. Useful for an
+    operator's first manual run of a workflow (e.g. the judge-prompt
+    optimizer) or any future scheduled-bot dry-run.
+    """
+    try:
+        parsed_payload = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        err_console.print(f"[red]invalid --payload JSON: {exc}[/red]")
+        raise typer.Exit(code=2)
+    if not isinstance(parsed_payload, dict):
+        err_console.print("[red]--payload must be a JSON object[/red]")
+        raise typer.Exit(code=2)
+
+    try:
+        with _client() as client:
+            result = client.trigger_workflow(slug, parsed_payload)
+    except ApiError as exc:
+        if exc.status_code == 404:
+            err_console.print("[red]workflow not found[/red]")
+            raise typer.Exit(code=2)
+        if exc.status_code == 400:
+            err_console.print(f"[red]{exc.detail}[/red]")
+            raise typer.Exit(code=2)
+        _handle_api_error(exc)
+    console.print(f"triggered: workflow_run={result['run_id']}")
 
 
 # ── role show / update / versions (ADR-0028) ─────────────────────────────────
