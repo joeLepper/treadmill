@@ -921,6 +921,15 @@ class LocalRuntime:
             # matches the port. The unsuffixed catch-all applies to all
             # signals (traces + metrics + logs).
             env["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/protobuf"
+        # ADR-0053 Wave 3: optional corpus URI for the prompt-optimizer
+        # workflow. When set in ``aws.corpus_s3_uri`` (operator-supplied
+        # YAML field, not a CDK output), workers carry it so
+        # ``tools/load-analysis-corpus.sh pull`` can fetch the labeled
+        # corpus. Absent is acceptable — the optimizer surfaces a clean
+        # "URI not configured" error rather than failing deep in boto3.
+        corpus_s3_uri = cfg.get("aws", {}).get("corpus_s3_uri")
+        if corpus_s3_uri:
+            env["TREADMILL_CORPUS_S3_URI"] = corpus_s3_uri
         return env
 
     def _report_up_dev_local(self, cfg: dict[str, Any]) -> None:
