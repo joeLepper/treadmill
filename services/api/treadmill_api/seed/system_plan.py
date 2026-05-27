@@ -81,6 +81,16 @@ def seed_system_plan_if_empty(session: Any) -> int:
             # dispatch's auto-merge intent via the task layer.
         )
     )
+    # Flush the Plan INSERT before adding the Event so the FK constraint
+    # ``events_plan_id_fkey`` can see the new ``plans.id`` row in the
+    # same transaction. Without this, SQLAlchemy's UnitOfWork can't
+    # infer the insert order (the Plan's PK is passed as an explicit
+    # value bypassing its ``server_default=gen_random_uuid()``, so
+    # dependency analysis doesn't link the Event's ``plan_id`` to the
+    # pending Plan row) — at commit time the Event INSERT can run
+    # first and Postgres rejects it with a ForeignKeyViolation. Caught
+    # in dev-local right after PR #40 deploy (2026-05-27).
+    session.flush()
     # plan_status VIEW is last-event-wins; ``plan.activated`` lifts the
     # system Plan into ``derived_status='active'`` so dispatch_task's
     # plan-active gate lets synthetic-task runs publish + send to SQS

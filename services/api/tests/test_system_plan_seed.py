@@ -33,21 +33,39 @@ class _ScalarOneOrNoneResult:
 
 class _StubSession:
     """Sync session double — execute returns ``existing`` (Plan row or None);
-    ``add`` records inserted entities; ``commit`` is recorded."""
+    ``add`` records inserted entities; ``flush`` is recorded; ``commit``
+    is recorded.
+
+    ``call_log`` interleaves add/flush/commit in the order they were
+    invoked so tests can pin the Plan-then-flush-then-Event order
+    required by the ``events_plan_id_fkey`` FK constraint."""
 
     def __init__(self, *, existing: Any | None) -> None:
         self._existing = existing
         self.added: list[Any] = []
+        self.flushed = 0
         self.committed = False
+        self.call_log: list[str] = []
 
     def execute(self, *args: Any, **kwargs: Any) -> _ScalarOneOrNoneResult:
         return _ScalarOneOrNoneResult(self._existing)
 
     def add(self, entity: Any) -> None:
         self.added.append(entity)
+        # Tag the log with the entity kind so order checks don't depend
+        # on attribute introspection.
+        kind = "plan" if hasattr(entity, "intent") else (
+            "event" if hasattr(entity, "entity_type") else "other"
+        )
+        self.call_log.append(f"add:{kind}")
+
+    def flush(self) -> None:
+        self.flushed += 1
+        self.call_log.append("flush")
 
     def commit(self) -> None:
         self.committed = True
+        self.call_log.append("commit")
 
 
 # ── Constant invariants ──────────────────────────────────────────────────────
@@ -97,6 +115,26 @@ def test_seed_system_plan_if_empty_fresh_db_inserts_plan_and_activated_event() -
     assert event.entity_type == "plan"
     assert event.action == "activated"
     assert event.plan_id == SYSTEM_PLAN_ID
+
+
+# ── seed_system_plan_if_empty: insert ordering ───────────────────────────────
+
+
+def test_seed_system_plan_if_empty_flushes_plan_before_event_insert() -> None:
+    """**Regression guard (2026-05-27, post-PR-#40 dev-local crash).** The
+    ``events_plan_id_fkey`` FK requires the Plan row to be visible
+    before the ``plan.activated`` Event row inserts. SQLAlchemy's
+    UnitOfWork doesn't auto-infer the order when the Plan's PK is
+    passed as an explicit value (bypassing its ``server_default``), so
+    we must flush between the two adds. The call log must be
+    add:plan → flush → add:event → commit (exact order)."""
+    session = _StubSession(existing=None)
+
+    seed_system_plan_if_empty(session)
+
+    assert session.call_log == [
+        "add:plan", "flush", "add:event", "commit",
+    ], f"insert order wrong: {session.call_log}"
 
 
 # ── seed_system_plan_if_empty: idempotency ───────────────────────────────────
