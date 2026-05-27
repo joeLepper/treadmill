@@ -1558,6 +1558,10 @@ def seed_starters_if_empty(session: Any) -> int:
             "seed_starters_if_empty: %d roles already present; skipping",
             role_count,
         )
+        # Even on an existing DB, ensure the system Plan is present (ADR-0057).
+        # The plan seed is idempotent (no-op when already present).
+        from treadmill_api.seed.system_plan import seed_system_plan_if_absent
+        seed_system_plan_if_absent(session)
         return 0
 
     # Best-effort static check — same as ``seed()``.
@@ -1619,4 +1623,11 @@ def seed_starters_if_empty(session: Any) -> int:
         "auto-seed complete: %d roles, %d workflows, %d event_triggers",
         seeded_role_count, len(STARTERS), len(_DEFAULT_EVENT_TRIGGERS),
     )
+
+    # Seed the system Plan used by the scheduler's synthetic-task path (ADR-0057).
+    # This runs unconditionally (not gated on role_count == 0) so it repairs
+    # a missing system Plan even on a re-run against an existing DB.
+    from treadmill_api.seed.system_plan import seed_system_plan_if_absent
+    seed_system_plan_if_absent(session)
+
     return seeded_role_count

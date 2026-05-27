@@ -87,9 +87,11 @@ from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.events.task import TaskEscalatedToOperator
 from treadmill_api.onboarding_store import OnboardingStore
+from treadmill_api.dispatch import DispatchError
 from treadmill_api.models import (
     Event,
     EventTrigger,
+    Plan,
     Schedule,
     Task,
     TaskPR,
@@ -99,6 +101,7 @@ from treadmill_api.models import (
     WorkflowVersion,
     WorkflowVersionStep,
 )
+from treadmill_api.seed.system_plan import SYSTEM_PLAN_ID
 
 logger = logging.getLogger("treadmill.coordination.triggers")
 
@@ -2753,14 +2756,64 @@ async def handle_scheduled_tick(
         await run_stuck_task_sweep(session, dispatcher)
         return None
 
+    # Synthetic-task dispatch path (ADR-0057): create a Task row tied to the
+    # system Plan and dispatch via the normal task-bound path so workers
+    # never see task_id=None.
     repo = typed.rendered_payload.get("repo", "")
-    return await _create_and_publish_run_without_task(
-        session,
-        dispatcher,
-        workflow_id=schedule.workflow_id,
-        trigger=f"schedule:{typed.schedule_id}",
-        repo=repo,
+    trigger_kind = typed.rendered_payload.get("trigger", "scheduled")
+
+    # Resolve latest WorkflowVersion.
+    wv_result = await session.execute(
+        select(WorkflowVersion)
+        .where(WorkflowVersion.workflow_id == schedule.workflow_id)
+        .order_by(WorkflowVersion.version.desc())
+        .limit(1)
     )
+    wv = wv_result.scalar_one_or_none()
+    if wv is None:
+        logger.warning(
+            "scheduled-tick: no WorkflowVersion for %s; skipping dispatch "
+            "(run starters seed?)",
+            schedule.workflow_id,
+        )
+        return None
+
+    # Verify system Plan is present (seeded at startup).
+    system_plan = await session.get(Plan, SYSTEM_PLAN_ID)
+    if system_plan is None:
+        logger.error(
+            "scheduled-tick: system Plan %s not seeded; "
+            "restart the API to auto-seed. Skipping dispatch for %s",
+            SYSTEM_PLAN_ID, schedule.workflow_id,
+        )
+        return None
+
+    now = datetime.now(tz=timezone.utc)
+    task = Task(
+        id=uuid.uuid4(),
+        plan_id=SYSTEM_PLAN_ID,
+        repo=repo,
+        title=f"{trigger_kind}: {schedule.workflow_id} ({now.isoformat()})",
+        workflow_version_id=wv.id,
+        created_by="scheduler",
+    )
+    session.add(task)
+    await session.flush()
+
+    try:
+        run_id = await dispatcher.dispatch_task(session, task)
+    except DispatchError as exc:
+        logger.warning(
+            "scheduled-tick: dispatch_task failed for %s task %s: %s",
+            schedule.workflow_id, task.id, exc,
+        )
+        return None
+
+    logger.info(
+        "scheduled-tick: dispatched %s for synthetic task %s (run %s)",
+        schedule.workflow_id, task.id, run_id,
+    )
+    return run_id
 
 
 async def _create_and_publish_run_without_task(
@@ -2771,7 +2824,11 @@ async def _create_and_publish_run_without_task(
     trigger: str,
     repo: str,
 ) -> uuid.UUID | None:
-    """Create a WorkflowRun + step rows for a schedule-triggered dispatch
+    """DEPRECATED per ADR-0057 — use ``dispatch_task`` with a synthetic task.
+    Kept for the in-flight cancel mechanism + backward compat during
+    migration window.
+
+    Create a WorkflowRun + step rows for a schedule-triggered dispatch
     and publish ``step.ready`` for the first step.
 
     Mirrors ``_create_and_publish_run`` but accepts no Task context.

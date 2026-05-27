@@ -213,6 +213,15 @@ class Settings(BaseSettings):
     # sets this via the deployment's secrets layer.
     github_token: str | None = Field(default=None, alias="GITHUB_TOKEN")
 
+    # ── System Plan repo (ADR-0057) ───────────────────────────────────────────
+    # The scheduler's synthetic-task path creates Tasks under a single
+    # "system: scheduler" Plan (sentinel UUID
+    # ``00000000-0000-0000-0000-000000000001``). This setting supplies that
+    # Plan's ``repo`` field at seed time. Override with
+    # ``TREADMILL_SYSTEM_PLAN_REPO`` for downstream deployments. Default is
+    # the dogfood repo; not hardcoded in the seed code itself.
+    system_plan_repo: str = Field(default="joeLepper/treadmill")
+
     # ── Per-repo allow-list for the plan-merge trigger (ADR-0021) ─────────────
     # The merge-to-main plan-doc trigger only fires for repos whose slug
     # appears in this comma-separated allow-list. Empty (the default)
