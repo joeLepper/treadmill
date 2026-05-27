@@ -85,7 +85,7 @@ from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.events.schedule import ScheduledTick
-from treadmill_api.events.task import TaskEscalatedToOperator
+from treadmill_api.events.task import TaskEscalatedToOperator, TaskRegistered
 from treadmill_api.onboarding_store import OnboardingStore
 from treadmill_api.models import (
     Event,
@@ -99,6 +99,7 @@ from treadmill_api.models import (
     WorkflowVersion,
     WorkflowVersionStep,
 )
+from treadmill_api.seed.system_plan import SYSTEM_PLAN_ID
 
 logger = logging.getLogger("treadmill.coordination.triggers")
 
@@ -2711,12 +2712,13 @@ async def handle_scheduled_tick(
     The scheduler emits one of these per cron fire; the consumer's
     ``schedule`` branch routes it here after the Pydantic parse gate.
 
-    Schedules don't inherently have a task context (ops bots sweep the
-    entire repo, not a specific PR). ``_create_and_publish_run_without_task``
-    creates the run with ``task_id=None`` — this path works in unit tests
-    (mocked sessions skip the NOT NULL DB check) and requires a schema
-    migration making ``workflow_runs.task_id`` nullable before use against a
-    real database.
+    Per ADR-0057, scheduled dispatch creates a **synthetic Task** per
+    tick (tied to the system Plan, ``SYSTEM_PLAN_ID``) and runs the
+    normal ``dispatcher.dispatch_task`` path — same code as a user-
+    created task. This closes the silent-failure hole where the taskless
+    path (``_create_and_publish_run_without_task``) sent ``task_id=null``
+    to workers and they died silently in ``_handle_step`` before any
+    event landed. Worker code is unchanged; tasks look normal to it.
 
     One slug — ``wf-stuck-task-sweep`` — short-circuits the
     ``WorkflowVersion`` lookup and runs a deterministic detector
@@ -2726,8 +2728,9 @@ async def handle_scheduled_tick(
     role-step bots without forcing it through a one-step wrapper workflow.
 
     Returns the new run's id, or ``None`` if any skip condition fired
-    (schedule not found, paused, no WorkflowVersion seeded, or the
-    deterministic stuck-task sweep ran — no run is materialized).
+    (schedule not found, paused, payload missing ``repo``, no
+    WorkflowVersion seeded, or the deterministic stuck-task sweep ran —
+    no run is materialized).
     """
     schedule = await session.get(Schedule, typed.schedule_id)
     if schedule is None:
@@ -2753,14 +2756,115 @@ async def handle_scheduled_tick(
         await run_stuck_task_sweep(session, dispatcher)
         return None
 
-    repo = typed.rendered_payload.get("repo", "")
-    return await _create_and_publish_run_without_task(
+    repo = typed.rendered_payload.get("repo")
+    if not repo:
+        # ADR-0057 + ADR-0055 sibling: schedules without a payload.repo can't
+        # name a Task (Task.repo is NOT NULL) and can't populate step.ready.
+        # The synthetic-task fix surfaces this as a loud skip instead of
+        # the previous silent ``repo=""`` propagation.
+        logger.warning(
+            "scheduled-tick: schedule %s rendered_payload missing 'repo'; "
+            "skipping dispatch for workflow %s",
+            typed.schedule_id, schedule.workflow_id,
+        )
+        return None
+
+    # ``ScheduledTick`` carries no fire_at field (ADR-0035 v0); the
+    # Task's server-default ``created_at`` is the dispatch timestamp.
+    return await _dispatch_via_synthetic_task(
         session,
         dispatcher,
         workflow_id=schedule.workflow_id,
-        trigger=f"schedule:{typed.schedule_id}",
         repo=repo,
+        trigger=f"schedule:{typed.schedule_id}",
+        created_by="scheduler",
+        title=f"schedule:{schedule.workflow_id}",
     )
+
+
+async def _dispatch_via_synthetic_task(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    workflow_id: str,
+    repo: str,
+    trigger: str,
+    created_by: str,
+    title: str,
+) -> uuid.UUID | None:
+    """ADR-0057: create a synthetic ``Task`` and dispatch via the normal
+    task-bound path so workers see a normal task body.
+
+    Mirrors ``create_task`` in ``routers/tasks.py`` — resolve the latest
+    ``WorkflowVersion``, insert a ``Task`` tied to ``SYSTEM_PLAN_ID``,
+    emit ``task.registered``, then call ``dispatcher.dispatch_task``.
+
+    ``trigger`` is recorded as a tag on the ``Task.title`` and on the
+    surrounding log line; the underlying ``WorkflowRun.trigger`` will be
+    ``"registered"`` (the dispatch_task default). Schedulers and operator
+    surfaces can still distinguish themselves via ``created_by``.
+
+    Returns the run's id, or ``None`` if the workflow has no version
+    (un-seeded install) or no steps (degenerate workflow). The caller
+    must commit the session.
+    """
+    wv_result = await session.execute(
+        select(WorkflowVersion)
+        .where(WorkflowVersion.workflow_id == workflow_id)
+        .order_by(WorkflowVersion.version.desc())
+        .limit(1)
+    )
+    wv = wv_result.scalar_one_or_none()
+    if wv is None:
+        logger.warning(
+            "synthetic-task dispatch (%s): no WorkflowVersion for %s; "
+            "skipping (run starters seed?)",
+            trigger, workflow_id,
+        )
+        return None
+
+    task = Task(
+        plan_id=SYSTEM_PLAN_ID,
+        repo=repo,
+        title=title,
+        description=None,
+        workflow_version_id=wv.id,
+        created_by=created_by,
+    )
+    session.add(task)
+    await session.flush()
+
+    # Mirror create_task: emit TaskRegistered before dispatch so the audit
+    # log carries the registration before the run is materialized.
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="task",
+        action="registered",
+        payload=TaskRegistered(
+            repo=task.repo,
+            title=task.title,
+            workflow_version_id=wv.id,
+            plan_id=SYSTEM_PLAN_ID,
+        ),
+        plan_id=SYSTEM_PLAN_ID,
+        task_id=task.id,
+    )
+
+    try:
+        run_id = await dispatcher.dispatch_task(session, task)
+    except Exception:
+        logger.exception(
+            "synthetic-task dispatch (%s): dispatch_task raised for "
+            "workflow %s, task %s",
+            trigger, workflow_id, task.id,
+        )
+        raise
+
+    logger.info(
+        "synthetic-task dispatch (%s): workflow %s → task %s, run %s",
+        trigger, workflow_id, task.id, run_id,
+    )
+    return run_id
 
 
 async def _create_and_publish_run_without_task(
@@ -2771,8 +2875,19 @@ async def _create_and_publish_run_without_task(
     trigger: str,
     repo: str,
 ) -> uuid.UUID | None:
-    """Create a WorkflowRun + step rows for a schedule-triggered dispatch
-    and publish ``step.ready`` for the first step.
+    """**DEPRECATED — do not call.** Use ``_dispatch_via_synthetic_task``.
+
+    Per ADR-0057, this path is the 4th silent-failure pattern in the
+    scheduler primitive: it sends ``task_id=null`` / ``plan_id=null`` to
+    workers; workers parse the body without KeyError but die silently
+    inside ``_handle_step`` (downstream code assumes non-null task), and
+    SQS visibility-timeout looping never publishes a ``step.failed``.
+
+    Kept in tree for the 4 historical orphan ``workflow_runs`` rows the
+    pre-fix scheduler created, and to keep the unit tests around the
+    legacy shape running while we wind it down. New callers are not
+    permitted; both production surfaces (``handle_scheduled_tick`` +
+    ``routers/workflow_triggers``) go through ``_dispatch_via_synthetic_task``.
 
     Mirrors ``_create_and_publish_run`` but accepts no Task context.
     ``WorkflowRun.task_id`` is set to ``None``; this works in unit tests

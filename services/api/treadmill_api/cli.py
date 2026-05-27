@@ -4,7 +4,7 @@ Starts uvicorn against the FastAPI app on the configured port. Production
 deploys typically run uvicorn directly via the ECS task command; this
 entrypoint exists for local invocation.
 
-Four startup responsibilities live here (and *only* here — so test paths
+Five startup responsibilities live here (and *only* here — so test paths
 that bypass ``run()`` are unaffected):
 
 1. ``logging.basicConfig`` — without it, Python's root logger sits at
@@ -20,7 +20,11 @@ that bypass ``run()`` are unaffected):
    the bunkhouse "I forgot to run seed-starters" failure mode. Multi-
    replica safety via ``SELECT FOR UPDATE`` on the ``alembic_version``
    sentinel row.
-4. Auto-seed schedules when ``schedules`` is empty (ADR-0035). Creates
+4. Auto-seed the system Plan (ADR-0057). The single Plan row that owns
+   every synthetic Task created by ``handle_scheduled_tick`` and the
+   operator-trigger endpoint. Runs BEFORE schedules seed so the first
+   scheduled tick can dispatch into a real active plan.
+5. Auto-seed schedules when ``schedules`` is empty (ADR-0035). Creates
    the four canonical ops-bot periodic schedules on first deploy;
    idempotent across multi-replica rollouts.
 """
@@ -136,6 +140,48 @@ def _auto_seed_starters(settings: Settings) -> None:
         engine.dispose()
 
 
+def _auto_seed_system_plan(settings: Settings) -> None:
+    """Auto-seed the system Plan (ADR-0057).
+
+    The system Plan is the parent of every synthetic Task created by
+    ``handle_scheduled_tick`` and the operator-trigger endpoint. It must
+    be in derived_status ``active`` so the dispatch_task plan-active
+    gate (ADR-0010 / dispatch.py) lets synthetic-task runs publish + send
+    to SQS immediately — see ``seed/system_plan.py``.
+
+    Runs AFTER ``_auto_seed_starters`` (roles/workflows must exist first
+    for any workflow resolution by dispatchers) and BEFORE
+    ``_auto_seed_schedules`` (the seeded schedules will start firing as
+    soon as the API serves traffic; if the system Plan isn't there yet
+    every tick will skip with a noisy missing-plan log).
+    """
+    if settings.skip_auto_seed:
+        logging.getLogger(__name__).info(
+            "TREADMILL_SKIP_AUTO_SEED=true — skipping system-plan auto-seed",
+        )
+        return
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from treadmill_api.seed.system_plan import seed_system_plan_if_empty
+
+    logger = logging.getLogger(__name__)
+    sync_url = settings.database_url.replace("+asyncpg", "+psycopg")
+    engine = create_engine(sync_url)
+    try:
+        with Session(engine) as session:
+            seeded = seed_system_plan_if_empty(session)
+        if seeded > 0:
+            logger.info(
+                "auto-seed: seeded system Plan (ADR-0057) into fresh DB",
+            )
+        else:
+            logger.debug("auto-seed: system Plan already present; no-op")
+    finally:
+        engine.dispose()
+
+
 def _auto_seed_schedules(settings: Settings) -> None:
     """Auto-seed the four canonical ops-bot periodic schedules on first deploy.
 
@@ -189,6 +235,7 @@ def run() -> None:
 
     _run_migrations(settings)
     _auto_seed_starters(settings)
+    _auto_seed_system_plan(settings)
     _auto_seed_schedules(settings)
 
     uvicorn.run(

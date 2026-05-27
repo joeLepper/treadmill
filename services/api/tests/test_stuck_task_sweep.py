@@ -219,8 +219,8 @@ async def test_multiple_stalled_tasks_each_escalated_once() -> None:
 @pytest.mark.asyncio
 async def test_handle_scheduled_tick_routes_stuck_sweep_to_deterministic_path() -> None:
     """A scheduled tick for ``wf-stuck-task-sweep`` runs the deterministic
-    sweep — it does NOT call ``_create_and_publish_run_without_task`` and
-    therefore does NOT look up a ``WorkflowVersion``. Returns ``None``
+    sweep — it does NOT call the synthetic-task dispatch helper (ADR-0057)
+    and therefore does NOT look up a ``WorkflowVersion``. Returns ``None``
     because the sweep materializes no run."""
     from treadmill_api.coordination.triggers import handle_scheduled_tick
     from treadmill_api.events.schedule import ScheduledTick
@@ -260,8 +260,10 @@ async def test_handle_scheduled_tick_routes_stuck_sweep_to_deterministic_path() 
 @pytest.mark.asyncio
 async def test_handle_scheduled_tick_non_sweep_workflow_uses_role_path() -> None:
     """A non-stuck-sweep schedule slug skips the deterministic intercept
-    and falls through to ``_create_and_publish_run_without_task`` (which
-    we mock here so we don't need a full DB)."""
+    and falls through to ``_dispatch_via_synthetic_task`` (ADR-0057) —
+    we mock the helper here so we don't need a full DB. The deeper
+    invariants of the synthetic-task path are covered by
+    ``test_scheduled_tick_synthetic_task.py``."""
     from treadmill_api.coordination import triggers as trg
     from treadmill_api.coordination.triggers import handle_scheduled_tick
     from treadmill_api.events.schedule import ScheduledTick
@@ -287,7 +289,7 @@ async def test_handle_scheduled_tick_non_sweep_workflow_uses_role_path() -> None
         ) as mocked_sweep,
         patch.object(
             trg,
-            "_create_and_publish_run_without_task",
+            "_dispatch_via_synthetic_task",
             new=AsyncMock(return_value=expected_run),
         ) as mocked_dispatch,
     ):
