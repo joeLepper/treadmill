@@ -74,6 +74,31 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "jitter_seconds": 60,
         "created_by": "auto-seed",
     },
+    {
+        # ADR-0053 Wave 3: weekly judge-prompt optimizer run, targeting
+        # role-architect first (the highest-leverage judge — its
+        # amend/supersede/accept verdicts shape loop count). The
+        # ``payload_template`` MUST carry ``repo`` per the schedule-payload-
+        # needs-repo finding: the taskless dispatch path uses
+        # ``rendered_payload["repo"]`` for the worker workspace, and an
+        # empty/missing repo causes the dispatched ``step.ready`` to carry
+        # ``repo=""`` → worker can't clone → step hangs pending forever.
+        # The worker also pulls the labeled corpus via
+        # ``$TREADMILL_CORPUS_S3_URI`` (set when the operator configures
+        # ``aws.corpus_s3_uri`` in the deployment YAML; see
+        # ``LocalRuntime._dev_local_worker_env``).
+        "workflow_id": "wf-tune-judge-prompts",
+        "cron_expression": "0 20 * * 6",  # Saturday 8pm Pacific
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {
+            "trigger": "scheduled-tune",
+            "repo": "joeLepper/treadmill",
+            "judge_role": "role-architect",
+        },
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
 ]
 
 
