@@ -1007,7 +1007,7 @@ function PRStrip({ pr }: { pr: PullRequest | null }) {
 }
 
 /* ─── Action bar ─────────────────────────────────────────────────── */
-function ActionBar({
+export function ActionBar({
   task,
   onCancel,
   onAck,
@@ -1020,7 +1020,6 @@ function ActionBar({
   const isNonTerminal = !terminal.includes(task.derived_status);
   const hasPR = !!task.pr;
   const lastStepFailed = task.pipeline?.some((p) => p.status === 'failed');
-  const needsReviewOverride = task.pr?.review_decision === 'changes_requested';
 
   return (
     <div
@@ -1050,11 +1049,6 @@ function ActionBar({
       {lastStepFailed && (
         <Button size="md" iconLeft={<RotateCcw size={12} />}>
           retry·step
-        </Button>
-      )}
-      {needsReviewOverride && (
-        <Button size="md" iconLeft={<Check size={12} />}>
-          override·review
         </Button>
       )}
       <span style={{ flex: 1 }} />

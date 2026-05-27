@@ -100,3 +100,13 @@ silently drifts the UI's numeric vocabulary across pages.
 - Mock data covers two canonical pages only — bunkhouse's ~25 routes are
   deliberately not ported. Lift more routes from bunkhouse when the
   operator actually reaches for them.
+
+## Recent changes
+
+- **PR-B10** — Removed the `override·review` button from `ActionBar` in
+  `src/pages/TaskDetail.tsx`. B7's audit
+  (`docs/dashboard/validate-override-surface.md`) confirmed ADR-0042's
+  `validate.override` is internal-only with no callable HTTP surface, and
+  the prior render condition conflated `validate.override` with
+  `review.override` (separate event domains, both internal-only). Regression
+  guarded by `src/pages/TaskDetail.test.tsx`.
