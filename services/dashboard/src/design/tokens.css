@@ -1,0 +1,102 @@
+/* Treadmill operator dashboard — design tokens.
+ *
+ * Ported from the Claude Design handoff bundle (treadmill-system.jsx).
+ * Direction C ("Console v2") — dark surface, IBM Plex Sans/Mono, 4-color
+ * semantic palette (danger / warn / ok / muted, plus info for chrome).
+ *
+ * Hard rule (DESIGN.md): one StateBadge component with a closed enumerated
+ * vocabulary. Action colors are semantic-only; cancelled/superseded are
+ * muted gray, not red. Red is reserved for "needs attention now."
+ */
+
+:root {
+  /* ─── Surfaces — cool near-black with a hint of slate ─────────────── */
+  --tm-bg:        oklch(0.158 0.012 250);
+  --tm-surface:   oklch(0.188 0.013 250);
+  --tm-surface-2: oklch(0.220 0.014 250);
+  --tm-surface-3: oklch(0.255 0.016 250);
+  --tm-hover:     oklch(0.275 0.017 250);
+  --tm-border:    oklch(0.290 0.013 250);
+  --tm-border-2:  oklch(0.380 0.014 250);
+  --tm-border-3:  oklch(0.500 0.016 250);
+
+  /* ─── Text ────────────────────────────────────────────────────────── */
+  --tm-t1: oklch(0.965 0.005 250); /* primary */
+  --tm-t2: oklch(0.760 0.008 250); /* secondary */
+  --tm-t3: oklch(0.580 0.010 250); /* tertiary / labels */
+  --tm-t4: oklch(0.460 0.012 250); /* quaternary / micro */
+
+  /* ─── Action colors — closed enum, semantic only ─────────────────── */
+  --tm-danger:      oklch(0.72 0.20 25);
+  --tm-danger-fg:   oklch(0.86 0.13 25);
+  --tm-danger-bg:   oklch(0.30 0.13 25 / 0.42);
+  --tm-danger-edge: oklch(0.50 0.18 25 / 0.55);
+
+  --tm-warn:        oklch(0.82 0.17 75);
+  --tm-warn-fg:     oklch(0.88 0.14 75);
+  --tm-warn-bg:     oklch(0.32 0.10 75 / 0.40);
+  --tm-warn-edge:   oklch(0.55 0.14 75 / 0.55);
+
+  --tm-ok:        oklch(0.80 0.17 145);
+  --tm-ok-fg:     oklch(0.88 0.14 145);
+  --tm-ok-bg:     oklch(0.30 0.10 145 / 0.38);
+  --tm-ok-edge:   oklch(0.50 0.14 145 / 0.55);
+
+  --tm-info:      oklch(0.80 0.13 215);
+  --tm-info-fg:   oklch(0.88 0.11 215);
+  --tm-info-bg:   oklch(0.30 0.09 215 / 0.40);
+  --tm-info-edge: oklch(0.50 0.12 215 / 0.55);
+
+  --tm-muted:      oklch(0.58 0.010 250);
+  --tm-muted-fg:   oklch(0.72 0.010 250);
+  --tm-muted-bg:   oklch(0.30 0.010 250 / 0.5);
+  --tm-muted-edge: oklch(0.42 0.012 250 / 0.6);
+
+  /* ─── Type ────────────────────────────────────────────────────────── */
+  --tm-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --tm-mono: "IBM Plex Mono", ui-monospace, "JetBrains Mono", monospace;
+
+  /* ─── Density ─────────────────────────────────────────────────────── */
+  --tm-row-h: 36px;
+  --tm-row-h-dense: 30px;
+}
+
+.tm {
+  font-family: var(--tm-sans);
+  color: var(--tm-t1);
+  background: var(--tm-bg);
+  font-feature-settings: "ss01", "cv01", "tnum";
+  -webkit-font-smoothing: antialiased;
+}
+.tm * { box-sizing: border-box; }
+
+.tm-mono { font-family: var(--tm-mono); font-feature-settings: "tnum"; }
+.tm-tnum { font-variant-numeric: tabular-nums; }
+
+.tm-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.tm-scroll::-webkit-scrollbar-track { background: transparent; }
+.tm-scroll::-webkit-scrollbar-thumb { background: var(--tm-border); border-radius: 6px; }
+.tm-scroll::-webkit-scrollbar-thumb:hover { background: var(--tm-border-2); }
+
+@keyframes tm-pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@keyframes tm-pulse-ring {
+  0% { transform: scale(0.6); opacity: 0.9; }
+  80%, 100% { transform: scale(2.4); opacity: 0; }
+}
+@keyframes tm-flash-row {
+  0% { background: var(--tm-info-bg); }
+  100% { background: transparent; }
+}
+@keyframes tm-spin { to { transform: rotate(360deg); } }
+@keyframes tm-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.tm-spin  { animation: tm-spin 1.2s linear infinite; }
+.tm-pulse { animation: tm-pulse-soft 1.6s ease-in-out infinite; }
+
+.tm ::selection { background: var(--tm-info-bg); color: var(--tm-t1); }
