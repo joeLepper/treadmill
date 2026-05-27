@@ -94,11 +94,6 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Known follow-ups
 
-- `tools/local-adapter/treadmill_local/deploy_watcher.py` doesn't yet
-  recreate the dashboard container on `services/dashboard/**` PR merges.
-  Until that's added, an operator `treadmill-local up` (or a manual
-  `docker build` + `docker rm -f treadmill-dashboard`) is the way to
-  pick up new dashboard code in a live local environment.
 - Right-rail event-tail filtering is client-side over the global feed; a
   server-side `task_id` filter on `/api/dashboard/events` will be cheaper
   once the event volume rises.

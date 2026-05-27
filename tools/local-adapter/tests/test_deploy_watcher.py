@@ -94,13 +94,17 @@ def _make_watcher(
     pr_files: list[str] | None = None,
     pr_files_fn=None,
     api_health_url: str = "http://localhost:8088/health/ready",
+    dashboard_calls: list[str] | None = None,
 ) -> tuple[DeployWatcher, list[str], list[str]]:
     """Construct a watcher with controllable PR-files response.
 
     Tests call ``_process_message`` directly, so ``receive_fn`` is a no-op.
     The ``recreate_api_fn`` is a recording stub — every test that exercises
     the api category needs to verify it WAS called (the silent-no-op
-    ADR-0024 captured was the watcher skipping recreate entirely).
+    ADR-0024 captured was the watcher skipping recreate entirely). The
+    dashboard recreate hook is the symmetric sibling for
+    ``services/dashboard/**`` merges (ADR-0056); pass a list via
+    ``dashboard_calls`` to capture invocations.
 
     Returns ``(watcher, acked_handles, recreate_calls)``.
     """
@@ -116,11 +120,16 @@ def _make_watcher(
     def recreate_api() -> None:
         recreate_calls.append("recreate")
 
+    def recreate_dashboard() -> None:
+        if dashboard_calls is not None:
+            dashboard_calls.append("recreate")
+
     watcher = DeployWatcher(
         receive_fn=lambda: [],
         ack_fn=lambda h: acked.append(h),
         get_pr_files_fn=pr_files_fn,
         recreate_api_fn=recreate_api,
+        recreate_dashboard_fn=recreate_dashboard,
         api_health_url=api_health_url,
         state_file=tmp_path / "state.json",
         repo_root=Path("/fake-repo"),
@@ -133,6 +142,10 @@ def _make_watcher(
 
 def test_categorize_api():
     assert _categorize_file("services/api/main.py") == "api"
+
+
+def test_categorize_dashboard():
+    assert _categorize_file("services/dashboard/src/App.tsx") == "dashboard"
 
 
 def test_categorize_agent():
@@ -282,6 +295,76 @@ def test_api_action_health_url_uses_configured_port(mock_run, tmp_path):
     assert ":8000" not in called_url, (
         "deploy-watcher must not health-check the hardcoded :8000 port"
     )
+
+
+# ── Dashboard category action ─────────────────────────────────────────────────
+
+
+@patch("subprocess.run")
+def test_dashboard_action_syncs_and_recreates(mock_run, tmp_path):
+    """Dashboard merges (services/dashboard/**) must sync the local clone
+    to origin/main and then invoke the runtime recreate helper. The build
+    path lives inside the runtime helper (_ensure_images_built) so the
+    watcher itself does NOT shell out to ``docker build`` — sibling to
+    the ADR-0024 silent-no-op fix on the API side, but the build is owned
+    by the runtime here rather than the watcher."""
+    mock_run.side_effect = [
+        MagicMock(returncode=0),                       # git fetch
+        MagicMock(returncode=0, stderr=""),            # git merge --ff-only
+        MagicMock(returncode=0, stdout="abc1234\n"),   # git rev-parse --short HEAD
+    ]
+    dashboard_calls: list[str] = []
+    watcher, acked, _ = _make_watcher(
+        tmp_path,
+        pr_files=["services/dashboard/src/App.tsx"],
+        dashboard_calls=dashboard_calls,
+    )
+
+    watcher._process_message(_sqs_msg(20, "dashsha1"))
+
+    # sync prefix ran (fetch + merge --ff-only origin/main).
+    assert mock_run.call_args_list[0].args[0] == [
+        "git", "-C", "/fake-repo", "fetch", "origin", "--quiet",
+    ]
+    assert mock_run.call_args_list[1].args[0] == [
+        "git", "-C", "/fake-repo", "merge", "--ff-only", "origin/main",
+    ]
+    # No docker subprocess shell-out — the rebuild path lives in the
+    # runtime helper (_ensure_images_built), not the watcher.
+    for call in mock_run.call_args_list:
+        cmd = call.args[0]
+        assert cmd[:2] != ["docker", "build"], (
+            f"deploy-watcher must not shell out docker build for dashboard; got cmd={cmd}"
+        )
+        assert "restart" not in cmd, (
+            f"deploy-watcher must not docker-restart the dashboard; got cmd={cmd}"
+        )
+    # Recreate fn invoked exactly once — that's what swaps the running
+    # container to the freshly-built image.
+    assert dashboard_calls == ["recreate"]
+    assert acked == ["rh-20"]
+
+
+@patch("subprocess.run")
+def test_dashboard_action_does_not_invoke_api_recreate(mock_run, tmp_path):
+    """A dashboard-only PR must NOT trigger the API recreate path —
+    guard against routing drift between the two families."""
+    mock_run.side_effect = [
+        MagicMock(returncode=0),
+        MagicMock(returncode=0, stderr=""),
+        MagicMock(returncode=0, stdout="abc1234\n"),
+    ]
+    dashboard_calls: list[str] = []
+    watcher, _, api_recreate_calls = _make_watcher(
+        tmp_path,
+        pr_files=["services/dashboard/index.html"],
+        dashboard_calls=dashboard_calls,
+    )
+
+    watcher._process_message(_sqs_msg(21, "dashsha2"))
+
+    assert dashboard_calls == ["recreate"]
+    assert api_recreate_calls == []
 
 
 # ── Agent category action ─────────────────────────────────────────────────────

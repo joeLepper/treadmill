@@ -1425,6 +1425,41 @@ class LocalRuntime:
             port_mappings=svc.port_mappings,
         )
 
+    def recreate_dashboard_container(self) -> Container:
+        """Recreate the ``treadmill-dashboard`` container from the current image.
+
+        Mirror of ``recreate_api_container`` for the operator dashboard
+        (ADR-0056): on a ``services/dashboard/**`` PR merge, this helper
+        rebuilds ``treadmill-dashboard:dev`` via ``_ensure_images_built``
+        (the same path ``up`` uses), force-removes the running
+        ``treadmill-dashboard`` container, and ``docker run``s a new one
+        from the freshly-tagged image using ``_build_dashboard_service_spec``
+        so ``up`` and the recreate path share a single source of truth
+        for the container's run config.
+
+        Returns the newly-started container.
+        """
+        assert self.deployment_config is not None, (
+            "recreate_dashboard_container requires dev-local mode "
+            "(deployment_config set)"
+        )
+        self._ensure_images_built()
+        svc = self._build_dashboard_service_spec()
+        spec = svc.container_specs[0]
+        name = spec.family
+        try:
+            existing = self.docker.containers.get(name)
+            existing.remove(force=True)
+            console.print(f"• Removed existing [cyan]{name}[/cyan] container.")
+        except docker.errors.NotFound:
+            pass
+        return self._run_container(
+            spec,
+            name=name,
+            role="service",
+            port_mappings=svc.port_mappings,
+        )
+
     @staticmethod
     def logs(container: str, *, follow: bool = False) -> None:
         client = docker.from_env()
