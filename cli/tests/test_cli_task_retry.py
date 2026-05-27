@@ -53,7 +53,11 @@ def test_task_retry_with_workflow(httpx_mock: HTTPXMock) -> None:
     req = httpx_mock.get_requests()[0]
     import json
     body = json.loads(req.content)
-    assert body["workflow"] == "wf-author"
+    # API's TaskRetryRequest schema uses ``workflow_id``; the previous
+    # assertion (``body["workflow"]``) mirrored a CLI bug that made
+    # ``--workflow`` a no-op for terminal-task retries.
+    assert body["workflow_id"] == "wf-author"
+    assert "workflow" not in body, "regression: old wrong field name resurfaced"
 
 
 def test_task_retry_with_force_bypass_cap(httpx_mock: HTTPXMock) -> None:
