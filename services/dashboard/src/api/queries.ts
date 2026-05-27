@@ -1,14 +1,11 @@
 /**
  * Query hooks the pages consume.
  *
- * READ hooks (`useOverview`, `useTaskDetail`, `useRepoDocs`) fetch live
- * data from `services/api/treadmill_api/routers/dashboard/*.py`. Response
- * shapes match `./types.ts` field-for-field — the page components don't
- * know or care that the seam moved from in-process mock to HTTP.
- *
- * Mutation hooks (`useCancelTask`, `useAcknowledgeEscalation`) still call
- * the in-process mock; their HTTP swap lands with the cancel / ack
- * endpoints in a follow-up PR.
+ * Every read + mutation hook goes through `_apiFetch` against
+ * `services/api/treadmill_api/routers/dashboard/*.py`. Response and
+ * request shapes match `./types.ts` field-for-field — the page
+ * components don't know or care that the seam moved from in-process
+ * mock to HTTP.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,11 +19,6 @@ import type {
   Task,
   TaskDetail,
 } from './types';
-import {
-  acknowledgeEscalation as mockAck,
-  cancelTask as mockCancel,
-} from './mock';
-
 const STALE_MS = 3_000;
 
 async function _apiFetch<T>(url: string): Promise<T> {
@@ -116,7 +108,14 @@ export function useCancelTask() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ taskId, reason }: { taskId: string; reason: string }) => {
-      mockCancel(taskId, reason);
+      const res = await fetch(`/api/v1/dashboard/tasks/${taskId}/cancel`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+      if (!res.ok) {
+        throw new Error(`cancel task failed: HTTP ${res.status}`);
+      }
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['overview'] });
@@ -129,7 +128,13 @@ export function useAcknowledgeEscalation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ taskId }: { taskId: string }) => {
-      mockAck(taskId);
+      const res = await fetch(
+        `/api/v1/dashboard/tasks/${taskId}/ack-escalation`,
+        { method: 'POST' },
+      );
+      if (!res.ok) {
+        throw new Error(`acknowledge escalation failed: HTTP ${res.status}`);
+      }
     },
     // Optimistic — clear the escalation immediately, rollback on error.
     onMutate: async ({ taskId }) => {

@@ -60,29 +60,15 @@ The page components consume `src/api/queries.ts`; they never reach into
 the mock call with a `fetch('/api/...').then(...)` and the page renders
 unchanged.
 
-Status:
+Per-hook migration status:
 
 - `useOverview` — **MIGRATED (PR-B8)** → `GET /api/v1/dashboard/overview`
   (filters `repo`/`bucket`/`account`/`q` forwarded as query parameters).
-- `useTaskDetail` — **MIGRATED (PR-B8)** →
-  `GET /api/v1/dashboard/tasks/:taskId`.
-- `useRepoDocs` — **MIGRATED (PR-B8)** →
-  `GET /api/v1/dashboard/repos/:repo/docs`.
-- `useCancelTask`, `useAcknowledgeEscalation` — still call the mock.
-  HTTP swap lands in **PR-B9** against
-  `POST /api/v1/dashboard/tasks/:id/cancel` and
-  `POST /api/v1/dashboard/tasks/:id/ack-escalation`.
-- `/ws/events` — WebSocket migration lands in **PR-B11** (currently
-  driven by `sim.ts`).
-
-## Recent changes
-
-- **2026-05-27 (PR-B8)** — Swap the READ `queryFn` bodies in
-  `src/api/queries.ts` from in-process mock calls to `fetch()` against
-  the live dashboard endpoints (B1/B2/B3). Adds `_apiFetch` helper +
-  `src/api/queries.test.tsx` covering URL shape, query-parameter
-  forwarding, repo-name URL-encoding, and error surfacing on non-2xx /
-  network failure. Mutation hooks + WebSocket still pending (B9, B11).
+- `useTaskDetail` — **MIGRATED (PR-B8)** → `GET /api/v1/dashboard/tasks/:taskId`.
+- `useRepoDocs` — **MIGRATED (PR-B8)** → `GET /api/v1/dashboard/repos/:repo/docs`.
+- `useCancelTask` — **MIGRATED (PR-B9)** → `POST /api/v1/dashboard/tasks/:task_id/cancel`.
+- `useAcknowledgeEscalation` — **MIGRATED (PR-B9)** → `POST /api/v1/dashboard/tasks/:task_id/ack-escalation`.
+- `/ws/events` — WebSocket migration lands in **PR-B11** (currently driven by `sim.ts`).
 
 ## Running locally
 
@@ -118,6 +104,15 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+- **PR-B9** — Swapped `useCancelTask` and `useAcknowledgeEscalation`
+  mutation bodies from `mock.ts` to live `fetch` against
+  `POST /api/v1/dashboard/tasks/:task_id/{cancel,ack-escalation}`.
+  Non-2xx surfaces as a thrown `Error` carrying the HTTP status. The
+  optimistic-update + rollback machinery on `useAcknowledgeEscalation`
+  is preserved unchanged (it manipulates TanStack Query cache and was
+  never tied to the mock). Mutation shapes unchanged so callsites
+  don't move. Added cases to `src/api/queries.test.tsx` pinning URL,
+  body, optimistic update, rollback on failure, and error surfacing.
 - **PR-B10** — Removed the `override·review` button from `ActionBar` in
   `src/pages/TaskDetail.tsx`. B7's audit
   (`docs/dashboard/validate-override-surface.md`) confirmed ADR-0042's
