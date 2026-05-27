@@ -128,7 +128,11 @@ class ApiClient:
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"reason": reason}
         if workflow is not None:
-            body["workflow"] = workflow
+            # API expects ``workflow_id`` in TaskRetryRequest (routers/tasks.py).
+            # Previously sent ``workflow`` which the API silently ignored,
+            # making ``--workflow`` a no-op for terminal-task retries (where
+            # infer_retry_workflow can't fall back to a non-terminal run).
+            body["workflow_id"] = workflow
         if force_bypass_cap:
             body["force_bypass_cap"] = True
         return self._request("POST", f"/api/v1/tasks/{task_id}/retry", json=body)
