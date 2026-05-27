@@ -92,6 +92,24 @@ formatters in `design/fmt.ts` are the highest-leverage thing to test —
 every metric on the dashboard routes through them. A regression there
 silently drifts the UI's numeric vocabulary across pages.
 
+## Recent changes
+
+- PR — ADR-0056 dashboard B: `src/api/sim.ts`'s `useLiveSim` now drives a
+  real WebSocket subscription against
+  `${WS_BASE}/api/v1/dashboard/ws/events` (derived from `window.location`
+  — `wss:` when the page is on `https:`, `ws:` otherwise). Mode flips to
+  `'ws'` on `onopen`, `'disconnected'` on close/error, with exponential
+  reconnect backoff (1 s → 2 s → 4 s, capped 30 s). `event` messages with
+  a `task_id` populate `flashIds` for 1.5 s (preserving the phase-1
+  visual); `lastUpdated` refreshes on every incoming frame plus the
+  existing 1-second clock interval so the "Live · WebSocket · updated
+  HH:MM:SS" label stays current during quiet stretches. The hook's
+  return shape (`tick`, `mode`, `lastUpdated`, `flashIds`) is unchanged,
+  so `Overview.tsx`, `TaskDetail.tsx`, and `<ConnectionAffordance>` did
+  not move. Tests in `src/api/sim.test.tsx` stub `window.WebSocket` via
+  `vi.stubGlobal` and cover open→`'ws'`, event→`flashIds`,
+  lastUpdated-on-message, and close→`'disconnected'`+reconnect backoff.
+
 ## Known follow-ups
 
 - Right-rail event-tail filtering is client-side over the global feed; a

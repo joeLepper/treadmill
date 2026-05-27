@@ -42,6 +42,69 @@ from treadmill_api.observability import inject_trace_context
 logger = logging.getLogger("treadmill.eventbus")
 
 
+# ── In-process broadcast for live consumers (dashboard WS, ADR-0056) ──────────
+#
+# The publishers below fan every record they construct out to in-process
+# subscribers in addition to their SNS / log target. Subscribers register
+# via ``subscribe_local`` and receive a bounded ``asyncio.Queue`` of event
+# records (shape: ``_build_record``). Backpressure drops on full queues —
+# a wedged WS client must never block the publish path.
+#
+# We capture each subscriber's running loop at registration time and
+# schedule queue puts via ``loop.call_soon_threadsafe``. That keeps
+# broadcast correct when the publisher runs on a different thread than
+# the consumer (e.g. tests where Starlette's ``TestClient`` portal runs
+# the WS handler on a worker thread).
+
+_local_subscribers: "dict[asyncio.Queue[dict[str, Any]], asyncio.AbstractEventLoop]" = {}
+
+
+def subscribe_local() -> "asyncio.Queue[dict[str, Any]]":
+    """Register an in-process subscriber to the publish stream.
+
+    Returns a bounded ``asyncio.Queue`` onto which every record handed to
+    ``EventPublisher.publish`` is pushed. The caller MUST call
+    ``unsubscribe_local(queue)`` when done, and MUST call this from
+    inside a running event loop (the loop on which the consumer will
+    ``await queue.get()``).
+    """
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
+    _local_subscribers[q] = loop
+    return q
+
+
+def unsubscribe_local(queue: "asyncio.Queue[dict[str, Any]]") -> None:
+    _local_subscribers.pop(queue, None)
+
+
+def _put_nowait_drop(
+    queue: "asyncio.Queue[dict[str, Any]]", record: dict[str, Any],
+) -> None:
+    try:
+        queue.put_nowait(record)
+    except asyncio.QueueFull:
+        # The WS handler tracks its own send-side backpressure; we just
+        # drop here so the publish path stays non-blocking.
+        pass
+
+
+def _broadcast_local(record: dict[str, Any]) -> None:
+    """Fan ``record`` out to every in-process subscriber.
+
+    Safe to call from any thread — each subscriber is woken via
+    ``call_soon_threadsafe`` on the loop it registered against. Closed
+    loops drop their subscriber so a stale registration can't keep us
+    looping forever.
+    """
+    for queue, loop in list(_local_subscribers.items()):
+        try:
+            loop.call_soon_threadsafe(_put_nowait_drop, queue, record)
+        except RuntimeError:
+            # Loop is closed — clean up the stale subscriber.
+            _local_subscribers.pop(queue, None)
+
+
 class PublishError(Exception):
     """The event-bus transport rejected a publish.
 
@@ -87,6 +150,7 @@ class LoggingEventPublisher:
 
     async def publish(self, event: Event, typed_payload: EventPayload) -> None:
         record = _build_record(event, typed_payload)
+        _broadcast_local(record)
         logger.info(
             "event published (log-only): entity=%s action=%s id=%s task_id=%s",
             event.entity_type,
@@ -112,6 +176,10 @@ class SNSEventPublisher:
         # propagate unchanged so callers can distinguish the two cases.
         record = _build_record(event, typed_payload)
         attributes = _build_attributes(event)
+        # Fan out to in-process subscribers BEFORE the SNS hop so a
+        # transport failure doesn't starve local consumers (the dashboard
+        # WS, ADR-0056) of records the Event row already committed to.
+        _broadcast_local(record)
         try:
             await asyncio.to_thread(
                 self.sns_client.publish,
