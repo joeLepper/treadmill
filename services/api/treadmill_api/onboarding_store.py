@@ -173,3 +173,37 @@ class OnboardingStore:
             .order_by(RepoContextDocRow.version.desc())
             .limit(1)
         )
+
+    async def list_repo_docs(
+        self, session: AsyncSession, repo: str
+    ) -> list[RepoContextDocRow]:
+        """Return the latest-version row per ``doc_path`` for ``repo``.
+
+        One row per distinct ``doc_path`` (the row whose ``version``
+        equals the per-path ``MAX(version)``), ordered by ``doc_path``.
+        Used by the dashboard's ``GET /api/v1/dashboard/repos/{repo}/docs``
+        surface to compute the arch / plans / last_updated summary
+        without each caller re-deriving the latest-version join.
+        """
+        latest = (
+            sa.select(
+                RepoContextDocRow.doc_path,
+                sa.func.max(RepoContextDocRow.version).label("max_version"),
+            )
+            .where(RepoContextDocRow.repo == repo)
+            .group_by(RepoContextDocRow.doc_path)
+            .subquery()
+        )
+        result = await session.execute(
+            sa.select(RepoContextDocRow)
+            .join(
+                latest,
+                sa.and_(
+                    RepoContextDocRow.doc_path == latest.c.doc_path,
+                    RepoContextDocRow.version == latest.c.max_version,
+                ),
+            )
+            .where(RepoContextDocRow.repo == repo)
+            .order_by(RepoContextDocRow.doc_path)
+        )
+        return list(result.scalars().all())
