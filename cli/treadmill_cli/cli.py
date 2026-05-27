@@ -6,10 +6,11 @@ human consumption.
 
 Command groups:
 
-  treadmill plan submit  --doc PATH | --intent TEXT  [--repo REPO]
-  treadmill plan show    PLAN_ID
-  treadmill plan list    [--repo REPO]
-  treadmill submit       INTENT  [--repo REPO]   # auto-implicit one-task plan
+  treadmill plan submit       --doc PATH | --intent TEXT  [--repo REPO]
+  treadmill plan show         PLAN_ID
+  treadmill plan list         [--repo REPO]
+  treadmill plan seed-system  # verify ADR-0057 sentinel Plan is present
+  treadmill submit            INTENT  [--repo REPO]   # auto-implicit one-task plan
   treadmill task show    TASK_ID
   treadmill task list    [--repo REPO] [--plan PLAN_ID] [--status STATUS]
   treadmill status       # API + dependencies
@@ -236,6 +237,41 @@ def plan_list(
         "(API list-plans endpoint is a v0 follow-up).[/yellow]"
     )
     raise typer.Exit(code=1)
+
+
+# ── plan seed-system ─────────────────────────────────────────────────────────
+
+
+@plan_app.command("seed-system")
+def plan_seed_system() -> None:
+    """Check whether the system Plan (ADR-0057 sentinel) is seeded.
+
+    The system Plan (UUID ``00000000-0000-0000-0000-000000000001``) is
+    required by the scheduler's synthetic-task dispatch path.  It is
+    normally created automatically on API startup via
+    ``seed_starters_if_empty``.
+
+    This command verifies existence via the API.  If the Plan is missing,
+    restart the API so ``seed_starters_if_empty`` inserts it on boot.
+
+    Idempotent — safe to run on a healthy deployment (reports "already
+    present" and exits 0).
+    """
+    from treadmill_api.seed.system_plan import SYSTEM_PLAN_ID, seed_system_plan
+
+    with _client() as client:
+        present = seed_system_plan(client, repo=None)
+    if present:
+        console.print(
+            f"[green]system Plan {SYSTEM_PLAN_ID} is present.[/green]"
+        )
+    else:
+        err_console.print(
+            f"[yellow]system Plan {SYSTEM_PLAN_ID} not found.[/yellow]\n"
+            "  Restart the API to auto-seed it via seed_starters_if_empty,\n"
+            "  or run the API startup sequence against the DB directly."
+        )
+        raise typer.Exit(code=1)
 
 
 # ── submit (intent shorthand; auto-creates implicit one-task plan) ───────────
