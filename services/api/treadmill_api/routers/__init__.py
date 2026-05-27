@@ -14,6 +14,7 @@ from treadmill_api.routers import (
     skills,
     tasks,
     webhooks,
+    workflow_triggers,
     workflows,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "skills",
     "tasks",
     "webhooks",
+    "workflow_triggers",
     "workflows",
 ]

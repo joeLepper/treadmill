@@ -133,6 +133,19 @@ class ApiClient:
             body["force_bypass_cap"] = True
         return self._request("POST", f"/api/v1/tasks/{task_id}/retry", json=body)
 
+    # ── Workflows ─────────────────────────────────────────────────────────────
+
+    def trigger_workflow(
+        self,
+        workflow_slug: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v1/workflows/{workflow_slug}/trigger",
+            json={"payload": payload},
+        )
+
     # ── Health ────────────────────────────────────────────────────────────────
 
     def health(self) -> dict[str, Any]:
