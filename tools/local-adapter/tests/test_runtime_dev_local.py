@@ -582,6 +582,55 @@ def test_recreate_api_container_when_no_existing_container(
     )
 
 
+# ── recreate_dashboard_container (deploy-watcher auto-deploy, ADR-0056) ──────
+
+
+def test_recreate_dashboard_container_force_removes_existing_and_runs_new(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """``recreate_dashboard_container`` mirrors the API recreate path for
+    ``services/dashboard/**`` PR merges: force-remove any existing
+    ``treadmill-dashboard`` container (regardless of status — including
+    ``running``, which ``_start_service_container``'s normal path skips as
+    already-OK) and ``docker run`` a new one from
+    ``treadmill-dashboard:dev``.
+
+    Without this swap a merged dashboard PR is a silent no-op — the same
+    failure mode ADR-0024 retired on the API side."""
+    import docker as docker_lib
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+
+    existing = MagicMock(name="existing_dashboard_container")
+    existing.status = "running"
+    fake_docker.containers.get.return_value = existing
+    fake_docker.images.get.return_value = MagicMock()
+
+    # _ensure_images_built shells out to ``docker build`` — patch it so
+    # the unit test doesn't try to invoke real docker. The build path is
+    # exercised by the existing _ensure_images_built tests.
+    with patch.object(rt, "_ensure_images_built"):
+        rt.recreate_dashboard_container()
+
+    # Old container force-removed (status==running would normally skip).
+    existing.remove.assert_called_once_with(force=True)
+
+    # New container started from the dev image with the dashboard family
+    # name, publishing nginx (80) → 5174 on the same docker network ``up``
+    # uses (same spec _build_dashboard_service_spec returns to ``up``).
+    fake_docker.containers.run.assert_called_once()
+    call = fake_docker.containers.run.call_args
+    assert call.args[0] == "treadmill-dashboard:dev"
+    assert call.kwargs["name"] == DASHBOARD_FAMILY
+    assert call.kwargs["network"] == "treadmill-local"
+    assert call.kwargs["ports"] == {
+        f"{DEV_LOCAL_DASHBOARD_CONTAINER_PORT}/tcp": DEV_LOCAL_DASHBOARD_HOST_PORT,
+    }
+
+    _ = docker_lib  # quiet "imported but unused" under strict linters
+
+
 # ── ~/.aws mount: gone in dev-local (ADR-0019) ──────────────────────────────
 
 

@@ -5,11 +5,12 @@ deploy_events SQS queue, parses SNS-wrapped Treadmill events, and applies
 changes to local containers based on a dispatch table keyed by file path globs.
 
 Dispatch table (first-match wins; order is significant):
-  - ``services/api/**``      → api     (docker build + RECREATE container + health check)
-  - ``workers/agent/**``     → agent   (docker build only; workers are one-shot per ADR-0018)
-  - ``infra/**``             → infra   (notify-only; do NOT shell out)
-  - ``tools/local-adapter/**`` → adapter (notify-only)
-  - other                    → ignored
+  - ``services/api/**``       → api       (docker build + RECREATE container + health check)
+  - ``services/dashboard/**`` → dashboard (RECREATE container — build path lives in the runtime helper)
+  - ``workers/agent/**``      → agent     (docker build only; workers are one-shot per ADR-0018)
+  - ``infra/**``              → infra     (notify-only; do NOT shell out)
+  - ``tools/local-adapter/**`` → adapter   (notify-only)
+  - other                     → ignored
 
 The class is split from its subprocess entrypoint deliberately.
 ``DeployWatcher`` takes injectable callables for SQS, the GitHub API, and the
@@ -49,6 +50,7 @@ logger = logging.getLogger("treadmill.deploy_watcher")
 
 _DISPATCH_TABLE: list[tuple[str, str]] = [
     ("services/api/", "api"),
+    ("services/dashboard/", "dashboard"),
     ("workers/agent/", "agent"),
     ("infra/", "infra"),
     ("tools/local-adapter/", "adapter"),
@@ -104,6 +106,7 @@ class DeployWatcher:
         ack_fn: Callable[[str], None],
         get_pr_files_fn: Callable[[int], list[str] | None],
         recreate_api_fn: Callable[[], None],
+        recreate_dashboard_fn: Callable[[], None],
         api_health_url: str,
         state_file: Path,
         repo_root: Path,
@@ -112,6 +115,7 @@ class DeployWatcher:
         self._ack_fn = ack_fn
         self._get_pr_files_fn = get_pr_files_fn
         self._recreate_api_fn = recreate_api_fn
+        self._recreate_dashboard_fn = recreate_dashboard_fn
         self._api_health_url = api_health_url
         self._state_file = state_file
         self._repo_root = repo_root
@@ -210,6 +214,8 @@ class DeployWatcher:
     def _run_action(self, category: str, files: list[str]) -> None:
         if category == "api":
             self._action_api()
+        elif category == "dashboard":
+            self._action_dashboard()
         elif category == "agent":
             self._action_agent()
         elif category in _NOTIFY_ONLY_CATEGORIES:
@@ -281,6 +287,21 @@ class DeployWatcher:
             timeout_seconds=_HEALTH_TIMEOUT_SECONDS,
         )
         logger.info("api container recreated from new image and healthy")
+
+    def _action_dashboard(self) -> None:
+        # Mirror of ``_action_api`` for ``services/dashboard/**`` PR merges
+        # (ADR-0056). The runtime helper owns the rebuild path (it calls
+        # ``_ensure_images_built``, which already knows how to build
+        # ``treadmill-dashboard:dev``), so the watcher only syncs the local
+        # clone to origin/main and dispatches; the helper then
+        # force-removes the running container and ``docker run``s a new
+        # one from the freshly-tagged image via
+        # ``_build_dashboard_service_spec``. Dashboard is static nginx;
+        # no health probe here (sibling to the API's
+        # ``/health/ready`` check) — keep this path simple.
+        self._sync_local_to_origin()
+        self._recreate_dashboard_fn()
+        logger.info("dashboard container recreated from new image")
 
     def _action_agent(self) -> None:
         self._sync_local_to_origin()
@@ -458,6 +479,9 @@ def main() -> int:
         def recreate_api() -> None:
             runtime.recreate_api_container()
 
+        def recreate_dashboard() -> None:
+            runtime.recreate_dashboard_container()
+
         api_health_url = (
             cfg["local"]["api_url"].rstrip("/") + "/health/ready"
         )
@@ -468,6 +492,12 @@ def main() -> int:
                 "no-op (fully-local / test mode)."
             )
 
+        def recreate_dashboard() -> None:
+            logger.warning(
+                "dashboard recreate requested without a deployment_id; "
+                "no-op (fully-local / test mode)."
+            )
+
         api_health_url = "http://localhost:8088/health/ready"
 
     watcher = DeployWatcher(
@@ -475,6 +505,7 @@ def main() -> int:
         ack_fn=ack,
         get_pr_files_fn=get_pr_files,
         recreate_api_fn=recreate_api,
+        recreate_dashboard_fn=recreate_dashboard,
         api_health_url=api_health_url,
         state_file=state_file,
         repo_root=repo_root,
