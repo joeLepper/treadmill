@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_DOCKERFILE = Path(__file__).resolve().parents[2] / "workers" / "agent" / "Dockerfile"
+_DOCKERFILE = Path(__file__).resolve(). parents[3] / "workers" / "agent" / "Dockerfile"
 
 
 def test_dockerfile_installs_make() -> None:
