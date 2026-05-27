@@ -24,14 +24,15 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-crystallize-learning",
     "wf-stuck-task-sweep",
     "wf-o11y-regression-scan",
+    "wf-tune-judge-prompts",  # ADR-0053 Wave 3 (added 2026-05-26)
 }
 
 
 # ── SEED_SCHEDULES content invariants ────────────────────────────────────────
 
 
-def test_seed_schedules_has_four_entries() -> None:
-    assert len(SEED_SCHEDULES) == 4
+def test_seed_schedules_has_five_entries() -> None:
+    assert len(SEED_SCHEDULES) == 5
 
 
 def test_seed_schedules_workflow_ids() -> None:
@@ -117,9 +118,9 @@ def _existing_client(existing: list[dict]) -> MagicMock:
     return client
 
 
-def test_seed_schedules_creates_all_four_on_fresh_install() -> None:
+def test_seed_schedules_creates_all_five_on_fresh_install() -> None:
     created = seed_schedules(_fresh_client())
-    assert created == 4
+    assert created == 5
 
 
 def test_seed_schedules_idempotent_when_all_exist() -> None:
@@ -143,18 +144,18 @@ def test_seed_schedules_no_posts_when_all_exist() -> None:
 
 
 def test_seed_schedules_only_posts_missing() -> None:
-    """When one schedule already exists, only the other three are POSTed."""
+    """When one schedule already exists, only the other four are POSTed."""
     existing = [{"workflow_id": "wf-documentarian-audit", "cron_expression": "0 9 * * 1"}]
     client = _existing_client(existing)
     created = seed_schedules(client)
-    assert created == 3
+    assert created == 4
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
     posted_wf_ids = {c.kwargs["json"]["workflow_id"] for c in post_calls}
     assert "wf-documentarian-audit" not in posted_wf_ids
-    assert len(posted_wf_ids) == 3
+    assert len(posted_wf_ids) == 4
 
 
-def test_seed_schedules_posts_all_four_workflow_ids() -> None:
+def test_seed_schedules_posts_all_five_workflow_ids() -> None:
     client = _fresh_client()
     seed_schedules(client)
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
@@ -234,11 +235,11 @@ def test_seed_schedules_if_empty_skips_when_rows_exist() -> None:
     session.commit.assert_not_called()
 
 
-def test_seed_schedules_if_empty_inserts_four_on_fresh_db() -> None:
+def test_seed_schedules_if_empty_inserts_five_on_fresh_db() -> None:
     session = _make_session(existing_count=0)
     result = seed_schedules_if_empty(session)
-    assert result == 4
-    assert session.add.call_count == 4
+    assert result == 5
+    assert session.add.call_count == 5
     session.commit.assert_called_once()
 
 
