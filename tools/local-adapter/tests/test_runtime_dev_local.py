@@ -39,6 +39,9 @@ from treadmill_local.runner import ContainerSpec
 from treadmill_local.runtime import (
     AGENT_FAMILY,
     API_FAMILY,
+    DASHBOARD_FAMILY,
+    DEV_LOCAL_DASHBOARD_CONTAINER_PORT,
+    DEV_LOCAL_DASHBOARD_HOST_PORT,
     POSTGRES_FAMILY,
     REDIS_FAMILY,
     LocalRuntime,
@@ -468,17 +471,25 @@ def test_dev_local_otlp_collector_bare_host_port_gets_http_scheme(
         assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
 
 
-def test_dev_local_service_specs_includes_postgres_redis_api(
+def test_dev_local_service_specs_includes_postgres_redis_api_dashboard(
     tmp_path: Path,
     fake_docker: MagicMock,
 ) -> None:
-    """``_build_dev_local_service_specs`` returns exactly the three
-    long-running services (Postgres + Redis + API). The agent worker
-    is NOT a service — it's launched on-demand by ``start_worker_once``."""
+    """``_build_dev_local_service_specs`` returns the four long-running
+    services (Postgres + Redis + API + Dashboard). The agent worker is
+    NOT a service — it's launched on-demand by ``start_worker_once``.
+
+    ADR-0056 added the dashboard as a separate static-served service so
+    the operator dashboard's release cycle decouples from the API's."""
     rt = _runtime_with_injected_creds(tmp_path, fake_docker)
     specs = rt._build_dev_local_service_specs(rt.deployment_config)
     families = {s.family for s in specs}
-    assert families == {POSTGRES_FAMILY, REDIS_FAMILY, API_FAMILY}
+    assert families == {
+        POSTGRES_FAMILY,
+        REDIS_FAMILY,
+        API_FAMILY,
+        DASHBOARD_FAMILY,
+    }
 
     # API service exposes 8088 → 8088 on the host (operator hits
     # localhost:8088 to submit plans, etc.).
@@ -490,6 +501,13 @@ def test_dev_local_service_specs_includes_postgres_redis_api(
     assert pg.port_mappings == [(5432, 15432)]
     rd = next(s for s in specs if s.family == REDIS_FAMILY)
     assert rd.port_mappings == [(6379, 16379)]
+
+    # Dashboard exposes nginx (80) → 5174 on the host (one above the
+    # Vite dev-server port 5173 so both can coexist during UI iteration).
+    dash = next(s for s in specs if s.family == DASHBOARD_FAMILY)
+    assert dash.port_mappings == [
+        (DEV_LOCAL_DASHBOARD_CONTAINER_PORT, DEV_LOCAL_DASHBOARD_HOST_PORT)
+    ]
 
 
 # ── recreate_api_container (deploy-watcher auto-deploy, ADR-0024) ────────────

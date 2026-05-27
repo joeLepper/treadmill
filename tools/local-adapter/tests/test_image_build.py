@@ -23,6 +23,7 @@ from treadmill_local.cli import app
 from treadmill_local.runtime import (
     DEV_LOCAL_AGENT_IMAGE,
     DEV_LOCAL_API_IMAGE,
+    DEV_LOCAL_DASHBOARD_IMAGE,
     LocalRuntime,
     find_repo_root,
 )
@@ -136,20 +137,24 @@ def test_find_repo_root_resolves_workspace_pyproject() -> None:
 # ── _ensure_images_built: happy path ──────────────────────────────────────────
 
 
-def test_ensure_images_built_invokes_docker_build_for_both_images(
+def test_ensure_images_built_invokes_docker_build_for_each_image(
     tmp_path: Path,
     fake_docker: MagicMock,
     fake_repo_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two ``docker build`` invocations land — one per image — with the
-    exact argv + cwd each Dockerfile expects.
+    """One ``docker build`` invocation per image lands, with the exact
+    argv + cwd each Dockerfile expects.
 
-    The API Dockerfile is context-rooted at ``services/api/`` (its
-    ``COPY`` paths are relative to that directory). The agent Dockerfile
-    is context-rooted at the repo root and selected via ``-f`` because
-    the agent ``pyproject.toml`` declares ``treadmill-api`` as a
-    workspace source — both packages must be visible at build time.
+    - API Dockerfile is context-rooted at ``services/api/`` (its
+      ``COPY`` paths are relative to that directory).
+    - Agent Dockerfile is context-rooted at the repo root and selected
+      via ``-f`` because the agent ``pyproject.toml`` declares
+      ``treadmill-api`` as a workspace source — both packages must be
+      visible at build time.
+    - Dashboard Dockerfile is context-rooted at ``services/dashboard/``
+      (ADR-0056: self-contained Node-build → nginx-serve image, no
+      cross-package COPYs).
     """
     calls: list[dict[str, Any]] = []
 
@@ -164,7 +169,7 @@ def test_ensure_images_built_invokes_docker_build_for_both_images(
     rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
     rt._ensure_images_built()
 
-    assert len(calls) == 2, f"expected 2 docker build calls, got {calls}"
+    assert len(calls) == 3, f"expected 3 docker build calls, got {calls}"
 
     api_call = calls[0]
     assert api_call["cmd"] == [
@@ -180,6 +185,12 @@ def test_ensure_images_built_invokes_docker_build_for_both_images(
         ".",
     ]
     assert agent_call["cwd"] == str(fake_repo_root)
+
+    dashboard_call = calls[2]
+    assert dashboard_call["cmd"] == [
+        "docker", "build", "-t", DEV_LOCAL_DASHBOARD_IMAGE, ".",
+    ]
+    assert dashboard_call["cwd"] == str(fake_repo_root / "services" / "dashboard")
 
 
 def test_ensure_images_built_captures_output_on_success(
