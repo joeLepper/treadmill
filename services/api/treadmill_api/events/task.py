@@ -29,6 +29,21 @@ class TaskEscalatedToOperator(EventPayload):
     run_ids: list[str] = pydantic.Field(default_factory=list)
 
 
+class TaskEscalationAcknowledged(EventPayload):
+    """Emitted when an operator acks an outstanding ``escalated_to_operator``.
+
+    Pairs with ``TaskEscalatedToOperator``: the dashboard's escalation
+    surface treats a task as escalated only while its most recent
+    ``escalated_to_operator`` has no later ``escalation_acknowledged``
+    (see ``routers/dashboard/overview.py`` ``_ESCALATIONS_SQL``). Empty
+    payload — the row's ``task_id`` + ``created_at`` carry all the
+    information the surface needs.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "escalation_acknowledged"
+
+
 class TaskRegistered(EventPayload):
     """Emitted when a task is created via the API.
 
