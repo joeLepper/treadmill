@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # to a specific semver to avoid surprise upgrades silently changing
 # argv parsing or output format; the agent passes --model to select
 # per-role (Opus / Sonnet / Haiku). Pinned 2026-05-11.
-RUN npm install -g @anthropic-ai/claude-code@2.1.138
+RUN npm install -g @anthropic-ai/claude-code@2.1.138 aws-cdk
 
 # uv — needed for author-side validation scripts that use ``uv run pytest``
 # against the cloned workspace (per task #121 + the 2026-05-14 learning).
