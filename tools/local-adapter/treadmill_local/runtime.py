@@ -101,6 +101,10 @@ mounts. Other worker families do not."""
 API_FAMILY = "treadmill-api"
 """API service family. Receives the dev-local AWS env wiring."""
 
+DASHBOARD_FAMILY = "treadmill-dashboard"
+"""Operator dashboard service family. Static React bundle served by nginx;
+no env, no AWS creds, no DB."""
+
 POSTGRES_FAMILY = "treadmill-postgres"
 REDIS_FAMILY = "treadmill-redis"
 
@@ -113,6 +117,7 @@ DEV_LOCAL_POSTGRES_IMAGE = "postgres:16-alpine"
 DEV_LOCAL_REDIS_IMAGE = "redis:7-alpine"
 DEV_LOCAL_API_IMAGE = "treadmill-api:dev"
 DEV_LOCAL_AGENT_IMAGE = "treadmill-agent:dev"
+DEV_LOCAL_DASHBOARD_IMAGE = "treadmill-dashboard:dev"
 
 # Single source of truth for the dev-local API port. The container
 # listens on this port and the host publishes it 1:1, so the same value
@@ -120,6 +125,14 @@ DEV_LOCAL_AGENT_IMAGE = "treadmill-agent:dev"
 # in operator-facing strings (``_report_up_dev_local``,
 # ``TREADMILL_API_URL`` env injection, the deploy-watcher's health URL).
 DEV_LOCAL_API_HOST_PORT = 8088
+
+# Dashboard listens on nginx's default 80 inside the container and is
+# published on host port 5174 (one above the Vite dev-server port 5173 so
+# both can coexist when the operator is iterating on the UI). The
+# dashboard's nginx config terminates SPA fallback in-container; phase 2
+# adds an ``/api`` reverse-proxy to the API container.
+DEV_LOCAL_DASHBOARD_HOST_PORT = 5174
+DEV_LOCAL_DASHBOARD_CONTAINER_PORT = 80
 
 # Container-network DNS hostnames the API + worker reach internal
 # services through. The service container name doubles as the DNS name
@@ -669,7 +682,37 @@ class LocalRuntime:
                 port_mappings=[(6379, 16379)],
             ),
             self._build_api_service_spec(cfg),
+            self._build_dashboard_service_spec(),
         ]
+
+    def _build_dashboard_service_spec(self) -> ServiceSpec:
+        """Return the operator dashboard ServiceSpec.
+
+        The dashboard is a static React bundle served by nginx; it carries
+        no env vars, no AWS credentials, and no database connection. v1
+        ships against in-process mock data (no API dependency); v2 will
+        add an ``/api`` reverse-proxy to the API container, at which point
+        this spec gains nothing — the dashboard still has no env of its
+        own because the proxy lives inside the dashboard image's nginx
+        config (no runtime substitution).
+        """
+        return ServiceSpec(
+            family=DASHBOARD_FAMILY,
+            desired_count=1,
+            container_specs=[
+                ContainerSpec(
+                    family=DASHBOARD_FAMILY,
+                    name=DASHBOARD_FAMILY,
+                    image=DEV_LOCAL_DASHBOARD_IMAGE,
+                    env={},
+                    network=NETWORK_NAME,
+                    container_ports=[DEV_LOCAL_DASHBOARD_CONTAINER_PORT],
+                ),
+            ],
+            port_mappings=[
+                (DEV_LOCAL_DASHBOARD_CONTAINER_PORT, DEV_LOCAL_DASHBOARD_HOST_PORT),
+            ],
+        )
 
     def _build_api_service_spec(self, cfg: dict[str, Any]) -> ServiceSpec:
         """Return the API ServiceSpec used by both ``up`` and
@@ -942,6 +985,9 @@ class LocalRuntime:
         )
         console.print(
             f"  api:               [cyan]http://localhost:{DEV_LOCAL_API_HOST_PORT}[/cyan]"
+        )
+        console.print(
+            f"  dashboard:         [cyan]http://localhost:{DEV_LOCAL_DASHBOARD_HOST_PORT}[/cyan]"
         )
         console.print(
             f"  webhook_inbox:     [dim]{cfg['aws']['webhook_inbox_queue_url']}[/dim]"
@@ -1454,6 +1500,11 @@ class LocalRuntime:
                     ".",
                 ],
                 repo_root,
+            ),
+            (
+                DEV_LOCAL_DASHBOARD_IMAGE,
+                ["docker", "build", "-t", DEV_LOCAL_DASHBOARD_IMAGE, "."],
+                repo_root / "services" / "dashboard",
             ),
         ]
         for image, cmd, cwd in builds:
