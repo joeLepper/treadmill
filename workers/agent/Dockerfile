@@ -6,13 +6,15 @@ FROM python:3.12-slim
 # API package must be present at build time for pip to resolve the
 # editable install.
 
-# git + gh + nodejs (for Claude Code CLI install via npm). gh provides
-# the GitHub mode PR creation; git is used by both modes.
+# git + gh + nodejs (for Claude Code CLI install via npm) + make so plan
+# validation scripts that use `make <target>` work in the worker. gh
+# provides the GitHub mode PR creation; git is used by both modes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
         curl \
         gnupg \
+        make \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
