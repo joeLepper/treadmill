@@ -155,7 +155,14 @@ def operator_bucket(*, derived_status: str | None, escalated: bool) -> str:
     return "inflight"
 
 
-_TERMINAL_STATUSES = frozenset({"done", "merged", "validated", "cancelled"})
+# Terminal task states — the Overview operator surface filters these
+# out (see the WHERE clause in ``_TASKS_SQL``). The merged-PR projection
+# emits ``"pr_merged"`` (NOT ``"merged"``); the LIKE pattern in the SQL
+# also matches the rare hybrid ``"pr_merged (wf-author: failed)"`` form
+# a task can land in when an in-flight workflow run terminates AFTER
+# the PR has already auto-merged (the run's outcome no longer matters
+# from an operator perspective — the PR is in main).
+_TERMINAL_STATUSES = frozenset({"done", "pr_merged", "validated", "cancelled"})
 
 
 # Map raw event ``entity_type`` values to the dashboard's enum (matches
@@ -238,7 +245,10 @@ LEFT JOIN LATERAL (
     JOIN workflow_runs r ON r.id = s.run_id
     WHERE r.task_id = t.id
 ) token_rollup ON TRUE
-WHERE ts.derived_status NOT IN ('done', 'merged', 'validated', 'cancelled')
+WHERE (
+        ts.derived_status NOT IN ('done', 'pr_merged', 'validated', 'cancelled')
+    AND ts.derived_status NOT LIKE 'pr_merged %'
+)
    OR ts.derived_status IS NULL
 ORDER BY COALESCE(last_event.created_at, t.created_at) ASC
 """
