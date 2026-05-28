@@ -134,6 +134,41 @@ def test_find_repo_root_resolves_workspace_pyproject() -> None:
     assert (root / "workers" / "agent" / "Dockerfile").exists()
 
 
+# ── ADR-0061 triage probe scripts ────────────────────────────────────────────
+
+
+def test_triage_probe_scripts_present_for_agent_image() -> None:
+    """The agent Dockerfile copies ``workers/agent/scripts/triage/*`` into
+    ``/opt/triage/`` so the ADR-0061 role-ui-triage prompt can invoke
+    them by their documented absolute paths. The script files must
+    exist on disk so the COPY succeeds at image-build time.
+
+    Renaming or relocating either script breaks the v1 prompt's
+    "Tooling" section + the seed-corpus evidence pointers — pin both
+    here so the contract isn't quietly violated."""
+    root = find_repo_root()
+    triage_dir = root / "workers" / "agent" / "scripts" / "triage"
+    assert (triage_dir / "probe.mjs").exists(), (
+        "ADR-0061 prompt at docs/triage/role-ui-triage.v1.md expects "
+        "/opt/triage/probe.mjs in the agent image — source missing"
+    )
+    assert (triage_dir / "walk.mjs").exists(), (
+        "ADR-0061 prompt expects /opt/triage/walk.mjs in the agent "
+        "image — source missing"
+    )
+    # The Dockerfile must reference both: the COPY line lifts the
+    # whole directory, plus we install Playwright + chromium.
+    dockerfile = (root / "workers" / "agent" / "Dockerfile").read_text()
+    assert "/opt/triage/" in dockerfile, (
+        "agent Dockerfile must COPY workers/agent/scripts/triage/ "
+        "to /opt/triage/ per ADR-0061 § Tooling"
+    )
+    assert "playwright install chromium" in dockerfile.lower(), (
+        "agent Dockerfile must install chromium so role-ui-triage can "
+        "drive a headless browser"
+    )
+
+
 # ── _ensure_images_built: happy path ──────────────────────────────────────────
 
 
