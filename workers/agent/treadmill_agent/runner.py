@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from treadmill_agent import claude_code, git, startup_auth, workspace
+from treadmill_agent import claude_code, git, repo_deps, startup_auth, workspace
 from treadmill_agent.api_client import ApiClient, WorkerContext
 from treadmill_agent.config import Settings
 from treadmill_agent.events import StepOutput, StepTokenUsage
@@ -322,7 +322,30 @@ def _handle_step(
             )
             raise
 
+        # ADR-0059 step 2: materialize per-repo extras (Python / Node /
+        # binaries) into an overlay and bind it to a ContextVar so the
+        # validation subprocess seam can merge ``PATH`` / ``PYTHONPATH``
+        # / ``NODE_PATH`` overrides without each call site growing a
+        # kwarg. An empty WorkerDeps short-circuits to a no-op overlay
+        # (legacy no-deps path stays in scope). Materialization failure
+        # fails the step cleanly — never silently runs validation
+        # without the deps the plan author registered.
+        try:
+            worker_deps = startup_auth.fetch_repo_worker_deps(settings, ctx.repo)
+            overlay = repo_deps.materialize(ctx.repo, worker_deps)
+        except Exception as exc:
+            logger.exception(
+                "step %s failed materializing repo_deps overlay", ctx.step_id,
+            )
+            publisher.publish_step_failed(
+                task_id=ctx.task_id, plan_id=ctx.plan_id,
+                run_id=ctx.run_id, step_id=ctx.step_id,
+                error=str(exc),
+            )
+            raise
+
         creds_token = claude_code.set_claude_creds(claude_creds)
+        overlay_token = repo_deps.bind_overlay(overlay)
         try:
             try:
                 output, token_usage = _execute(ctx, settings)
@@ -339,6 +362,7 @@ def _handle_step(
             # so a subsequent step on this worker doesn't inherit the prior
             # step's account routing.
             claude_code.reset_claude_creds(creds_token)
+            repo_deps.reset_overlay(overlay_token)
         publisher.publish_step_completed(
             task_id=ctx.task_id, plan_id=ctx.plan_id,
             run_id=ctx.run_id, step_id=ctx.step_id,

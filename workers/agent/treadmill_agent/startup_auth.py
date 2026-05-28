@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Literal
 
 import boto3
 
+from treadmill_api.models.onboarding import WorkerDeps
+
 if TYPE_CHECKING:
     from treadmill_agent.config import Settings
 
@@ -108,6 +110,59 @@ def fetch_claude_credentials(
         creds.account, creds.type, repo,
     )
     return creds
+
+
+def fetch_repo_worker_deps(
+    settings: "Settings", repo: str,
+) -> WorkerDeps:
+    """Resolve the repo's :class:`WorkerDeps` config via the onboarding API.
+
+    GETs ``/api/v1/onboarding/repos/{repo}`` and returns the response's
+    ``worker_deps`` field. ADR-0059 step 2: the runner calls this
+    before :func:`treadmill_agent.repo_deps.materialize` so the
+    overlay reflects the repo's onboarded extras.
+
+    Returns an empty :class:`WorkerDeps` (no extras) on 404 (repo not
+    onboarded — legacy no-deps path), 503 (feature off), or any
+    network error. Absence of config must never crash the step; the
+    no-overlay path stays in scope so unmigrated repos continue to
+    work.
+    """
+    url = (
+        settings.api_url.rstrip("/")
+        + f"/api/v1/onboarding/repos/{repo}"
+    )
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 503):
+            logger.info(
+                "repo_deps fetch returned %d for repo=%s; no overlay",
+                exc.code, repo,
+            )
+            return WorkerDeps()
+        logger.warning(
+            "repo_deps fetch failed (HTTP %d) for repo=%s; no overlay",
+            exc.code, repo,
+        )
+        return WorkerDeps()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "repo_deps fetch failed for repo=%s (%s); no overlay",
+            repo, exc,
+        )
+        return WorkerDeps()
+    raw = payload.get("worker_deps") or {}
+    try:
+        return WorkerDeps.model_validate(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "repo_deps response malformed for repo=%s (%s); no overlay",
+            repo, exc,
+        )
+        return WorkerDeps()
 
 
 def resolve_worker_aws_session(settings: "Settings") -> boto3.session.Session:

@@ -85,10 +85,17 @@ def run_deterministic(
         CheckResult with verdict, rationale, and log excerpt
     """
     try:
-        env = None
+        import os
+
+        from treadmill_agent.repo_deps import current_overlay
+
+        env: dict[str, str] = dict(os.environ)
+        overlay = current_overlay()
+        if overlay is not None:
+            for k, v in overlay.env_overrides().items():
+                env[k] = v
         if pr_number is not None:
-            import os
-            env = {**os.environ, "PR_NUMBER": str(pr_number)}
+            env["PR_NUMBER"] = str(pr_number)
         result = subprocess.run(
             check.script,
             shell=True,

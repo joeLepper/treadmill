@@ -46,6 +46,31 @@ def _default_claude_creds_off(
     )
 
 
+@pytest.fixture(autouse=True)
+def _default_repo_deps_empty(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``fetch_repo_worker_deps`` to empty (ADR-0059 step 2).
+
+    Same rationale as ``_default_claude_creds_off``: the runner now calls
+    ``startup_auth.fetch_repo_worker_deps`` for every step. Without an
+    autouse default, every existing test would try to hit the onboarding
+    API via urllib. Tests that exercise materialization specifically
+    (``test_repo_deps``) call ``repo_deps.materialize`` directly and
+    don't route through this seam.
+    """
+    if request.module.__name__.endswith("test_startup_auth"):
+        return
+    from treadmill_api.models.onboarding import WorkerDeps
+
+    from treadmill_agent import startup_auth
+
+    monkeypatch.setattr(
+        startup_auth, "fetch_repo_worker_deps",
+        lambda settings, repo: WorkerDeps(),
+    )
+
+
 
 def init_bare_repo(bare_repos_dir: Path, repo: str) -> Path:
     """Seed a bare repo with one ``main`` commit and return its path.
