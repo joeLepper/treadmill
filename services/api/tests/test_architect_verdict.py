@@ -184,3 +184,85 @@ def test_architect_verdict_accept_as_is_does_not_require_rewritten_description()
         "target_artifact": "workers/agent/AGENT.md",
     })
     assert verdict.rewritten_description is None
+
+
+# ── ADR-0058: gate-broken verdict + gate_log_excerpt requirement ────────────
+
+
+def test_architect_verdict_accepts_gate_broken() -> None:
+    """Per ADR-0058, ``gate-broken`` joins the value-set as the 4th
+    verdict. With a non-empty ``gate_log_excerpt`` it validates."""
+    verdict = ArchitectVerdict.model_validate({
+        "verdict": "gate-broken",
+        "reasoning": (
+            "The deterministic gate runs `cdk synth` which fails with "
+            "ModuleNotFoundError: No module named 'aws_cdk' — the worker "
+            "sandbox lacks the Python lib. Trigger B (ralph-loop deadlock)."
+        ),
+        "target_artifact": "tasks/<id>/validation",
+        "gate_log_excerpt": (
+            "--- stderr ---\n"
+            "Traceback (most recent call last):\n"
+            "  File \"/var/treadmill/workspaces/.../repo/app.py\", line 3, in <module>\n"
+            "    import aws_cdk\n"
+            "ModuleNotFoundError: No module named 'aws_cdk'\n"
+        ),
+    })
+    assert verdict.verdict == "gate-broken"
+    assert "ModuleNotFoundError" in verdict.gate_log_excerpt
+
+
+def test_architect_verdict_gate_broken_requires_log_excerpt() -> None:
+    """Per ADR-0058, a gate-broken verdict without ``gate_log_excerpt``
+    fails the validator — the operator needs the excerpt to repair the
+    gate without re-running the loop."""
+    with pytest.raises(ValidationError) as exc_info:
+        ArchitectVerdict.model_validate({
+            "verdict": "gate-broken",
+            "reasoning": "The gate is broken",
+            "target_artifact": "tasks/<id>/validation",
+        })
+    assert "gate_log_excerpt" in str(exc_info.value)
+
+
+def test_architect_verdict_gate_broken_rejects_empty_log_excerpt() -> None:
+    """Empty / whitespace-only ``gate_log_excerpt`` fails the gate-broken
+    validator (same gate as missing — empty excerpt has no diagnostic
+    value)."""
+    for empty in ("", "   ", "\n\t"):
+        with pytest.raises(ValidationError):
+            ArchitectVerdict.model_validate({
+                "verdict": "gate-broken",
+                "reasoning": "The gate is broken",
+                "target_artifact": "tasks/<id>/validation",
+                "gate_log_excerpt": empty,
+            })
+
+
+def test_architect_verdict_gate_broken_caps_log_excerpt_at_4000_chars() -> None:
+    """``gate_log_excerpt`` is capped at 4000 chars (same bound as
+    ReviewVerdict.rationale)."""
+    with pytest.raises(ValidationError):
+        ArchitectVerdict.model_validate({
+            "verdict": "gate-broken",
+            "reasoning": "The gate is broken",
+            "target_artifact": "tasks/<id>/validation",
+            "gate_log_excerpt": "x" * 4001,
+        })
+
+
+def test_architect_verdict_non_gate_broken_does_not_require_log_excerpt() -> None:
+    """``gate_log_excerpt`` is only required when verdict='gate-broken'.
+    The other three verdicts validate without it."""
+    for v, extras in [
+        ("amend", {}),
+        ("accept-as-is", {}),
+        ("supersede", {"rewritten_description": "Corrected text"}),
+    ]:
+        verdict = ArchitectVerdict.model_validate({
+            "verdict": v,
+            "reasoning": f"Test {v}",
+            "target_artifact": "docs/test.md",
+            **extras,
+        })
+        assert verdict.gate_log_excerpt is None

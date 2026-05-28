@@ -56,10 +56,10 @@ logger = logging.getLogger("treadmill.agent.architecture")
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
-# ADR-0032 §Decision three-verdict contract (post-ADR-0048). Kept in
-# sync with ``ArchitectVerdict.verdict`` Literal in
+# ADR-0032 §Decision four-verdict contract (post-ADR-0048 + ADR-0058).
+# Kept in sync with ``ArchitectVerdict.verdict`` Literal in
 # ``services/api/treadmill_api/events/architect_verdict.py``.
-_VALID_VERDICTS = frozenset({"amend", "supersede", "accept-as-is"})
+_VALID_VERDICTS = frozenset({"amend", "supersede", "accept-as-is", "gate-broken"})
 
 
 class ArchitectVerdictParseError(RuntimeError):
@@ -84,9 +84,29 @@ class ArchitectVerdictParseError(RuntimeError):
 # This fallback extracts the model's intended verdict from prose so the
 # system can act on it; the strict JSON path remains primary.
 #
-# Per ADR-0048, ``uncertain`` was removed from the verdict surface; the
-# cue table now covers only the three actionable verdicts.
+# Per ADR-0048, ``uncertain`` was removed from the verdict surface.
+# Per ADR-0058, ``gate-broken`` was added — it is listed FIRST so the
+# deadlock cues fire before the "the work is complete" accept-as-is
+# cues (a gate-broken task often reads as "work complete + gate red",
+# which would otherwise be misclassified as accept-as-is).
 _PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
+    ("gate-broken", (
+        "verdict: gate-broken",
+        "gate-broken",
+        "ralph-loop deadlock",
+        "ralph loop deadlock",
+        "trigger b",
+        "trigger b (ralph-loop deadlock)",
+        "the gate is broken",
+        "the deterministic gate is broken",
+        "the deterministic gate cannot be satisfied",
+        "gate is failing for reasons outside the author",
+        "gate is failing for reasons outside of the author",
+        "tooling required by the gate is unavailable",
+        "the worker sandbox cannot satisfy",
+        "sandbox cannot run the gate",
+        "missing tooling in the worker",
+    )),
     ("amend", (
         "verdict: amend",
         "amend the implementation",
@@ -148,7 +168,7 @@ def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
     for verdict, cues in _PROSE_VERDICT_CUES:
         for cue in cues:
             if cue in lower:
-                return {
+                envelope: dict[str, Any] = {
                     "verdict": verdict,
                     "reasoning": (
                         "Extracted from architect prose (no JSON envelope "
@@ -157,6 +177,22 @@ def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
                     "target_artifact": "",
                     "parsed_from_prose": True,
                 }
+                if verdict == "gate-broken":
+                    # ADR-0058: the strict validator on ArchitectVerdict
+                    # rejects gate-broken without a non-empty
+                    # ``gate_log_excerpt``. Prose-fallback can't recover
+                    # the original gate stderr (the architect's prose
+                    # only references it indirectly), so we synthesize a
+                    # placeholder that satisfies the validator and
+                    # signals provenance. The operator gets the prose
+                    # reasoning in ``reasoning``; the architect-prompt
+                    # tightening in Step 2 should eliminate this path.
+                    envelope["gate_log_excerpt"] = (
+                        "[prose-parsed: original gate stderr unavailable; "
+                        "see ``reasoning`` for the architect's prose "
+                        "summary of the deadlock]"
+                    )
+                return envelope
     return None
 
 
@@ -167,10 +203,11 @@ _RETRY_PROMPT = (
     "fields:\n"
     "```json\n"
     "{\n"
-    '  "verdict": "amend" | "supersede" | "accept-as-is",\n'
+    '  "verdict": "amend" | "supersede" | "accept-as-is" | "gate-broken",\n'
     '  "reasoning": "<one paragraph distilling your prior analysis>",\n'
     '  "target_artifact": "<path to the implicated artifact>",\n'
-    '  "remediation_summary": "<required for amend/supersede; omit for accept-as-is>"\n'
+    '  "remediation_summary": "<required for amend/supersede; omit for accept-as-is and gate-broken>",\n'
+    '  "gate_log_excerpt": "<required for gate-broken: the deterministic gate\'s stderr you are citing; omit for the other verdicts>"\n'
     "}\n"
     "```\n\n"
     "Reply with ONLY the fenced ```json block. No other text.\n\n"
@@ -384,6 +421,21 @@ def _build_dispatch_payload(
             "target_artifact": target_artifact,
             "intent": "append-pitfall",
         }
+    if verdict == "gate-broken":
+        # ADR-0058 Step 1 — schema-only landing. The architect prompt
+        # gains Trigger B classification in Step 2; the dispatch
+        # handler (operator escalation + amend-cap skip + run-parking)
+        # lands in Step 3 via an API-side trigger keyed on this
+        # disposition's emitted verdict. Until Step 3 ships, the
+        # routing is inert: ``workflow_id=None`` + ``intent`` tag so
+        # the verdict surfaces in events for telemetry without
+        # producing a downstream dispatch that doesn't yet exist.
+        return {
+            "workflow_id": None,
+            "task_id": task_id,
+            "target_artifact": target_artifact,
+            "intent": "gate-broken-await-step-3",
+        }
     # Should be unreachable; _VALID_VERDICTS gates the parse.
     raise ArchitectVerdictParseError(f"unknown verdict: {verdict!r}")
 
@@ -516,6 +568,7 @@ def handle(ctx: DispositionContext) -> StepOutput:
     target_artifact: str = envelope.get("target_artifact", "")
     remediation_summary: str | None = envelope.get("remediation_summary")
     rewritten_description: str | None = envelope.get("rewritten_description")
+    gate_log_excerpt: str | None = envelope.get("gate_log_excerpt")
 
     # ADR-0048: supersede repurposed. The architect must include a
     # non-empty ``rewritten_description`` so the API-side trigger has
@@ -534,6 +587,23 @@ def handle(ctx: DispositionContext) -> StepOutput:
             "that becomes the child task's description). Per ADR-0048, "
             "supersede creates a new task row carrying this field's "
             "value; an empty rewrite has no child-task content."
+        )
+
+    # ADR-0058: gate-broken requires a non-empty ``gate_log_excerpt`` —
+    # the failing tooling's stderr that the architect cites as evidence.
+    # Mirrors the Pydantic validator API-side. The prose-fallback path
+    # synthesizes a placeholder excerpt (see ``_parse_verdict_from_prose``)
+    # so a prose-only gate-broken still satisfies this gate; an
+    # explicit JSON envelope without the field is a parse failure.
+    if verdict == "gate-broken" and not (
+        gate_log_excerpt and gate_log_excerpt.strip()
+    ):
+        raise ArchitectVerdictParseError(
+            "architect verdict=gate-broken requires a non-empty "
+            "``gate_log_excerpt`` field (the failing tooling stderr "
+            "the architect is citing). Per ADR-0058, the operator "
+            "needs the excerpt to repair the gate without re-running "
+            "the loop."
         )
 
     dispatch_payload = _build_dispatch_payload(
@@ -565,6 +635,12 @@ def handle(ctx: DispositionContext) -> StepOutput:
         # text in the natural place. The API-side supersede trigger
         # reads ``dispatch.rewritten_description``.
         payload["rewritten_description"] = rewritten_description
+    if gate_log_excerpt:
+        # ADR-0058: surface at top level so the API-side gate-broken
+        # trigger (Step 3) reads the excerpt without re-parsing the
+        # disposition's prose. Per the validator-mirror above, this is
+        # always populated when verdict==gate-broken.
+        payload["gate_log_excerpt"] = gate_log_excerpt
     if pr_comment_payload is not None:
         payload["pr_comment"] = pr_comment_payload
     # Surface the prose-fallback marker so downstream telemetry can
