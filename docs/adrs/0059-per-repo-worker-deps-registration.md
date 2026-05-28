@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-05-27
 - **Supersedes:** none
-- **Related:** ADR-0050 (onboarding persistence), ADR-0051 (onboarding HTTP), ADR-0054 (mode + repo context), ADR-0055 (per-account Claude credentials), ADR-0058 (gate-broken verdict)
+- **Related:** ADR-0050 (onboarding persistence), ADR-0051 (onboarding HTTP), ADR-0054 (mode + repo context), ADR-0055 (per-account Claude credentials), ADR-0058 (gate-broken verdict), ADR-0060 (egress-scoping proxy — detail for the network-egress sequence step)
 
 ## Context
 
@@ -164,7 +164,9 @@ the registration, not by floating specs.
 3. Worker side: per-repo overlay materialization (venv / node_modules
    / bin) with `(repo, deps-hash)` cache.
 4. Network egress scoping: registries-only allowlist during install
-   phase; restore no-egress for task work.
+   phase; always-allowed-only for task work. **Detailed in
+   [ADR-0060](0060-sidecar-https-proxy-for-worker-egress-scoping.md);**
+   sidecar HTTPS proxy is the enforcement layer.
 5. Failure event: `task.worker_deps_failed` event; ADR-0058 classifier
    handles it as gate-broken.
 6. wf-discover extension: detect Python/Node deps from the
