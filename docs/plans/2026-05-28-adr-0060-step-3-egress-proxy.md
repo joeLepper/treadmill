@@ -200,7 +200,7 @@ sequence_of_work:
   - id: autoscaler-proxy-wiring
     title: "ADR-0060 Step 3b — autoscaler spawns proxy + isolates workers"
     workflow: wf-author
-    depends_on: [egress-proxy-service]
+    depends_on: [task.egress-proxy-service.pr_merged]
     intent: |
       STUDY:
         - `tools/local-adapter/treadmill_local/autoscaler.py` —
@@ -294,7 +294,7 @@ sequence_of_work:
   - id: runner-proxy-credential
     title: "ADR-0060 Step 3c — runner injects install credential into materialize"
     workflow: wf-author
-    depends_on: [egress-proxy-service]
+    depends_on: [task.egress-proxy-service.pr_merged]
     intent: |
       STUDY:
         - `workers/agent/treadmill_agent/repo_deps.py` — the existing
@@ -378,9 +378,9 @@ sequence_of_work:
     title: "ADR-0060 Step 3d — end-to-end allow/deny integration smoke"
     workflow: wf-author
     depends_on:
-      - egress-proxy-service
-      - autoscaler-proxy-wiring
-      - runner-proxy-credential
+      - task.egress-proxy-service.pr_merged
+      - task.autoscaler-proxy-wiring.pr_merged
+      - task.runner-proxy-credential.pr_merged
     intent: |
       STUDY:
         - The three preceding tasks' new modules.
