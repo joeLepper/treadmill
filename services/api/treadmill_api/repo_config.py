@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from treadmill_api.models.onboarding import WorkerDeps
+
 VALID_MODES = frozenset({"conform", "adapt"})
 
 
@@ -30,6 +32,10 @@ class RepoConfig:
     # The named account must exist in ``Settings.claude_accounts``; resolution
     # happens at the worker's per-step credential fetch, not at onboarding.
     claude_account: str | None = None
+    # Per-repo worker extras (ADR-0059). ``None`` is the wire shorthand for
+    # "no extras"; ``OnboardingStore.get_repo_config`` always materializes it
+    # as a non-None ``WorkerDeps`` (possibly with empty lists).
+    worker_deps: WorkerDeps | None = None
 
 
 def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
@@ -43,6 +49,13 @@ def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
             f"repo_config 'mode' must be one of {sorted(VALID_MODES)}; got {mode!r}"
         )
 
+    worker_deps_data = data.get("worker_deps")
+    worker_deps = (
+        WorkerDeps.model_validate(worker_deps_data)
+        if worker_deps_data is not None
+        else None
+    )
+
     return RepoConfig(
         repo=repo,
         mode=mode,
@@ -50,6 +63,7 @@ def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
         test_command=data.get("test_command"),
         lint_command=data.get("lint_command"),
         claude_account=data.get("claude_account"),
+        worker_deps=worker_deps,
     )
 
 
@@ -61,4 +75,9 @@ def to_dict(config: RepoConfig) -> dict[str, Any]:
         "test_command": config.test_command,
         "lint_command": config.lint_command,
         "claude_account": config.claude_account,
+        "worker_deps": (
+            config.worker_deps.model_dump()
+            if config.worker_deps is not None
+            else None
+        ),
     }

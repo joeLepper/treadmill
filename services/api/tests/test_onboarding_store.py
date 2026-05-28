@@ -24,9 +24,12 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from treadmill_api.models.onboarding import (
+    BinarySpec,
     RepoConfigRow,
     RepoContextDocRow,
     RepoProfileRow,
+    RepoWorkerBinaryRow,
+    WorkerDeps,
 )
 from treadmill_api.onboarding_store import OnboardingStore
 from treadmill_api.repo_config import RepoConfig
@@ -45,6 +48,7 @@ def test_onboarding_models_and_store_shape() -> None:
     assert RepoConfigRow.__tablename__ == "repo_configs"
     assert RepoProfileRow.__tablename__ == "repo_profiles"
     assert RepoContextDocRow.__tablename__ == "repo_context_docs"
+    assert RepoWorkerBinaryRow.__tablename__ == "repo_worker_binaries"
 
     for method in (
         "upsert_repo_config",
@@ -109,10 +113,14 @@ def migrations_applied(database_url: str) -> None:
 def truncate(engine: Engine) -> Iterator[None]:
     def _do() -> None:
         with engine.begin() as conn:
+            # repo_worker_binaries CASCADEs from repo_configs but the
+            # TRUNCATE needs to enumerate it explicitly for RESTART
+            # IDENTITY to behave consistently across runs.
             conn.execute(
                 sa.text(
                     "TRUNCATE TABLE repo_configs, repo_profiles, "
-                    "repo_context_docs RESTART IDENTITY CASCADE"
+                    "repo_context_docs, repo_worker_binaries "
+                    "RESTART IDENTITY CASCADE"
                 )
             )
     _do()
@@ -145,6 +153,7 @@ async def test_repo_config_upsert_and_get_round_trip(
         auto_merge_blocked=True,
         test_command="uv run pytest",
         lint_command="uv run ruff check",
+        worker_deps=WorkerDeps(),
     )
     async with session_factory() as session:
         await store.upsert_repo_config(session, config)
@@ -161,6 +170,7 @@ async def test_repo_config_upsert_and_get_round_trip(
         auto_merge_blocked=False,
         test_command="make test",
         lint_command=None,
+        worker_deps=WorkerDeps(),
     )
     async with session_factory() as session:
         await store.upsert_repo_config(session, updated)
@@ -235,6 +245,126 @@ async def test_repo_profile_upsert_and_get_round_trip(
     assert fetched.components == ["services/api", "workers/agent"]
     assert fetched.has_agent_context is True
     assert fetched == profile
+
+
+@integration
+@pytest.mark.asyncio
+async def test_repo_config_round_trips_worker_deps(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0059: ``worker_deps`` survives upsert/get (lists + binaries)."""
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    deps = WorkerDeps(
+        python=["aws-cdk-lib==2.214.0", "constructs==10.3.0"],
+        node=["typescript@5.4.5"],
+        binaries=[
+            BinarySpec(
+                name="cdk",
+                download_url="https://example.com/cdk",
+                sha256_checksum="a" * 64,
+                target_path="/var/treadmill/repo-bin/cdk",
+            ),
+            BinarySpec(
+                name="kubectl",
+                download_url="https://example.com/kubectl",
+                sha256_checksum="b" * 64,
+                target_path="/var/treadmill/repo-bin/kubectl",
+            ),
+        ],
+    )
+    config = RepoConfig(repo=repo, worker_deps=deps)
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, config)
+        await session.commit()
+
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None
+    assert fetched.worker_deps == deps
+
+
+@integration
+@pytest.mark.asyncio
+async def test_repo_config_worker_deps_defaults_to_empty_when_omitted(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0059: ``get_repo_config`` never returns ``None`` for
+    ``worker_deps`` — an empty :class:`WorkerDeps` is the materialized
+    shape when the caller upserted without any deps."""
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    config = RepoConfig(repo=repo)  # worker_deps defaults to None
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, config)
+        await session.commit()
+
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None
+    assert fetched.worker_deps == WorkerDeps()
+
+
+@integration
+@pytest.mark.asyncio
+async def test_repo_config_reupsert_replaces_binaries(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0059: a re-upsert wipes the previous binaries and inserts
+    the new set (drop + insert, not diff)."""
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    first = RepoConfig(
+        repo=repo,
+        worker_deps=WorkerDeps(
+            binaries=[
+                BinarySpec(
+                    name="cdk",
+                    download_url="https://example.com/cdk-old",
+                    sha256_checksum="a" * 64,
+                    target_path="/var/treadmill/repo-bin/cdk",
+                ),
+                BinarySpec(
+                    name="kubectl",
+                    download_url="https://example.com/kubectl",
+                    sha256_checksum="b" * 64,
+                    target_path="/var/treadmill/repo-bin/kubectl",
+                ),
+            ]
+        ),
+    )
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, first)
+        await session.commit()
+
+    second = RepoConfig(
+        repo=repo,
+        worker_deps=WorkerDeps(
+            binaries=[
+                BinarySpec(
+                    name="terraform",
+                    download_url="https://example.com/terraform",
+                    sha256_checksum="c" * 64,
+                    target_path="/var/treadmill/repo-bin/terraform",
+                ),
+            ]
+        ),
+    )
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, second)
+        await session.commit()
+
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None
+    assert fetched.worker_deps is not None
+    assert [b.name for b in fetched.worker_deps.binaries] == ["terraform"]
 
 
 @integration

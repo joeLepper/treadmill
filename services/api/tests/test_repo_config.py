@@ -52,6 +52,33 @@ def test_round_trip_via_to_dict():
         "test_command": "pytest",
         "lint_command": "ruff check .",
         "claude_account": "secondary",
+        "worker_deps": None,
+    }
+
+    assert to_dict(parse_repo_config(source)) == source
+
+
+def test_round_trip_via_to_dict_with_worker_deps():
+    """ADR-0059: ``worker_deps`` round-trips through the dict shape."""
+    source = {
+        "repo": "o/r",
+        "mode": "conform",
+        "auto_merge_blocked": False,
+        "test_command": None,
+        "lint_command": None,
+        "claude_account": None,
+        "worker_deps": {
+            "python": ["aws-cdk-lib==2.214.0"],
+            "node": [],
+            "binaries": [
+                {
+                    "name": "cdk",
+                    "download_url": "https://example.com/cdk",
+                    "sha256_checksum": "a" * 64,
+                    "target_path": "/var/treadmill/repo-bin/cdk",
+                }
+            ],
+        },
     }
 
     assert to_dict(parse_repo_config(source)) == source

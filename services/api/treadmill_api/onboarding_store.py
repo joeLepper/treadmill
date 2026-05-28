@@ -21,9 +21,12 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.models.onboarding import (
+    BinarySpec,
     RepoConfigRow,
     RepoContextDocRow,
     RepoProfileRow,
+    RepoWorkerBinaryRow,
+    WorkerDeps,
 )
 from treadmill_api.repo_config import RepoConfig
 from treadmill_api.repo_profile import RepoProfile
@@ -39,27 +42,51 @@ class OnboardingStore:
     async def upsert_repo_config(
         self, session: AsyncSession, config: RepoConfig
     ) -> None:
+        deps = config.worker_deps or WorkerDeps()
         existing = await session.scalar(
             sa.select(RepoConfigRow).where(RepoConfigRow.repo == config.repo)
         )
         if existing is None:
+            existing = RepoConfigRow(
+                repo=config.repo,
+                mode=config.mode,
+                auto_merge_blocked=config.auto_merge_blocked,
+                test_command=config.test_command,
+                lint_command=config.lint_command,
+                claude_account=config.claude_account,
+                worker_deps_python=list(deps.python),
+                worker_deps_node=list(deps.node),
+            )
+            session.add(existing)
+            await session.flush()
+        else:
+            existing.mode = config.mode
+            existing.auto_merge_blocked = config.auto_merge_blocked
+            existing.test_command = config.test_command
+            existing.lint_command = config.lint_command
+            existing.claude_account = config.claude_account
+            existing.worker_deps_python = list(deps.python)
+            existing.worker_deps_node = list(deps.node)
+            existing.updated_at = sa.func.now()
+
+        # ADR-0059: binaries are replaced wholesale on every upsert
+        # (delete + reinsert is simpler than diffing — operator-curated
+        # lists are small).
+        await session.execute(
+            sa.delete(RepoWorkerBinaryRow).where(
+                RepoWorkerBinaryRow.repo_config_id == existing.id
+            )
+        )
+        for binary in deps.binaries:
             session.add(
-                RepoConfigRow(
-                    repo=config.repo,
-                    mode=config.mode,
-                    auto_merge_blocked=config.auto_merge_blocked,
-                    test_command=config.test_command,
-                    lint_command=config.lint_command,
-                    claude_account=config.claude_account,
+                RepoWorkerBinaryRow(
+                    repo_config_id=existing.id,
+                    name=binary.name,
+                    download_url=binary.download_url,
+                    sha256_checksum=binary.sha256_checksum,
+                    target_path=binary.target_path,
                 )
             )
-            return
-        existing.mode = config.mode
-        existing.auto_merge_blocked = config.auto_merge_blocked
-        existing.test_command = config.test_command
-        existing.lint_command = config.lint_command
-        existing.claude_account = config.claude_account
-        existing.updated_at = sa.func.now()
 
     async def get_repo_config(
         self, session: AsyncSession, repo: str
@@ -69,6 +96,26 @@ class OnboardingStore:
         )
         if row is None:
             return None
+        binary_rows = (
+            await session.scalars(
+                sa.select(RepoWorkerBinaryRow)
+                .where(RepoWorkerBinaryRow.repo_config_id == row.id)
+                .order_by(RepoWorkerBinaryRow.name)
+            )
+        ).all()
+        worker_deps = WorkerDeps(
+            python=list(row.worker_deps_python),
+            node=list(row.worker_deps_node),
+            binaries=[
+                BinarySpec(
+                    name=b.name,
+                    download_url=b.download_url,
+                    sha256_checksum=b.sha256_checksum,
+                    target_path=b.target_path,
+                )
+                for b in binary_rows
+            ],
+        )
         return RepoConfig(
             repo=row.repo,
             mode=row.mode,
@@ -76,6 +123,7 @@ class OnboardingStore:
             test_command=row.test_command,
             lint_command=row.lint_command,
             claude_account=row.claude_account,
+            worker_deps=worker_deps,
         )
 
     async def upsert_repo_profile(
