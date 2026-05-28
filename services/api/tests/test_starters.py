@@ -43,6 +43,7 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-crystallize-learning",
     "wf-audit-rule-corpus",
     "wf-tune-judge-prompts",
+    "wf-ui-triage",  # ADR-0061
 }
 
 _EXPECTED_ROLE_IDS = {
@@ -59,6 +60,7 @@ _EXPECTED_ROLE_IDS = {
     "role-crystallization-judge",
     "role-rule-corpus-auditor",
     "role-prompt-optimizer",
+    "role-ui-triage",  # ADR-0061
 }
 
 # Action-role ids that may appear as step 2 of a 2-step workflow. Per
@@ -238,7 +240,14 @@ def test_role_model_tier_invariant() -> None:
     # (operator-triggered today; Wave 3 adds a schedule) and the role
     # reasons about prompt design + emits a structured JSON envelope, so
     # cost is not the relevant axis.
-    SONNET_ROLES = {"role-architect", "role-reviewer", "role-prompt-optimizer"}
+    # ``role-ui-triage`` is sonnet per ADR-0061 — same rationale as
+    # role-prompt-optimizer (rarely-dispatched + structured-JSON output).
+    SONNET_ROLES = {
+        "role-architect",
+        "role-reviewer",
+        "role-prompt-optimizer",
+        "role-ui-triage",
+    }
     roles_by_id = {r["id"]: r for r in _all_roles()}
     assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
         f"role-planner must use {PLANNER_MODEL!r}"
@@ -662,6 +671,7 @@ def test_single_step_workflows_match_adr_0015_and_0032_matrix() -> None:
         "wf-author", "wf-review", "wf-validate", "wf-doc-amend",
         "wf-architecture-resolve", "wf-audit-rule-corpus",
         "wf-tune-judge-prompts",
+        "wf-ui-triage",  # ADR-0061
     }
 
 
@@ -1111,3 +1121,69 @@ def test_rule_corpus_audit_envelope_importable_from_events() -> None:
     audit = RuleCorpusAudit(entries=[entry])
     assert audit.entries[0].status == "keep"
     assert audit.entries[0].rule_slug == "adr-and-plan-has-diagram"
+
+
+# ── ADR-0061: role-ui-triage + wf-ui-triage ──────────────────────────────────
+
+
+def test_role_ui_triage_is_seeded() -> None:
+    """role-ui-triage exists with OutputKind.ANALYSIS and the v1 prompt
+    loaded from the bundled package-data .md file (ADR-0061)."""
+    roles = {r["id"]: r for r in _all_roles()}
+    assert "role-ui-triage" in roles, (
+        "role-ui-triage must be seeded so wf-ui-triage's author step has a"
+        " role to dispatch against"
+    )
+    role = roles["role-ui-triage"]
+    assert role["output_kind"] == OutputKind.ANALYSIS, (
+        "ADR-0061: role-ui-triage emits TriageFinding[] JSON; empty diff"
+        " is success — OutputKind.ANALYSIS is the right shape"
+    )
+    # The prompt must be loaded from the bundled file; the body
+    # invariant below pins drift.
+    assert role["system_prompt"].strip().startswith(
+        "# role-ui-triage (v1)"
+    ), "role-ui-triage prompt must come from prompts/role_ui_triage_v1.md"
+
+
+def test_role_ui_triage_prompt_matches_canonical_doc() -> None:
+    """The bundled ``treadmill_api/prompts/role_ui_triage_v1.md`` must be a
+    verbatim copy of ``docs/triage/role-ui-triage.v1.md``. This is the
+    test that catches drift between the canonical artifact and the
+    package-data copy that ships into the API image."""
+    from pathlib import Path
+
+    bundled = (
+        Path(__file__).parent.parent
+        / "treadmill_api"
+        / "prompts"
+        / "role_ui_triage_v1.md"
+    ).read_text(encoding="utf-8")
+    canonical = (
+        Path(__file__).parent.parent.parent.parent
+        / "docs"
+        / "triage"
+        / "role-ui-triage.v1.md"
+    ).read_text(encoding="utf-8")
+    assert bundled == canonical, (
+        "treadmill_api/prompts/role_ui_triage_v1.md drifted from "
+        "docs/triage/role-ui-triage.v1.md — re-copy the canonical artifact"
+    )
+
+
+def test_wf_ui_triage_is_seeded() -> None:
+    """wf-ui-triage is a single-step workflow that runs role-ui-triage
+    once (ADR-0015 §"Per-workflow shape matrix" — single-step like
+    wf-author / wf-review / wf-validate)."""
+    workflows = {wf["id"]: wf for wf in STARTERS}
+    assert "wf-ui-triage" in workflows, (
+        "ADR-0061: wf-ui-triage is the surface periodic schedules + "
+        "operator-trigger CLI dispatch against"
+    )
+    wf = workflows["wf-ui-triage"]
+    assert len(wf["steps"]) == 1, (
+        "wf-ui-triage is single-step per ADR-0015 — the role's output is "
+        "the workflow's output"
+    )
+    assert wf["steps"][0]["role_id"] == "role-ui-triage"
+    assert wf["steps"][0]["name"] == "triage"

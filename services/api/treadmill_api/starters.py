@@ -34,9 +34,29 @@ analyzer from action in the first place.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 
 from treadmill_api.models import OutputKind
+
+
+# Prompts that are too long to inline get bundled into
+# ``treadmill_api/prompts/`` (a package-data dir COPYed into the
+# services/api image via ``COPY treadmill_api ./treadmill_api``) and
+# loaded at module import time. The docs/triage/role-ui-triage.v1.md
+# canonical artifact is mirrored into this dir on every PR that
+# touches it; a `test_starters` invariant pins the two copies in lock-step.
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+def _load_prompt(name: str) -> str:
+    """Read a bundled prompt artifact verbatim.
+
+    Raises ``FileNotFoundError`` at import time when the prompt is
+    missing — fail loudly so a packaging mistake (e.g. forgetting to
+    bundle the prompts dir) doesn't ship a silently-broken role seed.
+    """
+    return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
 
 logger = logging.getLogger("treadmill.api.starters")
 
@@ -1141,6 +1161,29 @@ _ROLES: list[dict[str, Any]] = [
             "values to chat — the corpus loader uses environment-driven AWS creds."
         ),
     },
+    {
+        # ADR-0061. The triage role drives a headless browser via
+        # Playwright scripts at /opt/triage/ (Step 2), reads the
+        # design contract + recent triage corpus + open PRs, and
+        # produces TriageFinding[] records. Sonnet-tier for the
+        # same reasons as role-prompt-optimizer: structured-output
+        # reliability + rarely dispatched (periodic schedule fires
+        # it every 4 h plus operator on-demand). Output is JSON
+        # written to /tmp/triage-<run_id>/run.json so it flows to
+        # downstream consumers via ADR-0015's step-output
+        # composition — OutputKind.ANALYSIS is the right shape
+        # (empty diff is success, no commit expected; the dispatch
+        # side effects happen via separate `treadmill plan submit`
+        # subprocess calls from inside the role's tooling). The
+        # full system_prompt is bundled at
+        # treadmill_api/prompts/role_ui_triage_v1.md (canonical
+        # source: docs/triage/role-ui-triage.v1.md; the two are
+        # pinned in lockstep by test_starters).
+        "id": "role-ui-triage",
+        "model": "claude-sonnet-4-6",
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": _load_prompt("role_ui_triage_v1.md"),
+    },
 ]
 
 
@@ -1291,6 +1334,27 @@ STARTERS: list[dict[str, Any]] = [
         "roles": _roles_for("role-prompt-optimizer"),
         "steps": [
             {"name": "optimize", "role_id": "role-prompt-optimizer"},
+        ],
+    },
+    {
+        # ADR-0061. Single-step workflow that runs role-ui-triage
+        # against one or more target URLs and emits TriageFinding[]
+        # rows + (when policy says so) dispatches plans for the
+        # fixes. Invoked either via the periodic schedule (Step 5)
+        # or operator on-demand via
+        # ``treadmill workflows trigger wf-ui-triage --payload '{...}'``.
+        # Single-author shape per ADR-0015 §"Per-workflow shape
+        # matrix" (wf-author / wf-review / wf-validate are
+        # single-step).
+        "id": "wf-ui-triage",
+        "description": (
+            "Drive a headless browser against target URL(s), produce "
+            "labelable TriageFinding records, and dispatch plans for "
+            "the fixes (ADR-0061)."
+        ),
+        "roles": _roles_for("role-ui-triage"),
+        "steps": [
+            {"name": "triage", "role_id": "role-ui-triage"},
         ],
     },
 ]
