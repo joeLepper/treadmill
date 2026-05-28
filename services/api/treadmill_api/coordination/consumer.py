@@ -345,6 +345,15 @@ class CoordinationConsumer:
             )
             return
 
+        # ADR-0061 — project task-terminal verbs onto any triage_findings
+        # row whose dispatched_plan_id matches the task's plan. Other task
+        # verbs fall through to the catch-all "ignoring" log below.
+        if et == "task" and action in ("cancelled", "superseded"):
+            await self._handle_task_terminal_for_triage(
+                record, action=action, payload=record.get("payload") or {},
+            )
+            return
+
         if et != "step":
             logger.debug("coordination ignoring %s.%s", et, action)
             return
@@ -732,6 +741,14 @@ class CoordinationConsumer:
                 await self._try_task_prs_fallback_on_pr_merged(session, typed)
                 # Set task_prs.closed_at when a PR merges.
                 await self._set_task_prs_closed_at_on_pr_merged(session, typed)
+                # ADR-0061 — project the merge onto any triage_findings
+                # row whose dispatched_plan_id matches this PR's task's
+                # plan. Runs after the task_prs fallback so an operator-
+                # completed PR that only just got its task_prs row still
+                # projects on the same delivery.
+                await self._update_triage_outcome_on_pr_merged(
+                    session, record, typed,
+                )
 
             await session.commit()
 
@@ -956,6 +973,134 @@ class CoordinationConsumer:
             "task_prs.closed_at set for repo=%s pr=%d (no-op if already set)",
             typed.repo, typed.pr_number,
         )
+
+    async def _update_triage_outcome_on_pr_merged(
+        self,
+        session: AsyncSession,
+        record: dict[str, Any],
+        typed: Any,
+    ) -> None:
+        """Project ``triage_findings.outcome_state='merged'`` for any
+        finding whose ``dispatched_plan_id`` matches the plan of the task
+        bound to this PR (ADR-0061 §"Outcome tracking").
+
+        Resolves the owning plan via ``task_prs → tasks`` so the helper
+        composes with ``_try_task_prs_fallback_on_pr_merged`` (operator-
+        completed PRs that only acquired a ``task_prs`` row on this very
+        delivery still project on the same transaction).
+
+        Idempotent on re-delivery: we read ``outcome_merged_at`` off the
+        persisted Event row's ``created_at`` (stable across retries), so
+        a re-projected event writes the same values.
+
+        No-op when the PR has no task_prs row (operator-authored PRs we
+        can't map back to a Treadmill task) or when the task's plan has
+        no triage_findings row pointing at it (the common case — most
+        PRs are not triage-dispatched).
+        """
+        # Resolve plan_id via the task_prs bridge. The same join the
+        # plan-merge trigger and conflict sweep use; cheap on the
+        # ``(repo, pr_number)`` index.
+        plan_id = await session.scalar(
+            select(Task.plan_id)
+            .join(TaskPR, TaskPR.task_id == Task.id)
+            .where(
+                func.lower(TaskPR.repo) == func.lower(typed.repo),
+                TaskPR.pr_number == typed.pr_number,
+            )
+        )
+        if plan_id is None:
+            return
+
+        # Pull outcome_merged_at off the just-persisted Event row so
+        # re-projection writes a stable value. NULL is acceptable — the
+        # column is nullable — but in practice every well-formed record
+        # carries an event_id, the audit INSERT/no-op leaves a row, and
+        # this SELECT returns its created_at.
+        merged_at: Any = None
+        raw_event_id = record.get("event_id")
+        if raw_event_id:
+            try:
+                event_uuid = uuid.UUID(str(raw_event_id))
+            except (ValueError, TypeError):
+                event_uuid = None
+            if event_uuid is not None:
+                merged_at = await session.scalar(
+                    select(Event.created_at).where(Event.id == event_uuid)
+                )
+
+        from treadmill_api.triage_store import TriageStore
+
+        rowcount = await TriageStore().update_outcome(
+            session,
+            dispatched_plan_id=plan_id,
+            outcome_state="merged",
+            outcome_pr_number=typed.pr_number,
+            outcome_merged_at=merged_at,
+        )
+        if rowcount:
+            logger.info(
+                "triage outcome projected: plan_id=%s pr=%d (rows=%d)",
+                plan_id, typed.pr_number, rowcount,
+            )
+
+    async def _handle_task_terminal_for_triage(
+        self,
+        record: dict[str, Any],
+        *,
+        action: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        """Project ``triage_findings.outcome_state`` for terminal task
+        verbs (ADR-0061 §"Outcome tracking").
+
+        Handles ``task.cancelled`` (operator cancel) and
+        ``task.superseded`` (architect supersede). The audit Event row
+        commits in the same transaction as the outcome UPDATE so no
+        sweeper / race window is needed. Malformed payloads are dropped
+        before any DB access (same poison-safe pattern as the github /
+        step paths).
+        """
+        try:
+            parse_payload("task", action or "", payload)
+        except (UnknownEventTypeError, ValidationError) as exc:
+            logger.warning(
+                "coordination dropping malformed task.%s payload: %s",
+                action, exc,
+            )
+            return
+
+        task_id = _uuid_or_none(record.get("task_id"))
+        if task_id is None:
+            logger.warning(
+                "task.%s without task_id; skipping triage projection", action,
+            )
+            return
+
+        async with self.sessionmaker() as session:
+            await self._persist_event(session, record, payload)
+
+            plan_id = await session.scalar(
+                select(Task.plan_id).where(Task.id == task_id)
+            )
+            if plan_id is not None:
+                from treadmill_api.triage_store import TriageStore
+
+                rowcount = await TriageStore().update_outcome(
+                    session,
+                    dispatched_plan_id=plan_id,
+                    outcome_state=action or "",
+                    outcome_pr_number=None,
+                    outcome_merged_at=None,
+                )
+                if rowcount:
+                    logger.info(
+                        "triage outcome projected: plan_id=%s state=%s "
+                        "(rows=%d)",
+                        plan_id, action, rowcount,
+                    )
+
+            await session.commit()
 
     async def _handle_plan_doc_merged(self, typed: Any) -> None:
         """Run the ADR-0021 plan-merge trigger after a ``pr_merged`` event.

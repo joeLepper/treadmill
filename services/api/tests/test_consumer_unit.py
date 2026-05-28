@@ -30,6 +30,14 @@ class _StubSession:
         self.execute = AsyncMock()
         self.commit = AsyncMock()
         self.flush = AsyncMock()
+        # ``scalar`` was added to the stub to support the ADR-0061
+        # triage-outcome projection, which uses
+        # ``await session.scalar(select(...))`` to look up the
+        # dispatched-finding rows tied to a freshly merged PR. Tests
+        # that don't care about the triage hook never touch this
+        # mock; tests that do care can configure its return_value
+        # locally.
+        self.scalar = AsyncMock(return_value=None)
 
 
 def _stub_factory(session: _StubSession) -> Any:
