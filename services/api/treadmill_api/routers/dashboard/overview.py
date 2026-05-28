@@ -35,7 +35,7 @@ Stubs (flagged in the PR description per the task spec, surfaced through
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -356,6 +356,10 @@ async def get_overview(
     bucket: Annotated[str | None, Query()] = None,
     account: Annotated[str | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
+    reason: Annotated[
+        Literal["architect_cap", "stuck_task_sweep", "gate-broken"] | None,
+        Query(),
+    ] = None,
 ) -> OverviewResponse:
     """Return the operator-dashboard overview payload.
 
@@ -365,6 +369,11 @@ async def get_overview(
       * ``bucket``  — one of ``blocked`` / ``inflight`` / ``hopper``.
       * ``account`` — Claude account name (``personal``, ``osmo``, …).
       * ``q``       — case-insensitive substring across title / id / repo.
+      * ``reason``  — escalation sub-classifier from
+        ``TaskEscalatedToOperator.reason`` (ADR-0058): one of
+        ``architect_cap`` / ``stuck_task_sweep`` / ``gate-broken``.
+        Narrows the ``escalations`` array only; ``tasks`` / bucket
+        counts stay unfiltered so the page chrome doesn't drift.
 
     Filters narrow the ``tasks`` array only — ``bucketCounts`` stays
     global so the bucket-pill totals on the page chrome don't drift when
@@ -405,6 +414,14 @@ async def get_overview(
         for row in escalations_rows
     ]
     escalation_by_task: dict[str, Escalation] = {e.task_id: e for e in escalations}
+
+    # ``reason`` narrows the surfaced ``escalations`` array (per-reason
+    # triage view, ADR-0058 Step 5). Applied AFTER ``escalation_by_task``
+    # is built so bucket math + per-task ``escalated`` flags stay
+    # independent of the filter — mirrors how ``repo``/``account``
+    # narrow ``tasks`` without disturbing ``bucketCounts``.
+    if reason is not None:
+        escalations = [e for e in escalations if e.reason == reason]
 
     # Build the full Task list (pre-filter, pre-bucket).
     all_tasks: list[Task] = []
