@@ -121,6 +121,9 @@ class _FakePublisher:
     def publish_step_failed(self, **kwargs) -> None:
         self.events.append(("failed", kwargs))
 
+    def publish_task_worker_deps_failed(self, **kwargs) -> None:
+        self.events.append(("worker_deps_failed", kwargs))
+
 
 def _claim(
     step_id: str,
@@ -1321,3 +1324,134 @@ def test_queue_hygiene_delete_strictly_inside_try_after_success(
         f"_delete was called after _handle_step raised; order={call_order}"
     )
     assert sqs2.deleted == []
+
+
+# ── ADR-0059 Step 4: task.worker_deps_failed emit on materialize failure ─────
+
+
+def test_handle_step_emits_worker_deps_failed_then_step_failed_on_materialize_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0059 Step 4: a ``WorkerDepsMaterializationError`` from
+    ``repo_deps.materialize`` publishes ``task.worker_deps_failed`` (with
+    ``stage`` / ``detail`` / ``worker_deps_hash`` lifted off the exception
+    + a fresh ``compute_deps_hash`` over the registered deps) AND publishes
+    ``step.failed`` for the audit trail, then re-raises so the runner's
+    don't-delete-on-error contract (ADR-0025) leaves the SQS message in
+    flight. ``_execute`` must not run when the overlay couldn't be
+    materialized.
+    """
+    from treadmill_agent import repo_deps as repo_deps_mod
+    from treadmill_agent import startup_auth as startup_auth_mod
+    from treadmill_api.models.onboarding import WorkerDeps
+
+    ctx = _ctx(repo="joeLepper/treadmill")
+    execute_called: list[bool] = []
+
+    deps = WorkerDeps(python=["aws-cdk-lib==99.99.99"], node=[], binaries=[])
+
+    def _fake_fetch(settings, repo):  # type: ignore[no-untyped-def]
+        return deps
+
+    def _boom_materialize(repo, worker_deps, *, overlay_root=None):  # type: ignore[no-untyped-def]
+        raise repo_deps_mod.WorkerDepsMaterializationError(
+            stage="python",
+            detail="pip install failed: No matching distribution for aws-cdk-lib==99.99.99",
+        )
+
+    def _track_execute(c, s):
+        execute_called.append(True)
+        from treadmill_agent.events import StepOutput
+        return StepOutput(summary="x", decision="pushed", commit_sha="a"), None
+
+    monkeypatch.setattr(
+        startup_auth_mod, "fetch_repo_worker_deps", _fake_fetch,
+    )
+    monkeypatch.setattr(repo_deps_mod, "materialize", _boom_materialize)
+    monkeypatch.setattr(runner, "_execute", _track_execute)
+
+    sqs = _FakeSqs([_claim(
+        ctx.step_id, task_id=ctx.task_id, plan_id=ctx.plan_id,
+        run_id=ctx.run_id, receipt="rh-deps-fail",
+    )])
+    pub = _FakePublisher()
+    with pytest.raises(
+        repo_deps_mod.WorkerDepsMaterializationError,
+        match="pip install failed",
+    ):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
+
+    # _execute never ran — materialize failed first.
+    assert execute_called == []
+
+    # Audit trail: started, then worker_deps_failed BEFORE step.failed so the
+    # operator dashboard's escalations surface sees the typed signal even if
+    # the consumer projects step.failed onto a generic bucket first.
+    names = [name for name, _ in pub.events]
+    assert names == ["started", "worker_deps_failed", "failed"]
+
+    deps_failed_kwargs = pub.events[1][1]
+    assert deps_failed_kwargs["task_id"] == ctx.task_id
+    assert deps_failed_kwargs["plan_id"] == ctx.plan_id
+    assert deps_failed_kwargs["run_id"] == ctx.run_id
+    assert deps_failed_kwargs["step_id"] == ctx.step_id
+    assert deps_failed_kwargs["repo"] == "joeLepper/treadmill"
+    assert deps_failed_kwargs["stage"] == "python"
+    assert "pip install failed" in deps_failed_kwargs["detail"]
+    # The hash is the canonical sha256 over the same WorkerDeps the worker
+    # tried to materialize — operators can correlate two failures sharing
+    # a registration shape.
+    assert deps_failed_kwargs["worker_deps_hash"] == repo_deps_mod.compute_deps_hash(deps)
+
+    # step.failed still carries the exception's str() so the per-step audit
+    # trail isn't lost.
+    failed_kwargs = pub.events[2][1]
+    assert failed_kwargs["step_id"] == ctx.step_id
+    assert "pip install failed" in failed_kwargs["error"]
+
+    # Queue-hygiene: SQS message stays in flight for redelivery / DLQ.
+    assert sqs.deleted == []
+
+
+def test_handle_step_does_not_emit_worker_deps_failed_on_generic_overlay_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only ``WorkerDepsMaterializationError`` triggers the typed event;
+    a generic exception (e.g. an unexpected ``RuntimeError`` in the
+    materialize path) still publishes ``step.failed`` but does NOT emit
+    ``task.worker_deps_failed`` — the typed event's contract is "the
+    registered deps spec failed to materialize", not "anything went
+    wrong near the overlay seam"."""
+    from treadmill_agent import repo_deps as repo_deps_mod
+    from treadmill_agent import startup_auth as startup_auth_mod
+    from treadmill_api.models.onboarding import WorkerDeps
+
+    ctx = _ctx()
+
+    monkeypatch.setattr(
+        startup_auth_mod, "fetch_repo_worker_deps",
+        lambda settings, repo: WorkerDeps(),
+    )
+
+    def _boom_materialize(repo, worker_deps, *, overlay_root=None):  # type: ignore[no-untyped-def]
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(repo_deps_mod, "materialize", _boom_materialize)
+
+    sqs = _FakeSqs([_claim(
+        ctx.step_id, task_id=ctx.task_id, plan_id=ctx.plan_id,
+        run_id=ctx.run_id, receipt="rh-generic-fail",
+    )])
+    pub = _FakePublisher()
+    with pytest.raises(RuntimeError, match="disk full"):
+        runner.run(
+            settings=_settings(), api=_FakeApi(ctx),
+            sqs_client=sqs, publisher=pub,
+        )
+
+    names = [name for name, _ in pub.events]
+    assert names == ["started", "failed"]
+    assert "worker_deps_failed" not in names

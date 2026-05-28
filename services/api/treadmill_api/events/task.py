@@ -131,3 +131,34 @@ class TaskAutoMerged(EventPayload):
     merged_sha: str
     pr_number: int
     repo: str
+
+
+class TaskWorkerDepsFailed(EventPayload):
+    """Emitted when ``repo_deps.materialize`` raises
+    ``WorkerDepsMaterializationError`` (ADR-0059 Step 4).
+
+    The operator surface (dashboard escalations list) gets a distinct
+    event vs ``gate-broken`` / ``architect_cap`` / ``stuck_task_sweep``
+    so a worker-deps registration failure is triaged independently of
+    the verdict-driven escalations. The step still fails (the runner's
+    materialize-failure path re-raises after publishing this event), so
+    ``step.failed`` carries the audit trail while this typed event is
+    the operator-visible signal that the repo's ``WorkerDeps``
+    registration needs attention.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "worker_deps_failed"
+
+    task_id: uuid.UUID
+    repo: str
+    # Matches ``WorkerDepsMaterializationError.stage`` (the three install
+    # phases in ``workers/agent/treadmill_agent/repo_deps.py``).
+    stage: Literal["python", "node", "binary"]
+    # The exception's ``detail`` field — captured stderr or the
+    # checksum-mismatch line — so the operator can read the actual
+    # failure on the escalation event without re-running the loop.
+    detail: str = pydantic.Field(min_length=1)
+    # ``compute_deps_hash(worker_deps)`` for cache-correlation: an
+    # operator can see whether two failures share a registration shape.
+    worker_deps_hash: str = pydantic.Field(min_length=1)
