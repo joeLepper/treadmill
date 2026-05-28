@@ -25,14 +25,15 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-stuck-task-sweep",
     "wf-o11y-regression-scan",
     "wf-tune-judge-prompts",  # ADR-0053 Wave 3 (added 2026-05-26)
+    "wf-ui-triage",  # ADR-0061 Step 5 (added 2026-05-28)
 }
 
 
 # ── SEED_SCHEDULES content invariants ────────────────────────────────────────
 
 
-def test_seed_schedules_has_five_entries() -> None:
-    assert len(SEED_SCHEDULES) == 5
+def test_seed_schedules_has_six_entries() -> None:
+    assert len(SEED_SCHEDULES) == 6
 
 
 def test_seed_schedules_workflow_ids() -> None:
@@ -51,6 +52,7 @@ def test_seed_schedules_cron_expressions() -> None:
     assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
     assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
     assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
+    assert by_wf["wf-ui-triage"] == "7 */4 * * *"
 
 
 def test_seed_schedules_quiet_hours() -> None:
@@ -68,6 +70,40 @@ def test_seed_schedules_payload_templates() -> None:
     assert by_wf["wf-crystallize-learning"] == {"trigger": "scheduled-sweep"}
     assert by_wf["wf-stuck-task-sweep"] == {"trigger": "scheduled-sweep"}
     assert by_wf["wf-o11y-regression-scan"] == {"trigger": "scheduled-scan"}
+
+
+def test_wf_ui_triage_payload_template_shape() -> None:
+    """Pin wf-ui-triage's invocation inputs (ADR-0061 Step 5).
+
+    The role's first step (role-ui-triage) reads ``mode``, ``target_urls``,
+    and ``corpus_bucket`` off the dispatched payload; periodic dispatch
+    must carry the literal values the role's required-reading section
+    expects (docs/triage/role-ui-triage.v1.md § "Invocation inputs").
+    """
+    by_wf = {s["workflow_id"]: s["payload_template"] for s in SEED_SCHEDULES}
+    triage = by_wf["wf-ui-triage"]
+    assert triage["trigger"] == "scheduled-tick"
+    assert triage["mode"] == "periodic"
+    assert triage["target_urls"] == ["http://localhost:5174/"]
+    assert triage["corpus_bucket"] == "treadmill-personal-triage-corpus"
+
+
+def test_scheduled_dispatch_payloads_carry_repo() -> None:
+    """Every scheduled workflow that uses synthetic-task dispatch (ADR-0035 /
+    ADR-0057) MUST carry ``repo`` in its payload_template — the
+    schedule-payload-needs-repo trap: rendered_payload["repo"] feeds the
+    worker workspace clone; an empty value silently hangs the step
+    pending forever. Both wf-tune-judge-prompts and wf-ui-triage rely on
+    this; the deterministic ops-bots (sweeps / audits / scans) do not
+    because they short-circuit before dispatch.
+    """
+    by_wf = {s["workflow_id"]: s["payload_template"] for s in SEED_SCHEDULES}
+    for wf_id in ("wf-tune-judge-prompts", "wf-ui-triage"):
+        payload = by_wf[wf_id]
+        assert payload.get("repo"), (
+            f"{wf_id!r} payload_template missing non-empty 'repo' — "
+            f"taskless dispatch will hang the step (see schedule-payload-needs-repo)"
+        )
 
 
 def test_all_entries_have_required_fields() -> None:
@@ -118,9 +154,9 @@ def _existing_client(existing: list[dict]) -> MagicMock:
     return client
 
 
-def test_seed_schedules_creates_all_five_on_fresh_install() -> None:
+def test_seed_schedules_creates_all_six_on_fresh_install() -> None:
     created = seed_schedules(_fresh_client())
-    assert created == 5
+    assert created == 6
 
 
 def test_seed_schedules_idempotent_when_all_exist() -> None:
@@ -144,18 +180,18 @@ def test_seed_schedules_no_posts_when_all_exist() -> None:
 
 
 def test_seed_schedules_only_posts_missing() -> None:
-    """When one schedule already exists, only the other four are POSTed."""
+    """When one schedule already exists, only the remaining five are POSTed."""
     existing = [{"workflow_id": "wf-documentarian-audit", "cron_expression": "0 9 * * 1"}]
     client = _existing_client(existing)
     created = seed_schedules(client)
-    assert created == 4
+    assert created == 5
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
     posted_wf_ids = {c.kwargs["json"]["workflow_id"] for c in post_calls}
     assert "wf-documentarian-audit" not in posted_wf_ids
-    assert len(posted_wf_ids) == 4
+    assert len(posted_wf_ids) == 5
 
 
-def test_seed_schedules_posts_all_five_workflow_ids() -> None:
+def test_seed_schedules_posts_all_six_workflow_ids() -> None:
     client = _fresh_client()
     seed_schedules(client)
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
@@ -215,6 +251,7 @@ def test_seed_schedules_posts_correct_cron_expressions() -> None:
     assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
     assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
     assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
+    assert by_wf["wf-ui-triage"] == "7 */4 * * *"
 
 
 # ── seed_schedules_if_empty() — DB path ──────────────────────────────────────
@@ -235,11 +272,11 @@ def test_seed_schedules_if_empty_skips_when_rows_exist() -> None:
     session.commit.assert_not_called()
 
 
-def test_seed_schedules_if_empty_inserts_five_on_fresh_db() -> None:
+def test_seed_schedules_if_empty_inserts_six_on_fresh_db() -> None:
     session = _make_session(existing_count=0)
     result = seed_schedules_if_empty(session)
-    assert result == 5
-    assert session.add.call_count == 5
+    assert result == 6
+    assert session.add.call_count == 6
     session.commit.assert_called_once()
 
 
