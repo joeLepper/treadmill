@@ -417,6 +417,127 @@ def test_overview_escalated_task_lands_in_blocked_bucket() -> None:
     }
 
 
+# ── ``reason`` filter (ADR-0058 Step 5) ───────────────────────────────────────
+
+
+def _multi_reason_escalation_session() -> tuple[_StubSession, dict[str, str]]:
+    """Three escalated tasks — one per ADR-0058 reason value. Returns the
+    session and a ``{reason: task_id}`` map so tests can pin the
+    expected surviving row by id without hard-coding uuids."""
+    cap_task = _task_row(
+        derived_status="wf-architecture-resolve: executing",
+        title="Architect cap hit",
+        run_id=uuid.uuid4(),
+    )
+    sweep_task = _task_row(
+        derived_status="wf-quick: executing",
+        title="Stuck task sweep escalation",
+        run_id=uuid.uuid4(),
+    )
+    gate_task = _task_row(
+        derived_status="wf-architecture-resolve: executing",
+        title="Gate-broken escalation",
+        run_id=uuid.uuid4(),
+    )
+    escalated_at = _now() - timedelta(minutes=5)
+    session = _StubSession(
+        tasks=[cap_task, sweep_task, gate_task],
+        escalations=[
+            {
+                "task_id": cap_task["id"], "repo": cap_task["repo"],
+                "title": cap_task["title"], "escalated_at": escalated_at,
+                "reason": "architect_cap",
+            },
+            {
+                "task_id": sweep_task["id"], "repo": sweep_task["repo"],
+                "title": sweep_task["title"], "escalated_at": escalated_at,
+                "reason": "stuck_task_sweep",
+            },
+            {
+                "task_id": gate_task["id"], "repo": gate_task["repo"],
+                "title": gate_task["title"], "escalated_at": escalated_at,
+                "reason": "gate-broken",
+            },
+        ],
+    )
+    return session, {
+        "architect_cap": cap_task["id"],
+        "stuck_task_sweep": sweep_task["id"],
+        "gate-broken": gate_task["id"],
+    }
+
+
+@pytest.mark.parametrize(
+    "reason", ["architect_cap", "stuck_task_sweep", "gate-broken"],
+)
+def test_overview_filter_by_reason_narrows_escalations(reason: str) -> None:
+    """``?reason=`` narrows ``escalations`` to rows whose escalation
+    event's ``payload.reason`` matches. The ADR-0058 sub-classifier
+    surface for the dashboard's per-reason badges."""
+    session, task_ids = _multi_reason_escalation_session()
+    app = _build_app(session)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/overview", params={"reason": reason},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["escalations"]) == 1
+    surfaced = body["escalations"][0]
+    assert surfaced["reason"] == reason
+    assert surfaced["task_id"] == task_ids[reason]
+
+
+def test_overview_reason_filter_keeps_bucket_counts_global() -> None:
+    """``?reason=`` only narrows the ``escalations`` array — bucket
+    counts and the ``tasks`` list stay unfiltered so the page chrome
+    keeps reflecting global state (mirrors ``repo``/``account``/``bucket``
+    semantics)."""
+    session, _ = _multi_reason_escalation_session()
+    app = _build_app(session)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/overview", params={"reason": "gate-broken"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["escalations"]) == 1
+    # All three tasks remain — every escalation flags its task as
+    # ``escalated``, so all three bucket as ``blocked`` regardless of
+    # the surfaced-escalations filter.
+    assert len(body["tasks"]) == 3
+    assert body["bucketCounts"] == {
+        "blocked": 3, "inflight": 0, "hopper": 0, "total": 3,
+    }
+    assert all(t["escalated"] is True for t in body["tasks"])
+
+
+def test_overview_reason_filter_rejects_unknown_value() -> None:
+    """``reason`` is a closed enum — anything outside the three ADR-0058
+    values is a 422 from FastAPI's Literal validation."""
+    session, _ = _multi_reason_escalation_session()
+    app = _build_app(session)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/overview", params={"reason": "bogus"},
+        )
+    assert response.status_code == 422
+
+
+def test_overview_reason_filter_unset_returns_all_escalations() -> None:
+    """No ``reason`` param ⇒ all escalations surface (pre-ADR-0058
+    behavior is preserved exactly when the filter is omitted)."""
+    session, _ = _multi_reason_escalation_session()
+    app = _build_app(session)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/dashboard/overview")
+    assert response.status_code == 200
+    body = response.json()
+    assert {e["reason"] for e in body["escalations"]} == {
+        "architect_cap", "stuck_task_sweep", "gate-broken",
+    }
+
+
 # ── Bucket derivation parity with mock.ts `operatorBucket()` ──────────────────
 
 
