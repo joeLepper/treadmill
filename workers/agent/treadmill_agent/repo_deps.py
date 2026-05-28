@@ -30,12 +30,14 @@ import contextvars
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import urllib.request
 from contextvars import Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse, urlunparse
 
 if TYPE_CHECKING:
     from treadmill_api.models.onboarding import BinarySpec, WorkerDeps
@@ -106,7 +108,6 @@ class RepoOverlay:
         if self.node_modules_path is not None:
             path_parts.append(str(self.node_modules_path / ".bin"))
 
-        import os
         existing_path = os.environ.get("PATH", "")
         if existing_path:
             path_parts.append(existing_path)
@@ -256,6 +257,46 @@ def materialize(
     )
 
 
+def _install_proxy_url() -> str | None:
+    """Credentialed proxy URL for install-phase egress (ADR-0060).
+
+    Combines ``TREADMILL_INSTALL_PROXY_TOKEN`` (minted per worker by the
+    autoscaler) with the worker's base ``HTTPS_PROXY`` to form
+    ``http://install:<token>@<host>:<port>`` — the only signal the
+    egress proxy honors when deciding whether to elevate a request to
+    the install-phase allowlist. Returns ``None`` when either env var
+    is missing so the caller falls back to the task-phase
+    (uncredentialed) proxy that the worker entrypoint already set.
+
+    Stripping any existing userinfo from the base URL keeps the helper
+    idempotent if a caller has already credentialed the proxy.
+    """
+    token = os.environ.get("TREADMILL_INSTALL_PROXY_TOKEN")
+    base = os.environ.get("HTTPS_PROXY")
+    if not token or not base:
+        return None
+    parsed = urlparse(base)
+    netloc_host = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunparse(parsed._replace(netloc=f"install:{token}@{netloc_host}"))
+
+
+def _install_subprocess_env() -> dict[str, str] | None:
+    """Subprocess env for materialize()'s install-phase children.
+
+    Returns a copy of ``os.environ`` with ``HTTPS_PROXY`` / ``HTTP_PROXY``
+    overridden to the credentialed proxy URL when one is available, so
+    ``pip`` / ``npm`` route through the install-phase allowlist.
+    Returns ``None`` when no credential is configured, which the
+    callers pass straight to ``subprocess.run(env=...)`` — equivalent
+    to inheriting the parent env (the task-phase contract: uncredentialed
+    ``HTTPS_PROXY`` if present, otherwise no proxy at all).
+    """
+    proxy_url = _install_proxy_url()
+    if proxy_url is None:
+        return None
+    return {**os.environ, "HTTPS_PROXY": proxy_url, "HTTP_PROXY": proxy_url}
+
+
 def _slugify_repo(repo: str) -> str:
     """``owner/name`` → ``owner__name`` so the overlay dir is path-safe."""
     return repo.replace("/", "__")
@@ -279,6 +320,7 @@ def _venv_site_packages(venv_path: Path) -> Path | None:
 
 def _install_python(venv_path: Path | None, specs: list[str]) -> None:
     assert venv_path is not None
+    env = _install_subprocess_env()
     try:
         subprocess.run(
             ["python", "-m", "venv", str(venv_path)],
@@ -286,6 +328,7 @@ def _install_python(venv_path: Path | None, specs: list[str]) -> None:
             capture_output=True,
             text=True,
             timeout=_SUBPROCESS_TIMEOUT,
+            env=env,
         )
     except subprocess.CalledProcessError as exc:
         raise WorkerDepsMaterializationError(
@@ -299,6 +342,7 @@ def _install_python(venv_path: Path | None, specs: list[str]) -> None:
             capture_output=True,
             text=True,
             timeout=_SUBPROCESS_TIMEOUT,
+            env=env,
         )
     except subprocess.CalledProcessError as exc:
         raise WorkerDepsMaterializationError(
@@ -315,6 +359,7 @@ def _install_node(overlay_dir: Path, specs: list[str]) -> None:
             capture_output=True,
             text=True,
             timeout=_SUBPROCESS_TIMEOUT,
+            env=_install_subprocess_env(),
         )
     except subprocess.CalledProcessError as exc:
         raise WorkerDepsMaterializationError(
@@ -333,15 +378,27 @@ def _install_binaries(binaries: list["BinarySpec"]) -> None:
     from treadmill_api.models.onboarding import BINARY_TARGET_PREFIX
 
     _BINARY_DIR.mkdir(parents=True, exist_ok=True)
+    proxy_url = _install_proxy_url()
     for spec in binaries:
         relative = spec.target_path[len(BINARY_TARGET_PREFIX):]
         target = _BINARY_DIR / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(  # noqa: S310 — onboarding-curated URL
-                spec.download_url, timeout=_SUBPROCESS_TIMEOUT,
-            ) as resp:
-                payload = resp.read()
+            if proxy_url is not None:
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler(
+                        {"http": proxy_url, "https": proxy_url},
+                    ),
+                )
+                with opener.open(  # noqa: S310 — onboarding-curated URL
+                    spec.download_url, timeout=_SUBPROCESS_TIMEOUT,
+                ) as resp:
+                    payload = resp.read()
+            else:
+                with urllib.request.urlopen(  # noqa: S310 — onboarding-curated URL
+                    spec.download_url, timeout=_SUBPROCESS_TIMEOUT,
+                ) as resp:
+                    payload = resp.read()
         except Exception as exc:  # noqa: BLE001
             raise WorkerDepsMaterializationError(
                 stage="binary",
