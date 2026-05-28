@@ -1039,6 +1039,61 @@ def test_role_rule_corpus_auditor_prompt_teaches_json_envelope() -> None:
         )
 
 
+# ── ADR-0058 Step 2: architect prompt has gate-broken classifier ────────────
+
+
+def test_role_architect_prompt_teaches_gate_broken_verdict() -> None:
+    """ADR-0058 Step 2: the architect's system prompt must reference the
+    new ``gate-broken`` verdict + the Trigger B sub-classifier that tells
+    the model when to use it. Without this prompt content the model has
+    only the syntactic capability (Step 1 schema) to emit the verdict —
+    but no guidance about WHEN.
+
+    The cues encode hard-won shape; if the prompt is refactored, these
+    invariants survive (or fail loudly so the refactor authors confirm
+    the equivalent guidance is still present)."""
+    from treadmill_api.starters import _ROLES_BY_ID
+
+    prompt = _ROLES_BY_ID["role-architect"]["system_prompt"]
+
+    # The four-verdict envelope template is in place.
+    assert "four-verdict envelope" in prompt, (
+        "prompt must call out the FOUR-verdict envelope, not three"
+    )
+    assert '"gate-broken"' in prompt, (
+        "JSON envelope template must list gate-broken as a valid verdict"
+    )
+    assert "gate_log_excerpt" in prompt, (
+        "envelope template must mention the required gate_log_excerpt field"
+    )
+
+    # Trigger B sub-classifier with concrete tooling-availability cues —
+    # this is the signal the model uses to choose gate-broken over amend.
+    assert "Trigger B sub-classifier" in prompt
+    for cue in (
+        "ModuleNotFoundError",
+        "command not found",
+        "docker daemon",
+        "Unable to locate credentials",
+    ):
+        assert cue in prompt, (
+            f"Trigger B sub-classifier must enumerate the {cue!r} "
+            "tooling-availability signature so the model recognizes "
+            "the gate-broken pattern in stderr"
+        )
+
+    # Verdict-meaning section + bias guidance — the two surfaces where the
+    # model is told NOT to fall back to amend when gate-broken applies.
+    assert "Bias toward gate-broken (NOT amend)" in prompt, (
+        "bias section must specifically steer away from amend when "
+        "tooling-availability cues are present in the stderr"
+    )
+
+    # The closing instruction lists all four verdicts.
+    for verdict in ("amend", "supersede", "accept-as-is", "gate-broken"):
+        assert verdict in prompt
+
+
 def test_rule_corpus_audit_envelope_importable_from_events() -> None:
     """``RuleCorpusAudit`` and ``RuleCorpusAuditEntry`` must be importable
     from ``treadmill_api.events`` so the disposition layer can parse the
