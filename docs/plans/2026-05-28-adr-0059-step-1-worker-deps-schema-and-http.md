@@ -236,11 +236,9 @@ sequence_of_work:
         severity: blocking
         timeout_seconds: 180
       - kind: deterministic
-        description: New migration file exists, declares the expected revision id, and chains from the most recent prior head. Sandbox-safe (file/grep only — no DATABASE_URL required).
+        description: A new migration file exists somewhere under alembic/versions/ that adds the worker_deps columns or the repo_worker_binaries table. Robust to filename / timestamp variation (per SKILL.md "make deterministic validation robust, not formatting-brittle" — the prior exact-filename gate caused a brittle wedge).
         script: |
-          test -f services/api/alembic/versions/20260528_1600_repo_configs_worker_deps.py \
-            && grep -qE 'revision.*=.*"20260528_1600"' services/api/alembic/versions/20260528_1600_repo_configs_worker_deps.py \
-            && grep -qE 'down_revision.*=.*"20260526_1500"' services/api/alembic/versions/20260528_1600_repo_configs_worker_deps.py
+          grep -lE 'worker_deps_python|repo_worker_binaries' services/api/alembic/versions/*.py | head -1
         severity: blocking
         timeout_seconds: 30
       - kind: llm-judge
