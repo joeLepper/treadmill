@@ -59,8 +59,9 @@ def test_existing_schedules_unchanged() -> None:
         "wf-stuck-task-sweep",
         "wf-o11y-regression-scan",
         "wf-tune-judge-prompts",
+        "wf-ui-triage",  # ADR-0061
     ):
         assert expected in workflow_ids, f"missing {expected} in SEED_SCHEDULES"
-    assert len(SEED_SCHEDULES) == 5, (
-        f"expected 5 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
+    assert len(SEED_SCHEDULES) == 6, (
+        f"expected 6 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
     )
