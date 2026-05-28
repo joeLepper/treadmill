@@ -240,6 +240,64 @@ def plan_list(
     raise typer.Exit(code=1)
 
 
+# ── plan validate ────────────────────────────────────────────────────────────
+
+
+@plan_app.command("validate")
+def plan_validate(
+    doc: Annotated[Path, typer.Argument(help="Path to a plan markdown doc.")],
+) -> None:
+    """Validate a plan doc against the SKILL.md authoring rules.
+
+    Catches sandbox-unsafe gates (live AWS, Docker, Postgres, package
+    registry egress, dev-machine absolute paths) and format-brittle
+    gates (exact-filename pins on timestamped artifacts, multi-arg
+    call-signature greps) before the plan is dispatched. Exits 0 on
+    clean, 1 on violations, 2 on parse errors.
+    """
+    if not doc.exists():
+        err_console.print(f"[red]doc file not found: {doc}[/red]")
+        raise typer.Exit(code=2)
+    content = doc.read_text(encoding="utf-8")
+
+    # Lazy-import: matches the existing pattern at line 456 — the CLI
+    # shares the API parser via the uv workspace member install.
+    from treadmill_api.parsers.plan_doc import PlanDocFormatError
+    from treadmill_cli.plan_validate import validate_plan_doc
+
+    try:
+        violations = validate_plan_doc(content)
+    except PlanDocFormatError as exc:
+        err_console.print(f"[red]plan parse error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:  # pydantic.ValidationError, etc.
+        err_console.print(f"[red]plan validation error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    if not violations:
+        console.print(f"[green]clean:[/green] {doc} ({len(content.splitlines())} lines)")
+        raise typer.Exit(code=0)
+
+    table = Table(title=f"Plan-rule violations ({len(violations)})")
+    table.add_column("Task", style="dim")
+    table.add_column("Where")
+    table.add_column("Rule", style="red")
+    table.add_column("Detail")
+    for v in violations:
+        where = (
+            f"validation[{v.validation_index}]"
+            if v.validation_index is not None
+            else "scope"
+        )
+        table.add_row(v.task_id, where, v.rule, v.detail)
+    console.print(table)
+    err_console.print(
+        "[red]plan failed validation; fix the gates above before "
+        "dispatching (see citations in SKILL.md)[/red]"
+    )
+    raise typer.Exit(code=1)
+
+
 # ── submit (intent shorthand; auto-creates implicit one-task plan) ───────────
 
 
