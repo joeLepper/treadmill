@@ -13,6 +13,7 @@ members = [
     "treadmill-agent",
     "treadmill-api",
     "treadmill-cli",
+    "treadmill-egress-proxy",
     "treadmill-infra",
     "treadmill-local",
     "treadmill-noop-worker",
@@ -2267,6 +2268,29 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=8.3.0" },
     { name = "pytest-httpx", specifier = ">=0.30.0" },
+]
+
+[[package]]
+name = "treadmill-egress-proxy"
+version = "0.0.0"
+source = { editable = "services/egress-proxy" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.7" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
 ]
 
 [[package]]
