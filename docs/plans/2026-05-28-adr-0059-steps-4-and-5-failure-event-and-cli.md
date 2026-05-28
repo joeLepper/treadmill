@@ -202,11 +202,17 @@ sequence_of_work:
           failures are a separate surface)
     validation:
       - kind: deterministic
-        description: New + extended worker-deps event tests pass.
+        description: New event-payload tests pass (services/api side).
         script: |
-          cd services/api && uv run pytest tests/test_task_worker_deps_failed_event.py -q && cd /home/joe/treadmill/workers/agent && uv run pytest tests/test_runner_dispositions.py -q
+          cd services/api && uv run pytest tests/test_task_worker_deps_failed_event.py -q
         severity: blocking
-        timeout_seconds: 180
+        timeout_seconds: 120
+      - kind: deterministic
+        description: Worker-side runner-disposition tests stay green (extended for the materialize-failure → emit path).
+        script: |
+          cd workers/agent && uv run pytest tests/test_runner_dispositions.py -q
+        severity: blocking
+        timeout_seconds: 120
       - kind: deterministic
         description: New event payload class is defined and exported from treadmill_api.events.
         script: |
