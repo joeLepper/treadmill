@@ -1886,6 +1886,84 @@ def test_architecture_handler_malformed_validator_tuning_drops_with_warn(
     assert any("validator_tuning" in r.message for r in caplog.records)
 
 
+# ── ADR-0058: gate-broken verdict ─────────────────────────────────────────────
+
+
+_GATE_STDERR_EXAMPLE = (
+    "--- stderr ---\n"
+    "Traceback (most recent call last):\n"
+    "  File \"/var/treadmill/workspaces/.../repo/app.py\", line 3, in <module>\n"
+    "    import aws_cdk\n"
+    "ModuleNotFoundError: No module named 'aws_cdk'\n"
+)
+
+
+def test_architecture_handler_gate_broken_verdict_routes_to_step_3_trigger(
+    tmp_path: Path,
+) -> None:
+    """ADR-0058 Step 1: the disposition accepts ``gate-broken`` + a
+    non-empty ``gate_log_excerpt``, surfaces both at top-level on the
+    payload, and emits an inert dispatch payload
+    (``workflow_id=None`` + ``intent='gate-broken-await-step-3'``)
+    pending the Step 3 API-side trigger."""
+    summary = (
+        '```json\n'
+        '{"verdict": "gate-broken", "reasoning": "Trigger B (ralph-loop '
+        'deadlock): cdk synth fails because aws_cdk is not in the worker '
+        'sandbox. Code is logically complete; gate is unsatisfiable.", '
+        '"target_artifact": "tasks/<id>/validation", '
+        f'"gate_log_excerpt": {json.dumps(_GATE_STDERR_EXAMPLE)}}}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "gate-broken"
+    assert out.payload["dispatch"]["workflow_id"] is None
+    assert out.payload["dispatch"]["intent"] == "gate-broken-await-step-3"
+    assert "ModuleNotFoundError" in out.payload["gate_log_excerpt"]
+
+
+def test_architecture_handler_gate_broken_without_excerpt_raises(
+    tmp_path: Path,
+) -> None:
+    """Per ADR-0058, ``verdict='gate-broken'`` without a non-empty
+    ``gate_log_excerpt`` is a parse failure. The disposition forbids
+    the worker from emitting an excerpt-less gate-broken so the step
+    fails fast rather than dispatching an empty-evidence escalation."""
+    summary = (
+        '```json\n'
+        '{"verdict": "gate-broken", "reasoning": "The gate is broken", '
+        '"target_artifact": "tasks/<id>/validation"}\n'
+        '```'
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    with pytest.raises(ArchitectVerdictParseError) as exc_info:
+        handle_architecture(ctx)
+    assert "gate_log_excerpt" in str(exc_info.value)
+
+
+def test_architecture_handler_prose_fallback_extracts_gate_broken(
+    tmp_path: Path,
+) -> None:
+    """Prose-fallback parser recognizes ``trigger b (ralph-loop deadlock)``
+    and ``the gate is broken`` style cues. Since prose can't recover
+    the original gate stderr, the fallback synthesizes a placeholder
+    excerpt that satisfies the gate_log_excerpt requirement; the
+    disposition still emits gate-broken with the prose reasoning."""
+    summary = (
+        "After reviewing the loop, this is Trigger B (ralph-loop "
+        "deadlock). The author has produced logically-complete code "
+        "but the deterministic gate cannot be satisfied. The gate is "
+        "broken — the worker sandbox is missing the tooling the gate "
+        "requires."
+    )
+    ctx = _arch_ctx(tmp_path, summary)
+    out = handle_architecture(ctx)
+    assert out.decision == "gate-broken"
+    assert "prose-parsed" in out.payload["gate_log_excerpt"]
+    assert out.payload.get("parsed_from_prose") is True
+
+
 # ── crystallization handler (wf-crystallize-learning) ─────────────────────────
 
 
