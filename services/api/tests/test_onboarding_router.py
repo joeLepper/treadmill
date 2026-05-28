@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from treadmill_api.dependencies_db import get_session
+from treadmill_api.models.onboarding import BinarySpec, WorkerDeps
 from treadmill_api.repo_config import RepoConfig
 from treadmill_api.repo_profile import RepoProfile
 from treadmill_api.routers import onboarding as onboarding_router_mod
@@ -113,6 +114,7 @@ def test_onboard_repo_explicit_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         "mode": "adapt",
         "auto_merge_blocked": True,
         "claude_account": None,
+        "worker_deps": {"python": [], "node": [], "binaries": []},
     }
     assert session.committed
     assert len(store.profiles) == 1
@@ -263,6 +265,7 @@ def test_get_repo_returns_config(monkeypatch: pytest.MonkeyPatch) -> None:
         "test_command": "make unit_test",
         "lint_command": None,
         "claude_account": None,
+        "worker_deps": {"python": [], "node": [], "binaries": []},
     }
 
 
@@ -319,3 +322,171 @@ def test_get_repo_404_when_not_onboarded(
 
     assert response.status_code == 404, response.text
     assert "not onboarded" in response.json()["detail"]
+
+
+# ── ADR-0059: worker_deps round-trip ─────────────────────────────────────────
+
+
+def test_onboard_repo_accepts_worker_deps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST forwards ``worker_deps`` (Python + Node + binaries) to the
+    persisted :class:`RepoConfig` and echoes it on the response."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "owner/example",
+        "profile": {"languages": ["python"]},
+        "worker_deps": {
+            "python": ["aws-cdk-lib==2.214.0"],
+            "node": ["typescript@5.4.5"],
+            "binaries": [
+                {
+                    "name": "cdk",
+                    "download_url": "https://example.com/cdk",
+                    "sha256_checksum": "a" * 64,
+                    "target_path": "/var/treadmill/repo-bin/cdk",
+                },
+            ],
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["worker_deps"] == body["worker_deps"]
+    assert store.configs[0].worker_deps == WorkerDeps(
+        python=["aws-cdk-lib==2.214.0"],
+        node=["typescript@5.4.5"],
+        binaries=[
+            BinarySpec(
+                name="cdk",
+                download_url="https://example.com/cdk",
+                sha256_checksum="a" * 64,
+                target_path="/var/treadmill/repo-bin/cdk",
+            )
+        ],
+    )
+
+
+def test_onboard_repo_defaults_worker_deps_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``worker_deps`` is omitted the handler hands an empty
+    :class:`WorkerDeps` to the store — never ``None`` — so downstream
+    callers can lean on the materialized shape."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "owner/example",
+        "profile": {"languages": ["python"]},
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["worker_deps"] == {
+        "python": [],
+        "node": [],
+        "binaries": [],
+    }
+    assert store.configs[0].worker_deps == WorkerDeps()
+
+
+def test_onboard_repo_rejects_invalid_worker_deps_checksum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pydantic validation rejects uppercase hex in ``sha256_checksum``
+    (422); nothing gets persisted."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "owner/example",
+        "profile": {"languages": ["python"]},
+        "worker_deps": {
+            "binaries": [
+                {
+                    "name": "cdk",
+                    "download_url": "https://example.com/cdk",
+                    "sha256_checksum": "A" * 64,  # uppercase — rejected
+                    "target_path": "/var/treadmill/repo-bin/cdk",
+                },
+            ],
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 422, response.text
+    assert not session.committed
+    assert store.configs == []
+
+
+def test_get_repo_returns_worker_deps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _StubSession()
+    store = _FakeStore()
+    store.config_by_repo["owner/example"] = RepoConfig(
+        repo="owner/example",
+        worker_deps=WorkerDeps(
+            python=["aws-cdk-lib==2.214.0"],
+            binaries=[
+                BinarySpec(
+                    name="cdk",
+                    download_url="https://example.com/cdk",
+                    sha256_checksum="a" * 64,
+                    target_path="/var/treadmill/repo-bin/cdk",
+                )
+            ],
+        ),
+    )
+    app = _build_app(session, store, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/onboarding/repos/owner/example")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["worker_deps"] == {
+        "python": ["aws-cdk-lib==2.214.0"],
+        "node": [],
+        "binaries": [
+            {
+                "name": "cdk",
+                "download_url": "https://example.com/cdk",
+                "sha256_checksum": "a" * 64,
+                "target_path": "/var/treadmill/repo-bin/cdk",
+            }
+        ],
+    }
+
+
+def test_get_repo_returns_empty_worker_deps_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stored config with ``worker_deps=None`` still returns an empty
+    :class:`WorkerDeps` on the wire — the handler never serializes
+    ``None`` for the field (ADR-0059)."""
+    session = _StubSession()
+    store = _FakeStore()
+    store.config_by_repo["owner/example"] = RepoConfig(repo="owner/example")
+    app = _build_app(session, store, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/onboarding/repos/owner/example")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["worker_deps"] == {
+        "python": [],
+        "node": [],
+        "binaries": [],
+    }

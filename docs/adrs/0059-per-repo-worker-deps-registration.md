@@ -1,6 +1,6 @@
 # ADR-0059 — Per-repo worker-dep registration
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-27
 - **Supersedes:** none
 - **Related:** ADR-0050 (onboarding persistence), ADR-0051 (onboarding HTTP), ADR-0054 (mode + repo context), ADR-0055 (per-account Claude credentials), ADR-0058 (gate-broken verdict)
@@ -197,3 +197,8 @@ shape proposed above is derived from first principles + ADR-0050/
 ADR-0055 patterns; if bunkhouse has a different precedent we should
 adopt it. This is the **one open question** before moving the ADR
 from `proposed` to `accepted`.
+
+*Resolution (2026-05-28):* bunkhouse doesn't have a precedent for
+per-repo deps — confirmed by operator 2026-05-28. The shape above
+(derived from first principles + ADR-0050 / ADR-0055 patterns) stands;
+ADR moves to `accepted`.

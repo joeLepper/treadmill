@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api import repo_profile as repo_profile_mod
 from treadmill_api.dependencies_db import get_session
+from treadmill_api.models.onboarding import WorkerDeps
 from treadmill_api.onboarding_store import OnboardingStore
 from treadmill_api.repo_config import VALID_MODES, RepoConfig
 
@@ -45,6 +46,10 @@ class OnboardRepoRequest(BaseModel):
     claude_account: str | None = None
     """Named Claude account for workers operating on this repo (ADR-0055).
     ``None`` defers to the deployment's ``claude_default_account``."""
+    worker_deps: WorkerDeps | None = None
+    """ADR-0059 per-repo worker extras. ``None`` (omitted) is treated as
+    an empty :class:`WorkerDeps`; clients that want "no extras" can omit
+    the field rather than serializing an empty object."""
 
 
 class OnboardRepoResponse(BaseModel):
@@ -52,6 +57,7 @@ class OnboardRepoResponse(BaseModel):
     mode: str
     auto_merge_blocked: bool
     claude_account: str | None = None
+    worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
 
 
 @router.post(
@@ -74,6 +80,7 @@ async def onboard_repo(
             detail=f"mode must be one of {sorted(VALID_MODES)}; got {mode!r}",
         )
 
+    worker_deps = body.worker_deps or WorkerDeps()
     config = RepoConfig(
         repo=body.repo,
         mode=mode,
@@ -81,6 +88,7 @@ async def onboard_repo(
         test_command=profile.test_command,
         lint_command=profile.lint_command,
         claude_account=body.claude_account,
+        worker_deps=worker_deps,
     )
 
     store = OnboardingStore()
@@ -93,6 +101,7 @@ async def onboard_repo(
         mode=mode,
         auto_merge_blocked=body.auto_merge_blocked,
         claude_account=body.claude_account,
+        worker_deps=worker_deps,
     )
 
 
@@ -103,6 +112,7 @@ class RepoConfigResponse(BaseModel):
     test_command: str | None = None
     lint_command: str | None = None
     claude_account: str | None = None
+    worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
 
 
 @router.get(
@@ -132,4 +142,5 @@ async def get_repo(
         test_command=config.test_command,
         lint_command=config.lint_command,
         claude_account=config.claude_account,
+        worker_deps=config.worker_deps or WorkerDeps(),
     )

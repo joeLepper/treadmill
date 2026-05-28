@@ -14,18 +14,89 @@ Three tables back the onboarding flow:
 
 Per ADR-0011, list-valued columns use Postgres ``ARRAY(String)`` rather
 than JSONB.
+
+This module also hosts the ADR-0059 ``WorkerDeps`` + ``BinarySpec``
+Pydantic models and the side table ``repo_worker_binaries`` row model
+that backs them — workers materialize per-repo extras (Python / Node
+package lists + downloaded binaries) before invoking task work.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ARRAY, Boolean, Index, Integer, String, UniqueConstraint, text
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from treadmill_api.database import Base
+
+
+# ── ADR-0059 Pydantic shapes ────────────────────────────────────────────────
+
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+BINARY_TARGET_PREFIX = "/var/treadmill/repo-bin/"
+
+
+class BinarySpec(BaseModel):
+    """Signed-URL binary download + checksum + materialization path (ADR-0059).
+
+    Workers fetch ``download_url``, verify ``sha256_checksum``, and place
+    the result at ``target_path`` (which must live under
+    ``/var/treadmill/repo-bin/`` per the ADR's materialization spec).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1)
+    download_url: str = Field(..., min_length=1)
+    sha256_checksum: str
+    target_path: str = Field(..., min_length=1)
+
+    @field_validator("sha256_checksum")
+    @classmethod
+    def _validate_sha256(cls, v: str) -> str:
+        if not _SHA256_PATTERN.fullmatch(v):
+            raise ValueError(
+                "sha256_checksum must be exactly 64 lowercase hex characters"
+            )
+        return v
+
+    @field_validator("target_path")
+    @classmethod
+    def _validate_target_path(cls, v: str) -> str:
+        if not v.startswith(BINARY_TARGET_PREFIX):
+            raise ValueError(
+                f"target_path must start with {BINARY_TARGET_PREFIX!r}"
+            )
+        return v
+
+
+class WorkerDeps(BaseModel):
+    """ADR-0059: per-repo extras the worker installs before task work.
+
+    Each list is opt-in; an empty ``WorkerDeps()`` means "no extras." Apt
+    / OS-package support is intentionally out-of-scope for v1 (privilege
+    boundary; see ADR-0059 Out-of-scope).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    python: list[str] = []
+    node: list[str] = []
+    binaries: list[BinarySpec] = []
 
 
 class RepoConfigRow(Base):
@@ -56,6 +127,18 @@ class RepoConfigRow(Base):
     claude_account: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
+    # ADR-0059: per-repo Python / Node deps the worker installs before
+    # task work. Binaries live in the ``repo_worker_binaries`` side table.
+    worker_deps_python: Mapped[list[str]] = mapped_column(
+        ARRAY(String),
+        nullable=False,
+        server_default=text("'{}'"),
+    )
+    worker_deps_node: Mapped[list[str]] = mapped_column(
+        ARRAY(String),
+        nullable=False,
+        server_default=text("'{}'"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
@@ -69,6 +152,41 @@ class RepoConfigRow(Base):
 
     __table_args__ = (
         UniqueConstraint("repo", name="uq_repo_configs_repo"),
+    )
+
+
+class RepoWorkerBinaryRow(Base):
+    """ADR-0059: side table for per-repo binary downloads.
+
+    One row per registered binary on a repo's :class:`RepoConfigRow`.
+    Upserts replace the entire set for the repo (simpler than diffing —
+    the list is small and operator-curated).
+    """
+
+    __tablename__ = "repo_worker_binaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    repo_config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("repo_configs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    download_url: Mapped[str] = mapped_column(String, nullable=False)
+    sha256_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        Index("ix_repo_worker_binaries_repo_config_id", "repo_config_id"),
     )
 
 
