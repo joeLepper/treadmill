@@ -150,6 +150,14 @@ class ApiClient:
             json={"payload": payload},
         )
 
+    # ── Onboarding ───────────────────────────────────────────────────────────
+
+    def get_repo_config(self, repo: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/onboarding/repos/{repo}")
+
+    def upsert_repo_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/onboarding/repos", json=config)
+
     # ── Health ────────────────────────────────────────────────────────────────
 
     def health(self) -> dict[str, Any]:
