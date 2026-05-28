@@ -500,6 +500,16 @@ class CoordinationConsumer:
                 await self._maybe_dispatch_supersede(
                     session, step_id, typed,
                 )
+            # ADR-0058: when the architect step.completed carries
+            # ``payload.verdict='gate-broken'``, escalate the task to
+            # operator with the gate's stderr captured. Independent
+            # path — fires only on gate-broken. Skips the amend-cap
+            # counter (the architect's verdict isn't amend, so the
+            # counter naturally doesn't advance).
+            if action == "completed":
+                await self._maybe_dispatch_gate_broken_escalation(
+                    session, step_id, typed,
+                )
             # ADR-0032/ADR-0038 partnership closure: when the architect
             # verdicts ``amend``, dispatch ``wf-feedback`` against the
             # same task so the feedback role can author the
@@ -1653,6 +1663,49 @@ class CoordinationConsumer:
             logger.exception(
                 "_maybe_dispatch_supersede: dispatch failed for step %s; "
                 "prior projection committed, will retry on redelivery",
+                step_id,
+            )
+
+    # ── ADR-0058: gate-broken architect verdict → operator escalation ────
+
+    async def _maybe_dispatch_gate_broken_escalation(
+        self,
+        session: AsyncSession,
+        step_id: str,
+        typed: Any,
+    ) -> None:
+        """ADR-0058: emit ``task.escalated_to_operator`` when an architect
+        step.completed carries ``payload.verdict='gate-broken'``.
+
+        Delegates to
+        ``triggers.maybe_dispatch_gate_broken_escalation``. The trigger
+        confirms the step belongs to wf-architecture-resolve, resolves
+        the owning task, and persists an escalation event with
+        ``reason='gate-broken'`` plus the gate's full stderr (from
+        ``payload.gate_log_excerpt``) so the operator sees the actual
+        tooling failure without re-running the loop.
+
+        Failures are logged but do not propagate — the prior projection
+        has already committed.
+        """
+        if self.dispatcher is None:
+            return
+        if not isinstance(typed, StepCompleted):
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_gate_broken_escalation,
+        )
+        try:
+            await maybe_dispatch_gate_broken_escalation(
+                session,
+                self.dispatcher,
+                step_id=step_id,
+                typed=typed,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_dispatch_gate_broken_escalation: dispatch failed for "
+                "step %s; prior projection committed, will retry on redelivery",
                 step_id,
             )
 

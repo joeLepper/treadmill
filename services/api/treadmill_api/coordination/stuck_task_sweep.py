@@ -151,6 +151,7 @@ async def run_stuck_task_sweep(
                     f"no downstream step dispatched within "
                     f"{STUCK_TASK_THRESHOLD}. Operator intervention needed."
                 ),
+                reason="stuck_task_sweep",  # ADR-0058
             )
             escalated += 1
         except Exception:
