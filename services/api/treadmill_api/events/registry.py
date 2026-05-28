@@ -51,6 +51,7 @@ from treadmill_api.events.task import (
     TaskReady,
     TaskRegistered,
     TaskRetry,
+    TaskSuperseded,
     TaskWorkerDepsFailed,
 )
 from treadmill_api.events.validate import ValidateOverride
@@ -68,6 +69,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     TaskReady,
     TaskRegistered,
     TaskRetry,
+    TaskSuperseded,
     TaskWorkerDepsFailed,
     # Plan events
     PlanRegistered,

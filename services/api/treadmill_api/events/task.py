@@ -133,6 +133,22 @@ class TaskAutoMerged(EventPayload):
     repo: str
 
 
+class TaskSuperseded(EventPayload):
+    """Emitted when a task is superseded by a child task (ADR-0048 architect
+    supersede verdict). The parent task is retired in favour of the child
+    which carries the rewritten description.
+
+    ``superseded_by_task_id`` is the child task's id; it is optional so
+    the event can be emitted before the child row is fully committed (rare),
+    and for forward-compatibility if the supersede trigger changes shape.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "superseded"
+
+    superseded_by_task_id: uuid.UUID | None = None
+
+
 class TaskWorkerDepsFailed(EventPayload):
     """Emitted when ``repo_deps.materialize`` raises
     ``WorkerDepsMaterializationError`` (ADR-0059 Step 4).
