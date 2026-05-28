@@ -51,6 +51,7 @@ from treadmill_api.events.task import (
     TaskReady,
     TaskRegistered,
     TaskRetry,
+    TaskWorkerDepsFailed,
 )
 from treadmill_api.events.validate import ValidateOverride
 from treadmill_api.events.validator_tuning import ValidatorTuning  # noqa: F401  re-exported
@@ -67,6 +68,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     TaskReady,
     TaskRegistered,
     TaskRetry,
+    TaskWorkerDepsFailed,
     # Plan events
     PlanRegistered,
     PlanPlanningStarted,

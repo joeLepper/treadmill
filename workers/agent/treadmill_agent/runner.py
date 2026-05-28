@@ -329,10 +329,26 @@ def _handle_step(
         # kwarg. An empty WorkerDeps short-circuits to a no-op overlay
         # (legacy no-deps path stays in scope). Materialization failure
         # fails the step cleanly — never silently runs validation
-        # without the deps the plan author registered.
+        # without the deps the plan author registered. ADR-0059 step 4:
+        # a ``WorkerDepsMaterializationError`` also emits a typed
+        # ``task.worker_deps_failed`` event so the operator dashboard
+        # sees a distinct escalation signal vs gate-broken /
+        # architect_cap / stuck_task_sweep; ``step.failed`` still fires
+        # because we re-raise after publishing.
         try:
             worker_deps = startup_auth.fetch_repo_worker_deps(settings, ctx.repo)
-            overlay = repo_deps.materialize(ctx.repo, worker_deps)
+            try:
+                overlay = repo_deps.materialize(ctx.repo, worker_deps)
+            except repo_deps.WorkerDepsMaterializationError as exc:
+                publisher.publish_task_worker_deps_failed(
+                    task_id=ctx.task_id, plan_id=ctx.plan_id,
+                    run_id=ctx.run_id, step_id=ctx.step_id,
+                    repo=ctx.repo,
+                    stage=exc.stage,
+                    detail=exc.detail,
+                    worker_deps_hash=repo_deps.compute_deps_hash(worker_deps),
+                )
+                raise
         except Exception as exc:
             logger.exception(
                 "step %s failed materializing repo_deps overlay", ctx.step_id,

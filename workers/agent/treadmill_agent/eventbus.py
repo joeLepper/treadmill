@@ -33,6 +33,7 @@ from treadmill_agent.events import (
     StepTokenUsage,
 )
 from treadmill_api.events.base import EventPayload
+from treadmill_api.events.task import TaskWorkerDepsFailed
 
 logger = logging.getLogger("treadmill.agent.eventbus")
 
@@ -100,6 +101,38 @@ class EventPublisher:
         payload = StepFailed(failed_at=_utcnow(), error=error)
         self._publish(
             entity_type="step", action="failed",
+            task_id=task_id, plan_id=plan_id, run_id=run_id, step_id=step_id,
+            payload=payload,
+        )
+
+    def publish_task_worker_deps_failed(
+        self,
+        *,
+        task_id: str, plan_id: str, run_id: str, step_id: str,
+        repo: str,
+        stage: str,
+        detail: str,
+        worker_deps_hash: str,
+    ) -> None:
+        """Emit ``task.worker_deps_failed`` (ADR-0059 Step 4).
+
+        Fires from the runner's per-step ``repo_deps.materialize``
+        seam alongside (and before) ``step.failed`` so the operator
+        dashboard sees a distinct escalation signal for a registration
+        failure — separate from gate-broken / architect_cap /
+        stuck_task_sweep escalations. The wire envelope reuses the
+        step-level IDs available at the materialize site so the
+        consumer's audit trail links the event to the failing step.
+        """
+        payload = TaskWorkerDepsFailed(
+            task_id=task_id,
+            repo=repo,
+            stage=stage,
+            detail=detail,
+            worker_deps_hash=worker_deps_hash,
+        )
+        self._publish(
+            entity_type="task", action="worker_deps_failed",
             task_id=task_id, plan_id=plan_id, run_id=run_id, step_id=step_id,
             payload=payload,
         )
