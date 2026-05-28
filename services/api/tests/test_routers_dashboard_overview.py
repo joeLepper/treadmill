@@ -443,3 +443,35 @@ def test_operator_bucket_parity_with_mock(
     assert operator_bucket(
         derived_status=derived_status, escalated=escalated,
     ) == expected_bucket
+
+
+def test_terminal_filter_uses_pr_merged_not_merged() -> None:
+    """The merged-PR projection emits ``pr_merged``, not ``merged``.
+
+    Regression for the 2026-05-28 incident where the Overview returned
+    all 86 ``pr_merged`` rows because ``_TASKS_SQL`` was filtering on
+    ``'merged'`` (which never matches). Pins both the constant and the
+    SQL text so a future tidy that splits one without the other can't
+    re-introduce the bug.
+    """
+    from treadmill_api.routers.dashboard.overview import (
+        _TASKS_SQL,
+        _TERMINAL_STATUSES,
+    )
+
+    assert "pr_merged" in _TERMINAL_STATUSES
+    assert "merged" not in _TERMINAL_STATUSES
+    # Every terminal status the Python side claims must appear in the
+    # SQL filter — otherwise the API returns rows the Python expects
+    # to have been excluded.
+    for status in _TERMINAL_STATUSES:
+        assert f"'{status}'" in _TASKS_SQL, (
+            f"_TERMINAL_STATUSES has '{status}' but _TASKS_SQL does not "
+            f"reference it; the SQL filter and the Python constant must "
+            f"agree."
+        )
+    # The hybrid ``"pr_merged (wf-author: failed)"`` shape needs the
+    # LIKE pattern (a workflow run terminated AFTER the PR auto-merged
+    # — the PR is in main, the operator has nothing to do about the
+    # run's outcome).
+    assert "LIKE 'pr_merged %'" in _TASKS_SQL
