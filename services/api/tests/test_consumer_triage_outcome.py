@@ -300,6 +300,49 @@ async def test_task_cancelled_projects_cancelled_outcome(
     assert row.outcome_merged_at is None
 
 
+# ── task.superseded → outcome_state='superseded' ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_task_superseded_projects_superseded_outcome(
+    session_factory: async_sessionmaker[AsyncSession],
+    engine: Engine,
+    truncate: None,
+) -> None:
+    """A task.superseded event whose task lives on a plan with a
+    triage_findings row updates ``outcome_state='superseded'``."""
+    plan_id, task_id = _seed_plan_task(engine)
+    finding = TriageFinding(
+        **_dispatched_finding_kwargs(plan_id)
+    )
+    async with session_factory() as session:
+        await TriageStore().insert_finding(session, finding)
+        await session.commit()
+
+    consumer = CoordinationConsumer(
+        sqs_client=None, queue_url="unused", sessionmaker=session_factory,
+    )
+    await consumer.handle({
+        "entity_type": "task",
+        "action": "superseded",
+        "event_id": str(uuid.uuid4()),
+        "task_id": str(task_id),
+        "payload": {"superseded_by_task_id": str(uuid.uuid4())},
+    })
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text(
+                "SELECT outcome_state, outcome_pr_number, outcome_merged_at "
+                "FROM triage_findings WHERE finding_id = :id"
+            ),
+            {"id": finding.finding_id},
+        ).one()
+    assert row.outcome_state == "superseded"
+    assert row.outcome_pr_number is None
+    assert row.outcome_merged_at is None
+
+
 # ── pr_merged with no matching triage_findings row → no-op ────────────────────
 
 
