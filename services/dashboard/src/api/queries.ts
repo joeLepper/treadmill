@@ -18,6 +18,8 @@ import type {
   RepoDocs,
   Task,
   TaskDetail,
+  TriageFinding,
+  TriageLabelInput,
 } from './types';
 const STALE_MS = 3_000;
 
@@ -120,6 +122,60 @@ export function useCancelTask() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['overview'] });
       qc.invalidateQueries({ queryKey: ['task'] });
+    },
+  });
+}
+
+/* ─── Triage labeling (ADR-0061) ───────────────────────────────────── */
+
+const UNLABELED_KEY = ['triage', 'unlabeled'] as const;
+
+export function useUnlabeledFindings() {
+  return useQuery({
+    queryKey: UNLABELED_KEY,
+    queryFn: async () =>
+      _apiFetch<TriageFinding[]>(
+        '/api/v1/triage/findings?label_is_real_bug=null&limit=50',
+      ),
+    staleTime: STALE_MS,
+  });
+}
+
+export function useLabelFinding() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      findingId,
+      label,
+    }: {
+      findingId: string;
+      label: TriageLabelInput;
+    }) => {
+      const res = await fetch(`/api/v1/triage/findings/${findingId}/label`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(label),
+      });
+      if (!res.ok) {
+        throw new Error(`label finding failed: HTTP ${res.status}`);
+      }
+      return (await res.json()) as TriageFinding;
+    },
+    // Optimistic: drop the labeled finding out of the unlabeled cache
+    // so the UI flips to the next finding without waiting for a refetch.
+    onMutate: async ({ findingId }) => {
+      await qc.cancelQueries({ queryKey: UNLABELED_KEY });
+      const prev = qc.getQueryData<TriageFinding[]>(UNLABELED_KEY);
+      qc.setQueryData<TriageFinding[] | undefined>(UNLABELED_KEY, (old) =>
+        old?.filter((f) => f.finding_id !== findingId),
+      );
+      return { prev };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) qc.setQueryData(UNLABELED_KEY, ctx.prev);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: UNLABELED_KEY });
     },
   });
 }

@@ -152,3 +152,122 @@ export interface RepoDocs {
 
 /* ─── Operator buckets — the three questions Overview is organized by */
 export type Bucket = 'blocked' | 'inflight' | 'hopper';
+
+/* ─── Triage findings (ADR-0061) ──────────────────────────────────── */
+
+export type TriageCategory =
+  | 'console_error'
+  | 'network_failure'
+  | 'broken_asset'
+  | 'accessibility'
+  | 'layout_overflow'
+  | 'consistency'
+  | 'dead_affordance'
+  | 'loading_state'
+  | 'other';
+
+export type TriageSeverity = 'high' | 'medium' | 'low';
+export type TriageConfidence = 'high' | 'medium' | 'low';
+export type TriageDispatchAction =
+  | 'dispatched'
+  | 'research_only'
+  | 'suppressed'
+  | 'escalated_to_operator';
+export type TriageSuppressionSignal =
+  | 'duplicate_open_pr'
+  | 'duplicate_recent_finding'
+  | 'out_of_scope'
+  | 'low_confidence'
+  | 'operator_action_required'
+  | 'design_intent'
+  | 'not_in_design_system';
+export type TriageMode = 'periodic' | 'on_demand';
+export type TriageOutcomeState =
+  | 'pending'
+  | 'merged'
+  | 'rejected'
+  | 'superseded'
+  | 'cancelled';
+
+export interface TriageEvidenceSummary {
+  console_errors?: number;
+  http_4xx?: number;
+  http_5xx?: number;
+  requestfailed?: number;
+  [key: string]: number | undefined;
+}
+
+/**
+ * Mirrors the Pydantic ``TriageFinding`` schema in
+ * ``services/api/treadmill_api/schemas/triage_finding.py``. Field order
+ * here intentionally follows the five layers in ADR-0061: provenance,
+ * target state, evidence, detector output, dispatcher output, outcome,
+ * labels.
+ */
+export interface TriageFinding {
+  // Provenance
+  finding_id: string;
+  run_id: string;
+  created_at: string | null;
+  prompt_version: string;
+  model: string;
+  mode: TriageMode;
+  on_demand_request: string | null;
+
+  // Target state
+  target_url: string;
+  viewport_w: number;
+  viewport_h: number;
+  git_sha: string;
+  api_git_sha: string | null;
+
+  // Evidence
+  screenshot_uri: string;
+  viewport_png_uri: string | null;
+  dom_snapshot_uri: string | null;
+  console_log_uri: string;
+  network_log_uri: string;
+  evidence_summary: TriageEvidenceSummary;
+
+  // Detector output
+  category: TriageCategory;
+  severity: TriageSeverity;
+  confidence: TriageConfidence;
+  observation: string;
+  evidence_pointer: string;
+  proposed_resolution: string;
+
+  // Dispatcher output
+  dispatch_action: TriageDispatchAction;
+  dispatch_reason: string;
+  suppression_signal: TriageSuppressionSignal | null;
+  parent_finding_id: string | null;
+  dispatched_plan_id: string | null;
+
+  // Outcome (server-projected)
+  outcome_state: TriageOutcomeState | null;
+  outcome_pr_number: number | null;
+  outcome_merged_at: string | null;
+  recurrence_count: number;
+
+  // Labels (operator-set; null = "Skip" per ADR-0061 v1 prompt)
+  label_is_real_bug: boolean | null;
+  label_severity: TriageSeverity | null;
+  label_category: TriageCategory | null;
+  label_fix_in_dsl: boolean | null;
+  label_dispatch_action: TriageDispatchAction | null;
+  label_notes: string | null;
+  labeled_by: string | null;
+  labeled_at: string | null;
+  label_guidelines_version: string | null;
+}
+
+/** Body posted to ``POST /api/v1/triage/findings/:id/label``. */
+export interface TriageLabelInput {
+  label_is_real_bug: boolean | null;
+  label_severity: TriageSeverity | null;
+  label_category: TriageCategory | null;
+  label_fix_in_dsl: boolean | null;
+  label_notes: string | null;
+  labeled_by: string;
+}

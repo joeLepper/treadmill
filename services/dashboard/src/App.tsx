@@ -10,12 +10,14 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Overview } from './pages/Overview';
 import { TaskDetail } from './pages/TaskDetail';
+import { TriageLabeling } from './pages/TriageLabeling';
 
 export function App() {
   return (
     <Routes>
       <Route path="/" element={<Overview />} />
       <Route path="/tasks/:taskId" element={<TaskDetail />} />
+      <Route path="/triage" element={<TriageLabeling />} />
       {/* Fallback — bounce unknown routes back to the overview. */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
