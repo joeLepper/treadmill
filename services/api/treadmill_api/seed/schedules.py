@@ -99,6 +99,34 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "jitter_seconds": 60,
         "created_by": "auto-seed",
     },
+    {
+        # ADR-0061 Step 5: periodic UI triage via Playwright. Every 4 h on
+        # minute 7 — offset from the hour to avoid the hourly thundering
+        # herd while still landing several runs per day so the labelable
+        # corpus accrues quickly. ``payload_template`` MUST carry ``repo``
+        # for the same reason wf-tune-judge-prompts does — taskless
+        # scheduled dispatch reads ``rendered_payload["repo"]`` for the
+        # worker workspace, and an empty value hangs the step pending
+        # forever (schedule-payload-needs-repo finding). ``target_urls`` is
+        # the dashboard Overview only for v1; TaskDetail requires picking
+        # a task at runtime, so periodic mode starts simpler — a future
+        # ADR-0061 plan can expand surfaces. ``corpus_bucket`` is the S3
+        # prefix where artifacts land; the role-side handles a missing
+        # bucket best-effort (dev-local fully-local mode may not have it).
+        "workflow_id": "wf-ui-triage",
+        "cron_expression": "7 */4 * * *",  # minute 7, every 4 hours
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {
+            "repo": "joeLepper/treadmill",
+            "trigger": "scheduled-tick",
+            "mode": "periodic",
+            "target_urls": ["http://localhost:5174/"],
+            "corpus_bucket": "treadmill-personal-triage-corpus",
+        },
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
 ]
 
 
@@ -190,7 +218,7 @@ def seed_schedules_if_empty(session: Any) -> int:
     Called from the API startup path after ``alembic upgrade head`` succeeds.
     Idempotent: when any schedule row exists, returns 0 without inserting.
 
-    Returns the count of newly seeded schedules (0 on re-run; 4 on a fresh DB).
+    Returns the count of newly seeded schedules (0 on re-run; len(SEED_SCHEDULES) on a fresh DB).
     """
     from sqlalchemy import func
     from sqlalchemy import select as sa_select
