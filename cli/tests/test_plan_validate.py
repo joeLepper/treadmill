@@ -310,6 +310,104 @@ def test_llm_judge_validation_is_skipped_safely() -> None:
 # ── Per-violation surface ────────────────────────────────────────────────────
 
 
+# ── depends_on syntax (real bug from 2026-05-28 ADR-0060 dispatch) ──────────
+
+
+_TWO_TASK_TEMPLATE = textwrap.dedent("""\
+    # Plan: Two
+
+    - **Status:** active
+    - **Date:** 2026-05-28
+
+    ## Goal
+    T.
+
+    ## Success criteria
+    T.
+
+    ## Constraints / scope
+
+    ### In scope
+    T.
+
+    ### Out of scope
+    T.
+
+    ## Sequence of work
+
+    ```yaml
+    sequence_of_work:
+      - id: first
+        title: First
+        workflow: wf-author
+        intent: |
+          T.
+        scope:
+          files: ["x.py"]
+        validation:
+          - kind: deterministic
+            description: t
+            script: |
+              echo ok
+      - id: second
+        title: Second
+        workflow: wf-author
+        depends_on: [{dep_expr}]
+        intent: |
+          T.
+        scope:
+          files: ["y.py"]
+        validation:
+          - kind: deterministic
+            description: t
+            script: |
+              echo ok
+    ```
+""")
+
+
+def test_depends_on_bare_id_flagged() -> None:
+    """Real bug from the 2026-05-28 ADR-0060 Step 3 plan dispatch."""
+    doc = _TWO_TASK_TEMPLATE.format(dep_expr="first")
+    violations = validate_plan_doc(doc)
+    assert "depends-on-syntax" in _rules(violations)
+
+
+def test_depends_on_pr_merged_form_is_clean() -> None:
+    doc = _TWO_TASK_TEMPLATE.format(dep_expr="task.first.pr_merged")
+    assert validate_plan_doc(doc) == []
+
+
+def test_depends_on_run_completed_form_is_clean() -> None:
+    doc = _TWO_TASK_TEMPLATE.format(dep_expr="task.first.run.completed")
+    assert validate_plan_doc(doc) == []
+
+
+def test_depends_on_step_completed_form_is_clean() -> None:
+    doc = _TWO_TASK_TEMPLATE.format(
+        dep_expr="task.first.step.wf-author.completed",
+    )
+    assert validate_plan_doc(doc) == []
+
+
+def test_depends_on_unknown_sibling_flagged() -> None:
+    # Right syntax, but the sibling id doesn't exist in the plan.
+    doc = _TWO_TASK_TEMPLATE.format(dep_expr="task.does-not-exist.pr_merged")
+    violations = validate_plan_doc(doc)
+    assert "depends-on-unknown-sibling" in _rules(violations)
+
+
+def test_depends_on_wrong_trailing_segment_flagged() -> None:
+    # ``finished`` is not a valid trailing segment; only pr_merged /
+    # run.completed / step.<name>.completed are.
+    doc = _TWO_TASK_TEMPLATE.format(dep_expr="task.first.finished")
+    violations = validate_plan_doc(doc)
+    assert "depends-on-syntax" in _rules(violations)
+
+
+# ── Per-violation surface ────────────────────────────────────────────────────
+
+
 def test_violation_carries_task_and_citation() -> None:
     violations = validate_plan_doc(
         _make_plan(script="alembic upgrade head")

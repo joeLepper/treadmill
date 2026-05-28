@@ -141,6 +141,19 @@ _FORMAT_BRITTLE_GREP_RE = re.compile(
     r"\bgrep\s+[^\n]*?-[a-zA-Z]*[qE][a-zA-Z]*[^\n]*?['\"][^'\"]*\([^'\")]*=[^'\")]*,[^'\")]*\)[^'\"]*['\"]"
 )
 
+# Plan-doc ``depends_on`` is a typed expression, NOT a bare task id.
+# Mirrors the regex enforced server-side at
+# ``services/api/treadmill_api/routers/plans.py::_DEP_RE``. Three valid
+# trailing segments: ``pr_merged``, ``run.completed``, or
+# ``step.<name>.completed``. A plan that writes ``depends_on:
+# [some-task-id]`` (bare id) is rejected at ``treadmill plan submit``
+# time with ``malformed depends_on expression``. Catch it at authoring
+# time instead.
+_DEPENDS_ON_EXPR_RE = re.compile(
+    r"^task\.(?P<sibling>[a-zA-Z0-9_-]+)"
+    r"\.(?P<rest>pr_merged|run\.completed|step\.[a-zA-Z0-9_-]+\.completed)$"
+)
+
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -156,15 +169,18 @@ def validate_plan_doc(markdown_text: str) -> list[Violation]:
     from treadmill_api.parsers.plan_doc import parse_plan_doc
 
     specs = parse_plan_doc(markdown_text)
+    known_task_ids = {spec.id for spec in specs}
     violations: list[Violation] = []
     for spec in specs:
-        violations.extend(_validate_task(spec))
+        violations.extend(_validate_task(spec, known_task_ids))
     return violations
 
 
-def _validate_task(spec: "TaskSpec") -> list[Violation]:
+def _validate_task(spec: "TaskSpec", known_task_ids: set[str]) -> list[Violation]:
     """Run all rules against a single task spec; aggregate violations."""
     out: list[Violation] = []
+    for expr in spec.depends_on:
+        out.extend(_validate_depends_on_expr(spec.id, expr, known_task_ids))
     for absolute_path_offender in _find_absolute_paths(spec.scope.files):
         out.append(
             Violation(
@@ -253,6 +269,54 @@ def _validate_deterministic_script(
                     "or assert behavior via pytest"
                 ),
                 citation="SKILL.md — Make `deterministic` validation robust, not formatting-brittle",
+            )
+        )
+    return out
+
+
+def _validate_depends_on_expr(
+    task_id: str, expression: str, known_task_ids: set[str],
+) -> list[Violation]:
+    """Check a single ``depends_on`` element against the typed grammar.
+
+    Emits up to two violations per expression: ``depends-on-syntax``
+    when the expression doesn't match the regex (e.g. a bare task id),
+    and ``depends-on-unknown-sibling`` when the syntax is fine but the
+    referenced sibling id isn't in the plan. The server-side
+    ``_validate_and_substitute_dep_expr`` enforces the same two
+    rejections at submit-time; this catches them at authoring time.
+    """
+    out: list[Violation] = []
+    match = _DEPENDS_ON_EXPR_RE.match(expression)
+    if match is None:
+        out.append(
+            Violation(
+                task_id=task_id,
+                validation_index=None,
+                rule="depends-on-syntax",
+                detail=(
+                    f"depends_on element {expression!r} is not a valid "
+                    f"expression. Use one of: "
+                    f"task.<id>.pr_merged | task.<id>.run.completed | "
+                    f"task.<id>.step.<name>.completed"
+                ),
+                citation="services/api/treadmill_api/routers/plans.py::_DEP_RE — server enforces this regex at submit time",
+            )
+        )
+        return out
+    sibling = match.group("sibling")
+    if sibling not in known_task_ids:
+        out.append(
+            Violation(
+                task_id=task_id,
+                validation_index=None,
+                rule="depends-on-unknown-sibling",
+                detail=(
+                    f"depends_on expression {expression!r} references "
+                    f"sibling task id {sibling!r}, but no task with that "
+                    f"id is declared in this plan"
+                ),
+                citation="services/api/treadmill_api/routers/plans.py::_validate_and_substitute_dep_expr — server rejects unknown sibling references",
             )
         )
     return out
