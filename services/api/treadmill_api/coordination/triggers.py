@@ -74,7 +74,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1003,6 +1003,10 @@ async def _emit_arch_cap_reached(
                 last_verdict=last_verdict,
                 last_reasoning=last_reasoning,
                 run_ids=run_ids,
+                # ADR-0058: tag the escalation reason so the dashboard
+                # can triage architect-cap fires separately from
+                # gate-broken cases.
+                reason="architect_cap",
             ),
             plan_id=task.plan_id,
             task_id=task_id,
@@ -1031,19 +1035,22 @@ async def _emit_operator_escalation(
     signal: str,
     repo: str | None = None,
     detail: str | None = None,
+    reason: Literal["architect_cap", "stuck_task_sweep", "gate-broken"] | None = None,
 ) -> None:
     """Persist + publish ``task.escalated_to_operator`` for a non-architect
     terminal that has no productive next step (a cap or a give-up).
 
     ``signal`` is a short slug stored in ``last_verdict`` (e.g.
     ``'wf-ci-fix-cap-reached'``); ``detail`` goes to ``last_reasoning``.
-    ``repo`` defaults to the task's own repo when not supplied. The operator
-    surface is ``GET /api/v1/tasks?status=needs_operator`` (PR #184), which
-    uses ``EXISTS`` on the escalation event. We still guard against duplicate
-    rows for the same ``(task, signal)`` so reprocessing or repeated cap hits
-    don't pile up escalations. No-op when the dispatcher is absent (test stubs)
-    or the task row is missing — the caller's warning log already recorded the
-    signal.
+    ``repo`` defaults to the task's own repo when not supplied. ``reason``
+    (ADR-0058) tags the escalation source for dashboard triage; callers
+    that don't supply it land as ``None`` (legacy escalations).
+    The operator surface is ``GET /api/v1/tasks?status=needs_operator``
+    (PR #184), which uses ``EXISTS`` on the escalation event. We still
+    guard against duplicate rows for the same ``(task, signal)`` so
+    reprocessing or repeated cap hits don't pile up escalations. No-op
+    when the dispatcher is absent (test stubs) or the task row is
+    missing — the caller's warning log already recorded the signal.
     """
     if dispatcher is None:
         return
@@ -1078,6 +1085,7 @@ async def _emit_operator_escalation(
                 last_verdict=signal,
                 last_reasoning=detail,
                 run_ids=[],
+                reason=reason,
             ),
             plan_id=task.plan_id,
             task_id=task_id,
@@ -2277,6 +2285,151 @@ async def maybe_dispatch_supersede_on_architect_verdict(
     )
 
     return run_id
+
+
+# ── ADR-0058: gate-broken escalation ─────────────────────────────────────────
+
+
+async def maybe_dispatch_gate_broken_escalation(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+    typed: StepCompleted,
+) -> uuid.UUID | None:
+    """ADR-0058: handle the architect's ``gate-broken`` verdict.
+
+    Predicate: the step belongs to ``wf-architecture-resolve`` AND its
+    output payload carries ``verdict='gate-broken'`` with a non-empty
+    ``gate_log_excerpt``. The worker-side parse (and the
+    ``ArchitectVerdict`` Pydantic validator) already reject excerpt-
+    less gate-broken, so this trigger defensively re-checks rather
+    than failing silently.
+
+    Effect: emit ``task.escalated_to_operator`` with
+    ``reason='gate-broken'`` and the gate's stderr captured. The
+    amend-cap counter (per ADR-0029 Q29.e) is NOT incremented — that
+    counter fires on consecutive architect-amend dispatches; a
+    gate-broken verdict isn't amend, so the counter naturally doesn't
+    advance. No new ``WorkflowRun`` is materialized.
+
+    Idempotency: an explicit dedup is unnecessary because the
+    ``escalated_to_operator`` event is keyed by the same
+    ``step.completed`` (one event per architect step). If SQS
+    redelivers the same step.completed, the prior projection will
+    have already committed the escalation; this fires again and
+    creates a second escalation row — which the dashboard's
+    `_ESCALATIONS_SQL` "latest-with-no-ack" filter de-duplicates
+    cleanly. The cost of double-emit is low; the cost of a missed
+    emit is operator-visible.
+
+    Returns the new ``task.escalated_to_operator`` event id on
+    success, or ``None`` on any skip condition.
+    """
+    if dispatcher is None:
+        return None
+    output = typed.output
+    payload = output.payload if isinstance(output.payload, dict) else {}
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("verdict") != "gate-broken":
+        return None
+    gate_log_excerpt = payload.get("gate_log_excerpt") or ""
+    if not gate_log_excerpt.strip():
+        logger.warning(
+            "gate-broken dispatch: step %s carries verdict=gate-broken "
+            "but no gate_log_excerpt; skipping escalation (architect "
+            "should re-emit with excerpt populated)",
+            step_id,
+        )
+        return None
+
+    # Confirm the step belongs to wf-architecture-resolve. We could
+    # accept gate-broken from other architect-bearing workflows in
+    # principle, but today the only architect dispatcher is
+    # wf-architecture-resolve. Refusing other workflows here makes
+    # the surface single-sourced.
+    step_uuid = uuid.UUID(step_id) if isinstance(step_id, str) else step_id
+    workflow_id_result = await session.execute(
+        select(WorkflowVersion.workflow_id)
+        .join(WorkflowRun, WorkflowRun.workflow_version_id == WorkflowVersion.id)
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .where(WorkflowRunStep.id == step_uuid)
+        .limit(1)
+    )
+    wf_id = workflow_id_result.scalar_one_or_none()
+    if wf_id != ARCHITECTURE_RESOLVE_WORKFLOW_ID:
+        logger.debug(
+            "gate-broken dispatch: step %s is not wf-architecture-resolve "
+            "(workflow=%s); skipping",
+            step_id, wf_id,
+        )
+        return None
+
+    # Resolve owning task + repo.
+    task_result = await session.execute(
+        select(Task)
+        .join(WorkflowRun, WorkflowRun.task_id == Task.id)
+        .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
+        .where(WorkflowRunStep.id == step_uuid)
+        .limit(1)
+    )
+    task = task_result.scalar_one_or_none()
+    if task is None:
+        logger.warning(
+            "gate-broken dispatch: step %s has no owning task; skipping",
+            step_id,
+        )
+        return None
+
+    # Pull last_verdict / last_reasoning from this same step's payload
+    # so the escalation event carries the architect's full context.
+    last_reasoning = payload.get("reasoning")
+
+    # Fetch recent architect run IDs for the operator's reference.
+    run_ids_result = await session.execute(
+        select(WorkflowRun.id)
+        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
+        .where(
+            WorkflowRun.task_id == task.id,
+            WorkflowVersion.workflow_id == ARCHITECTURE_RESOLVE_WORKFLOW_ID,
+        )
+        .order_by(WorkflowRun.created_at.desc())
+        .limit(5)
+    )
+    run_ids = [str(r) for r in run_ids_result.scalars()]
+
+    try:
+        event = await dispatcher.persist_and_publish(
+            session,
+            entity_type="task",
+            action="escalated_to_operator",
+            payload=TaskEscalatedToOperator(
+                task_id=task.id,
+                repo=task.repo,
+                last_verdict="gate-broken",
+                last_reasoning=last_reasoning,
+                run_ids=run_ids,
+                reason="gate-broken",
+                gate_log_excerpt=gate_log_excerpt[:4000],
+            ),
+            plan_id=task.plan_id,
+            task_id=task.id,
+        )
+    except Exception:
+        logger.exception(
+            "gate-broken dispatch: failed to emit escalation event for "
+            "task %s (step %s); operator must check logs",
+            task.id, step_id,
+        )
+        return None
+
+    logger.info(
+        "gate-broken dispatch: task %s escalated to operator "
+        "(reason=gate-broken, step=%s, runs=%d)",
+        task.id, step_id, len(run_ids),
+    )
+    return event.id if event is not None else None
 
 
 async def _maybe_close_parent_pr_for_supersede(
