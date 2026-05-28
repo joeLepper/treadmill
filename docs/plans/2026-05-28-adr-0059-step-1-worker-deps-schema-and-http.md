@@ -236,11 +236,13 @@ sequence_of_work:
         severity: blocking
         timeout_seconds: 180
       - kind: deterministic
-        description: Migration head matches the new revision after upgrade.
+        description: New migration file exists, declares the expected revision id, and chains from the most recent prior head. Sandbox-safe (file/grep only — no DATABASE_URL required).
         script: |
-          cd services/api && uv run alembic upgrade head && uv run alembic current 2>&1 | grep -q "20260528_1600"
+          test -f services/api/alembic/versions/20260528_1600_repo_configs_worker_deps.py \
+            && grep -qE 'revision.*=.*"20260528_1600"' services/api/alembic/versions/20260528_1600_repo_configs_worker_deps.py \
+            && grep -qE 'down_revision.*=.*"20260526_1500"' services/api/alembic/versions/20260528_1600_repo_configs_worker_deps.py
         severity: blocking
-        timeout_seconds: 120
+        timeout_seconds: 30
       - kind: llm-judge
         description: ADR-0059 status flipped + AGENT.md updated per ADR-0030.
         prompt: |
