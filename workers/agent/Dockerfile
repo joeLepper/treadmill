@@ -37,6 +37,30 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.138 aws-cdk
 # code disposition refuses to push.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
+# Playwright + chromium-headless-shell for ADR-0061 role-ui-triage.
+# The triage role drives a headless browser through /opt/triage/*.mjs
+# (see scripts/triage/ below). We install the @playwright/test npm
+# package globally so ``npx playwright`` resolves without a per-project
+# install, then download the chromium-headless-shell binary to a known
+# path so PLAYWRIGHT_BROWSERS_PATH points at it. Other workflows pay
+# no runtime cost (the binaries sit on disk; chromium isn't launched
+# unless the triage scripts run).
+#
+# Image footprint trade-off captured in ADR-0061 § "Bad / trade-offs":
+# ~150 MB for chromium-headless-shell. A future ADR moves Playwright
+# to a sidecar image if footprint becomes a problem.
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright
+RUN npm install -g playwright@1.55.0 \
+    && mkdir -p $PLAYWRIGHT_BROWSERS_PATH \
+    && npx --yes playwright install chromium-headless-shell --with-deps
+
+# Triage probe scripts the role-ui-triage prompt invokes by absolute
+# path. Drop in workers/agent/scripts/triage/ on the host; bake to
+# /opt/triage/ in the image. Per ADR-0061 § "Tooling" the prompt
+# documents these exact paths — do not rename without re-cutting the
+# prompt artifact + the v1 corpus's evidence pointers.
+COPY workers/agent/scripts/triage/ /opt/triage/
+
 WORKDIR /app
 
 # Copy the API package first because the agent's pyproject declares
