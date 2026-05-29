@@ -34,8 +34,15 @@ packages = ["treadmill_local"]
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
     "moto[server]>=5.0.0",
+    # In-process import for the egress proxy integration smoke test
+    # (tests/test_egress_proxy_integration.py) — ADR-0060 Step 3d.
+    "treadmill-egress-proxy",
 ]
+
+[tool.uv.sources]
+treadmill-egress-proxy = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

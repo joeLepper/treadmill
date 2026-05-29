@@ -2333,6 +2333,8 @@ dependencies = [
 dev = [
     { name = "moto", extra = ["server"] },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "treadmill-egress-proxy" },
 ]
 
 [package.metadata]
@@ -2349,6 +2351,8 @@ requires-dist = [
 dev = [
     { name = "moto", extras = ["server"], specifier = ">=5.0.0" },
     { name = "pytest", specifier = ">=8.3.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "treadmill-egress-proxy", editable = "services/egress-proxy" },
 ]
 
 [[package]]
