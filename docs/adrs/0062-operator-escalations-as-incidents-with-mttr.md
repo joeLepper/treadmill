@@ -19,31 +19,47 @@ sites today:
 - wf-ci-fix-cap-reached (CI-fix loop gave up)
 - gate-broken (architect's 4th verdict, ADR-0058)
 
-Producers work. **Consumers don't.** The only existing surface is the
-dashboard's `_ESCALATIONS_SQL` view in `routers/dashboard/overview.py`,
-which renders open escalations on the operator's dashboard if they
-happen to look. There is no real-time notification: the operator
-sees the escalation only when they explicitly check.
+Three gaps surfaced during the 2026-05-28/29 sessions, in increasing
+order of subtlety:
 
-The 2026-05-28 evening session demonstrated the failure mode end to
-end. Task `a35f3c79` (ADR-0060 Step 3c) hit
-`wf-conflict-cap-reached` at 23:28 UTC and emitted
-`escalated_to_operator`. The orchestrator on duty (me) was running a
-`plan show` poll every ~15 min, saw `wf-conflict: executing`, and
-declared the task healthy. The escalation row sat untouched for
-20 minutes until the human operator (Joe) noticed and prompted a
-deeper look. The same evening produced 7 escalation events across 5
-distinct tasks, 3 from concurrent operators all stalling on the
-same `workers/agent/AGENT.md` "Recent changes" hotspot — none
-surfaced beyond the dashboard.
+**Gap 1 — no consumer.** The only existing surface is the dashboard's
+`_ESCALATIONS_SQL` view in `routers/dashboard/overview.py`, which
+renders open escalations on the operator's dashboard if they happen
+to look. There is no real-time notification: the operator sees the
+escalation only when they explicitly check.
 
-A second gap: even after I resolved the conflict (rebased + force-
-pushed + the PR merged), there is no signal in the event stream
-that says "this incident is closed." The system still treats the
-task as escalated until an explicit `TaskEscalationAcknowledged`
-event lands — and even ack only suppresses the dashboard row; it
-doesn't capture *when* the incident was actually resolved or how
-long it took.
+The 2026-05-28 evening session demonstrated this end to end. Task
+`a35f3c79` (ADR-0060 Step 3c) hit `wf-conflict-cap-reached` at 23:28
+UTC and emitted `escalated_to_operator`. The orchestrator on duty
+(me) was running a `plan show` poll every ~15 min, saw `wf-conflict:
+executing`, and declared the task healthy. The escalation row sat
+untouched for 20 minutes until the human operator (Joe) noticed and
+prompted a deeper look. The same evening produced 7 escalation
+events across 5 distinct tasks, 3 from concurrent operators all
+stalling on the same `workers/agent/AGENT.md` "Recent changes"
+hotspot — none surfaced beyond the dashboard.
+
+**Gap 2 — no incident lifecycle.** Even after I resolved the
+conflict (rebased + force-pushed + the PR merged), there is no
+signal in the event stream that says "this incident is closed." The
+system still treats the task as escalated until an explicit
+`TaskEscalationAcknowledged` event lands — and even ack only
+suppresses the dashboard row; it doesn't capture *when* the incident
+was actually resolved or how long it took.
+
+**Gap 3 — producer taxonomy doesn't cover terminal step failures
+without a cap.** Task `55b57331` (ADR-0060 Step 3b) hit an Anthropic
+429 at 01:09 UTC inside a wf-feedback step (mid-loop, after an
+11.7-minute claude run that had already consumed real tokens). The
+workflow's local retry policy fired 3× immediately, each sub-second
+because the limit was still active, then took the step to terminal
+`wf-feedback: failed` and stopped. **No `escalated_to_operator`
+event ever fired** — none of the five producer sites covers
+"step ran to terminal-failure without a producing-cap loop." The
+operator-poll discipline added after Gap 1 returned 0 escalations
+for the task; the task sat dead for 14 hours until I checked plan
+status directly. A complete escalation taxonomy must cover the
+generic terminal-step-failure case, not just the cap-reached ones.
 
 **The reframe:** escalations are the **beginning of an incident**, not
 a static flag. The right model is the o11y incident lifecycle —
@@ -51,7 +67,9 @@ open at the escalation event, closed at the resolution event, with
 MTTR computed across the pair. Real-time notification fires on open
 (so the operator sees it within seconds, not 20 minutes), and the
 close signal is what makes the MTTR distribution observable over
-time.
+time. And every terminal-failure path emits the open event so the
+producer set is complete — not an enumerable list of cap names that
+silently misses anything else.
 
 The existing `TaskEscalationAcknowledged` event is a "operator saw
 it" signal — useful for suppressing further notifications — but it
@@ -62,14 +80,44 @@ silently growing. We need both signals, distinct.
 ## Decision
 
 Layer an **Incident model** on top of the existing escalation event
-stream. No new tables — the model is event-sourced, consistent with
-the rest of `coordination/`.
+stream, and close the producer-taxonomy gap so every terminal task
+failure becomes an open incident. No new tables — the model is
+event-sourced, consistent with the rest of `coordination/`.
+
+### Producer sites
+
+| Producer | What it covers | Status |
+|---|---|---|
+| architect-cap | 3 amend rounds exhausted | existing |
+| stuck-task-sweep | No downstream dispatch in N minutes | existing |
+| wf-conflict-cap-reached | Merge-conflict resolver gave up | existing |
+| wf-ci-fix-cap-reached | CI-fix loop gave up | existing |
+| gate-broken | Architect's 4th verdict, ADR-0058 | existing |
+| **terminal-step-failure** | **A `step.failed` event reaches a terminal workflow state without any of the cap-reached producers firing first.** Covers the 2026-05-29 Gap 3 case (429 inside wf-feedback → 3 quick retries → terminal-fail with no escalation) and any future cap path we don't yet have. | **NEW — this ADR** |
+
+The terminal-step-failure trigger sits in `coordination/triggers.py`
+as a new `maybe_dispatch_terminal_step_failure_escalation` sibling
+to the gate-broken trigger. It subscribes to `step.failed` events;
+emits `escalated_to_operator` with
+`reason="terminal_step_failure"` when both:
+
+- The workflow run is terminal (no further `step.ready` will be
+  enqueued — the workflow's retry policy is exhausted), AND
+- No `escalated_to_operator` event already fired for this task in
+  the last 5 minutes (dedup against the cap-reached producers; they
+  fire first and would otherwise be doubled by this trigger).
+
+The payload carries the failing step's name and the captured
+`log_excerpt` so the operator sees the proximate cause (429, OOM,
+crash, etc.) without re-querying the events table. This makes the
+producer set "complete by construction" — any terminal-failure
+path, named or unnamed, becomes a first-class incident.
 
 ### Events
 
 | Event | When | Payload |
 |---|---|---|
-| `task.escalated_to_operator` | Producer fires (architect-cap, stuck-task-sweep, wf-conflict-cap, wf-ci-fix-cap, gate-broken) — **unchanged** | reason, last_verdict, gate_log_excerpt |
+| `task.escalated_to_operator` | Any of the six producer sites fires | reason (now extended with `terminal_step_failure`), last_verdict, gate_log_excerpt, step_name (new — populated by terminal-step-failure producer) |
 | `task.escalation_acknowledged` | Operator acks via UI / CLI — **unchanged** | empty |
 | `task.escalation_closed` | **NEW** — incident resolved | close_reason, opened_at (denormalized), mttr_seconds |
 
@@ -180,6 +228,11 @@ us in.
   seconds, not the next time they happen to check. The 20-minute
   silent-stall pattern from 2026-05-28 becomes a sub-minute
   notification.
+- Producer set becomes complete by construction. Any terminal-
+  failure path emits an escalation, including ones we haven't
+  named yet (future workflow steps, new retry-cap paths). The
+  14-hour silent-stall pattern from 2026-05-29 (Gap 3, 429 inside
+  wf-feedback → terminal-fail with no escalation) cannot recur.
 - MTTR becomes a first-class observability metric. A regression in
   MTTR distribution is the signal that says "the architect's
   retry-cap is firing more often" or "wf-conflict's auto-resolver
@@ -222,28 +275,45 @@ us in.
 
 ## Sequence (high-level — full step list in the plan)
 
-1. **Event + sweep.** Add `TaskEscalationClosed` event payload;
+1. **Terminal-step-failure producer.** Add
+   `maybe_dispatch_terminal_step_failure_escalation` to
+   `coordination/triggers.py`; wire it into the consumer beside
+   `_maybe_dispatch_gate_broken_escalation`. Extend the
+   `TaskEscalatedToOperator.reason` Literal with
+   `terminal_step_failure` and add the `step_name` field.
+   Closes Gap 3 — every terminal-failure path becomes an
+   incident, not just the cap-reached ones. Unit test covers the
+   2026-05-29 Step 3b shape (429 → terminal `wf-feedback: failed`
+   → escalation fires once; cap-reached path still wins the dedup
+   when both could apply).
+2. **Close event + sweep.** Add `TaskEscalationClosed` event payload;
    register in `events/registry.py`; add the close-detection sweep
    to `coordination/` with a `*/2` schedule entry. The sweep runs
    the five close-trigger queries against open incidents and emits
    the close event with MTTR computed. Unit tests cover each close
    trigger.
-2. **CLI surface.** New `treadmill escalations` group: `tail`,
+3. **CLI surface.** New `treadmill escalations` group: `tail`,
    `list`, `close`, `ack`, `report`. Reuses the existing API
    client; the `tail` command long-polls a streaming endpoint
    added on the API side.
-3. **Slack notifier.** In-process subscriber on the events stream;
+4. **Slack notifier.** In-process subscriber on the events stream;
    posts to `TREADMILL_SLACK_WEBHOOK_URL` on each open / close
    event. Slack-specific formatting (emoji, link to dashboard).
-4. **Pluggable webhook fan-out.** Generalize the notifier to a list
+5. **Pluggable webhook fan-out.** Generalize the notifier to a list
    of webhook URLs from `TREADMILL_NOTIFICATION_WEBHOOKS`; raw
    event JSON for non-Slack targets.
-5. **Dashboard integration.** Update `_ESCALATIONS_SQL` to honor
+6. **Dashboard integration.** Update `_ESCALATIONS_SQL` to honor
    the new close event; add a per-incident MTTR column to the
    dashboard's escalations table.
-6. **MTTR report.** Server-side aggregation endpoint + the CLI
+7. **MTTR report.** Server-side aggregation endpoint + the CLI
    `report` subcommand. Surface to Grafana later via OTel metrics
    if a real trend matters.
+
+The terminal-step-failure producer (step 1) is the highest-priority
+piece because it closes the producer-taxonomy gap that already
+silently consumed 14 hours of Task 3b's wall clock. Until step 1
+ships, even a perfectly notified consumer (steps 2-5) still misses
+the Gap 3 class of incident.
 
 ## Alternatives considered (architecture)
 
