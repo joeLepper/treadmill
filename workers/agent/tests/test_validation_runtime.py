@@ -112,6 +112,40 @@ def test_deterministic_large_output_truncated(tmp_path: Path) -> None:
     assert len(result.log_excerpt) <= 4000
 
 
+def test_deterministic_subprocess_env_excludes_install_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0060 task-phase contract: validation subprocess env carries
+    only the uncredentialed HTTPS_PROXY (from the worker entrypoint),
+    NEVER the credentialed install proxy URL. If this leaked, a task-
+    phase validation script could reach the install-phase allowlist
+    via the egress proxy — the entire phase-toggle correctness depends
+    on the credential being absent here.
+
+    The credential lives only in materialize()'s subprocess env
+    (covered by tests in test_repo_deps.py); this test pins the
+    *absence* on the validation seam."""
+    monkeypatch.setenv("TREADMILL_INSTALL_PROXY_TOKEN", "abc123")
+    monkeypatch.setenv("HTTPS_PROXY", "http://treadmill-egress-proxy:3128")
+
+    check = _check(script="exit 0")
+    with patch(
+        "treadmill_agent.validation_runtime.subprocess.run"
+    ) as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        run_deterministic(check, tmp_path, timeout_seconds=5)
+
+    env = mock_run.call_args.kwargs["env"]
+    # The base (uncredentialed) HTTPS_PROXY may pass through unchanged
+    # — that's the task-phase default. But no credential userinfo.
+    https_proxy = env.get("HTTPS_PROXY", "")
+    assert "install:" not in https_proxy
+    assert "abc123" not in https_proxy
+    assert https_proxy == "http://treadmill-egress-proxy:3128"
+
+
 # ── LLM-judge tests ──────────────────────────────────────────────────────────
 
 

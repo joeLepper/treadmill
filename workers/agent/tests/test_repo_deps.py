@@ -21,6 +21,7 @@ import pytest
 from treadmill_agent.repo_deps import (
     RepoOverlay,
     WorkerDepsMaterializationError,
+    _install_proxy_url,
     compute_deps_hash,
     materialize,
 )
@@ -256,3 +257,92 @@ def test_env_overrides_shape_with_all_three(tmp_path: Path) -> None:
     assert venv_idx < bin_idx < node_idx
     assert env["PYTHONPATH"] == str(site_packages)
     assert env["NODE_PATH"] == str(node_modules)
+
+
+# ── _install_proxy_url + install-phase subprocess env (ADR-0060 step 3c) ────
+
+
+def test_install_proxy_url_returns_none_when_token_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No install credential in env → no credentialed URL; caller falls
+    back to the task-phase (uncredentialed) proxy."""
+    monkeypatch.delenv("TREADMILL_INSTALL_PROXY_TOKEN", raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://treadmill-egress-proxy:3128")
+    assert _install_proxy_url() is None
+
+
+def test_install_proxy_url_returns_none_when_https_proxy_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No base HTTPS_PROXY → no credentialed URL even with the token —
+    the helper has no host:port to anchor the credential against."""
+    monkeypatch.setenv("TREADMILL_INSTALL_PROXY_TOKEN", "abc123")
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    assert _install_proxy_url() is None
+
+
+def test_install_proxy_url_returns_credentialed_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token + base proxy → ``http://install:<token>@<host>:<port>``."""
+    monkeypatch.setenv("TREADMILL_INSTALL_PROXY_TOKEN", "abc123")
+    monkeypatch.setenv("HTTPS_PROXY", "http://treadmill-egress-proxy:3128")
+    assert (
+        _install_proxy_url()
+        == "http://install:abc123@treadmill-egress-proxy:3128"
+    )
+
+
+def test_materialize_subprocess_env_has_credentialed_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When TREADMILL_INSTALL_PROXY_TOKEN is set, every materialize()
+    subprocess.run call receives an env override with HTTPS_PROXY /
+    HTTP_PROXY pointing at the credentialed proxy URL. The egress
+    proxy reads the Proxy-Authorization header off this URL to grant
+    install-phase allowlist access."""
+    monkeypatch.setenv("TREADMILL_INSTALL_PROXY_TOKEN", "abc123")
+    monkeypatch.setenv("HTTPS_PROXY", "http://treadmill-egress-proxy:3128")
+    worker_deps = WorkerDeps(python=["aws-cdk-lib==2.214.0"])
+
+    with patch("treadmill_agent.repo_deps.subprocess.run") as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        materialize("owner/repo", worker_deps, overlay_root=tmp_path)
+
+    expected = "http://install:abc123@treadmill-egress-proxy:3128"
+    assert mock_run.call_count >= 1
+    for call in mock_run.call_args_list:
+        env = call.kwargs.get("env")
+        assert env is not None, (
+            f"materialize() subprocess.run missing env kwarg: {call}"
+        )
+        assert env.get("HTTPS_PROXY") == expected
+        assert env.get("HTTP_PROXY") == expected
+
+
+def test_materialize_subprocess_env_unchanged_without_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When TREADMILL_INSTALL_PROXY_TOKEN is unset, materialize() does
+    not override the subprocess env — env kwarg is None (inherit parent
+    env). The worker entrypoint's uncredentialed HTTPS_PROXY (if any)
+    flows through unchanged; nothing escalates to install-phase."""
+    monkeypatch.delenv("TREADMILL_INSTALL_PROXY_TOKEN", raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://treadmill-egress-proxy:3128")
+    worker_deps = WorkerDeps(python=["aws-cdk-lib==2.214.0"])
+
+    with patch("treadmill_agent.repo_deps.subprocess.run") as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        materialize("owner/repo", worker_deps, overlay_root=tmp_path)
+
+    assert mock_run.call_count >= 1
+    for call in mock_run.call_args_list:
+        # env=None is the contract for "unchanged" — subprocess.run
+        # inherits the parent env (and any HTTPS_PROXY in it stays
+        # uncredentialed).
+        assert call.kwargs.get("env") is None
