@@ -1140,9 +1140,12 @@ def test_role_ui_triage_is_seeded() -> None:
         " is success — OutputKind.ANALYSIS is the right shape"
     )
     # The prompt must be loaded from the bundled file; the body
-    # invariant below pins drift.
+    # invariant below pins drift. We check the unversioned title
+    # prefix so the assertion survives version bumps — the
+    # canonical-vs-bundled lockstep is the test that catches
+    # genuine drift.
     assert role["system_prompt"].strip().startswith(
-        "# role-ui-triage (v1)"
+        "# role-ui-triage"
     ), "role-ui-triage prompt must come from prompts/role_ui_triage_v1.md"
 
 
