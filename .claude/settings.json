@@ -16,7 +16,9 @@
       "Bash(gh pr view *)",
       "Bash(gh api repos/*/issues*)",
       "Bash(gh api repos/*/pulls*)",
-      "Bash(python3 -c *)"
+      "Bash(python3 -c *)",
+      "Bash(treadmill plan submit *)",
+      "Bash(treadmill plan validate *)"
     ]
   },
   "hooks": {
