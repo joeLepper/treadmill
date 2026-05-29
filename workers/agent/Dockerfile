@@ -73,11 +73,20 @@ COPY services/api/treadmill_api ./services/api/treadmill_api
 COPY workers/agent/pyproject.toml ./pyproject.toml
 COPY workers/agent/treadmill_agent ./treadmill_agent
 
+# role-ui-triage v1.3+ (ADR-0061) issues `treadmill plan validate`
+# and `treadmill plan submit` from inside the worker as part of its
+# self-dispatching Dispatching section. The CLI ships as the small
+# `treadmill-cli` package under `cli/`. Install it alongside the
+# agent so the `treadmill` entry-point is on $PATH at runtime.
+COPY cli/pyproject.toml ./cli/pyproject.toml
+COPY cli/treadmill_cli ./cli/treadmill_cli
+
 # Install the API package first so the agent's pip install sees it as
 # already-installed (its ``treadmill-api`` workspace dep is then
 # satisfied from PyPI metadata, which finds the local package).
 RUN pip install --no-cache-dir ./services/api
 RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ./cli
 
 # Default claude OAuth credentials path. The local-adapter mounts the
 # host's ~/.claude/.credentials.json here (read-write so Claude Code
