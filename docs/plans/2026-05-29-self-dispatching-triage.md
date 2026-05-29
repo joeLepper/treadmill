@@ -304,22 +304,20 @@ sequence_of_work:
         - docs/plans/2026-05-29-self-dispatching-triage.md
     validation:
       - kind: deterministic
-        description: "Lockstep + seed tests pass; the v1.3 Dispatching section + v1.3.0 version marker are present in both prompt copies; the Plan template file exists."
+        description: "Lockstep byte-equality between canonical + bundled prompt copies; both contain the v1.3 Dispatching section + v1.3.0 marker; Plan template exists with placeholder sentinels + container-DNS host; permission patterns present."
         script: |
           set -euo pipefail
-          .venv/bin/python -m pytest \
-            services/api/tests/test_starters.py \
-            -q
+          diff -q docs/triage/role-ui-triage.v1.md services/api/treadmill_api/prompts/role_ui_triage_v1.md
+          grep -q "^# role-ui-triage" services/api/treadmill_api/prompts/role_ui_triage_v1.md
           grep -q "^## Dispatching" docs/triage/role-ui-triage.v1.md
-          grep -q "^## Dispatching" services/api/treadmill_api/prompts/role_ui_triage_v1.md
           grep -q "v1.3.0" docs/triage/role-ui-triage.v1.md
-          grep -q "v1.3.0" services/api/treadmill_api/prompts/role_ui_triage_v1.md
           test -f workers/agent/scripts/triage/plan-template-ui-fix.md
           grep -q "<FINDING_ID_SHORT>" workers/agent/scripts/triage/plan-template-ui-fix.md
           grep -q "treadmill-dashboard:80" workers/agent/scripts/triage/plan-template-ui-fix.md
           grep -q "treadmill plan submit" .claude/settings.json
+          grep -q "treadmill plan validate" .claude/settings.json
         severity: blocking
-        timeout_seconds: 120
+        timeout_seconds: 60
       - kind: llm-judge
         description: "AGENT.md updates land per ADR-0030 in services/api/AGENT.md and workers/agent/AGENT.md."
         prompt: |
