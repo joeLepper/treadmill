@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +17,36 @@ from treadmill_local.autoscaler import (
     _REAP_AGE_SECONDS,
     parse_scalable_target_bounds,
 )
+
+
+class _FakeDockerAdapter:
+    """Test double for DockerClientAdapter — no real Docker daemon required.
+
+    Records all calls so tests can assert on network and container operations
+    without touching the Docker socket.
+    """
+
+    def __init__(self) -> None:
+        self.networks_ensured: list[tuple[str, bool]] = []
+        self.containers_run: list[dict[str, Any]] = []
+        self.running_containers: set[str] = set()
+        # name -> ip; populated by tests to simulate assigned IPs
+        self.container_ips: dict[str, str] = {}
+
+    def ensure_network(self, name: str, *, internal: bool = False) -> None:
+        self.networks_ensured.append((name, internal))
+
+    def container_running(self, name: str) -> bool:
+        return name in self.running_containers
+
+    def run_container(self, image: str, *, name: str, **kwargs: Any) -> MagicMock:
+        self.containers_run.append({"image": image, "name": name, **kwargs})
+        c = MagicMock()
+        c.name = name
+        return c
+
+    def get_container_ip(self, container: Any, network_name: str) -> str | None:
+        return self.container_ips.get(container.name)
 
 
 class _Fake:
@@ -535,3 +568,112 @@ def test_get_depth_closure_defaults_missing_attributes_to_zero():
         return visible, in_flight
 
     assert get_depth() == (0, 0)
+
+
+# ── egress proxy helpers (ADR-0060) ───────────────────────────────────────────
+
+
+def test_ensure_egress_network_creates_internal_network() -> None:
+    from treadmill_local.egress_proxy import (
+        EGRESS_NETWORK_NAME,
+        ensure_egress_network,
+    )
+
+    adapter = _FakeDockerAdapter()
+    ensure_egress_network(adapter)
+    assert adapter.networks_ensured == [(EGRESS_NETWORK_NAME, True)]
+
+
+def test_ensure_egress_proxy_container_spawns_when_not_running(
+    tmp_path: Path,
+) -> None:
+    from treadmill_local.egress_proxy import (
+        EGRESS_NETWORK_NAME,
+        EGRESS_PROXY_CONTAINER_NAME,
+        EGRESS_PROXY_IMAGE,
+        ensure_egress_proxy_container,
+    )
+
+    adapter = _FakeDockerAdapter()
+    ensure_egress_proxy_container(adapter, tmp_path)
+    assert len(adapter.containers_run) == 1
+    run = adapter.containers_run[0]
+    assert run["image"] == EGRESS_PROXY_IMAGE
+    assert run["name"] == EGRESS_PROXY_CONTAINER_NAME
+    assert run["network"] == EGRESS_NETWORK_NAME
+
+
+def test_ensure_egress_proxy_container_skips_when_already_running(
+    tmp_path: Path,
+) -> None:
+    from treadmill_local.egress_proxy import (
+        EGRESS_PROXY_CONTAINER_NAME,
+        ensure_egress_proxy_container,
+    )
+
+    adapter = _FakeDockerAdapter()
+    adapter.running_containers.add(EGRESS_PROXY_CONTAINER_NAME)
+    ensure_egress_proxy_container(adapter, tmp_path)
+    assert adapter.containers_run == []
+
+
+def test_mint_worker_credential_returns_token_and_sha256() -> None:
+    import hashlib
+
+    from treadmill_local.egress_proxy import mint_worker_credential
+
+    token, token_hash = mint_worker_credential()
+    assert len(token) > 0
+    assert token_hash == hashlib.sha256(token.encode()).hexdigest()
+    assert len(token_hash) == 64
+
+
+def test_build_always_allowed_includes_static_and_api_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from treadmill_local.egress_proxy import _ALWAYS_ALLOWED_STATIC, build_always_allowed
+
+    monkeypatch.setenv("TREADMILL_API_HOST", "api.example.treadmill.dev")
+    result = build_always_allowed()
+    for h in _ALWAYS_ALLOWED_STATIC:
+        assert h in result
+    assert "api.example.treadmill.dev" in result
+
+
+def test_build_always_allowed_omits_api_host_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from treadmill_local.egress_proxy import _ALWAYS_ALLOWED_STATIC, build_always_allowed
+
+    monkeypatch.delenv("TREADMILL_API_HOST", raising=False)
+    result = build_always_allowed()
+    assert result == list(_ALWAYS_ALLOWED_STATIC)
+
+
+def test_build_install_allowed_merges_defaults_and_urls() -> None:
+    from treadmill_local.egress_proxy import INSTALL_DEFAULTS, build_install_allowed
+
+    urls = ["https://example.com/tool.tar.gz", "https://cdn.example.org/bin"]
+    result = build_install_allowed(urls)
+    for h in INSTALL_DEFAULTS:
+        assert h in result
+    assert "example.com" in result
+    assert "cdn.example.org" in result
+
+
+def test_write_worker_allowlist_writes_valid_json(tmp_path: Path) -> None:
+    from treadmill_local.egress_proxy import write_worker_allowlist
+
+    config_dir = tmp_path / "egress-proxy-config"
+    write_worker_allowlist(
+        config_dir,
+        worker_ip="10.0.1.5",
+        credential_hash="abc123",
+        always_allowed=["api.anthropic.com"],
+        install_allowed=["pypi.org"],
+    )
+    out = json.loads((config_dir / "10.0.1.5.json").read_text())
+    assert out["worker_ip"] == "10.0.1.5"
+    assert out["install_credential_hash"] == "abc123"
+    assert "api.anthropic.com" in out["always_allowed"]
+    assert "pypi.org" in out["install_allowed"]
