@@ -1185,7 +1185,9 @@ class LocalRuntime:
             )
         console.print(table)
 
-    def start_worker_once(self, family: str) -> Container:
+    def start_worker_once(
+        self, family: str, *, docker_adapter: Any | None = None
+    ) -> Container:
         """Start one container for the given task family, attached to the
         Treadmill local network and wired with the resolved env. Returns the
         running container handle.
@@ -1203,6 +1205,11 @@ class LocalRuntime:
         so an operator running ``run-worker`` against an already-up stack
         picks up worker-code changes made mid-session. Docker's layer
         cache keeps this near-free when nothing changed.
+
+        When *docker_adapter* is provided (autoscaler path, ADR-0060) the
+        worker is spawned on the ``treadmill-egress`` network with proxy env
+        vars and a per-worker install credential injected, and an allowlist
+        config file is written after the IP is resolved.
         """
         self._ensure_images_built()
         if self.state.container_specs is None:
@@ -1220,7 +1227,7 @@ class LocalRuntime:
         spec = find_spec(self.state.container_specs, family)
         nonce = int(time.time() * 1000) % 100000
         name = f"treadmill-worker-{spec.family}-{nonce:05d}"
-        return self._run_container(spec, name=name, role="worker")
+        return self._run_container(spec, name=name, role="worker", docker_adapter=docker_adapter)
 
     def _run_container(
         self,
@@ -1229,10 +1236,37 @@ class LocalRuntime:
         name: str,
         role: str,
         port_mappings: list[tuple[int, int]] | None = None,
+        docker_adapter: Any | None = None,
     ) -> Container:
         """Start a single container for *spec*. ``role`` becomes the
         ``treadmill.role`` label; ``port_mappings`` (container_port, host_port)
-        publishes ports on the host."""
+        publishes ports on the host.
+
+        When *docker_adapter* is provided (ADR-0060 egress path) the container
+        is spawned on the ``treadmill-egress`` network with proxy env vars
+        injected, and a per-worker allowlist JSON is written after the IP is
+        resolved from the network-attach response.
+        """
+        env = dict(spec.env)
+        network = spec.network
+
+        install_cred: str | None = None
+        install_cred_hash: str | None = None
+
+        if docker_adapter is not None:
+            from treadmill_local.egress_proxy import (
+                EGRESS_NETWORK_NAME,
+                build_always_allowed,
+                build_install_allowed,
+                mint_worker_credential,
+                write_worker_allowlist,
+            )
+            network = EGRESS_NETWORK_NAME  # internal bridge; no external gateway
+            install_cred, install_cred_hash = mint_worker_credential()
+            env["HTTP_PROXY"] = "http://treadmill-egress-proxy:3128"
+            env["HTTPS_PROXY"] = "http://treadmill-egress-proxy:3128"
+            env["TREADMILL_INSTALL_PROXY_TOKEN"] = install_cred
+
         self._ensure_image(spec.image)
         ports = {f"{cp}/tcp": hp for cp, hp in (port_mappings or [])}
         volumes = self._volumes_for(spec)
@@ -1240,8 +1274,8 @@ class LocalRuntime:
             spec.image,
             name=name,
             detach=True,
-            network=spec.network,
-            environment=spec.env,
+            network=network,
+            environment=env,
             ports=ports,
             volumes=volumes,
             labels={
@@ -1251,6 +1285,19 @@ class LocalRuntime:
             },
             remove=False,
         )
+
+        if docker_adapter is not None and install_cred_hash is not None:
+            worker_ip = docker_adapter.get_container_ip(c, network)
+            if worker_ip:
+                egress_config_dir = self.infra_dir / "egress-proxy-config"
+                write_worker_allowlist(
+                    egress_config_dir,
+                    worker_ip,
+                    install_cred_hash,
+                    always_allowed=build_always_allowed(),
+                    install_allowed=build_install_allowed([]),
+                )
+
         suffix = f" ports={ports}" if ports else ""
         console.print(f"• {role.capitalize()} [cyan]{name}[/cyan] started ({c.short_id}){suffix}.")
         return c

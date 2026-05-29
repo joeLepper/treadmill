@@ -294,6 +294,17 @@ def main() -> int:
     )
     docker_client = docker.from_env()
 
+    from treadmill_local.docker_client import DockerClientAdapter
+    from treadmill_local.egress_proxy import (
+        ensure_egress_network,
+        ensure_egress_proxy_container,
+    )
+
+    adapter = DockerClientAdapter(docker_client)
+    egress_config_dir = infra_dir / "egress-proxy-config"
+    ensure_egress_network(adapter)
+    ensure_egress_proxy_container(adapter, egress_config_dir)
+
     if deployment_id is not None:
         # Dev-local: build LocalRuntime with the deployment_config so
         # ``start_worker_once`` calls into the dev-local credential
@@ -340,7 +351,7 @@ def main() -> int:
         )
 
     def start_worker() -> None:
-        runtime.start_worker_once(family)
+        runtime.start_worker_once(family, docker_adapter=adapter)
 
     def reap_dead_workers() -> int:
         """Remove exited worker containers older than ``_REAP_AGE_SECONDS``.
