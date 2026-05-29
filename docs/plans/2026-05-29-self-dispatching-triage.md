@@ -307,9 +307,7 @@ sequence_of_work:
         description: "Lockstep + seed tests pass; the v1.3 Dispatching section + v1.3.0 version marker are present in both prompt copies; the Plan template file exists."
         script: |
           set -euo pipefail
-          .venv/bin/python -m pytest \
-            services/api/tests/test_starters.py \
-            -q
+          (cd services/api && uv run pytest tests/test_starters.py -q)
           grep -q "^## Dispatching" docs/triage/role-ui-triage.v1.md
           grep -q "^## Dispatching" services/api/treadmill_api/prompts/role_ui_triage_v1.md
           grep -q "v1.3.0" docs/triage/role-ui-triage.v1.md
@@ -319,7 +317,7 @@ sequence_of_work:
           grep -q "treadmill-dashboard:80" workers/agent/scripts/triage/plan-template-ui-fix.md
           grep -q "treadmill plan submit" .claude/settings.json
         severity: blocking
-        timeout_seconds: 120
+        timeout_seconds: 180
       - kind: llm-judge
         description: "AGENT.md updates land per ADR-0030 in services/api/AGENT.md and workers/agent/AGENT.md."
         prompt: |
