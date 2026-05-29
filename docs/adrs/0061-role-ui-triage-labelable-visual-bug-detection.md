@@ -61,6 +61,18 @@ Ship **`role-ui-triage`** — a Treadmill role + workflow that:
 5. **Dispatches a Treadmill plan** for `dispatched` findings,
    `research_only` plans for medium/low-severity cases, and logs
    `suppressed` findings to the corpus for label-driven evolution.
+   Dispatch is **inline in the same worker run** — the role authors
+   a Plan from the bundled UI-fix template
+   (`/opt/triage/plan-template-ui-fix.md`), submits it via
+   `treadmill plan submit`, captures the resulting `plan_id`, and
+   includes it in the finding record's `dispatched_plan_id` before
+   POSTing to `/api/v1/triage/findings`. The schema's
+   `model_validator` allows `dispatched_plan_id` to be non-null at
+   creation when `dispatch_action='dispatched'` (revised in the
+   2026-05-29 amendment after v1.0/v1.1/v1.2 prompt runs showed the
+   "downstream dispatcher fills it in later" framing required an
+   async surface we explicitly chose not to build — see "One role,
+   not two" below).
 
 Findings are stored in a new `triage_findings` Postgres table with
 the schema defined in this ADR and detailed in the v1 prompt artifact.
@@ -124,6 +136,40 @@ transaction as the source event. This mirrors how `task_status` and
 `task_mergeability` are already projected — no separate sweeper, no
 race window.
 
+### UI-fix dispatched plans validate via Playwright
+
+A Plan dispatched by `role-ui-triage` for a UI bug carries a
+**Playwright validation step** in its `validation` block — not
+merely a `pytest` invocation. The downstream code-author task's PR
+is gated on a headless Playwright assertion that the bug no longer
+reproduces against the live dashboard at
+`http://treadmill-dashboard:80/` (the same container-DNS hostname
+the triage probe used to find it). The bundled
+`/opt/triage/plan-template-ui-fix.md` includes a validation block
+shaped like:
+
+```yaml
+validation:
+  - kind: deterministic
+    script: |
+      node /opt/triage/validate.mjs \
+        --target http://treadmill-dashboard:80/ \
+        --assert "<assertion derived from finding.proposed_resolution>"
+```
+
+The agent image already ships Playwright + chromium-headless-shell
+(per Step 2 of the rollout plan); no new image work is required.
+This makes UI-fix dispatches **closed-loop visually** even though
+the agent-side dependency cost was paid once for the triage role
+itself.
+
+Non-UI dispatches (the `other` category, plus any future role-driven
+dispatch that doesn't target a rendered surface) fall back to
+ordinary `pytest`-style validation. The Plan template lives in
+the worker image; switching templates per-finding-category is a
+template-lookup decision in the role's prompt, not a schema
+constraint.
+
 ### Retention
 
 Triage findings are retained **forever**. The corpus selection for
@@ -181,6 +227,19 @@ already supports the split (every record has both detector and
 dispatcher fields). When label data shows the detector and dispatcher
 have separable error modes, we re-prompt without re-shaping the
 record.
+
+Re-examined 2026-05-29 after v1.0/v1.1/v1.2 prompt runs revealed that
+the dispatch path was theoretical — the schema validator rejected
+`dispatched + null plan_id`, the prompt punted to a "downstream
+dispatcher" that didn't exist, and the v1.2 worker correctly
+downgraded everything to `research_only`. The natural fix was the
+detector/dispatcher split (`wf-ui-triage-dispatch` runs after
+`wf-ui-triage`, scans for `dispatched`+null-`plan_id` rows, authors
+Plans). We chose the **inline path** instead — the operator's
+phrasing was *"they just schedule a task without us asking"*, "they"
+being the triage worker itself. Single role, single workflow, single
+run. Reconsider if v1.3+ prompt comprehension regresses on the
+combined surface.
 
 ### Store findings as `events` rows
 
