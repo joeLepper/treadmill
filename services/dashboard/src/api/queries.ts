@@ -100,6 +100,7 @@ export function useRepoDocs(repo: string) {
       _apiFetch<RepoDocs>(
         '/api/v1/dashboard/repos/' + encodeURIComponent(repo) + '/docs',
       ),
+    enabled: !!repo,
     staleTime: 60_000,
   });
 }

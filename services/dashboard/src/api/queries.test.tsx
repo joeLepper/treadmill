@@ -190,6 +190,15 @@ describe('useRepoDocs', () => {
     expect(result.current.error).toBeInstanceOf(TypeError);
     expect((result.current.error as Error).message).toBe('Failed to fetch');
   });
+
+  it('does not fire when repo is empty', async () => {
+    const fetchMock = vi.mocked(fetch);
+    renderHook(() => useRepoDocs(''), { wrapper: wrapper() });
+    // Give react-query a tick to settle. The hook
+    // should remain idle because `enabled: false`.
+    await new Promise(r => setTimeout(r, 50));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('useCancelTask', () => {
