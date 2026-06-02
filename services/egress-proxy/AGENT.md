@@ -70,9 +70,33 @@ Each connection decision writes one JSON object:
 
 | Variable | Default | Description |
 |---|---|---|
-| `EGRESS_PROXY_CONFIG_DIR` | `/etc/treadmill/egress-proxy` | Directory containing per-worker `*.json` allowlist files. |
+| `EGRESS_PROXY_CONFIG_DIR` | `/etc/egress-proxy-config` | Directory containing per-worker `*.json` allowlist files. |
 | `EGRESS_PROXY_PORT` | `3128` | TCP port the proxy listens on. |
+
+## Container image
+
+Built locally from `services/egress-proxy/Dockerfile` (build context
+is `services/egress-proxy/`) as `treadmill-egress-proxy:dev` by
+`tools/local-adapter/treadmill_local/runtime.py::_ensure_images_built`
+during every `treadmill-local up`. The autoscaler in
+`tools/local-adapter/treadmill_local/egress_proxy.py` (ADR-0060
+Step 3b) spawns one container per host on the
+`treadmill-egress` internal docker network, mounting the operator-
+side config directory read-only at `/etc/egress-proxy-config`.
+
+The Dockerfile is intentionally minimal — pure stdlib asyncio plus a
+single Pydantic dep means no system packages, no compile step, no
+network installs beyond `pip install --no-cache-dir .` of the local
+wheel. `EXPOSE 3128` matches the autoscaler's spawn assumption.
 
 ## Recent changes
 
-- PR #TBD — Initial implementation (ADR-0060 Step 3a).
+- Dockerfile + image-build wiring (closes the 2026-06-02 delivery
+  gap from ADR-0060 Step 3b — the autoscaler-spawn code was merged
+  in PR #92 but the image it referenced wasn't built anywhere in
+  dev-local, so the autoscaler 404'd on `docker pull` and no
+  workers spawned).
+- Default `EGRESS_PROXY_CONFIG_DIR` aligned with the autoscaler's
+  spawn mount (`/etc/egress-proxy-config`), so the proxy reads
+  per-worker configs out-of-the-box without env-var wiring.
+- PR #77 — Initial implementation (ADR-0060 Step 3a).
