@@ -120,6 +120,13 @@ class Escalation(BaseModel):
     title: str
     escalated_at: datetime
     reason: str | None = None
+    # ADR-0062 Step 5: populated only on the closed-incident path
+    # (``?include_closed=true``). ``None`` for open incidents (the
+    # default surface). When non-null, the value is read from the
+    # ``task.escalation_closed`` event payload — the emitter stamps MTTR
+    # at close-time (``escalation_close_sweep.emit_escalation_closed``)
+    # so consumers don't re-derive it.
+    mttr_seconds: int | None = None
 
 
 class BucketCounts(BaseModel):
@@ -268,8 +275,13 @@ ORDER BY s.run_id, s.step_index
 
 _ESCALATIONS_SQL = """
 -- A task is "escalated" iff its most recent ``task.escalated_to_operator``
--- event has not yet been followed by a ``task.escalation_acknowledged``.
--- Mirrors the mock's transient ``escalated`` bool exactly: ack flips it off.
+-- event has not yet been followed by *either* a
+-- ``task.escalation_acknowledged`` (operator dismissed the ribbon) *or*
+-- a ``task.escalation_closed`` (ADR-0062 paired close — sweep-detected
+-- via ``coordination/escalation_close_sweep.py`` or operator-driven via
+-- the CLI). The original mock contract only knew about ack; ADR-0062
+-- Step 5 widens the open-set filter so a closed incident also drops out
+-- of the operator's "needs attention" list.
 WITH last_escalation AS (
     SELECT DISTINCT ON (task_id)
         task_id,
@@ -290,6 +302,16 @@ last_ack AS (
       AND action = 'escalation_acknowledged'
       AND task_id IS NOT NULL
     ORDER BY task_id, created_at DESC
+),
+last_close AS (
+    SELECT DISTINCT ON (task_id)
+        task_id,
+        created_at AS closed_at
+    FROM events
+    WHERE entity_type = 'task'
+      AND action = 'escalation_closed'
+      AND task_id IS NOT NULL
+    ORDER BY task_id, created_at DESC
 )
 SELECT
     le.task_id::text AS task_id,
@@ -299,9 +321,67 @@ SELECT
     le.reason        AS reason
 FROM last_escalation le
 JOIN tasks t ON t.id = le.task_id
-LEFT JOIN last_ack la ON la.task_id = le.task_id
-WHERE la.acked_at IS NULL OR la.acked_at < le.escalated_at
+LEFT JOIN last_ack   la ON la.task_id = le.task_id
+LEFT JOIN last_close lc ON lc.task_id = le.task_id
+WHERE (la.acked_at  IS NULL OR la.acked_at  < le.escalated_at)
+  AND (lc.closed_at IS NULL OR lc.closed_at < le.escalated_at)
 ORDER BY le.escalated_at DESC
+"""
+
+
+# ``?include_closed=true`` ribbon cap. 50 is enough to fill the
+# dashboard's "recently closed" strip without paging; if a future surface
+# needs more we'll widen this or page properly.
+_CLOSED_ESCALATIONS_LIMIT = 50
+
+
+_CLOSED_ESCALATIONS_SQL = """
+-- Recently closed incidents (ADR-0062 Step 5). Pairs each task's most
+-- recent ``task.escalation_closed`` with its matching opener so the
+-- "recently closed" ribbon can show the original ``escalated_at`` /
+-- ``reason`` alongside the MTTR. ``mttr_seconds`` is read straight from
+-- the close event's payload — the emitter
+-- (``escalation_close_sweep.emit_escalation_closed``) stamps it at
+-- close-time so the value reflects the real wall-clock incident
+-- duration even for multi-day stalls.
+--
+-- CTE names are intentionally distinct from ``_ESCALATIONS_SQL`` so the
+-- test-suite's SQL-substring dispatch can tell the two queries apart.
+WITH closed_event AS (
+    SELECT DISTINCT ON (task_id)
+        task_id,
+        created_at AS closed_at,
+        (payload->>'mttr_seconds')::int AS mttr_seconds
+    FROM events
+    WHERE entity_type = 'task'
+      AND action = 'escalation_closed'
+      AND task_id IS NOT NULL
+    ORDER BY task_id, created_at DESC
+),
+paired_open AS (
+    SELECT DISTINCT ON (task_id)
+        task_id,
+        created_at AS escalated_at,
+        payload->>'reason' AS reason
+    FROM events
+    WHERE entity_type = 'task'
+      AND action = 'escalated_to_operator'
+      AND task_id IS NOT NULL
+    ORDER BY task_id, created_at DESC
+)
+SELECT
+    ce.task_id::text AS task_id,
+    t.repo           AS repo,
+    t.title          AS title,
+    po.escalated_at  AS escalated_at,
+    po.reason        AS reason,
+    ce.mttr_seconds  AS mttr_seconds
+FROM closed_event ce
+JOIN paired_open po ON po.task_id = ce.task_id
+JOIN tasks t        ON t.id      = ce.task_id
+WHERE po.escalated_at <= ce.closed_at
+ORDER BY ce.closed_at DESC
+LIMIT :limit
 """
 
 
@@ -360,6 +440,7 @@ async def get_overview(
         Literal["architect_cap", "stuck_task_sweep", "gate-broken"] | None,
         Query(),
     ] = None,
+    include_closed: Annotated[bool, Query()] = False,
 ) -> OverviewResponse:
     """Return the operator-dashboard overview payload.
 
@@ -374,6 +455,14 @@ async def get_overview(
         ``architect_cap`` / ``stuck_task_sweep`` / ``gate-broken``.
         Narrows the ``escalations`` array only; ``tasks`` / bucket
         counts stay unfiltered so the page chrome doesn't drift.
+      * ``include_closed`` — when truthy (ADR-0062 Step 5), append
+        recently-closed incidents to ``escalations`` so the dashboard
+        can render a "recently closed" ribbon with MTTR. Closed rows
+        carry a non-null ``mttr_seconds`` (open rows always carry
+        ``null``), which is how the frontend distinguishes the two
+        states without a separate response array. Closed rows do NOT
+        feed ``escalation_by_task``, so per-task ``escalated`` flags
+        and bucket counts stay aligned with the open-incident set only.
 
     Filters narrow the ``tasks`` array only — ``bucketCounts`` stays
     global so the bucket-pill totals on the page chrome don't drift when
@@ -413,13 +502,43 @@ async def get_overview(
         )
         for row in escalations_rows
     ]
+    # ``escalation_by_task`` drives per-task ``escalated`` flags + bucket
+    # math. Only OPEN incidents belong here — closed incidents (appended
+    # below when ``include_closed`` is set) are informational ribbon
+    # rows, not signals that the task currently needs attention.
     escalation_by_task: dict[str, Escalation] = {e.task_id: e for e in escalations}
+
+    # ADR-0062 Step 5: optional "recently closed" ribbon. Appended to
+    # the same ``escalations`` array with ``mttr_seconds`` populated;
+    # the frontend distinguishes closed from open by the field being
+    # non-null. Kept out of ``escalation_by_task`` so bucket counts
+    # don't drift when an incident closes.
+    if include_closed:
+        closed_rows = (
+            await session.execute(
+                text(_CLOSED_ESCALATIONS_SQL),
+                {"limit": _CLOSED_ESCALATIONS_LIMIT},
+            )
+        ).mappings().all()
+        escalations.extend(
+            Escalation(
+                task_id=row["task_id"],
+                repo=row["repo"],
+                title=row["title"],
+                escalated_at=row["escalated_at"],
+                reason=row["reason"],
+                mttr_seconds=row["mttr_seconds"],
+            )
+            for row in closed_rows
+        )
 
     # ``reason`` narrows the surfaced ``escalations`` array (per-reason
     # triage view, ADR-0058 Step 5). Applied AFTER ``escalation_by_task``
     # is built so bucket math + per-task ``escalated`` flags stay
     # independent of the filter — mirrors how ``repo``/``account``
-    # narrow ``tasks`` without disturbing ``bucketCounts``.
+    # narrow ``tasks`` without disturbing ``bucketCounts``. Filters
+    # both open and closed rows when ``include_closed`` is set so the
+    # ribbon stays consistent with the open-list narrowing.
     if reason is not None:
         escalations = [e for e in escalations if e.reason == reason]
 
