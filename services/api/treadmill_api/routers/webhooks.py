@@ -40,6 +40,7 @@ from treadmill_api.webhooks import (
     SignatureMissingError,
     buffer_pending_event,
     normalize_github_event,
+    pr_pending_buffer_key,
     verify_github_signature,
 )
 
@@ -229,8 +230,7 @@ async def github_webhook(
         try:
             await buffer_pending_event(
                 request.app.state.redis,
-                normalized.repo,
-                normalized.pr_number,
+                pr_pending_buffer_key(normalized.repo, normalized.pr_number),
                 event.id,
             )
         except Exception:

@@ -18,6 +18,7 @@ from treadmill_api.webhooks.pending_events import (
     buffer_pending_event,
     drain_pending_events,
     pending_event_count,
+    pr_pending_buffer_key,
 )
 from treadmill_api.webhooks.signatures import (
     InvalidSignatureError,
@@ -34,5 +35,6 @@ __all__ = [
     "drain_pending_events",
     "normalize_github_event",
     "pending_event_count",
+    "pr_pending_buffer_key",
     "verify_github_signature",
 ]

@@ -364,7 +364,10 @@ def test_drain_resolves_buffered_events(
     # Call drain_pending_events directly (the future task_prs INSERT path
     # will invoke this; here we simulate it).
     from treadmill_api.eventbus import LoggingEventPublisher
-    from treadmill_api.webhooks.pending_events import drain_pending_events
+    from treadmill_api.webhooks.pending_events import (
+        drain_pending_events,
+        pr_pending_buffer_key,
+    )
 
     async def _drain():
         async_url = database_url.replace("+psycopg", "+asyncpg")
@@ -375,7 +378,7 @@ def test_drain_resolves_buffered_events(
             async with Session() as session:
                 drained = await drain_pending_events(
                     r, session, LoggingEventPublisher(),
-                    "drain/test", 55, task_id,
+                    pr_pending_buffer_key("drain/test", 55), task_id,
                 )
             return drained
         finally:
@@ -399,7 +402,10 @@ def test_drain_on_empty_buffer_returns_zero(
 ) -> None:
     """An empty buffer drains cleanly with no errors."""
     from treadmill_api.eventbus import LoggingEventPublisher
-    from treadmill_api.webhooks.pending_events import drain_pending_events
+    from treadmill_api.webhooks.pending_events import (
+        drain_pending_events,
+        pr_pending_buffer_key,
+    )
 
     async def _drain():
         async_url = database_url.replace("+psycopg", "+asyncpg")
@@ -411,7 +417,7 @@ def test_drain_on_empty_buffer_returns_zero(
                 import uuid as _uuid
                 drained = await drain_pending_events(
                     r, session, LoggingEventPublisher(),
-                    "no/such/repo", 1, _uuid.uuid4(),
+                    pr_pending_buffer_key("no/such/repo", 1), _uuid.uuid4(),
                 )
             return drained
         finally:
