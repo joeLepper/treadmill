@@ -15,7 +15,7 @@ class TaskEscalatedToOperator(EventPayload):
     """Emitted when automated recovery is exhausted and operator
     intervention is required.
 
-    Three call sites today (the ``reason`` field discriminates):
+    Four call sites today (the ``reason`` field discriminates):
       * ``architect_cap`` — per ADR-0048 §3, wf-architecture-resolve hit
         its 5-attempt per-task cap (ADR-0029 Q29.e); see
         ``triggers._emit_arch_cap_reached``.
@@ -29,6 +29,11 @@ class TaskEscalatedToOperator(EventPayload):
         so the operator can repair the gate without re-running the
         loop. The amend-cap counter is not incremented because the
         architect's verdict is not ``amend``.
+      * ``terminal_step_failure`` — per ADR-0062, a ``step.failed``
+        landed on a workflow run with no further pending steps and
+        no concurrent cap-reached escalation. ``step_name`` is set
+        to the failing step's name and ``gate_log_excerpt`` carries
+        the step's captured error / log excerpt when present.
 
     Surface via GET /api/v1/tasks?status=needs_operator and the
     dashboard's escalation bucket (``routers/dashboard/overview.py``).
@@ -42,19 +47,31 @@ class TaskEscalatedToOperator(EventPayload):
     last_verdict: str | None = None
     last_reasoning: str | None = None
     run_ids: list[str] = pydantic.Field(default_factory=list)
-    # ADR-0058: distinguish escalation sources so dashboards / sweeps
-    # can triage gate-broken cases separately from cap escalations.
-    # Optional with default=None so the existing escalation emitters
-    # keep working without an in-place schema migration; the existing
-    # emitters set this on the natural deploy cycle.
-    reason: Literal["architect_cap", "stuck_task_sweep", "gate-broken"] | None = None
+    # ADR-0058 / ADR-0062: distinguish escalation sources so dashboards /
+    # sweeps can triage cases separately. Optional with default=None so
+    # the existing escalation emitters keep working without an in-place
+    # schema migration; the existing emitters set this on the natural
+    # deploy cycle.
+    reason: Literal[
+        "architect_cap",
+        "stuck_task_sweep",
+        "gate-broken",
+        "terminal_step_failure",
+    ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from
     # ``source_step.output.payload.validation_results[].log_excerpt``
     # so the operator sees the actual tooling failure on the
     # escalation event without re-running the loop. Capped at 4000
     # chars (same bound as ArchitectVerdict.gate_log_excerpt).
+    # ADR-0062 also populates this for ``reason='terminal_step_failure'``
+    # from the failing step's captured error / log excerpt.
     gate_log_excerpt: str | None = pydantic.Field(None, max_length=4000)
+    # ADR-0062: the failing step's ``step_name`` (e.g. ``action`` /
+    # ``analyze``) on ``reason='terminal_step_failure'``. Optional and
+    # default-None so the existing emitters that don't carry a single
+    # owning step (cap-reached, stuck-task-sweep) remain wire-compatible.
+    step_name: str | None = None
 
 
 class TaskEscalationClosed(EventPayload):

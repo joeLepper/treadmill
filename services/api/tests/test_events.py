@@ -37,6 +37,7 @@ from treadmill_api.events import (
     StepReady,
     StepStarted,
     TaskCancelled,
+    TaskEscalatedToOperator,
     TaskReady,
     TaskRegistered,
     UnknownEventTypeError,
@@ -75,6 +76,70 @@ def test_task_cancelled_with_no_reason():
     original = TaskCancelled()
     parsed = _round_trip(original)
     assert parsed.reason is None
+
+
+def test_task_escalated_to_operator_reason_literal_pins_known_values():
+    """ADR-0058 + ADR-0062 lock the ``reason`` Literal to four values
+    (plus the legacy ``None`` for pre-tagged emitters). Changing the
+    set is a wire-shape change — pin it so the producer additions
+    surface in CI."""
+    valid_reasons = (
+        "architect_cap",
+        "stuck_task_sweep",
+        "gate-broken",
+        "terminal_step_failure",
+    )
+    for reason in valid_reasons:
+        payload = TaskEscalatedToOperator(
+            task_id=uuid.uuid4(),
+            repo="RAMJAC/treadmill",
+            reason=reason,
+        )
+        # Round-trip survives.
+        parsed = _round_trip(payload)
+        assert isinstance(parsed, TaskEscalatedToOperator)
+        assert parsed.reason == reason
+
+    # ``None`` is permitted (legacy emitters pre-ADR-0058 wrote no reason).
+    legacy = TaskEscalatedToOperator(
+        task_id=uuid.uuid4(),
+        repo="RAMJAC/treadmill",
+    )
+    assert legacy.reason is None
+
+    # Anything else fails validation — Pydantic's Literal enforcement.
+    with pytest.raises(ValidationError):
+        TaskEscalatedToOperator(
+            task_id=uuid.uuid4(),
+            repo="RAMJAC/treadmill",
+            reason="not_a_real_reason",  # type: ignore[arg-type]
+        )
+
+
+def test_task_escalated_to_operator_carries_step_name_for_terminal_step_failure():
+    """ADR-0062 Step 1: ``step_name`` is the new optional field that
+    identifies the failing step on ``reason='terminal_step_failure'``.
+    The field round-trips and defaults to ``None`` when omitted."""
+    payload = TaskEscalatedToOperator(
+        task_id=uuid.uuid4(),
+        repo="RAMJAC/treadmill",
+        reason="terminal_step_failure",
+        step_name="action",
+        gate_log_excerpt="boom",
+    )
+    parsed = _round_trip(payload)
+    assert isinstance(parsed, TaskEscalatedToOperator)
+    assert parsed.reason == "terminal_step_failure"
+    assert parsed.step_name == "action"
+    assert parsed.gate_log_excerpt == "boom"
+
+    # Defaults: pre-ADR-0062 emitters omit step_name entirely.
+    defaulted = TaskEscalatedToOperator(
+        task_id=uuid.uuid4(),
+        repo="RAMJAC/treadmill",
+        reason="architect_cap",
+    )
+    assert defaulted.step_name is None
 
 
 def test_task_ready_has_no_required_fields():
