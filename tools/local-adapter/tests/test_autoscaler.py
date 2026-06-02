@@ -584,6 +584,34 @@ def test_ensure_egress_network_creates_internal_network() -> None:
     assert adapter.networks_ensured == [(EGRESS_NETWORK_NAME, True)]
 
 
+def test_ensure_egress_network_is_idempotent_when_network_exists() -> None:
+    """ADR-0064 Step 1: the boot path calls ``ensure_egress_network``
+    before services start; the autoscaler also calls it on its own
+    startup. The helper must be safe to call when the network already
+    exists — the underlying ``DockerClientAdapter.ensure_network``
+    catches NotFound on ``get`` and only creates on miss, so repeat
+    calls return the existing network without raising."""
+    from treadmill_local.docker_client import DockerClientAdapter
+    from treadmill_local.egress_proxy import (
+        EGRESS_NETWORK_NAME,
+        ensure_egress_network,
+    )
+
+    existing_network = MagicMock(name="existing_network")
+    fake_client = MagicMock(name="fake_docker_client")
+    fake_client.networks.get.return_value = existing_network
+
+    adapter = DockerClientAdapter(client=fake_client)
+    ensure_egress_network(adapter)
+    ensure_egress_network(adapter)
+
+    # The adapter looks the network up; both calls hit the get path
+    # and neither attempts to create (the existing-network branch).
+    assert fake_client.networks.get.call_count == 2
+    fake_client.networks.get.assert_any_call(EGRESS_NETWORK_NAME)
+    fake_client.networks.create.assert_not_called()
+
+
 def test_ensure_egress_proxy_container_spawns_when_not_running(
     tmp_path: Path,
 ) -> None:
