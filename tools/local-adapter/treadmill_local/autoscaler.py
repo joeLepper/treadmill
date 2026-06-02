@@ -302,6 +302,13 @@ def main() -> int:
 
     adapter = DockerClientAdapter(docker_client)
     egress_config_dir = infra_dir / "egress-proxy-config"
+    # mkdir BEFORE the proxy spawns. Docker auto-creates absent mount
+    # paths as root (the daemon's UID); a root-owned dir blocks the
+    # autoscaler (running as the operator's UID) from writing the
+    # per-worker allowlist JSON later. Surfaced 2026-06-02 as a
+    # `PermissionError` crash after every proxy restart. Idempotent
+    # on existing operator-owned dirs.
+    egress_config_dir.mkdir(parents=True, exist_ok=True)
     ensure_egress_network(adapter)
     ensure_egress_proxy_container(adapter, egress_config_dir)
 
