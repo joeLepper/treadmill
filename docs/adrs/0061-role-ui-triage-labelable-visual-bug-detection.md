@@ -136,15 +136,18 @@ transaction as the source event. This mirrors how `task_status` and
 `task_mergeability` are already projected — no separate sweeper, no
 race window.
 
-### UI-fix dispatched plans validate via Playwright
+### UI-fix dispatched plans validate via component-level vitest
 
 A Plan dispatched by `role-ui-triage` for a UI bug carries a
-**Playwright validation step** in its `validation` block — not
-merely a `pytest` invocation. The downstream code-author task's PR
-is gated on a headless Playwright assertion that the bug no longer
-reproduces against the live dashboard at
-`http://treadmill-dashboard:80/` (the same container-DNS hostname
-the triage probe used to find it). The bundled
+**component-level vitest assertion** in its `validation` block,
+not a Playwright probe against a deployed URL. The downstream
+code-author task authors a new test file at `<TEST_FILE_PATH>` that
+renders the affected component via `@testing-library/react` and
+asserts the bug no longer reproduces. The worker-sandbox gate
+checks the *shape* of that test (file exists, references the
+finding ID, contains the bug-specific assertion signature); the
+PR's CI step runs the test and validates the bug doesn't reproduce
+in JSDOM against the freshly-authored code. The bundled
 `/opt/triage/plan-template-ui-fix.md` includes a validation block
 shaped like:
 
@@ -152,16 +155,39 @@ shaped like:
 validation:
   - kind: deterministic
     script: |
-      node /opt/triage/validate.mjs \
-        --target http://treadmill-dashboard:80/ \
-        --assert "<assertion derived from finding.proposed_resolution>"
+      set -euo pipefail
+      test -f <TEST_FILE_PATH>
+      grep -q "<FINDING_ID_SHORT>" <TEST_FILE_PATH>
+      grep -q "<VITEST_ASSERTION_SIGNATURE>" <TEST_FILE_PATH>
 ```
 
-The agent image already ships Playwright + chromium-headless-shell
-(per Step 2 of the rollout plan); no new image work is required.
-This makes UI-fix dispatches **closed-loop visually** even though
-the agent-side dependency cost was paid once for the triage role
-itself.
+**Why not the deployed-URL Playwright gate the 2026-05-29 v1.3
+amendment proposed.** The original amendment specified a Playwright
+script probing `http://treadmill-dashboard:80/` (the same
+container-DNS host the triage probe used). Empirical evidence on
+2026-06-02 (task `d3ac6992`, triage finding `7e4ab8f6` — escalation
+ack `aria-label` uniqueness): the gate is **structurally
+unsatisfiable pre-merge.** Pre-merge, the dashboard at that URL
+still serves the unfixed bundle, so the assertion fails every
+cycle; the architect-amend loop can't redirect the gate because the
+URL is baked into the plan's `validation` script. The triage worker
+authored a correct fix, the architect couldn't rescue it, the task
+cancelled per the plan's 2-architect-amend budget, and we shipped
+manually (PR #119).
+
+The vitest-against-freshly-authored-component approach closes the
+gap: the test runs against the PR branch's code, not a deployed
+artifact. Closed-loop pre-merge validation against the fix-in-flight,
+which is what the cybernetic loop needs to actually merge work
+autonomously.
+
+Full-browser Playwright validation against the deployed dashboard
+becomes a **separate post-merge soak workflow** — fired by the
+coordination consumer when a dispatched-plan PR merges, validates
+the bug doesn't reproduce on the now-deployed surface, and updates
+the finding's `outcome_state` accordingly. Defining that soak
+workflow is a future ADR (or an extension to the existing outcome-
+tracking projection).
 
 Non-UI dispatches (the `other` category, plus any future role-driven
 dispatch that doesn't target a rendered surface) fall back to

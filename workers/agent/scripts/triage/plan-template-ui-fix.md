@@ -10,10 +10,12 @@ sequence_of_work:
         <PROPOSED_RESOLUTION>
 
       TESTS:
-        - The Playwright validation script below must
-          pass against the live dashboard at
-          http://treadmill-dashboard:80/ after the fix
-          lands.
+        - Author a new vitest test file alongside the modified
+          component at <TEST_FILE_PATH> that renders the relevant
+          component(s) via `@testing-library/react` and asserts
+          the bug no longer reproduces. The assertion mirrors what
+          the triage finding's `proposed_resolution` says should
+          be true after the fix.
 
       DOC:
         - Update the touched component's AGENT.md
@@ -22,6 +24,7 @@ sequence_of_work:
     scope:
       files:
         - <PROPOSED_RESOLUTION_FILES>
+        - <TEST_FILE_PATH>
         - <COMPONENT_AGENT_MD>
       services_affected:
         - services/dashboard
@@ -30,17 +33,11 @@ sequence_of_work:
         - Changes to the triage role prompt itself
     validation:
       - kind: deterministic
-        description: "Playwright asserts <FINDING_ID_SHORT> no longer reproduces against http://treadmill-dashboard:80/."
+        description: "The bug-regression vitest test exists, contains an assertion derived from the finding's proposed_resolution, and references the triage finding ID."
         script: |
-          node -e '
-            const { chromium } = require("playwright");
-            (async () => {
-              const browser = await chromium.launch({ headless: true });
-              const page = await browser.newPage();
-              await page.goto("http://treadmill-dashboard:80/<TARGET_PATH>", { waitUntil: "networkidle" });
-              <PLAYWRIGHT_ASSERTION_DERIVED_FROM_PROPOSED_RESOLUTION>
-              await browser.close();
-            })().catch(e => { console.error(e); process.exit(1); });
-          '
+          set -euo pipefail
+          test -f <TEST_FILE_PATH>
+          grep -q "<FINDING_ID_SHORT>" <TEST_FILE_PATH>
+          grep -q "<VITEST_ASSERTION_SIGNATURE>" <TEST_FILE_PATH>
         severity: blocking
-        timeout_seconds: 120
+        timeout_seconds: 30
