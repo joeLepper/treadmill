@@ -184,6 +184,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app_webhook_secret=settings.github_app_webhook_secret,
             sessionmaker=poller_sessionmaker,
             publisher=publisher,
+            redis_client=redis,
         )
         await webhook_inbox_poller.start()
 

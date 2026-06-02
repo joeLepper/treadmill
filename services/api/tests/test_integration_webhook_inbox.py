@@ -31,10 +31,12 @@ import subprocess
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import boto3
 import pytest
 import pytest_asyncio
+import redis.asyncio as redis_async
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
@@ -44,6 +46,11 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from treadmill_api.coordination.webhook_inbox import WebhookInboxPoller
+from treadmill_api.eventbus import LoggingEventPublisher
+from treadmill_api.webhooks.pending_events import (
+    buffer_key,
+    drain_pending_events,
+)
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
 pytestmark = pytest.mark.skipif(
@@ -55,6 +62,7 @@ pytestmark = pytest.mark.skipif(
 DEFAULT_DATABASE_URL = (
     "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill"
 )
+DEFAULT_REDIS_URL = "redis://localhost:16379/0"
 
 
 # ── Fixtures (DB + migrations, mirrored from test_integration_consumer.py) ───
@@ -133,6 +141,30 @@ async def session_factory(
     factory = async_sessionmaker(async_engine, expire_on_commit=False)
     yield factory
     await async_engine.dispose()
+
+
+# ── Fixtures (Redis — used by the ADR-0063 buffer/drain test) ────────────────
+
+
+@pytest.fixture
+def redis_url() -> str:
+    return os.environ.get("TREADMILL_TEST_REDIS_URL", DEFAULT_REDIS_URL)
+
+
+@pytest_asyncio.fixture
+async def redis_client(redis_url: str) -> AsyncIterator[Any]:
+    """Real async Redis client; wipes the test's pr:* keys before+after."""
+    r = redis_async.Redis.from_url(redis_url, decode_responses=False)
+    try:
+        keys = await r.keys("pr:*")
+        if keys:
+            await r.delete(*keys)
+        yield r
+        keys = await r.keys("pr:*")
+        if keys:
+            await r.delete(*keys)
+    finally:
+        await r.aclose()
 
 
 # ── Fixtures (moto SQS + Secrets Manager) ────────────────────────────────────
@@ -431,3 +463,148 @@ async def test_signature_failure_drops_message_and_writes_no_row(
         WaitTimeSeconds=0,
     ).get("Messages", [])
     assert remaining == []
+
+
+# ── ADR-0063 Step 1: SQS-path cache-then-heal buffer + drain ─────────────────
+
+
+PR_OPENED_FOR_BUFFER = {
+    "action": "opened",
+    "pull_request": {
+        "number": 731,
+        "title": "feat: ADR-0063 buffer mirror",
+        "head": {"ref": "task/cache-then-heal", "sha": "cafef00d" * 5},
+        "merged": False,
+    },
+    "repository": {"full_name": "Joe/Treadmill-Buffer-Test"},
+    "sender": {"login": "joe"},
+}
+
+
+@pytest.mark.asyncio
+async def test_sqs_pr_opened_without_task_prs_row_buffers_then_drains(
+    boto_kwargs: dict,
+    webhook_inbox_queue_url: str,
+    webhook_secret_name: str,
+    provisioned_secret: str,
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+    truncate: None,
+    engine: Engine,
+    async_database_url: str,
+) -> None:
+    """ADR-0063 Step 1 — SQS-ingress cache-then-heal mirror.
+
+    Steps:
+      1. Enqueue a pr_opened envelope on moto SQS for a PR with no
+         matching ``task_prs`` row.
+      2. Drive the poller for one cycle. The Event row persists with
+         ``task_id = NULL``; the pending-events Redis list for the
+         (repo, pr_number) pair has exactly one entry.
+      3. Seed a ``task_prs`` row that resolves the same (repo, pr_number)
+         pair and call ``drain_pending_events`` directly — this mirrors
+         the back-fill site in ``coordination/consumer.py`` (the
+         ``_write_task_prs_on_completed`` / ``_try_task_prs_fallback_on_pr_merged``
+         pair both end in this drain).
+      4. Assert the buffered event_id's ``events.task_id`` is now set to
+         the seeded task's id.
+
+    This closes the dual-ingress drift the SQS path was carrying since
+    ADR-0049: the HTTP route at ``routers/webhooks.py:223-240`` already
+    did this; the SQS path silently persisted with ``task_id=NULL`` and
+    never came back to heal.
+    """
+    sqs = boto3.client("sqs", **boto_kwargs)
+    secrets_client = boto3.client("secretsmanager", **boto_kwargs)
+    publisher = _RecordingPublisher()
+
+    poller = WebhookInboxPoller(
+        sqs_client=sqs,
+        queue_url=webhook_inbox_queue_url,
+        secrets_manager_client=secrets_client,
+        webhook_secret_name=webhook_secret_name,
+        sessionmaker=session_factory,
+        publisher=publisher,
+        wait_time_seconds=1,
+        redis_client=redis_client,
+    )
+    poller._webhook_secret = await poller._fetch_webhook_secret()
+
+    delivery = "abcdef00-0000-0000-0000-000000000063"
+    expected_event_id = uuid.uuid5(uuid.NAMESPACE_OID, delivery)
+    _enqueue_envelope(
+        sqs_client=sqs,
+        queue_url=webhook_inbox_queue_url,
+        body_dict=PR_OPENED_FOR_BUFFER,
+        delivery=delivery,
+        secret=provisioned_secret,
+    )
+
+    await _drain_one_message(poller)
+
+    repo_lower = "joe/treadmill-buffer-test"
+    pr_number = 731
+
+    # Event landed; task_id is NULL because no task_prs row resolves yet.
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT id, task_id FROM events WHERE id = :id"),
+            {"id": expected_event_id},
+        ).one()
+    assert row.task_id is None
+
+    # Buffer key holds exactly one entry — the pending event_id.
+    key = buffer_key(repo_lower, pr_number)
+    assert (await redis_client.llen(key)) == 1
+
+    # Seed the row that would resolve the lookup. Mirrors the shape the
+    # consumer's ``_write_task_prs_on_completed`` site INSERTs.
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO workflows (id) VALUES ('wf-adr-0063')"
+        ))
+        wv = conn.execute(sa.text(
+            "INSERT INTO workflow_versions (workflow_id, version) "
+            "VALUES ('wf-adr-0063', 1) RETURNING id"
+        )).scalar()
+        plan_id = conn.execute(sa.text(
+            "INSERT INTO plans (repo) VALUES (:r) RETURNING id"
+        ), {"r": repo_lower}).scalar()
+        task_id = conn.execute(sa.text(
+            "INSERT INTO tasks (plan_id, repo, title, workflow_version_id) "
+            "VALUES (:p, :r, 'T', :wv) RETURNING id"
+        ), {"p": plan_id, "r": repo_lower, "wv": wv}).scalar()
+        conn.execute(sa.text(
+            "INSERT INTO task_prs (repo, pr_number, task_id) "
+            "VALUES (:r, :n, :t)"
+        ), {"r": repo_lower, "n": pr_number, "t": task_id})
+
+    # Call drain_pending_events — same call the consumer's back-fill path
+    # makes after writing the task_prs row.
+    async_engine = create_async_engine(async_database_url)
+    Session = async_sessionmaker(async_engine, expire_on_commit=False)
+    try:
+        async with Session() as session:
+            drained = await drain_pending_events(
+                redis_client,
+                session,
+                LoggingEventPublisher(),
+                repo_lower,
+                pr_number,
+                task_id,
+            )
+    finally:
+        await async_engine.dispose()
+
+    assert drained == 1
+
+    # The Event row now carries the resolved task_id.
+    with engine.connect() as conn:
+        healed = conn.execute(
+            sa.text("SELECT task_id FROM events WHERE id = :id"),
+            {"id": expected_event_id},
+        ).one()
+    assert healed.task_id == task_id
+
+    # Buffer key is drained.
+    assert (await redis_client.llen(key)) == 0

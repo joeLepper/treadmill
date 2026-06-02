@@ -63,6 +63,7 @@ from treadmill_api.webhooks.normalize import (
     NormalizationResult,
     normalize_github_event,
 )
+from treadmill_api.webhooks.pending_events import buffer_pending_event
 from treadmill_api.webhooks.signatures import (
     InvalidSignatureError,
     SignatureMissingError,
@@ -153,6 +154,13 @@ class WebhookInboxPoller:
         staleness_seconds: How long without a successful poll before the
             health probe reports ``unreachable``. Default 120s, generous
             relative to the 20s long-poll cadence.
+        redis_client: Optional async Redis client. When set, the poller
+            mirrors the HTTP route's cache-then-heal buffering — a
+            task_prs miss on a github event with (repo, pr_number)
+            persists the Event with ``task_id=NULL`` *and* buffers the
+            event_id on the pending list so the future task_prs INSERT
+            drains it (ADR-0063 Step 1). ``None`` skips the buffer call
+            (narrow tests, log-only deployments).
     """
 
     def __init__(
@@ -169,6 +177,7 @@ class WebhookInboxPoller:
         normalizer: Any = None,
         staleness_seconds: float = 120.0,
         app_webhook_secret: str | None = None,
+        redis_client: Any = None,
     ) -> None:
         self.sqs = sqs_client
         self.queue_url = queue_url
@@ -181,6 +190,14 @@ class WebhookInboxPoller:
         self._verifier = verifier or verify_github_signature_any
         self._normalizer = normalizer or normalize_github_event
         self.staleness_seconds = staleness_seconds
+        # Per ADR-0063 Step 1, the SQS ingress mirrors the HTTP route's
+        # cache-then-heal buffering: when the task_prs lookup misses, we
+        # persist the Event with task_id=NULL AND push the event_id onto
+        # the (repo, pr_number) Redis list so the consumer's task_prs
+        # back-fill path can drain it once the bridge row appears. The
+        # client is optional so narrow tests (and log-only deployments)
+        # can construct the poller without Redis wiring.
+        self.redis_client = redis_client
 
         self._stopped = False
         self._task: asyncio.Task[None] | None = None
@@ -526,6 +543,43 @@ class WebhookInboxPoller:
             )
             await session.execute(stmt)
             await session.commit()
+
+            # ADR-0063 Step 1 — mirror of the HTTP route's cache-then-heal
+            # buffer at ``routers/webhooks.py:223-240``. When the task_prs
+            # lookup missed but the event carries a (repo, pr_number) pair,
+            # push the event_id onto the pending list so the consumer's
+            # task_prs back-fill path (``_write_task_prs_on_completed`` +
+            # ``_try_task_prs_fallback_on_pr_merged``) drains it once the
+            # bridge row eventually appears. The buffer call is best-effort
+            # — the row is persisted; a Redis hiccup degrades the race
+            # window but never loses audit data. Guarded by
+            # ``redis_client is not None`` so deployments / narrow tests
+            # that omit Redis wiring don't crash the ingest path.
+            if (
+                task_id is None
+                and normalized.repo
+                and normalized.pr_number is not None
+                and self.redis_client is not None
+            ):
+                try:
+                    await buffer_pending_event(
+                        self.redis_client,
+                        normalized.repo,
+                        normalized.pr_number,
+                        event_id,
+                    )
+                    logger.info(
+                        "webhook inbox: buffered pending event_id=%s for "
+                        "repo=%s pr=%d (task_prs miss; awaiting bridge row "
+                        "to drain)",
+                        event_id, normalized.repo, normalized.pr_number,
+                    )
+                except Exception:
+                    logger.exception(
+                        "webhook inbox: pending-event buffering failed for "
+                        "event_id=%s repo=%s pr=%d; row is persisted",
+                        event_id, normalized.repo, normalized.pr_number,
+                    )
 
             # Re-fetch the row so the publisher sees the canonical Event
             # (the INSERT may have been a no-op on re-delivery; we want
