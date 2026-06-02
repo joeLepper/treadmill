@@ -22,6 +22,7 @@ interface ButtonProps {
   title?: string;
   style?: CSSProperties;
   type?: 'button' | 'submit' | 'reset';
+  'aria-label'?: string;
 }
 
 export function Button({
@@ -35,6 +36,7 @@ export function Button({
   title,
   style,
   type = 'button',
+  'aria-label': ariaLabel,
 }: ButtonProps) {
   const isDestructive = kind === 'destructive';
   const isPrimary = kind === 'primary';
@@ -77,6 +79,7 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       title={title}
+      aria-label={ariaLabel}
       style={{ ...base, ...style }}
       onMouseEnter={(e) => {
         if (disabled) return;

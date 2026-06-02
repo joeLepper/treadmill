@@ -637,6 +637,7 @@ function EscalationStripC({
             size="sm"
             iconLeft={<CheckCircle2 size={11} />}
             onClick={() => onAck(it.task_id)}
+            aria-label={`Acknowledge ${it.title} escalation`}
           >
             ack
           </Button>
