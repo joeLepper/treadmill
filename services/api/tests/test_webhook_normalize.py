@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from treadmill_api.events import parse_payload
-from treadmill_api.routers.webhooks import _extract_commit_sha
+from treadmill_api.webhooks.persist import _extract_commit_sha
 from treadmill_api.webhooks.normalize import normalize_github_event
 
 
