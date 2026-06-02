@@ -1412,12 +1412,38 @@ class LocalRuntime:
         use predictable names (the family name) so they're DNS-discoverable
         on the docker network. ``up`` is idempotent: an already-running
         service is left alone; an exited service is removed and restarted.
+
+        ADR-0064 Step 2: after the API container is up, multi-attach it to
+        the ``treadmill-egress`` network so workers on that internal-only
+        bridge can resolve ``treadmill-api`` for the installation-token
+        mint at startup. Without this, workers on the egress network hit
+        ``Temporary failure in name resolution`` and exit 1 immediately.
         """
         if not self.state.service_specs:
             return
         for svc in self.state.service_specs:
             for cspec in svc.container_specs:
-                self._start_service_container(cspec, svc.port_mappings)
+                container = self._start_service_container(cspec, svc.port_mappings)
+                if container is not None and cspec.family == API_FAMILY:
+                    self._multi_attach_api_to_egress(container)
+
+    def _multi_attach_api_to_egress(self, api_container: Container) -> None:
+        """Attach the running API container to the ``treadmill-egress`` network.
+
+        Idempotent via ``DockerClientAdapter.connect_container_to_network``.
+        Only invoked in dev-local mode (the only path that builds an API
+        service spec and that pre-creates the egress network in
+        ``_up_dev_local``).
+        """
+        from treadmill_local.docker_client import DockerClientAdapter
+        from treadmill_local.egress_proxy import EGRESS_NETWORK_NAME
+
+        adapter = DockerClientAdapter(self.docker)
+        adapter.connect_container_to_network(EGRESS_NETWORK_NAME, api_container)
+        console.print(
+            f"• API [cyan]{api_container.name}[/cyan] multi-attached to "
+            f"[cyan]{EGRESS_NETWORK_NAME}[/cyan]."
+        )
 
     def _start_service_container(
         self,
@@ -1477,12 +1503,18 @@ class LocalRuntime:
             console.print(f"• Removed existing [cyan]{name}[/cyan] container.")
         except docker.errors.NotFound:
             pass
-        return self._run_container(
+        container = self._run_container(
             spec,
             name=name,
             role="service",
             port_mappings=svc.port_mappings,
         )
+        # ADR-0064 Step 2: deploy-watcher recreations must re-establish
+        # the egress multi-attach. The container is fresh, so it only
+        # carries the ``treadmill-local`` attach from ``_run_container``;
+        # without this re-connect, workers lose DNS for treadmill-api.
+        self._multi_attach_api_to_egress(container)
+        return container
 
     def recreate_dashboard_container(self) -> Container:
         """Recreate the ``treadmill-dashboard`` container from the current image.
