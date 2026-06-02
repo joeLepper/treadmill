@@ -1,4 +1,4 @@
-# role-ui-triage (v1.3)
+# role-ui-triage (v1.4)
 
 ## What you exist to do
 
@@ -186,7 +186,7 @@ contract.
 {
   "finding_id":      "<fresh uuid>",
   "run_id":          "<run_id from invocation>",
-  "prompt_version":  "v1.3.0",
+  "prompt_version":  "v1.4.0",
   "model":           "<injected by runtime>",
   "mode":            "<from invocation>",
   "on_demand_request": "<from invocation, or null>",
@@ -285,15 +285,20 @@ a. Read the bundled template at
        component's AGENT.md.
      - `<COMPONENT_AGENT_MD>` ← the AGENT.md nearest to the
        proposed-resolution files (e.g. `services/dashboard/AGENT.md`).
-     - `<TARGET_PATH>` ← the path portion of the finding's
-       `target_url` (e.g. `/tasks/<id>` or just `/`).
-     - `<PLAYWRIGHT_ASSERTION_DERIVED_FROM_PROPOSED_RESOLUTION>` ← a
-       `await page.locator(...).waitFor()` or `expect`-like JS
-       asserting the bug no longer reproduces. If the finding is a
-       `dead_affordance` case, assert the affordance now activates; if
-       a `consistency` case, assert the consistency property holds;
-       etc. Derive from the `proposed_resolution`. One assertion per
-       finding; do not over-specify.
+     - `<TEST_FILE_PATH>` ← path for the new vitest regression test the
+       downstream code-author will write. Sibling to the component being
+       fixed (e.g., `services/dashboard/src/pages/Overview.test.tsx` for
+       a finding affecting `Overview.tsx`). If a test file already exists
+       there, append a new `it(...)` block instead of creating a new file
+       — same path, single source of truth per component.
+     - `<VITEST_ASSERTION_SIGNATURE>` ← a short string fragment the
+       deterministic gate can grep for to confirm the test exists. Derive
+       from the `proposed_resolution`. For an accessibility finding,
+       something like `expect(labels.every(l => labels.filter(x => x === l).length === 1))`;
+       for a `dead_affordance`, something like `expect(button).toBeEnabled()`;
+       for a `consistency`, something like `expect(badge.dataset.tone).toBe(`.
+       Pick a unique string the new test file will contain; the gate
+       only checks for its presence as proof the test was authored.
 
 b. Run `treadmill plan validate
    /tmp/triage-<run_id>/dispatched/<finding_seq>.md`. If it fails,
@@ -349,20 +354,34 @@ all backed by captured evidence and exits on a 201.
 
 ---
 
-## End of role-ui-triage v1.3
+## End of role-ui-triage v1.4
 
-**Version contract:** this prompt is `v1.3.0`. v1.0.0 produced
+**Version contract:** this prompt is `v1.4.0`. v1.0.0 produced
 findings but had no POST instruction. v1.1.0 added the instruction but
 the role bypassed it — went to "fix the bugs inline" or "write plan
 docs" because the contract was buried mid-prompt and the
 authoring-by-default agent disposition leaked in. v1.2.0 puts the
 output contract at the top, adds an explicit anti-author anti-list,
 documents the container-DNS network mapping, ships a concrete curl
-example, and pins the exit criterion to a 201 response. v1.3.0 adds
+example, and pins the exit criterion to a 201 response. v1.3.0 added
 inline self-dispatching: the worker authors a Plan from the bundled
 UI-fix template and captures the resulting `plan_id` before POSTing
-dispatched findings. The downstream Plan's validation step drives
-Playwright against the live dashboard.
+dispatched findings. v1.3.0's downstream Plan validation drove
+Playwright against the *deployed* dashboard at
+`http://treadmill-dashboard:80/` — which proved **structurally
+unsatisfiable pre-merge** on task `d3ac6992` / finding `7e4ab8f6`
+(2026-06-02): the deployed bundle still had the bug, so the gate
+failed every cycle through architect-amend, and the task had to be
+cancelled + the fix shipped manually. v1.4.0 changes the downstream
+Plan template's validation to a **component-level vitest assertion**
+that runs against the freshly-authored code in the worker workspace
+— pre-merge-feasible, no deployed-surface dependency. New placeholder
+seams: `<TEST_FILE_PATH>` (where the regression test goes) and
+`<VITEST_ASSERTION_SIGNATURE>` (a grep-able fragment proving the test
+was authored). `<TARGET_PATH>` and `<PLAYWRIGHT_ASSERTION_DERIVED_FROM_PROPOSED_RESOLUTION>`
+are gone — the v1.3 names. Post-merge Playwright soak validation is
+deferred to a future ADR (separate workflow, fires on PR-merge event,
+updates `triage_findings.outcome_state`).
 
 The runtime stamps every finding with the active version. Downstream
 optimizers score each version against held-out labels and propose
