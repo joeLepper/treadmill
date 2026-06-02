@@ -68,6 +68,32 @@ def mint_worker_credential() -> tuple[str, str]:
     return token, token_hash
 
 
+# Internal docker-DNS hosts that workers must reach directly, NOT
+# through the egress proxy. The proxy is CONNECT-only (ADR-0060):
+# plain-HTTP requests to `http://treadmill-api:8088` (e.g. the
+# GitHub-App installation-token mint at worker startup) return 400
+# if routed through it. NO_PROXY bypasses the proxy for these
+# hosts; lowercase `no_proxy` is also set because Python's urllib
+# honors that form in some code paths.
+_WORKER_INTERNAL_HOSTS = "treadmill-api,localhost,127.0.0.1"
+
+
+def worker_proxy_env(install_credential: str) -> dict[str, str]:
+    """Env dict to inject on each worker so HTTP/HTTPS go through the
+    egress proxy while internal Treadmill services stay direct.
+
+    Centralizes the per-worker proxy contract so the autoscaler call
+    site and the test suite agree on a single shape.
+    """
+    return {
+        "HTTP_PROXY": "http://treadmill-egress-proxy:3128",
+        "HTTPS_PROXY": "http://treadmill-egress-proxy:3128",
+        "NO_PROXY": _WORKER_INTERNAL_HOSTS,
+        "no_proxy": _WORKER_INTERNAL_HOSTS,
+        "TREADMILL_INSTALL_PROXY_TOKEN": install_credential,
+    }
+
+
 def ensure_egress_network(adapter: DockerClientAdapter) -> None:
     """Ensure the treadmill-egress internal bridge network exists."""
     adapter.ensure_network(EGRESS_NETWORK_NAME, internal=True)

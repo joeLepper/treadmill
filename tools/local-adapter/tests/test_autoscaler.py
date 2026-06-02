@@ -628,6 +628,30 @@ def test_mint_worker_credential_returns_token_and_sha256() -> None:
     assert len(token_hash) == 64
 
 
+def test_worker_proxy_env_bypasses_internal_hosts() -> None:
+    """ADR-0060 follow-up: workers route internal calls (treadmill-api,
+    localhost) DIRECT — not through the CONNECT-only egress proxy that
+    returns 400 on plain-HTTP traffic. Regression check for the
+    2026-06-02 worker crashloop on installation-token mint."""
+    from treadmill_local.egress_proxy import worker_proxy_env
+
+    env = worker_proxy_env("test-credential-xyz")
+
+    # Proxy is set for external traffic.
+    assert env["HTTP_PROXY"] == "http://treadmill-egress-proxy:3128"
+    assert env["HTTPS_PROXY"] == "http://treadmill-egress-proxy:3128"
+
+    # Internal hosts bypass the proxy. Both casings present — Python's
+    # urllib honors lowercase no_proxy in some code paths.
+    assert "treadmill-api" in env["NO_PROXY"]
+    assert "treadmill-api" in env["no_proxy"]
+    assert "localhost" in env["NO_PROXY"]
+    assert "127.0.0.1" in env["NO_PROXY"]
+
+    # Install credential is threaded through unchanged.
+    assert env["TREADMILL_INSTALL_PROXY_TOKEN"] == "test-credential-xyz"
+
+
 def test_build_always_allowed_includes_static_and_api_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
