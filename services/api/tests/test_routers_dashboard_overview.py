@@ -66,12 +66,14 @@ class _StubSession:
         tasks: list[dict[str, Any]] | None = None,
         pipelines: list[dict[str, Any]] | None = None,
         escalations: list[dict[str, Any]] | None = None,
+        closed_escalations: list[dict[str, Any]] | None = None,
         events: list[dict[str, Any]] | None = None,
         accounts: list[dict[str, Any]] | None = None,
     ) -> None:
         self.tasks = tasks or []
         self.pipelines = pipelines or []
         self.escalations = escalations or []
+        self.closed_escalations = closed_escalations or []
         self.events = events or []
         self.accounts = accounts or []
         self.recorded_params: list[dict[str, Any] | None] = []
@@ -86,6 +88,12 @@ class _StubSession:
             return _StubResult(self.tasks)
         if "FROM workflow_run_steps s" in sql and ":run_ids" in sql:
             return _StubResult(self.pipelines)
+        # ADR-0062 Step 5: closed-escalations query is identified by its
+        # CTE name (``closed_event``); check it BEFORE the open-escalations
+        # branch since both queries reference ``last_escalation`` /
+        # ``last_close`` / similar CTEs.
+        if "closed_event" in sql:
+            return _StubResult(self.closed_escalations)
         if "last_escalation" in sql:
             return _StubResult(self.escalations)
         if "FROM events e" in sql and "LIMIT :limit" in sql:
@@ -596,3 +604,249 @@ def test_terminal_filter_uses_pr_merged_not_merged() -> None:
     # — the PR is in main, the operator has nothing to do about the
     # run's outcome).
     assert "LIKE 'pr_merged %'" in _TASKS_SQL
+
+
+# ── ``?include_closed`` + ``mttr_seconds`` (ADR-0062 Step 5) ──────────────────
+
+
+def test_escalations_sql_excludes_closed_incidents() -> None:
+    """ADR-0062 Step 5: an open incident requires no later
+    ``escalation_closed`` event AND no later ``escalation_acknowledged``
+    (existing). Pins both halves of the WHERE clause so a future tidy
+    can't drop one without the test catching it."""
+    from treadmill_api.routers.dashboard.overview import _ESCALATIONS_SQL
+
+    assert "action = 'escalation_closed'" in _ESCALATIONS_SQL
+    assert "lc.closed_at IS NULL OR lc.closed_at < le.escalated_at" in _ESCALATIONS_SQL
+    # The pre-existing ack guard must still be present.
+    assert "la.acked_at IS NULL OR la.acked_at < le.escalated_at" in _ESCALATIONS_SQL
+
+
+def test_closed_escalations_sql_pulls_mttr_from_payload() -> None:
+    """The MTTR value surfaced on the closed-incident path comes from
+    the close event's payload (the emitter stamps it at close-time per
+    ADR-0062 — multi-day stalls report real duration via
+    ``total_seconds()``), not from a fresh ``closed_at - escalated_at``
+    subtraction at read-time. Pinning this here so a future "optimizer"
+    doesn't quietly switch to a SQL-side recompute that breaks the
+    invariant."""
+    from treadmill_api.routers.dashboard.overview import (
+        _CLOSED_ESCALATIONS_LIMIT,
+        _CLOSED_ESCALATIONS_SQL,
+    )
+
+    assert "payload->>'mttr_seconds'" in _CLOSED_ESCALATIONS_SQL
+    assert "LIMIT :limit" in _CLOSED_ESCALATIONS_SQL
+    # Sanity check the limit value is reasonable for a ribbon.
+    assert 1 <= _CLOSED_ESCALATIONS_LIMIT <= 500
+
+
+def test_overview_open_escalations_carry_null_mttr_by_default() -> None:
+    """The open-incident path never populates ``mttr_seconds`` — the
+    field is the closed-incident signal. Open rows always carry
+    ``None``, regardless of the ``include_closed`` toggle."""
+    task = _task_row(
+        derived_status="wf-quick: executing",
+        title="Still escalated",
+        run_id=uuid.uuid4(),
+    )
+    session = _StubSession(
+        tasks=[task],
+        escalations=[
+            {
+                "task_id": task["id"], "repo": task["repo"],
+                "title": task["title"],
+                "escalated_at": _now() - timedelta(minutes=5),
+                "reason": "stuck_task_sweep",
+            },
+        ],
+    )
+    app = _build_app(session)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/dashboard/overview")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["escalations"]) == 1
+    assert body["escalations"][0]["mttr_seconds"] is None
+
+
+def test_overview_include_closed_appends_recently_closed_with_mttr() -> None:
+    """``?include_closed=true`` appends recently-closed incidents to the
+    ``escalations`` array with ``mttr_seconds`` populated from the close
+    event's payload. The frontend distinguishes closed from open by the
+    field being non-null."""
+    open_task = _task_row(
+        derived_status="wf-architecture-resolve: executing",
+        title="Still open",
+        run_id=uuid.uuid4(),
+    )
+    closed_task = _task_row(
+        derived_status="wf-quick: executing",
+        title="Already closed",
+        run_id=uuid.uuid4(),
+    )
+    session = _StubSession(
+        tasks=[open_task, closed_task],
+        escalations=[
+            {
+                "task_id": open_task["id"], "repo": open_task["repo"],
+                "title": open_task["title"],
+                "escalated_at": _now() - timedelta(minutes=5),
+                "reason": "architect_cap",
+            },
+        ],
+        closed_escalations=[
+            {
+                "task_id": closed_task["id"], "repo": closed_task["repo"],
+                "title": closed_task["title"],
+                "escalated_at": _now() - timedelta(hours=3),
+                "reason": "stuck_task_sweep",
+                "mttr_seconds": 9_842,
+            },
+        ],
+    )
+    app = _build_app(session)
+
+    # Default behavior: closed ribbon NOT included.
+    with TestClient(app) as client:
+        baseline = client.get("/api/v1/dashboard/overview").json()
+    assert {e["task_id"] for e in baseline["escalations"]} == {open_task["id"]}
+
+    # With the toggle: closed ribbon appended; ``mttr_seconds`` populated
+    # only on the closed entry.
+    with TestClient(app) as client:
+        body = client.get(
+            "/api/v1/dashboard/overview",
+            params={"include_closed": "true"},
+        ).json()
+    surfaced_by_id = {e["task_id"]: e for e in body["escalations"]}
+    assert set(surfaced_by_id) == {open_task["id"], closed_task["id"]}
+    assert surfaced_by_id[open_task["id"]]["mttr_seconds"] is None
+    assert surfaced_by_id[closed_task["id"]]["mttr_seconds"] == 9_842
+    # Closed entries carry their original reason so the ribbon can label
+    # the close by its open-time classification.
+    assert surfaced_by_id[closed_task["id"]]["reason"] == "stuck_task_sweep"
+
+
+def test_overview_include_closed_does_not_flip_task_to_escalated() -> None:
+    """A closed incident is informational — surfacing it on the
+    ``escalations`` ribbon must NOT flip the task's ``escalated`` bool
+    back to ``True`` or rebucket it as ``blocked``. Bucket counts +
+    per-task flags stay aligned with the open-incident set only."""
+    closed_task = _task_row(
+        derived_status="wf-quick: executing",
+        title="Closed but still executing",
+        run_id=uuid.uuid4(),
+    )
+    session = _StubSession(
+        tasks=[closed_task],
+        closed_escalations=[
+            {
+                "task_id": closed_task["id"], "repo": closed_task["repo"],
+                "title": closed_task["title"],
+                "escalated_at": _now() - timedelta(hours=1),
+                "reason": "architect_cap",
+                "mttr_seconds": 3_600,
+            },
+        ],
+    )
+    app = _build_app(session)
+    with TestClient(app) as client:
+        body = client.get(
+            "/api/v1/dashboard/overview",
+            params={"include_closed": "true"},
+        ).json()
+
+    assert len(body["escalations"]) == 1
+    assert body["escalations"][0]["mttr_seconds"] == 3_600
+    # Closed escalations don't flip ``escalated`` on the task.
+    assert body["tasks"][0]["escalated"] is False
+    assert body["tasks"][0]["escalation_reason"] is None
+    # And don't rebucket as ``blocked``.
+    assert body["bucketCounts"] == {
+        "blocked": 0, "inflight": 1, "hopper": 0, "total": 1,
+    }
+
+
+def test_overview_include_closed_passes_limit_to_sql() -> None:
+    """The closed-escalations query is parameterized on ``:limit``; the
+    route must wire the module-level cap through so a future widening
+    is a single-constant change."""
+    from treadmill_api.routers.dashboard.overview import (
+        _CLOSED_ESCALATIONS_LIMIT,
+    )
+
+    session = _StubSession()
+    app = _build_app(session)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/overview",
+            params={"include_closed": "true"},
+        )
+    assert response.status_code == 200
+    # The recorded params should contain exactly one call with the
+    # module-level cap — the closed-escalations query.
+    limit_calls = [
+        params for params in session.recorded_params
+        if params and params.get("limit") == _CLOSED_ESCALATIONS_LIMIT
+    ]
+    assert len(limit_calls) == 1
+
+
+def test_overview_reason_filter_narrows_closed_ribbon_too() -> None:
+    """``?reason=`` narrows BOTH open and closed entries so the ribbon
+    stays consistent with the open-list narrowing the operator chose."""
+    open_task = _task_row(
+        derived_status="wf-architecture-resolve: executing",
+        title="Open gate-broken",
+        run_id=uuid.uuid4(),
+    )
+    closed_task_match = _task_row(
+        derived_status="wf-architecture-resolve: executing",
+        title="Closed gate-broken",
+        run_id=uuid.uuid4(),
+    )
+    closed_task_other = _task_row(
+        derived_status="wf-quick: executing",
+        title="Closed sweep",
+        run_id=uuid.uuid4(),
+    )
+    session = _StubSession(
+        tasks=[open_task, closed_task_match, closed_task_other],
+        escalations=[
+            {
+                "task_id": open_task["id"], "repo": open_task["repo"],
+                "title": open_task["title"],
+                "escalated_at": _now() - timedelta(minutes=5),
+                "reason": "gate-broken",
+            },
+        ],
+        closed_escalations=[
+            {
+                "task_id": closed_task_match["id"],
+                "repo": closed_task_match["repo"],
+                "title": closed_task_match["title"],
+                "escalated_at": _now() - timedelta(hours=2),
+                "reason": "gate-broken",
+                "mttr_seconds": 5_000,
+            },
+            {
+                "task_id": closed_task_other["id"],
+                "repo": closed_task_other["repo"],
+                "title": closed_task_other["title"],
+                "escalated_at": _now() - timedelta(hours=2),
+                "reason": "stuck_task_sweep",
+                "mttr_seconds": 1_200,
+            },
+        ],
+    )
+    app = _build_app(session)
+    with TestClient(app) as client:
+        body = client.get(
+            "/api/v1/dashboard/overview",
+            params={"include_closed": "true", "reason": "gate-broken"},
+        ).json()
+
+    surviving_ids = {e["task_id"] for e in body["escalations"]}
+    assert surviving_ids == {open_task["id"], closed_task_match["id"]}
+    assert all(e["reason"] == "gate-broken" for e in body["escalations"])
