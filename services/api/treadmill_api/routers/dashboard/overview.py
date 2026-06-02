@@ -323,7 +323,7 @@ FROM last_escalation le
 JOIN tasks t ON t.id = le.task_id
 LEFT JOIN last_ack   la ON la.task_id = le.task_id
 LEFT JOIN last_close lc ON lc.task_id = le.task_id
-WHERE (la.acked_at  IS NULL OR la.acked_at  < le.escalated_at)
+WHERE (la.acked_at IS NULL OR la.acked_at < le.escalated_at)
   AND (lc.closed_at IS NULL OR lc.closed_at < le.escalated_at)
 ORDER BY le.escalated_at DESC
 """
