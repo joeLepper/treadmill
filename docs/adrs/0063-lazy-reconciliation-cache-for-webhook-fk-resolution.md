@@ -1,6 +1,6 @@
 # ADR-0063: Lazy-reconciliation cache for webhook FK resolution
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-29
 - **Related:** ADR-0007 (cache-then-heal for pr task_prs), ADR-0049
   (App-identity ingress cutover), ADR-0035 (scheduler — context for
