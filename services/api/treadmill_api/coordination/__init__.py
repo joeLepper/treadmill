@@ -6,7 +6,17 @@ do not mutate run state.
 """
 
 from treadmill_api.coordination.consumer import CoordinationConsumer
+from treadmill_api.coordination.notification_fanout import (
+    NotificationFanout,
+    make_notification_fanout,
+)
 from treadmill_api.coordination.replay import ReplayLoop
 from treadmill_api.coordination.webhook_inbox import WebhookInboxPoller
 
-__all__ = ["CoordinationConsumer", "ReplayLoop", "WebhookInboxPoller"]
+__all__ = [
+    "CoordinationConsumer",
+    "NotificationFanout",
+    "ReplayLoop",
+    "WebhookInboxPoller",
+    "make_notification_fanout",
+]

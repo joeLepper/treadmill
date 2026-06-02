@@ -69,8 +69,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     from treadmill_api.coordination import (
         CoordinationConsumer,
+        NotificationFanout,
         ReplayLoop,
         WebhookInboxPoller,
+        make_notification_fanout,
     )
     from treadmill_api.dispatch import Dispatcher
     from treadmill_api.eventbus import make_publisher, set_publisher
@@ -189,6 +191,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         await webhook_inbox_poller.start()
 
+    # Notification fan-out (ADR-0062 Step 4). Subscribes to the in-process
+    # eventbus broadcaster and POSTs ``task.escalated_to_operator`` +
+    # ``task.escalation_closed`` events to the configured webhook targets
+    # (Slack + arbitrary raw-event-JSON URLs). ``start()`` is a no-op when
+    # neither ``TREADMILL_SLACK_WEBHOOK_URL`` nor
+    # ``TREADMILL_NOTIFICATION_WEBHOOKS`` is set.
+    notification_fanout: NotificationFanout = make_notification_fanout(settings)
+    await notification_fanout.start()
+
     app.state.settings = settings
     app.state.engine = engine
     app.state.redis = redis
@@ -199,6 +210,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.consumer = consumer
     app.state.replay_loop = replay_loop
     app.state.webhook_inbox_poller = webhook_inbox_poller
+    app.state.notification_fanout = notification_fanout
     app.state.probes = _build_probes(
         engine, redis, consumer, webhook_inbox_poller,
     )
@@ -227,6 +239,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await consumer.stop()
             if webhook_inbox_poller is not None:
                 await webhook_inbox_poller.stop()
+            await notification_fanout.stop()
             await github_clients.aclose()
             if engine is not None:
                 await engine.dispose()

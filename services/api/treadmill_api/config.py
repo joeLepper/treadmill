@@ -223,6 +223,35 @@ class Settings(BaseSettings):
         default="", alias="TREADMILL_PLAN_MERGE_REPO_ALLOWLIST",
     )
 
+    # ── ADR-0062 Step 4: escalation notification fan-out ─────────────────────
+    # ``slack_webhook_url`` — when set, the notification-fanout subscriber
+    # POSTs a Slack-formatted JSON body (text + emoji + task-id snippet +
+    # reason + MTTR for close events) to this incoming-webhook URL on
+    # every ``task.escalated_to_operator`` and ``task.escalation_closed``
+    # event. Unset = no Slack hop.
+    #
+    # ``notification_webhooks`` — comma-separated list of raw-event-JSON
+    # webhook targets. Each URL receives a POST with the typed-event
+    # record (the same shape ``eventbus._build_record`` produces) on every
+    # escalation open / close. Empty (the default) = no generic-webhook
+    # fan-out. Per-target POST failures log + continue; one bad URL never
+    # blocks the others (ADR-0062 Step 4 invariant).
+    slack_webhook_url: str | None = Field(
+        default=None, alias="TREADMILL_SLACK_WEBHOOK_URL",
+    )
+    notification_webhooks: str = Field(
+        default="", alias="TREADMILL_NOTIFICATION_WEBHOOKS",
+    )
+
+    @property
+    def notification_webhook_urls(self) -> list[str]:
+        """Parsed list of generic-webhook URLs. Empty list = no fan-out."""
+        return [
+            u.strip()
+            for u in self.notification_webhooks.split(",")
+            if u.strip()
+        ]
+
     @property
     def plan_merge_allowed_repos(self) -> set[str]:
         """Parsed allow-list. Empty set means "allow all repos"."""
