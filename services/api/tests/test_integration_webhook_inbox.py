@@ -48,8 +48,8 @@ from sqlalchemy.ext.asyncio import (
 from treadmill_api.coordination.webhook_inbox import WebhookInboxPoller
 from treadmill_api.eventbus import LoggingEventPublisher
 from treadmill_api.webhooks.pending_events import (
-    buffer_key,
     drain_pending_events,
+    pr_pending_buffer_key,
 )
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
@@ -554,7 +554,7 @@ async def test_sqs_pr_opened_without_task_prs_row_buffers_then_drains(
     assert row.task_id is None
 
     # Buffer key holds exactly one entry — the pending event_id.
-    key = buffer_key(repo_lower, pr_number)
+    key = pr_pending_buffer_key(repo_lower, pr_number)
     assert (await redis_client.llen(key)) == 1
 
     # Seed the row that would resolve the lookup. Mirrors the shape the
@@ -589,8 +589,7 @@ async def test_sqs_pr_opened_without_task_prs_row_buffers_then_drains(
                 redis_client,
                 session,
                 LoggingEventPublisher(),
-                repo_lower,
-                pr_number,
+                pr_pending_buffer_key(repo_lower, pr_number),
                 task_id,
             )
     finally:

@@ -86,7 +86,10 @@ from treadmill_api.events.step import (
     StepStarted,
 )
 from treadmill_api.models import Event, Task, TaskPR, WorkflowRun, WorkflowRunStep
-from treadmill_api.webhooks.pending_events import drain_pending_events
+from treadmill_api.webhooks.pending_events import (
+    drain_pending_events,
+    pr_pending_buffer_key,
+)
 
 HealthStatus = Literal["starting", "running", "degraded", "dead"]
 """Reportable consumer states.
@@ -938,8 +941,7 @@ class CoordinationConsumer:
                     self.redis_client,
                     session,
                     self.publisher,
-                    stored_repo,
-                    typed.pr_number,
+                    pr_pending_buffer_key(stored_repo, typed.pr_number),
                     task_id,
                 )
             except Exception:
@@ -1415,8 +1417,7 @@ class CoordinationConsumer:
                     self.redis_client,
                     session,
                     self.publisher,
-                    repo,
-                    pr_number,
+                    pr_pending_buffer_key(repo, pr_number),
                     task_id,
                 )
             except Exception:

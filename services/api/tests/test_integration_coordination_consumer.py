@@ -1010,11 +1010,16 @@ async def test_task_prs_write_triggers_pending_events_drain(
     )
 
     # Pre-buffer into Redis matching the pending_events module's key format.
-    from treadmill_api.webhooks.pending_events import buffer_pending_event
+    from treadmill_api.webhooks.pending_events import (
+        buffer_pending_event,
+        pr_pending_buffer_key,
+    )
 
     try:
         await buffer_pending_event(
-            redis_client, "drain/coord", 77, buffered_event_id,
+            redis_client,
+            pr_pending_buffer_key("drain/coord", 77),
+            buffered_event_id,
         )
 
         consumer = CoordinationConsumer(

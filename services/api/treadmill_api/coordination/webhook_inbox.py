@@ -63,7 +63,10 @@ from treadmill_api.webhooks.normalize import (
     NormalizationResult,
     normalize_github_event,
 )
-from treadmill_api.webhooks.pending_events import buffer_pending_event
+from treadmill_api.webhooks.pending_events import (
+    buffer_pending_event,
+    pr_pending_buffer_key,
+)
 from treadmill_api.webhooks.signatures import (
     InvalidSignatureError,
     SignatureMissingError,
@@ -564,8 +567,9 @@ class WebhookInboxPoller:
                 try:
                     await buffer_pending_event(
                         self.redis_client,
-                        normalized.repo,
-                        normalized.pr_number,
+                        pr_pending_buffer_key(
+                            normalized.repo, normalized.pr_number,
+                        ),
                         event_id,
                     )
                     logger.info(
