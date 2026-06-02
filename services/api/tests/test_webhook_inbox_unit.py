@@ -172,6 +172,7 @@ def _make_poller(
     verifier: Any = None,
     normalizer: Any = None,
     staleness_seconds: float = 120.0,
+    redis_client: Any = None,
 ) -> WebhookInboxPoller:
     session = session if session is not None else _StubSession()
     publisher = publisher if publisher is not None else _StubPublisher()
@@ -205,10 +206,32 @@ def _make_poller(
         verifier=verifier if verifier is not None else (lambda *_a, **_k: None),
         normalizer=normalizer,
         staleness_seconds=staleness_seconds,
+        redis_client=redis_client,
     )
     # Set the cached secret directly (would normally be fetched on start()).
     poller._webhook_secret = secrets_manager.secret
     return poller
+
+
+class _StubRedis:
+    """Minimal async Redis stub that records rpush + expire calls.
+
+    Mirrors the surface ``buffer_pending_event`` touches: ``rpush`` +
+    ``expire``. Both are recorded so tests can assert the buffer was
+    invoked with the expected key.
+    """
+
+    def __init__(self) -> None:
+        self.rpush_calls: list[tuple[str, Any]] = []
+        self.expire_calls: list[tuple[str, int]] = []
+
+    async def rpush(self, key: str, value: Any) -> int:
+        self.rpush_calls.append((key, value))
+        return len(self.rpush_calls)
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expire_calls.append((key, seconds))
+        return True
 
 
 # ── Header lookup ─────────────────────────────────────────────────────────────
@@ -761,6 +784,115 @@ async def test_probe_reports_ok_when_running_and_fresh(
             await poller._task
         except _asyncio.CancelledError:
             pass
+
+
+# ── ADR-0063 Step 1: cache-then-heal buffer-on-miss ──────────────────────────
+
+
+def _session_with_task_prs_miss() -> _StubSession:
+    """Build a stub session whose task_prs SELECT returns no row.
+
+    The poller's ``_persist_and_publish`` calls ``execute`` twice — first
+    the ``task_prs`` lookup, then the Event INSERT. The lookup uses
+    ``result.scalar_one_or_none()`` to read the resolved ``task_id``; we
+    rig that to return None so the buffer-on-miss branch fires.
+    """
+    session = _StubSession()
+    lookup_result = MagicMock()
+    lookup_result.scalar_one_or_none = MagicMock(return_value=None)
+    insert_result = MagicMock()
+    session.execute = AsyncMock(side_effect=[lookup_result, insert_result])
+    return session
+
+
+@pytest.mark.asyncio
+async def test_process_task_prs_miss_buffers_pending_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the task_prs SELECT misses on a pr_opened, the SQS-ingress
+    mirrors the HTTP route's cache-then-heal: the Event row persists
+    with ``task_id=NULL`` AND the event_id is buffered on the (repo,
+    pr_number) pending list. The buffer-log lands at INFO so operators
+    can confirm the new path took effect.
+
+    This is the ADR-0063 Step 1 invariant — the dual-ingress drift the
+    SQS path was carrying since ADR-0049.
+    """
+    session = _session_with_task_prs_miss()
+    redis = _StubRedis()
+    poller = _make_poller(session=session, redis_client=redis)
+
+    delivery = "12345678-1234-5678-1234-567812345678"
+    expected_event_id = uuid.uuid5(uuid.NAMESPACE_OID, delivery)
+    msg = _sqs_message(_envelope(delivery=delivery))
+
+    with caplog.at_level(logging.INFO, logger="treadmill.webhook_inbox"):
+        await poller._process(msg)
+
+    # Exactly one rpush against the (repo, pr_number) buffer key. The
+    # PR_OPENED_PAYLOAD has repo="joe/treadmill" + pr=42.
+    assert len(redis.rpush_calls) == 1
+    key, raw = redis.rpush_calls[0]
+    assert key == "pr:joe/treadmill:42:pending_events"
+    # The buffered record is JSON carrying the derived event_id.
+    record = json.loads(raw)
+    assert record["event_id"] == str(expected_event_id)
+    # TTL armed on the same key.
+    assert redis.expire_calls and redis.expire_calls[0][0] == key
+
+    # The buffer-took-effect log line lands at INFO so the operator can
+    # confirm the mirror is active. Filter to the webhook_inbox logger
+    # specifically — the inner ``buffer_pending_event`` helper logs from
+    # ``treadmill.pending_events`` with a similar message and would
+    # otherwise satisfy a broader substring match without proving the
+    # poller's own confirmation log fired.
+    inbox_lines = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.INFO
+        and rec.name == "treadmill.webhook_inbox"
+    ]
+    assert any(
+        "webhook inbox: buffered pending event_id=" in line
+        for line in inbox_lines
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_task_prs_hit_does_not_buffer() -> None:
+    """When the task_prs SELECT resolves, the buffer is NOT touched —
+    the Event row stamps ``task_id`` from the lookup and the cache-
+    then-heal path is dormant."""
+    session = _StubSession()
+    resolved_task_id = uuid.uuid4()
+    lookup_result = MagicMock()
+    lookup_result.scalar_one_or_none = MagicMock(return_value=resolved_task_id)
+    insert_result = MagicMock()
+    session.execute = AsyncMock(side_effect=[lookup_result, insert_result])
+
+    redis = _StubRedis()
+    poller = _make_poller(session=session, redis_client=redis)
+
+    await poller._process(_sqs_message(_envelope()))
+
+    assert redis.rpush_calls == []
+    assert redis.expire_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_task_prs_miss_without_redis_client_does_not_crash() -> None:
+    """Narrow tests + log-only deployments may wire the poller without a
+    Redis client. A task_prs miss in that mode still persists the Event
+    (with task_id=NULL) but skips the buffer call cleanly — no
+    AttributeError on the missing client."""
+    session = _session_with_task_prs_miss()
+    poller = _make_poller(session=session, redis_client=None)
+
+    # Should complete without raising; Event row still persisted.
+    await poller._process(_sqs_message(_envelope()))
+
+    # commit was reached → INSERT path ran end-to-end.
+    session.commit.assert_awaited()
 
 
 # ── Persist / publish error path ─────────────────────────────────────────────
