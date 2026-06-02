@@ -9,7 +9,7 @@
  */
 
 import type { ReactNode } from 'react';
-import { Activity, Box, GitBranch, Search, Terminal, Zap } from 'lucide-react';
+import { Activity, Box, Search } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 
 interface PageLayoutProps {
@@ -137,9 +137,6 @@ function Skeleton() {
 const NAV = [
   { path: '/', label: 'Overview', icon: <Activity size={14} /> },
   { path: '/tasks', label: 'Tasks', icon: <Box size={14} /> },
-  { path: '/plans', label: 'Plans', icon: <GitBranch size={14} /> },
-  { path: '/events', label: 'Events', icon: <Zap size={14} /> },
-  { path: '/repos', label: 'Repos', icon: <Terminal size={14} /> },
 ];
 
 function Sidebar() {
