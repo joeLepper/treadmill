@@ -32,6 +32,9 @@ class _FakeDockerAdapter:
         self.running_containers: set[str] = set()
         # name -> ip; populated by tests to simulate assigned IPs
         self.container_ips: dict[str, str] = {}
+        # (network_name, container_name) tuples recorded by
+        # ``connect_container_to_network`` (ADR-0064 Step 2).
+        self.network_attachments: list[tuple[str, str]] = []
 
     def ensure_network(self, name: str, *, internal: bool = False) -> None:
         self.networks_ensured.append((name, internal))
@@ -47,6 +50,9 @@ class _FakeDockerAdapter:
 
     def get_container_ip(self, container: Any, network_name: str) -> str | None:
         return self.container_ips.get(container.name)
+
+    def connect_container_to_network(self, name: str, container: Any) -> None:
+        self.network_attachments.append((name, container.name))
 
 
 class _Fake:
@@ -621,6 +627,7 @@ def test_ensure_egress_proxy_container_spawns_when_not_running(
         EGRESS_PROXY_IMAGE,
         ensure_egress_proxy_container,
     )
+    from treadmill_local.runtime import NETWORK_NAME
 
     adapter = _FakeDockerAdapter()
     ensure_egress_proxy_container(adapter, tmp_path)
@@ -629,6 +636,13 @@ def test_ensure_egress_proxy_container_spawns_when_not_running(
     assert run["image"] == EGRESS_PROXY_IMAGE
     assert run["name"] == EGRESS_PROXY_CONTAINER_NAME
     assert run["network"] == EGRESS_NETWORK_NAME
+
+    # ADR-0064 Step 2: the proxy is multi-attached to ``treadmill-local``
+    # after spawn so its outbound CONNECTs route through that network's
+    # gateway — the ``treadmill-egress`` bridge is ``internal=True`` and
+    # has no upstream egress path. Pinning the attach here prevents a
+    # silent revert that would re-break worker traffic.
+    assert (NETWORK_NAME, EGRESS_PROXY_CONTAINER_NAME) in adapter.network_attachments
 
 
 def test_ensure_egress_proxy_container_skips_when_already_running(

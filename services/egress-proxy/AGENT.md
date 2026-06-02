@@ -82,7 +82,11 @@ during every `treadmill-local up`. The autoscaler in
 `tools/local-adapter/treadmill_local/egress_proxy.py` (ADR-0060
 Step 3b) spawns one container per host on the
 `treadmill-egress` internal docker network, mounting the operator-
-side config directory read-only at `/etc/egress-proxy-config`.
+side config directory read-only at `/etc/egress-proxy-config`. Per
+ADR-0064 Step 2, `ensure_egress_proxy_container` then multi-attaches
+the proxy to the `treadmill-local` network after spawn so its
+outbound CONNECTs route through that network's gateway (the egress
+bridge is `internal=True` and has no upstream gateway of its own).
 
 The Dockerfile is intentionally minimal — pure stdlib asyncio plus a
 single Pydantic dep means no system packages, no compile step, no
@@ -91,6 +95,16 @@ wheel. `EXPOSE 3128` matches the autoscaler's spawn assumption.
 
 ## Recent changes
 
+- ADR-0064 Step 2: `ensure_egress_proxy_container` multi-attaches
+  the proxy container to `treadmill-local` immediately after the
+  initial spawn on `treadmill-egress`. Without this the proxy could
+  not reach upstream targets at all — the egress bridge is
+  `internal=True` and has no gateway, so without a second
+  attachment to a non-internal network every CONNECT terminated at
+  the bridge. Implementation in
+  `tools/local-adapter/treadmill_local/egress_proxy.py` imports
+  `runtime.NETWORK_NAME` lazily inside the function to avoid a
+  module-load circular import.
 - Dockerfile + image-build wiring (closes the 2026-06-02 delivery
   gap from ADR-0060 Step 3b — the autoscaler-spawn code was merged
   in PR #92 but the image it referenced wasn't built anywhere in

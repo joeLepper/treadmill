@@ -103,16 +103,29 @@ def ensure_egress_proxy_container(
     adapter: DockerClientAdapter,
     config_dir: Path,
 ) -> None:
-    """Spawn the egress proxy container if it is not already running. Idempotent."""
+    """Spawn the egress proxy container if it is not already running. Idempotent.
+
+    ADR-0064 Step 2: the proxy is multi-attached to the ``treadmill-local``
+    network after creation so its outbound CONNECTs route through that
+    network's gateway (the ``treadmill-egress`` bridge is ``internal=True``
+    and has no upstream gateway). The runtime constant
+    ``NETWORK_NAME`` is imported here (rather than hardcoded) to avoid
+    magic-string drift between the two modules.
+    """
     if adapter.container_running(EGRESS_PROXY_CONTAINER_NAME):
         return
-    adapter.run_container(
+    proxy_container = adapter.run_container(
         EGRESS_PROXY_IMAGE,
         name=EGRESS_PROXY_CONTAINER_NAME,
         detach=True,
         network=EGRESS_NETWORK_NAME,
         volumes={str(config_dir): {"bind": "/etc/egress-proxy-config", "mode": "ro"}},
     )
+    # Imported lazily to avoid a circular import — runtime.py imports
+    # from this module on dev-local boot.
+    from treadmill_local.runtime import NETWORK_NAME
+
+    adapter.connect_container_to_network(NETWORK_NAME, proxy_container)
 
 
 def write_worker_allowlist(

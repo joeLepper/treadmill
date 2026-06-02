@@ -582,6 +582,142 @@ def test_recreate_api_container_when_no_existing_container(
     )
 
 
+def test_recreate_api_container_re_multi_attaches_to_egress_network(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """ADR-0064 Step 2: a deploy-watcher recreation must re-attach the
+    fresh API container to the ``treadmill-egress`` network. Without
+    this re-attach the new container only carries the
+    ``_run_container`` default (``treadmill-local``) and workers on
+    the internal-only egress bridge lose DNS for ``treadmill-api``
+    immediately after every ``services/api/**`` PR merge."""
+    import docker as docker_lib
+
+    from treadmill_local.egress_proxy import EGRESS_NETWORK_NAME
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+    fake_docker.containers.get.side_effect = docker_lib.errors.NotFound(
+        "no such container"
+    )
+    fake_docker.images.get.return_value = MagicMock()
+
+    # The container returned by docker.containers.run() must look like
+    # a fresh container (no networks yet) so connect_container_to_network
+    # actually fires its connect path rather than short-circuiting.
+    new_container = MagicMock(name="new_api_container")
+    new_container.name = API_FAMILY
+    new_container.attrs = {"NetworkSettings": {"Networks": {}}}
+    fake_docker.containers.run.return_value = new_container
+
+    egress_net = MagicMock(name="treadmill_egress_network")
+    fake_docker.networks.get.return_value = egress_net
+
+    rt.recreate_api_container()
+
+    # The adapter looked up the egress network and connected the new
+    # API container to it. The runtime helper hides the call behind
+    # ``_multi_attach_api_to_egress`` — these are the two observable
+    # docker-py interactions that prove the re-attach happened.
+    fake_docker.networks.get.assert_any_call(EGRESS_NETWORK_NAME)
+    egress_net.connect.assert_called_once_with(new_container)
+
+
+# ── _start_services API multi-attach (ADR-0064 Step 2) ───────────────────────
+
+
+def test_start_services_multi_attaches_api_to_egress_network(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """ADR-0064 Step 2: after the API container is up,
+    ``_start_services`` must multi-attach it to ``treadmill-egress`` so
+    workers on that internal-only bridge can resolve ``treadmill-api``
+    for the installation-token mint at startup. Without this, workers
+    hit ``Temporary failure in name resolution`` and exit 1
+    immediately — the cross-network DNS gap that kept ADR-0060 Step 3b
+    feature-flagged off.
+
+    Non-API service containers (Postgres, Redis, Dashboard) must NOT
+    be multi-attached — they have no cross-network traffic to route.
+    """
+    import docker as docker_lib
+
+    from treadmill_local.egress_proxy import EGRESS_NETWORK_NAME
+
+    cfg = _valid_yaml_dict()
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    # Populate service specs the way ``_up_dev_local`` would — but
+    # constrain to API + Postgres so the test exercises the
+    # "API yes, non-API no" branch explicitly.
+    rt.state.service_specs = [
+        rt._build_api_service_spec(cfg),
+    ]
+
+    fake_docker.containers.get.side_effect = docker_lib.errors.NotFound(
+        "no such container"
+    )
+    fake_docker.images.get.return_value = MagicMock()
+
+    new_api = MagicMock(name="new_api_container")
+    new_api.name = API_FAMILY
+    new_api.attrs = {"NetworkSettings": {"Networks": {}}}
+    fake_docker.containers.run.return_value = new_api
+
+    egress_net = MagicMock(name="treadmill_egress_network")
+    fake_docker.networks.get.return_value = egress_net
+
+    rt._start_services()
+
+    # API connect happened against the egress network.
+    fake_docker.networks.get.assert_any_call(EGRESS_NETWORK_NAME)
+    egress_net.connect.assert_called_once_with(new_api)
+
+
+def test_start_services_skips_multi_attach_for_non_api_containers(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """A Postgres / Redis service start must not touch the egress network
+    lookup — only the API gets multi-attached (ADR-0064 Step 2)."""
+    import docker as docker_lib
+
+    from treadmill_local.runner import ContainerSpec, ServiceSpec
+    from treadmill_local.runtime import (
+        DEV_LOCAL_POSTGRES_IMAGE,
+        NETWORK_NAME,
+        POSTGRES_FAMILY,
+    )
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+    rt.state.service_specs = [
+        ServiceSpec(
+            family=POSTGRES_FAMILY,
+            desired_count=1,
+            container_specs=[
+                ContainerSpec(
+                    family=POSTGRES_FAMILY,
+                    name=POSTGRES_FAMILY,
+                    image=DEV_LOCAL_POSTGRES_IMAGE,
+                    env={},
+                    network=NETWORK_NAME,
+                    container_ports=[5432],
+                ),
+            ],
+            port_mappings=[(5432, 15432)],
+        ),
+    ]
+    fake_docker.containers.get.side_effect = docker_lib.errors.NotFound("nope")
+    fake_docker.images.get.return_value = MagicMock()
+    fake_docker.containers.run.return_value = MagicMock(name="pg_container")
+
+    rt._start_services()
+
+    # Postgres start did not look up or connect any extra network — the
+    # adapter's connect path was never invoked for a non-API family.
+    fake_docker.networks.get.assert_not_called()
+
+
 # ── recreate_dashboard_container (deploy-watcher auto-deploy, ADR-0056) ──────
 
 

@@ -45,3 +45,19 @@ class DockerClientAdapter:
         if net is None:
             return None
         return net.get("IPAddress") or None
+
+    def connect_container_to_network(self, name: str, container: Any) -> None:
+        """Attach *container* to the network *name* if not already attached.
+
+        ADR-0064: services that need to talk to BOTH ``treadmill-local``
+        (internal-services DNS) and ``treadmill-egress`` (worker traffic)
+        get multi-attached via this helper. Idempotent — a no-op when the
+        container is already on the network, so callers don't need to
+        track attach state.
+        """
+        network = self._client.networks.get(name)
+        container.reload()
+        attached = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+        if name in attached:
+            return
+        network.connect(container)
