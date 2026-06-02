@@ -296,20 +296,26 @@ def main() -> int:
 
     from treadmill_local.docker_client import DockerClientAdapter
 
-    # ADR-0060 Step 3b is feature-flagged off by default as of 2026-06-02.
-    # The egress proxy spawn + per-worker isolation network shipped in
-    # PR #92 but the implementation is incomplete: workers on the
-    # internal `treadmill-egress` network cannot resolve `treadmill-api`
-    # (lives on `treadmill-local`), so every worker exits 1 on the
-    # startup installation-token mint. Until the cross-network DNS
-    # design lands (multi-attach the API to both networks, or move all
-    # internal services onto the egress network), this flag stays
-    # default-off. With it off, workers spawn on the operator-default
-    # network like they did pre-#92 — no egress proxy, no per-worker
-    # isolation, but they actually run. Flip to ``true`` once the
-    # cross-network fix ships and has a real end-to-end smoke test.
+    # ADR-0060 Step 3b is feature-flagged ON by default as of ADR-0064
+    # Step 3. The cross-network DNS gap that originally kept this flag
+    # default-off (workers on the internal-only ``treadmill-egress``
+    # bridge couldn't resolve ``treadmill-api`` on ``treadmill-local``
+    # and exited 1 on the installation-token mint) is closed by the
+    # ADR-0064 multi-attach: the API + egress proxy now sit on both
+    # networks, and the ADR-0065 real-boot smoke gate has run green
+    # against this default before the flip ships. With the flag on,
+    # workers spawn on ``treadmill-egress`` (internal, no gateway) and
+    # route external HTTP/HTTPS through ``treadmill-egress-proxy`` with
+    # per-worker install credentials and an allowlist JSON. The flag
+    # stays as an operator escape hatch: flip it back to ``false`` when
+    # debugging the egress proxy itself (a suspected proxy bug, a
+    # crash-looping proxy container blocking all workers, or an
+    # allowlist misconfiguration that needs the unproxied path to
+    # bisect against). Workers then spawn on the operator-default
+    # network like they did pre-#92 — no proxy, no per-worker
+    # isolation, but they run.
     egress_proxy_enabled = (
-        os.environ.get("TREADMILL_EGRESS_PROXY_ENABLED", "false").lower()
+        os.environ.get("TREADMILL_EGRESS_PROXY_ENABLED", "true").lower()
         in ("true", "1", "yes")
     )
 

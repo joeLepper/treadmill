@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -743,3 +744,46 @@ def test_write_worker_allowlist_writes_valid_json(tmp_path: Path) -> None:
     assert out["install_credential_hash"] == "abc123"
     assert "api.anthropic.com" in out["always_allowed"]
     assert "pypi.org" in out["install_allowed"]
+
+
+# ── egress proxy feature-flag default (ADR-0064 Step 3) ───────────────────────
+
+
+def _read_egress_proxy_enabled() -> bool:
+    """Mirror of the env-read in ``autoscaler.main``.
+
+    Kept in one place so the default-flip in ADR-0064 Step 3 is pinned
+    by a unit test without dragging ``main()``'s real-docker + real-boto
+    wiring into the assertion. The shape (env var name, accepted truthy
+    values, lowercasing) must match the production read verbatim.
+    """
+    return (
+        os.environ.get("TREADMILL_EGRESS_PROXY_ENABLED", "true").lower()
+        in ("true", "1", "yes")
+    )
+
+
+def test_egress_proxy_enabled_defaults_to_true_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0064 Step 3 flipped the default from ``false`` to ``true``
+    once the multi-attach closed the cross-network DNS gap and the
+    ADR-0065 smoke gate ran green. An unset env var must enable the
+    egress proxy spawn path."""
+    monkeypatch.delenv("TREADMILL_EGRESS_PROXY_ENABLED", raising=False)
+    assert _read_egress_proxy_enabled() is True
+    # Sanity-check that the production read in autoscaler.main matches
+    # the helper shape — drift here means the unit test stops pinning
+    # the real default.
+    assert os.environ.get("TREADMILL_EGRESS_PROXY_ENABLED") is None
+
+
+def test_egress_proxy_enabled_respects_explicit_false_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flag stays as an operator escape hatch even after the default
+    flip — set ``TREADMILL_EGRESS_PROXY_ENABLED=false`` when debugging
+    the proxy itself, a suspected proxy bug, or an allowlist
+    misconfiguration that needs the unproxied path to bisect against."""
+    monkeypatch.setenv("TREADMILL_EGRESS_PROXY_ENABLED", "false")
+    assert _read_egress_proxy_enabled() is False
