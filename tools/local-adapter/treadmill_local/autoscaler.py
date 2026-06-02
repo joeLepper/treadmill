@@ -295,22 +295,41 @@ def main() -> int:
     docker_client = docker.from_env()
 
     from treadmill_local.docker_client import DockerClientAdapter
-    from treadmill_local.egress_proxy import (
-        ensure_egress_network,
-        ensure_egress_proxy_container,
+
+    # ADR-0060 Step 3b is feature-flagged off by default as of 2026-06-02.
+    # The egress proxy spawn + per-worker isolation network shipped in
+    # PR #92 but the implementation is incomplete: workers on the
+    # internal `treadmill-egress` network cannot resolve `treadmill-api`
+    # (lives on `treadmill-local`), so every worker exits 1 on the
+    # startup installation-token mint. Until the cross-network DNS
+    # design lands (multi-attach the API to both networks, or move all
+    # internal services onto the egress network), this flag stays
+    # default-off. With it off, workers spawn on the operator-default
+    # network like they did pre-#92 — no egress proxy, no per-worker
+    # isolation, but they actually run. Flip to ``true`` once the
+    # cross-network fix ships and has a real end-to-end smoke test.
+    egress_proxy_enabled = (
+        os.environ.get("TREADMILL_EGRESS_PROXY_ENABLED", "false").lower()
+        in ("true", "1", "yes")
     )
 
-    adapter = DockerClientAdapter(docker_client)
-    egress_config_dir = infra_dir / "egress-proxy-config"
-    # mkdir BEFORE the proxy spawns. Docker auto-creates absent mount
-    # paths as root (the daemon's UID); a root-owned dir blocks the
-    # autoscaler (running as the operator's UID) from writing the
-    # per-worker allowlist JSON later. Surfaced 2026-06-02 as a
-    # `PermissionError` crash after every proxy restart. Idempotent
-    # on existing operator-owned dirs.
-    egress_config_dir.mkdir(parents=True, exist_ok=True)
-    ensure_egress_network(adapter)
-    ensure_egress_proxy_container(adapter, egress_config_dir)
+    adapter: DockerClientAdapter | None = None
+    if egress_proxy_enabled:
+        from treadmill_local.egress_proxy import (
+            ensure_egress_network,
+            ensure_egress_proxy_container,
+        )
+
+        adapter = DockerClientAdapter(docker_client)
+        egress_config_dir = infra_dir / "egress-proxy-config"
+        # mkdir BEFORE the proxy spawns. Docker auto-creates absent mount
+        # paths as root (the daemon's UID); a root-owned dir blocks the
+        # autoscaler (running as the operator's UID) from writing the
+        # per-worker allowlist JSON later. Idempotent on existing
+        # operator-owned dirs.
+        egress_config_dir.mkdir(parents=True, exist_ok=True)
+        ensure_egress_network(adapter)
+        ensure_egress_proxy_container(adapter, egress_config_dir)
 
     if deployment_id is not None:
         # Dev-local: build LocalRuntime with the deployment_config so
