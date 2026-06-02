@@ -50,6 +50,16 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # ~150 MB for chromium-headless-shell. A future ADR moves Playwright
 # to a sidecar image if footprint becomes a problem.
 ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright
+# NODE_PATH lets `node /opt/triage/probe.mjs` resolve the globally-
+# installed `playwright` package without a per-script symlink. The
+# 2026-05-29 v1.3 wf-ui-triage run reported having to symlink
+# /opt/triage/node_modules/playwright → /usr/lib/node_modules/playwright
+# at runtime because the v1.2 prompt's bash invocation didn't carry
+# NODE_PATH and the .claude/settings.json allowlist didn't permit an
+# env-var-prefixed form. Setting NODE_PATH at the image level resolves
+# both: the probe scripts pick up node_modules from npm's global
+# install dir, no per-run workaround needed.
+ENV NODE_PATH=/usr/lib/node_modules
 RUN npm install -g playwright@1.55.0 \
     && mkdir -p $PLAYWRIGHT_BROWSERS_PATH \
     && npx --yes playwright install chromium-headless-shell --with-deps
