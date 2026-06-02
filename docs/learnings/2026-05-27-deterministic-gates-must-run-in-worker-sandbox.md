@@ -1,10 +1,9 @@
 ---
 date: 2026-05-27
 trigger: incident
-status: captured
+status: crystallized-into-rule-deterministic-gates-must-use-sandbox-safe-tools
 related: ADR-0029, 2026-05-22-docker-restart-reuses-old-image-silent-noop-deploy
 ---
-
 # Learning: Deterministic gates must run cleanly in the worker sandbox, or the architect-amend loop becomes a deadlock
 
 ## Trigger
