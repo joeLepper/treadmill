@@ -2909,6 +2909,17 @@ async def handle_scheduled_tick(
         await run_stuck_task_sweep(session, dispatcher)
         return None
 
+    # Same idiom for the ADR-0062 escalation-close sweep — the five
+    # close triggers are deterministic queries over the event stream;
+    # no role-step needed.
+    from treadmill_api.coordination.escalation_close_sweep import (
+        ESCALATION_CLOSE_SWEEP_WORKFLOW_ID,
+        run_escalation_close_sweep,
+    )
+    if schedule.workflow_id == ESCALATION_CLOSE_SWEEP_WORKFLOW_ID:
+        await run_escalation_close_sweep(session, dispatcher)
+        return None
+
     repo = typed.rendered_payload.get("repo")
     if not repo:
         # ADR-0057 + ADR-0055 sibling: schedules without a payload.repo can't

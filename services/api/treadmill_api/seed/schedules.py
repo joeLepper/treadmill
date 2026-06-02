@@ -63,6 +63,26 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "created_by": "auto-seed",
     },
     {
+        # ADR-0062 Step 2: escalation-close sweep — paired with the
+        # stuck-task sweep above. Iterates every open incident (latest
+        # ``task.escalated_to_operator`` without a later
+        # ``task.escalation_closed`` for the same task) and emits a
+        # close event for each one whose underlying task has hit a
+        # close trigger (re_progressed / pr_merged / cancelled /
+        # superseded). Tight ``*/2`` cadence because incident latency
+        # matters more than throughput — the sweep cost is a single
+        # open-incidents query + a handful of close-trigger probes per
+        # incident, and ADR-0062's Slack-channel-as-MTTR-log surface
+        # wants the close visible within a couple of minutes.
+        "workflow_id": "wf-escalation-close-sweep",
+        "cron_expression": "*/2 * * * *",  # every 2 minutes
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {"trigger": "scheduled-sweep"},
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
+    {
         # Observability regression scan — consumes the ADR-0020 stack.
         # Short-circuits to a no-op until Grafana/Loki/Tempo queries
         # succeed (ADR-0020 phase 3+).
