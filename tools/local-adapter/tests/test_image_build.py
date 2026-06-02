@@ -24,6 +24,7 @@ from treadmill_local.runtime import (
     DEV_LOCAL_AGENT_IMAGE,
     DEV_LOCAL_API_IMAGE,
     DEV_LOCAL_DASHBOARD_IMAGE,
+    DEV_LOCAL_EGRESS_PROXY_IMAGE,
     LocalRuntime,
     find_repo_root,
 )
@@ -204,7 +205,7 @@ def test_ensure_images_built_invokes_docker_build_for_each_image(
     rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
     rt._ensure_images_built()
 
-    assert len(calls) == 3, f"expected 3 docker build calls, got {calls}"
+    assert len(calls) == 4, f"expected 4 docker build calls, got {calls}"
 
     api_call = calls[0]
     assert api_call["cmd"] == [
@@ -226,6 +227,18 @@ def test_ensure_images_built_invokes_docker_build_for_each_image(
         "docker", "build", "-t", DEV_LOCAL_DASHBOARD_IMAGE, ".",
     ]
     assert dashboard_call["cwd"] == str(fake_repo_root / "services" / "dashboard")
+
+    # ADR-0060 Step 3b — autoscaler spawns the egress proxy from
+    # this image; without the build entry the autoscaler 404s on
+    # ``docker pull treadmill-egress-proxy:dev`` and no workers
+    # spawn (delivery gap surfaced 2026-06-02).
+    egress_proxy_call = calls[3]
+    assert egress_proxy_call["cmd"] == [
+        "docker", "build", "-t", DEV_LOCAL_EGRESS_PROXY_IMAGE, ".",
+    ]
+    assert egress_proxy_call["cwd"] == str(
+        fake_repo_root / "services" / "egress-proxy",
+    )
 
 
 def test_ensure_images_built_captures_output_on_success(

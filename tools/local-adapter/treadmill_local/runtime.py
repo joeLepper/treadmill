@@ -118,6 +118,10 @@ DEV_LOCAL_REDIS_IMAGE = "redis:7-alpine"
 DEV_LOCAL_API_IMAGE = "treadmill-api:dev"
 DEV_LOCAL_AGENT_IMAGE = "treadmill-agent:dev"
 DEV_LOCAL_DASHBOARD_IMAGE = "treadmill-dashboard:dev"
+# Mirrors ``egress_proxy.EGRESS_PROXY_IMAGE`` so ``_ensure_images_built``
+# can include the proxy in its build set without importing the
+# autoscaler module (avoids a circular reference). ADR-0060 Step 3b.
+DEV_LOCAL_EGRESS_PROXY_IMAGE = "treadmill-egress-proxy:dev"
 
 # Single source of truth for the dev-local API port. The container
 # listens on this port and the host publishes it 1:1, so the same value
@@ -1587,6 +1591,11 @@ class LocalRuntime:
                 DEV_LOCAL_DASHBOARD_IMAGE,
                 ["docker", "build", "-t", DEV_LOCAL_DASHBOARD_IMAGE, "."],
                 repo_root / "services" / "dashboard",
+            ),
+            (
+                DEV_LOCAL_EGRESS_PROXY_IMAGE,
+                ["docker", "build", "-t", DEV_LOCAL_EGRESS_PROXY_IMAGE, "."],
+                repo_root / "services" / "egress-proxy",
             ),
         ]
         for image, cmd, cwd in builds:
