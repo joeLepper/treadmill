@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import ClassVar, Literal
 
 import pydantic
@@ -54,6 +55,47 @@ class TaskEscalatedToOperator(EventPayload):
     # escalation event without re-running the loop. Capped at 4000
     # chars (same bound as ArchitectVerdict.gate_log_excerpt).
     gate_log_excerpt: str | None = pydantic.Field(None, max_length=4000)
+
+
+class TaskEscalationClosed(EventPayload):
+    """Emitted when an open operator-escalation incident is closed (ADR-0062).
+
+    Pairs with ``TaskEscalatedToOperator`` as the close side of the
+    incident lifecycle. The ``close_reason`` discriminates the five
+    close triggers:
+
+      * ``re_progressed`` — a ``step.completed`` event landed for the
+        task with ``created_at > opened_at`` (the task is dispatching
+        again; the underlying stall is gone).
+      * ``pr_merged`` — a ``github.pr_merged`` event exists for the
+        task (the change shipped; whatever was blocking the loop is
+        resolved by the merge).
+      * ``cancelled`` — a ``task.cancelled`` terminal landed.
+      * ``superseded`` — a ``task.superseded`` terminal landed (a
+        replacement task took over).
+      * ``operator_close`` — the CLI ``treadmill escalations close
+        <task_id>`` command (Step 3) emitted the close explicitly.
+
+    ``opened_at`` is denormalized from the matching
+    ``task.escalated_to_operator`` event so consumers don't need to
+    re-join. ``mttr_seconds`` is the wall-clock incident duration
+    (``closed_at - opened_at``), computed at emit-time and stamped on
+    every close so MTTR aggregation over a window is a simple
+    column-scan rather than a paired-event join.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "escalation_closed"
+
+    close_reason: Literal[
+        "re_progressed",
+        "pr_merged",
+        "cancelled",
+        "superseded",
+        "operator_close",
+    ]
+    opened_at: datetime
+    mttr_seconds: int
 
 
 class TaskEscalationAcknowledged(EventPayload):

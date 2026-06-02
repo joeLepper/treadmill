@@ -23,6 +23,7 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-documentarian-audit",
     "wf-crystallize-learning",
     "wf-stuck-task-sweep",
+    "wf-escalation-close-sweep",  # ADR-0062 Step 2 (added 2026-06-02)
     "wf-o11y-regression-scan",
     "wf-tune-judge-prompts",  # ADR-0053 Wave 3 (added 2026-05-26)
     "wf-ui-triage",  # ADR-0061 Step 5 (added 2026-05-28)
@@ -32,8 +33,8 @@ _EXPECTED_WORKFLOW_IDS = {
 # ── SEED_SCHEDULES content invariants ────────────────────────────────────────
 
 
-def test_seed_schedules_has_six_entries() -> None:
-    assert len(SEED_SCHEDULES) == 6
+def test_seed_schedules_has_seven_entries() -> None:
+    assert len(SEED_SCHEDULES) == 7
 
 
 def test_seed_schedules_workflow_ids() -> None:
@@ -51,6 +52,7 @@ def test_seed_schedules_cron_expressions() -> None:
     assert by_wf["wf-documentarian-audit"] == "0 9 * * 1"
     assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
     assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
+    assert by_wf["wf-escalation-close-sweep"] == "*/2 * * * *"
     assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
     assert by_wf["wf-ui-triage"] == "7 */4 * * *"
 
@@ -61,6 +63,7 @@ def test_seed_schedules_quiet_hours() -> None:
     assert by_wf["wf-documentarian-audit"]["quiet_tz"] == "America/Los_Angeles"
     assert by_wf["wf-crystallize-learning"]["quiet_hours"] is None
     assert by_wf["wf-stuck-task-sweep"]["quiet_hours"] is None
+    assert by_wf["wf-escalation-close-sweep"]["quiet_hours"] is None
     assert by_wf["wf-o11y-regression-scan"]["quiet_hours"] is None
 
 
@@ -69,6 +72,7 @@ def test_seed_schedules_payload_templates() -> None:
     assert by_wf["wf-documentarian-audit"] == {"trigger": "scheduled-audit"}
     assert by_wf["wf-crystallize-learning"] == {"trigger": "scheduled-sweep"}
     assert by_wf["wf-stuck-task-sweep"] == {"trigger": "scheduled-sweep"}
+    assert by_wf["wf-escalation-close-sweep"] == {"trigger": "scheduled-sweep"}
     assert by_wf["wf-o11y-regression-scan"] == {"trigger": "scheduled-scan"}
 
 
@@ -154,9 +158,9 @@ def _existing_client(existing: list[dict]) -> MagicMock:
     return client
 
 
-def test_seed_schedules_creates_all_six_on_fresh_install() -> None:
+def test_seed_schedules_creates_all_seven_on_fresh_install() -> None:
     created = seed_schedules(_fresh_client())
-    assert created == 6
+    assert created == 7
 
 
 def test_seed_schedules_idempotent_when_all_exist() -> None:
@@ -180,18 +184,18 @@ def test_seed_schedules_no_posts_when_all_exist() -> None:
 
 
 def test_seed_schedules_only_posts_missing() -> None:
-    """When one schedule already exists, only the remaining five are POSTed."""
+    """When one schedule already exists, only the remaining six are POSTed."""
     existing = [{"workflow_id": "wf-documentarian-audit", "cron_expression": "0 9 * * 1"}]
     client = _existing_client(existing)
     created = seed_schedules(client)
-    assert created == 5
+    assert created == 6
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
     posted_wf_ids = {c.kwargs["json"]["workflow_id"] for c in post_calls}
     assert "wf-documentarian-audit" not in posted_wf_ids
-    assert len(posted_wf_ids) == 5
+    assert len(posted_wf_ids) == 6
 
 
-def test_seed_schedules_posts_all_six_workflow_ids() -> None:
+def test_seed_schedules_posts_all_seven_workflow_ids() -> None:
     client = _fresh_client()
     seed_schedules(client)
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
@@ -212,11 +216,16 @@ def test_seed_schedules_documentarian_quiet_hours_posted() -> None:
 
 
 def test_seed_schedules_ops_bots_post_no_quiet_hours() -> None:
-    """Stuck-task-sweep and o11y-regression-scan post with quiet_hours=None."""
+    """Stuck-task-sweep, escalation-close-sweep, and o11y-regression-scan
+    post with quiet_hours=None."""
     client = _fresh_client()
     seed_schedules(client)
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
-    for wf_id in ("wf-stuck-task-sweep", "wf-o11y-regression-scan"):
+    for wf_id in (
+        "wf-stuck-task-sweep",
+        "wf-escalation-close-sweep",
+        "wf-o11y-regression-scan",
+    ):
         call = next(
             c for c in post_calls if c.kwargs["json"]["workflow_id"] == wf_id
         )
@@ -236,6 +245,7 @@ def test_seed_schedules_posts_correct_payload_templates() -> None:
     assert by_wf["wf-documentarian-audit"] == {"trigger": "scheduled-audit"}
     assert by_wf["wf-crystallize-learning"] == {"trigger": "scheduled-sweep"}
     assert by_wf["wf-stuck-task-sweep"] == {"trigger": "scheduled-sweep"}
+    assert by_wf["wf-escalation-close-sweep"] == {"trigger": "scheduled-sweep"}
     assert by_wf["wf-o11y-regression-scan"] == {"trigger": "scheduled-scan"}
 
 
@@ -250,6 +260,7 @@ def test_seed_schedules_posts_correct_cron_expressions() -> None:
     assert by_wf["wf-documentarian-audit"] == "0 9 * * 1"
     assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
     assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
+    assert by_wf["wf-escalation-close-sweep"] == "*/2 * * * *"
     assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
     assert by_wf["wf-ui-triage"] == "7 */4 * * *"
 
@@ -272,11 +283,11 @@ def test_seed_schedules_if_empty_skips_when_rows_exist() -> None:
     session.commit.assert_not_called()
 
 
-def test_seed_schedules_if_empty_inserts_six_on_fresh_db() -> None:
+def test_seed_schedules_if_empty_inserts_seven_on_fresh_db() -> None:
     session = _make_session(existing_count=0)
     result = seed_schedules_if_empty(session)
-    assert result == 6
-    assert session.add.call_count == 6
+    assert result == 7
+    assert session.add.call_count == 7
     session.commit.assert_called_once()
 
 
@@ -314,6 +325,7 @@ def test_seed_schedules_if_empty_correct_cron_expressions() -> None:
     assert added["wf-documentarian-audit"] == "0 9 * * 1"
     assert added["wf-crystallize-learning"] == "0 20 * * 0"
     assert added["wf-stuck-task-sweep"] == "*/10 * * * *"
+    assert added["wf-escalation-close-sweep"] == "*/2 * * * *"
     assert added["wf-o11y-regression-scan"] == "*/15 * * * *"
 
 
@@ -331,4 +343,5 @@ def test_seed_schedules_if_empty_ops_bots_no_quiet_hours() -> None:
     seed_schedules_if_empty(session)
     added = {c.args[0].workflow_id: c.args[0] for c in session.add.call_args_list}
     assert added["wf-stuck-task-sweep"].quiet_hours is None
+    assert added["wf-escalation-close-sweep"].quiet_hours is None
     assert added["wf-o11y-regression-scan"].quiet_hours is None
