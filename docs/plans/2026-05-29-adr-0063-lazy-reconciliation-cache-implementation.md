@@ -1,7 +1,3 @@
----
-auto_merge: false
----
-
 # Plan: ADR-0063 — Lazy-reconciliation cache for webhook FK resolution (implementation)
 
 - **Status:** drafting
@@ -21,9 +17,11 @@ then centralize the buffer/no-buffer decision behind a shared
 helper, then add a CI lock-step gate that flags any new ingress
 that bypasses the helper.
 
-`auto_merge: false` — touches shared ingress paths and a helper
-module two consumers depend on. We want each PR reviewed by a
-human before it lands.
+Auto-merge enabled (default): the `depends_on` chain already
+serializes touch-overlapping files (Step 2 + Step 3 both edit the
+two ingress paths, but Step 3 only fires after Step 2's PR
+merges), and the surface is isolated from the other in-flight
+operator track.
 
 ## Success criteria
 
