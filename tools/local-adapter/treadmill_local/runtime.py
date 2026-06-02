@@ -1263,13 +1263,12 @@ class LocalRuntime:
                 build_always_allowed,
                 build_install_allowed,
                 mint_worker_credential,
+                worker_proxy_env,
                 write_worker_allowlist,
             )
             network = EGRESS_NETWORK_NAME  # internal bridge; no external gateway
             install_cred, install_cred_hash = mint_worker_credential()
-            env["HTTP_PROXY"] = "http://treadmill-egress-proxy:3128"
-            env["HTTPS_PROXY"] = "http://treadmill-egress-proxy:3128"
-            env["TREADMILL_INSTALL_PROXY_TOKEN"] = install_cred
+            env.update(worker_proxy_env(install_cred))
 
         self._ensure_image(spec.image)
         ports = {f"{cp}/tcp": hp for cp, hp in (port_mappings or [])}
