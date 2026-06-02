@@ -985,6 +985,49 @@ def test_up_dev_local_skips_moto_and_synth(
     assert any(s.family == AGENT_FAMILY for s in rt.state.container_specs)
 
 
+def test_up_dev_local_ensures_egress_network_before_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """ADR-0064 Step 1: the ``treadmill-egress`` network must exist
+    before any service spawns so later steps can multi-attach the API
+    to it. Asserts the call ordering — ``ensure_egress_network`` fires
+    before ``_start_services``."""
+    from treadmill_local import egress_proxy as egress_proxy_module
+
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+
+    call_order: list[str] = []
+
+    def record_ensure_egress(adapter: Any) -> None:
+        call_order.append("ensure_egress_network")
+
+    monkeypatch.setattr(
+        egress_proxy_module, "ensure_egress_network", record_ensure_egress,
+    )
+    monkeypatch.setattr(
+        rt, "_start_services", lambda: call_order.append("_start_services"),
+    )
+    monkeypatch.setattr(rt, "_ensure_network", lambda: None)
+    monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    monkeypatch.setattr(rt, "_start_autoscaler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._github_token = "ghp_test_token_placeholder"
+
+    rt.up()
+
+    assert "ensure_egress_network" in call_order
+    assert "_start_services" in call_order
+    assert call_order.index("ensure_egress_network") < call_order.index(
+        "_start_services"
+    ), f"ensure_egress_network must precede _start_services, got {call_order}"
+
+
 def test_up_fully_local_path_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

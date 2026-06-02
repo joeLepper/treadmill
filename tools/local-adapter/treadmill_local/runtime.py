@@ -394,6 +394,15 @@ class LocalRuntime:
         self.state.container_specs = [
             self._build_dev_local_agent_spec(cfg),
         ]
+        # ADR-0064 Step 1: ensure the treadmill-egress network exists
+        # before any service spawns so the API can be multi-attached to
+        # it in later steps. The autoscaler still calls
+        # ``ensure_egress_network`` on its own startup path (the helper
+        # is idempotent), which keeps the standalone-autoscaler tests
+        # working.
+        from treadmill_local.docker_client import DockerClientAdapter
+        from treadmill_local.egress_proxy import ensure_egress_network
+        ensure_egress_network(DockerClientAdapter(self.docker))
         self._start_services()
         if self.start_autoscaler:
             self._start_autoscaler_dev_local()
