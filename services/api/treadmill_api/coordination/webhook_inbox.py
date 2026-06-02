@@ -50,23 +50,16 @@ import uuid
 from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from treadmill_api.eventbus import EventPublisher
-from treadmill_api.events import encode_payload, parse_payload
 from treadmill_api.observability import extract_trace_context, get_tracer
-from sqlalchemy import func, select
-from treadmill_api.models import Event, TaskPR
 from treadmill_api.webhooks.inbox_envelope import WebhookInboxEnvelope
 from treadmill_api.webhooks.normalize import (
     NormalizationResult,
     normalize_github_event,
 )
-from treadmill_api.webhooks.pending_events import (
-    buffer_pending_event,
-    pr_pending_buffer_key,
-)
+from treadmill_api.webhooks.persist import persist_and_resolve_webhook_event
 from treadmill_api.webhooks.signatures import (
     InvalidSignatureError,
     SignatureMissingError,
@@ -93,35 +86,6 @@ class _SecretsManagerClient(Protocol):
     loop never blocks."""
 
     def get_secret_value(self, SecretId: str) -> dict[str, Any]: ...
-
-
-def _extract_commit_sha(action: str, body: dict[str, Any]) -> str | None:
-    """Pull the HEAD-at-event-time commit SHA from a raw GitHub payload.
-
-    Per ADR-0014 every github event whose semantics are "I happened at a
-    specific HEAD" populates ``events.commit_sha`` so ADR-0013's
-    ``task_mergeability`` VIEW can join on it without JSONB extraction.
-
-    Duplicated from ``routers/webhooks.py`` for now; both ingress paths
-    extract the same fields. Refactoring into a shared helper is an
-    invitation for drift — the two callers should agree by code review,
-    not by accidental import.
-    """
-    pr = body.get("pull_request") or {}
-    head = pr.get("head") or {}
-    if action == "pr_opened":
-        return head.get("sha") or None
-    if action == "pr_synchronize":
-        return head.get("sha") or None
-    if action == "pr_review_submitted":
-        review = body.get("review") or {}
-        return review.get("commit_id") or None
-    if action == "pr_merged":
-        return pr.get("merge_commit_sha") or head.get("sha") or None
-    if action == "check_run_completed":
-        check_run = body.get("check_run") or {}
-        return check_run.get("head_sha") or None
-    return None
 
 
 class WebhookInboxPoller:
@@ -492,128 +456,35 @@ class WebhookInboxPoller:
         normalized: NormalizationResult,
         body_json: dict[str, Any],
     ) -> None:
-        """Persist the Event row idempotently, then publish.
+        """Resolve task_id, persist the Event row idempotently, then publish.
 
-        The INSERT uses ``ON CONFLICT (id) DO NOTHING`` against the
-        deterministic ``event_id``. If a re-delivery lands the second
-        INSERT is a no-op; we still publish — the bus is notification
-        only, and the consumer's downstream idempotency (also keyed on
-        event_id) collapses duplicates.
+        Delegates to ``persist_and_resolve_webhook_event`` (ADR-0063
+        Step 3) — the single shared seam both ingress paths use. The
+        helper does the task_prs lookup, the
+        ``ON CONFLICT (id) DO NOTHING`` upsert against the deterministic
+        event_id, the cache-then-heal buffer-on-miss, and the publish
+        call (best-effort; log + swallow on failure).
 
-        Per ADR-0014, ``commit_sha`` is populated for every github event
-        with a commit anchor so the mergeability VIEW can join without
-        JSONB extraction. The HTTP route does the same.
+        We pass the deterministic ``event_id`` derived from the
+        ``X-GitHub-Delivery`` UUID so SQS visibility-timeout re-deliveries
+        collapse onto the same row. The HTTP route takes the
+        default-None path (database-generated UUID) — it has no replay
+        anchor.
+
+        Validation failures (Pydantic ``ValidationError`` raised inside
+        the helper when the normalizer drifted from the registry)
+        propagate so the SQS message stays for retry; the
+        ``_process`` exception handler catches and leaves the message
+        visible for the operator-driven fix.
         """
-        # Validate the normalized payload via the typed registry. A
-        # failure here means the normalizer drifted from the registry —
-        # propagate so the SQS message stays for retry (the operator
-        # restarts the API after fixing the bug).
-        typed = parse_payload(
-            normalized.entity_type, normalized.action, normalized.payload,
-        )
-
-        commit_sha = _extract_commit_sha(normalized.action, body_json)
-
         async with self.sessionmaker() as session:
-            # Resolve task_id via the task_prs bridge — mirror of the
-            # HTTP route at ``routers/webhooks.py:193-202``. The two
-            # ingress paths must stay in lock-step on this field; the
-            # dependency gate ``dispatch._is_dep_pr_merged`` queries
-            # ``events.task_id`` directly and a NULL here silently
-            # blocks downstream task dispatch. See the dual-ingress
-            # drift learning at 2026-05-14.
-            task_id: uuid.UUID | None = None
-            if normalized.repo and normalized.pr_number is not None:
-                result = await session.execute(
-                    select(TaskPR.task_id).where(
-                        func.lower(TaskPR.repo) == normalized.repo.lower(),
-                        TaskPR.pr_number == normalized.pr_number,
-                    )
-                )
-                task_id = result.scalar_one_or_none()
-
-            stmt = (
-                pg_insert(Event)
-                .values(
-                    id=event_id,
-                    entity_type=normalized.entity_type,
-                    action=normalized.action,
-                    task_id=task_id,
-                    payload=encode_payload(typed),
-                    commit_sha=commit_sha,
-                )
-                .on_conflict_do_nothing(index_elements=["id"])
-            )
-            await session.execute(stmt)
-            await session.commit()
-
-            # ADR-0063 Step 1 — mirror of the HTTP route's cache-then-heal
-            # buffer at ``routers/webhooks.py:223-240``. When the task_prs
-            # lookup missed but the event carries a (repo, pr_number) pair,
-            # push the event_id onto the pending list so the consumer's
-            # task_prs back-fill path (``_write_task_prs_on_completed`` +
-            # ``_try_task_prs_fallback_on_pr_merged``) drains it once the
-            # bridge row eventually appears. The buffer call is best-effort
-            # — the row is persisted; a Redis hiccup degrades the race
-            # window but never loses audit data. Guarded by
-            # ``redis_client is not None`` so deployments / narrow tests
-            # that omit Redis wiring don't crash the ingest path.
-            if (
-                task_id is None
-                and normalized.repo
-                and normalized.pr_number is not None
-                and self.redis_client is not None
-            ):
-                try:
-                    await buffer_pending_event(
-                        self.redis_client,
-                        pr_pending_buffer_key(
-                            normalized.repo, normalized.pr_number,
-                        ),
-                        event_id,
-                    )
-                    logger.info(
-                        "webhook inbox: buffered pending event_id=%s for "
-                        "repo=%s pr=%d (task_prs miss; awaiting bridge row "
-                        "to drain)",
-                        event_id, normalized.repo, normalized.pr_number,
-                    )
-                except Exception:
-                    logger.exception(
-                        "webhook inbox: pending-event buffering failed for "
-                        "event_id=%s repo=%s pr=%d; row is persisted",
-                        event_id, normalized.repo, normalized.pr_number,
-                    )
-
-            # Re-fetch the row so the publisher sees the canonical Event
-            # (the INSERT may have been a no-op on re-delivery; we want
-            # the existing row's fields, not the proposed ones, so the
-            # publish carries the audit-log-of-record values).
-            event = await session.get(Event, event_id)
-
-        if event is None:
-            # Should never happen — the row was either inserted by us or
-            # already existed. Log loudly and bail.
-            logger.error(
-                "webhook inbox: Event row %s vanished after upsert; "
-                "skipping publish",
-                event_id,
-            )
-            return
-
-        try:
-            await self.publisher.publish(event, typed)
-        except Exception:
-            # Publish-failure semantics: log + swallow. The Event row is
-            # persisted (source of truth); the bus is notification only.
-            # The replay loop heals dispatch-publish failures, but the
-            # webhook ingest path doesn't write a dispatch marker — the
-            # downstream consumer's poll-driven rescan picks up the row
-            # by entity_type/action index (which is what bunkhouse does).
-            logger.exception(
-                "webhook inbox: event publish failed for event_id=%s; "
-                "row is persisted, consumer rescan will pick it up",
-                event_id,
+            await persist_and_resolve_webhook_event(
+                session,
+                normalized,
+                body_json,
+                self.redis_client,
+                self.publisher,
+                event_id=event_id,
             )
 
     async def _delete(self, message: dict[str, Any]) -> None:

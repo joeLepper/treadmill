@@ -826,7 +826,7 @@ async def test_process_task_prs_miss_buffers_pending_event(
     expected_event_id = uuid.uuid5(uuid.NAMESPACE_OID, delivery)
     msg = _sqs_message(_envelope(delivery=delivery))
 
-    with caplog.at_level(logging.INFO, logger="treadmill.webhook_inbox"):
+    with caplog.at_level(logging.INFO, logger="treadmill.webhooks.persist"):
         await poller._process(msg)
 
     # Exactly one rpush against the (repo, pr_number) buffer key. The
@@ -841,20 +841,21 @@ async def test_process_task_prs_miss_buffers_pending_event(
     assert redis.expire_calls and redis.expire_calls[0][0] == key
 
     # The buffer-took-effect log line lands at INFO so the operator can
-    # confirm the mirror is active. Filter to the webhook_inbox logger
-    # specifically — the inner ``buffer_pending_event`` helper logs from
-    # ``treadmill.pending_events`` with a similar message and would
-    # otherwise satisfy a broader substring match without proving the
-    # poller's own confirmation log fired.
-    inbox_lines = [
+    # confirm the mirror is active. Post-ADR-0063 Step 3 the shared helper
+    # at ``webhooks/persist.py`` owns this log (both ingress paths route
+    # through it); filter to that logger specifically so the inner
+    # ``buffer_pending_event`` helper's lower-level log from
+    # ``treadmill.pending_events`` does not satisfy this assertion by
+    # accident.
+    persist_lines = [
         rec.getMessage()
         for rec in caplog.records
         if rec.levelno == logging.INFO
-        and rec.name == "treadmill.webhook_inbox"
+        and rec.name == "treadmill.webhooks.persist"
     ]
     assert any(
-        "webhook inbox: buffered pending event_id=" in line
-        for line in inbox_lines
+        "buffered pending event_id=" in line
+        for line in persist_lines
     )
 
 
