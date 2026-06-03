@@ -1,3 +1,7 @@
+---
+auto_merge: true
+---
+
 sequence_of_work:
   - id: triage-fix-<FINDING_ID_SHORT>
     title: "ui-fix from triage finding <FINDING_ID_SHORT> — <SHORT_OBSERVATION>"
