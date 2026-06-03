@@ -23,11 +23,30 @@ EGRESS_PROXY_CONTAINER_NAME = "treadmill-egress-proxy"
 EGRESS_PROXY_IMAGE = "treadmill-egress-proxy:dev"
 
 # Static always-allowed hostnames for every worker (ADR-0060).
+# AWS regional service hostnames (SQS for the work queue; future:
+# SecretsManager, S3, etc.) are appended via build_always_allowed()
+# using AWS_DEFAULT_REGION so the same code targets any deployment.
 _ALWAYS_ALLOWED_STATIC: list[str] = [
     "api.anthropic.com",
     "api.github.com",
     "*.githubusercontent.com",
     "*.github.com",
+]
+
+# AWS service hostnames the worker must reach to pick up work + read
+# its credential context. Templated by region in build_always_allowed.
+# Audit of worker-side boto3.client(...) call sites (workers/agent/):
+#   - sqs           — runner.receive_message (claims work from queue)
+#   - sns           — eventbus publish (step lifecycle events)
+#   - secretsmanager— startup_auth (per-account Claude credential fetch, ADR-0055)
+# SQS is the load-bearing one — without it the worker can't claim
+# messages and exits 1 immediately on startup (the 2026-06-03 wedge).
+# Listed as bare service names; the region suffix is appended at build
+# time so any deployment region works without forking the list.
+_AWS_SERVICE_NAMES: list[str] = [
+    "sqs",
+    "sns",
+    "secretsmanager",
 ]
 
 # Default install-allowed package registry hostnames merged into every worker.
@@ -40,11 +59,18 @@ INSTALL_DEFAULTS: list[str] = [
 
 
 def build_always_allowed() -> list[str]:
-    """Return always_allowed list, appending TREADMILL_API_HOST when set."""
+    """Return always_allowed list, appending TREADMILL_API_HOST when set
+    plus the region-templated AWS service hostnames from
+    ``_AWS_SERVICE_NAMES`` (read from ``AWS_DEFAULT_REGION``).
+    """
     hosts = list(_ALWAYS_ALLOWED_STATIC)
     api_host = os.environ.get("TREADMILL_API_HOST")
     if api_host:
         hosts.append(api_host)
+    region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
+    if region:
+        for svc in _AWS_SERVICE_NAMES:
+            hosts.append(f"{svc}.{region}.amazonaws.com")
     return hosts
 
 
