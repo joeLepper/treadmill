@@ -701,6 +701,8 @@ def test_build_always_allowed_includes_static_and_api_host(
     from treadmill_local.egress_proxy import _ALWAYS_ALLOWED_STATIC, build_always_allowed
 
     monkeypatch.setenv("TREADMILL_API_HOST", "api.example.treadmill.dev")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
     result = build_always_allowed()
     for h in _ALWAYS_ALLOWED_STATIC:
         assert h in result
@@ -713,8 +715,40 @@ def test_build_always_allowed_omits_api_host_when_unset(
     from treadmill_local.egress_proxy import _ALWAYS_ALLOWED_STATIC, build_always_allowed
 
     monkeypatch.delenv("TREADMILL_API_HOST", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
     result = build_always_allowed()
     assert result == list(_ALWAYS_ALLOWED_STATIC)
+
+
+def test_build_always_allowed_appends_aws_service_hostnames_per_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0060 + 2026-06-03 wedge — workers need SQS to claim work,
+    SNS to publish step lifecycle events, and Secrets Manager to mint
+    per-account Claude credentials (ADR-0055). Without these in
+    always_allowed, workers spawn but exit 1 on the first boto3 call."""
+    from treadmill_local.egress_proxy import build_always_allowed
+
+    monkeypatch.delenv("TREADMILL_API_HOST", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-2")
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    result = build_always_allowed()
+    assert "sqs.us-west-2.amazonaws.com" in result
+    assert "sns.us-west-2.amazonaws.com" in result
+    assert "secretsmanager.us-west-2.amazonaws.com" in result
+
+
+def test_build_always_allowed_uses_aws_region_when_default_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from treadmill_local.egress_proxy import build_always_allowed
+
+    monkeypatch.delenv("TREADMILL_API_HOST", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    result = build_always_allowed()
+    assert "sqs.us-east-1.amazonaws.com" in result
 
 
 def test_build_install_allowed_merges_defaults_and_urls() -> None:
