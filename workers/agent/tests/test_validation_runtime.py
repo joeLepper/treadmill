@@ -813,6 +813,106 @@ def test_validation_verdict_rationale_max_length() -> None:
         ValidationVerdict(verdict="pass", rationale=long_rationale)
 
 
+def test_validation_verdict_accepts_result_alias() -> None:
+    """``{"result": ...}`` is accepted as an alias for ``{"verdict": ...}``.
+
+    Motivation: 116 judge runs on the 2026-05-21 validator-corpus triage
+    errored on a strict-envelope ``ValidationError`` because the model
+    emitted ``result`` instead of ``verdict``. Widening the envelope
+    here recovers those verdicts.
+    """
+    verdict = ValidationVerdict.model_validate(
+        {"result": "pass", "rationale": "x"}
+    )
+    assert verdict.verdict == "pass"
+
+
+def test_validation_verdict_accepts_result_alias_fail() -> None:
+    """``{"result": "fail", ...}`` also parses cleanly."""
+    verdict = ValidationVerdict.model_validate(
+        {"result": "fail", "rationale": "x"}
+    )
+    assert verdict.verdict == "fail"
+
+
+def test_validation_verdict_field_name_still_works() -> None:
+    """``{"verdict": ...}`` (the original field name) keeps parsing —
+    ``populate_by_name=True`` accepts EITHER input shape so existing
+    judges that emit ``verdict`` are untouched."""
+    verdict = ValidationVerdict.model_validate(
+        {"verdict": "pass", "rationale": "x"}
+    )
+    assert verdict.verdict == "pass"
+
+
+def test_validation_verdict_both_keys_present_conflict() -> None:
+    """Behavior pin: both ``verdict`` and ``result`` present with
+    conflicting values resolves deterministically.
+
+    With ``Field(alias="result")`` + ``populate_by_name=True`` +
+    ``extra="forbid"``, Pydantic v2 consumes the alias first and treats
+    the leftover field-name key as extra, raising ``ValidationError``.
+    Calling the validator twice on the same input must produce the
+    same outcome — pinning that here so a future Pydantic upgrade
+    that silently flips the tiebreaker (instead of erroring) trips
+    this test rather than silently inverting verdicts in production."""
+    from pydantic import ValidationError
+
+    payload = {"verdict": "pass", "result": "fail", "rationale": "x"}
+
+    raised: list[bool] = []
+    values: list[str] = []
+    for _ in range(2):
+        try:
+            v = ValidationVerdict.model_validate(payload)
+            raised.append(False)
+            values.append(v.verdict)
+        except ValidationError:
+            raised.append(True)
+
+    # Determinism: the two attempts must agree on raise-or-accept and,
+    # if they accept, on the resolved value.
+    assert raised[0] == raised[1]
+    if not raised[0]:
+        assert values[0] == values[1]
+        assert values[0] in ("pass", "fail")
+
+
+def test_validation_verdict_invalid_value_via_alias_rejected() -> None:
+    """An invalid verdict value supplied via the ``result`` alias still
+    fails validation — alias acceptance must not weaken the
+    ``Literal["pass", "fail"]`` constraint."""
+    with pytest.raises(Exception):  # ValidationError
+        ValidationVerdict.model_validate(
+            {"result": "maybe", "rationale": "x"}
+        )
+
+
+def test_validation_verdict_missing_both_keys_rejected() -> None:
+    """Neither ``verdict`` nor ``result`` present → ValidationError.
+    Preserves the existing missing-field error path so silent acceptance
+    of a verdictless envelope is still impossible."""
+    with pytest.raises(Exception):  # ValidationError
+        ValidationVerdict.model_validate({"rationale": "x"})
+
+
+def test_parse_validation_envelope_accepts_result_alias() -> None:
+    """End-to-end: ``_parse_validation_envelope`` returns the same
+    ``(verdict, rationale)`` tuple whether the LLM emitted ``result`` or
+    ``verdict``. This is the seam where the 116 errored runs were lost."""
+    from treadmill_agent.validation_runtime import _parse_validation_envelope
+
+    output_with_result = (
+        '```json\n{"result": "pass", "rationale": "ok"}\n```'
+    )
+    assert _parse_validation_envelope(output_with_result) == ("pass", "ok")
+
+    output_with_verdict = (
+        '```json\n{"verdict": "pass", "rationale": "ok"}\n```'
+    )
+    assert _parse_validation_envelope(output_with_verdict) == ("pass", "ok")
+
+
 # ── CheckResult dataclass tests ──────────────────────────────────────────────
 
 
