@@ -6,6 +6,7 @@ each one explicitly.
 """
 
 from treadmill_api.routers import (
+    escalations,
     event_triggers,
     hooks,
     plans,
@@ -19,6 +20,7 @@ from treadmill_api.routers import (
 )
 
 __all__ = [
+    "escalations",
     "event_triggers",
     "hooks",
     "plans",

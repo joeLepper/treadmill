@@ -34,6 +34,7 @@ from treadmill_api.health import router as health_router
 from treadmill_api.routers.claude_credentials import router as claude_credentials_router
 from treadmill_api.routers.context_docs import router as context_docs_router
 from treadmill_api.routers.dashboard import router as dashboard_router
+from treadmill_api.routers.escalations import router as escalations_router
 from treadmill_api.routers.event_triggers import router as event_triggers_router
 from treadmill_api.routers.github import router as github_router
 from treadmill_api.routers.hooks import router as hooks_router
@@ -286,6 +287,7 @@ def create_app() -> FastAPI:
     app.include_router(context_docs_router)
     app.include_router(claude_credentials_router)
     app.include_router(dashboard_router)
+    app.include_router(escalations_router)
     app.include_router(triage_router)
     return app
 
