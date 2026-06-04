@@ -16,7 +16,10 @@ from typing import Protocol
 import httpx
 
 from treadmill_api.config import Settings
-from treadmill_api.github_app import InstallationTokenCache
+from treadmill_api.github_app import (
+    InstallationTokenCache,
+    RedisInstallationTokenCache,
+)
 
 logger = logging.getLogger("treadmill.github_auth")
 
@@ -113,10 +116,12 @@ class GitHubClients:
 
     client: httpx.AsyncClient | None
     _aux: list[httpx.AsyncClient] = field(default_factory=list)
-    installation_cache: InstallationTokenCache | None = None
+    installation_cache: InstallationTokenCache | RedisInstallationTokenCache | None = None
     """The App-path token cache (``None`` on the PAT / no-auth paths). Exposed
     so the ``/installation-token`` route mints through the same cache the API's
-    own GitHub client uses, instead of re-minting raw on every call."""
+    own GitHub client uses, instead of re-minting raw on every call. Redis-backed
+    when a redis client is available (survives restarts + shared fleet-wide),
+    else in-process."""
 
     async def aclose(self) -> None:
         if self.client is not None:
@@ -125,13 +130,17 @@ class GitHubClients:
             await aux.aclose()
 
 
-def build_github_clients(settings: Settings) -> GitHubClients:
+def build_github_clients(
+    settings: Settings, redis_client: object | None = None,
+) -> GitHubClients:
     """Build the API's GitHub client per ADR-0049 (guarded cutover).
 
     - App path (``github_app_id`` + ``github_app_private_key`` set): a
       hook-authenticated client that stamps a per-repo installation token on
       each request, plus a dedicated minting client (App-JWT calls must not go
-      through the hook).
+      through the hook). The token cache is **Redis-backed when ``redis_client``
+      is supplied** (tokens survive API restarts + are shared fleet-wide),
+      else in-process.
     - PAT path: the legacy static-Bearer client — byte-for-byte the prior
       behavior, so nothing changes until the App is configured.
     - Neither: ``client=None``.
@@ -141,11 +150,19 @@ def build_github_clients(settings: Settings) -> GitHubClients:
         # Build the cache explicitly (rather than via build_github_auth_provider)
         # so it can be exposed on GitHubClients — the /installation-token route
         # reuses this same cache + minting client instead of re-minting raw.
-        cache = InstallationTokenCache(
-            minting,
-            app_id=settings.github_app_id,
-            private_key_pem=settings.github_app_private_key,
-        )
+        cache: InstallationTokenCache | RedisInstallationTokenCache
+        if redis_client is not None:
+            cache = RedisInstallationTokenCache(
+                minting, redis_client,
+                app_id=settings.github_app_id,
+                private_key_pem=settings.github_app_private_key,
+            )
+        else:
+            cache = InstallationTokenCache(
+                minting,
+                app_id=settings.github_app_id,
+                private_key_pem=settings.github_app_private_key,
+            )
         provider = _AppAuthProvider(cache)
         client = httpx.AsyncClient(
             base_url=_GITHUB_API_BASE,

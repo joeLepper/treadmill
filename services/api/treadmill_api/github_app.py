@@ -43,6 +43,26 @@ _RETRY_BASE_DELAY_SECONDS = 0.5
 _RETRY_MAX_DELAY_SECONDS = 8.0
 
 
+def _is_rate_limited(response: httpx.Response) -> bool:
+    """True when a response is a GitHub rate limit we should back off + retry.
+
+    GitHub signals its **secondary** rate limit as a ``403`` (not ``429``) with
+    a ``Retry-After`` header or ``x-ratelimit-remaining: 0`` — the case PR #156
+    missed (its retry set only covered 429/5xx), which is why token-mint 502s
+    persisted with zero retry warnings. A bare ``403`` (genuine permission
+    denial) has neither header and is NOT retried.
+    """
+    if response.status_code == 429:
+        return True
+    if response.status_code != 403:
+        return False
+    if response.headers.get("Retry-After"):
+        return True
+    if response.headers.get("x-ratelimit-remaining") == "0":
+        return True
+    return "secondary rate limit" in (response.text or "").lower()
+
+
 def _retry_delay(attempt: int, response: httpx.Response | None) -> float:
     """Backoff for ``attempt`` (0-based). Honors ``Retry-After`` (seconds) when
     the upstream supplied it; otherwise exponential ``base * 2**attempt``,
@@ -73,10 +93,11 @@ async def _send_with_retry(
             return resp
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
-            if (
-                status_code not in _RETRYABLE_STATUSES
-                or attempt == _RETRY_MAX_ATTEMPTS - 1
-            ):
+            retryable = (
+                status_code in _RETRYABLE_STATUSES
+                or _is_rate_limited(exc.response)
+            )
+            if not retryable or attempt == _RETRY_MAX_ATTEMPTS - 1:
                 raise
             last_exc = exc
             delay = _retry_delay(attempt, exc.response)
@@ -292,6 +313,184 @@ class InstallationTokenCache:
             )
             self._repo_installations[repo] = installation_id
             return installation_id
+
+    async def token_for_installation(self, installation_id: int) -> str:
+        return (await self.installation_token(installation_id)).token
+
+    async def token_for_repo(self, repo: str) -> str:
+        installation_id = await self.installation_id_for(repo)
+        return await self.token_for_installation(installation_id)
+
+
+# ── Redis-backed cache (ADR-0049; 2026-06-04 durable fix) ─────────────────────
+#
+# An installation token is a ~1h reusable bearer token; GitHub's own docs say to
+# cache + reuse rather than re-mint. The in-process cache above dies on every API
+# recreate (the deploy-watcher recreates ``treadmill-api`` on every services/api
+# merge), so the fleet cold-starts and re-mints en masse → GitHub secondary rate
+# limit (403) → 502s. Backing the cache with Redis makes one token per
+# installation **survive restarts and be shared fleet-wide**, collapsing GitHub
+# mint volume to ~1/installation/hour. Redis is an ENHANCEMENT, never a hard
+# dependency: any Redis error degrades to a direct mint (never a 500). Token
+# values live only in Redis (internal-only) and are never logged.
+
+_REDIS_TOKEN_KEY = "github:install-token:{installation_id}"
+_REDIS_REPO_ID_KEY = "github:install-id:{repo}"
+_REDIS_HOME_ID_KEY = "github:install-id:__home__"
+_REDIS_MINT_LOCK_KEY = "github:mint-lock:{installation_id}"
+_REDIS_INSTALL_MAP_TTL_SECONDS = 6 * 3600  # repo→installation rarely changes
+_REDIS_MINT_LOCK_TTL_SECONDS = 10
+_REDIS_SINGLEFLIGHT_POLL_SECONDS = 0.25
+_REDIS_SINGLEFLIGHT_BUDGET_SECONDS = 8.0
+
+
+def _as_str(raw: Any) -> str | None:
+    """Normalize a Redis value (bytes or str, depending on decode_responses)."""
+    if raw is None:
+        return None
+    return raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+
+
+class RedisInstallationTokenCache:
+    """Installation-token cache backed by Redis (same async surface as
+    :class:`InstallationTokenCache`) so tokens survive API restarts and are
+    shared across the whole fleet. On any Redis failure it falls back to a
+    direct mint — Redis is an optimization, not a dependency."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        redis: Any,
+        *,
+        app_id: str,
+        private_key_pem: str,
+    ) -> None:
+        self._client = client
+        self._redis = redis
+        self._app_id = app_id
+        self._private_key_pem = private_key_pem
+
+    async def _redis_get(self, key: str) -> str | None:
+        try:
+            return _as_str(await self._redis.get(key))
+        except Exception:
+            logger.warning("github_app: redis GET %s failed; resolving fresh",
+                           key, exc_info=True)
+            return None
+
+    async def _redis_set(self, key: str, value: str, *, ex: int) -> None:
+        if ex <= 0:
+            return
+        try:
+            await self._redis.set(key, value, ex=ex)
+        except Exception:
+            logger.warning("github_app: redis SET %s failed (continuing)",
+                           key, exc_info=True)
+
+    async def installation_id_for(self, repo: str) -> int:
+        key = _REDIS_REPO_ID_KEY.format(repo=repo)
+        cached = await self._redis_get(key)
+        if cached is not None:
+            return int(cached)
+        installation_id = await resolve_installation_id(
+            self._client, app_id=self._app_id,
+            private_key_pem=self._private_key_pem, repo=repo,
+        )
+        await self._redis_set(key, str(installation_id),
+                              ex=_REDIS_INSTALL_MAP_TTL_SECONDS)
+        return installation_id
+
+    async def home_installation_id(self) -> int:
+        cached = await self._redis_get(_REDIS_HOME_ID_KEY)
+        if cached is not None:
+            return int(cached)
+        ids = await list_installation_ids(
+            self._client, app_id=self._app_id,
+            private_key_pem=self._private_key_pem,
+        )
+        if not ids:
+            raise LookupError("GitHub App has no installations")
+        home = min(ids)
+        await self._redis_set(_REDIS_HOME_ID_KEY, str(home),
+                              ex=_REDIS_INSTALL_MAP_TTL_SECONDS)
+        return home
+
+    async def _read_token(self, key: str) -> InstallationToken | None:
+        raw = await self._redis_get(key)
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+            tok = InstallationToken(
+                token=data["token"],
+                expires_at=datetime.fromisoformat(data["expires_at"]),
+            )
+        except (ValueError, KeyError, TypeError):
+            return None  # corrupt entry — treat as a miss
+        return tok if tok.is_fresh() else None
+
+    async def _store_token(self, key: str, tok: InstallationToken) -> None:
+        ttl = int(
+            (tok.expires_at - datetime.now(timezone.utc)).total_seconds()
+            - _TOKEN_REFRESH_MARGIN_SECONDS
+        )
+        await self._redis_set(
+            key,
+            json.dumps({"token": tok.token,
+                        "expires_at": tok.expires_at.isoformat()}),
+            ex=ttl,
+        )
+
+    async def installation_token(self, installation_id: int) -> InstallationToken:
+        key = _REDIS_TOKEN_KEY.format(installation_id=installation_id)
+        tok = await self._read_token(key)
+        if tok is not None:
+            return tok
+        return await self._mint_single_flight(key, installation_id)
+
+    async def _mint_single_flight(
+        self, key: str, installation_id: int,
+    ) -> InstallationToken:
+        """Mint with a fleet-wide single-flight lock so a cold-cache burst
+        produces ONE GitHub mint, not N. Lock losers poll the token key (the
+        winner's write lands); if the budget elapses they mint anyway — a rare
+        double-mint is harmless (tokens are independently valid), a stall is not.
+        """
+        lock_key = _REDIS_MINT_LOCK_KEY.format(installation_id=installation_id)
+        got_lock = True
+        try:
+            got_lock = bool(
+                await self._redis.set(
+                    lock_key, "1", nx=True, ex=_REDIS_MINT_LOCK_TTL_SECONDS,
+                )
+            )
+        except Exception:
+            logger.warning("github_app: redis mint-lock failed; minting directly",
+                           exc_info=True)
+            got_lock = True
+
+        if not got_lock:
+            waited = 0.0
+            while waited < _REDIS_SINGLEFLIGHT_BUDGET_SECONDS:
+                await asyncio.sleep(_REDIS_SINGLEFLIGHT_POLL_SECONDS)
+                waited += _REDIS_SINGLEFLIGHT_POLL_SECONDS
+                tok = await self._read_token(key)
+                if tok is not None:
+                    return tok
+            # budget exhausted — fall through and mint anyway
+
+        fresh = await fetch_installation_token(
+            self._client, app_id=self._app_id,
+            private_key_pem=self._private_key_pem,
+            installation_id=installation_id,
+        )
+        await self._store_token(key, fresh)
+        if got_lock:
+            try:
+                await self._redis.delete(lock_key)
+            except Exception:
+                pass  # lock self-expires via EX
+        return fresh
 
     async def token_for_installation(self, installation_id: int) -> str:
         return (await self.installation_token(installation_id)).token
