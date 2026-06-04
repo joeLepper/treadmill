@@ -15,11 +15,17 @@ explicit and **never silently fall back across accounts**:
     or neither repo-level nor default account is set).
   * 404 — resolved account name is not in the configured map.
   * 502 — Secrets Manager fetch failed or returned no string value.
+
+Optional fallback (ADR-0066): when ``RepoConfig.claude_account_fallback``
+is set, the response also carries a ``fallback`` credential resolved
+best-effort. Any failure on the fallback side logs a warning and leaves
+``fallback=None``; it never turns a working primary into an error.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated, Literal
 
 import boto3
@@ -33,6 +39,8 @@ from treadmill_api.onboarding_store import OnboardingStore
 
 router = APIRouter(prefix="/api/v1/claude", tags=["claude-credentials"])
 
+_log = logging.getLogger(__name__)
+
 
 class ClaudeAccountConfig(BaseModel):
     """Shape of a single entry in ``claude_accounts_json``."""
@@ -45,11 +53,18 @@ class ClaudeCredentialsRequest(BaseModel):
     repo: str = Field(..., min_length=1)
 
 
+class ClaudeFallbackCredential(BaseModel):
+    account: str
+    type: Literal["oauth", "api_key"]
+    token: str
+
+
 class ClaudeCredentialsResponse(BaseModel):
     repo: str
     account: str
     type: Literal["oauth", "api_key"]
     token: str
+    fallback: ClaudeFallbackCredential | None = None
 
 
 def _parse_accounts(raw: str | None) -> dict[str, ClaudeAccountConfig]:
@@ -144,9 +159,44 @@ async def fetch_claude_credentials(
             ),
         )
 
+    fallback: ClaudeFallbackCredential | None = None
+    fallback_name = cfg.claude_account_fallback if cfg is not None else None
+    if fallback_name:
+        fallback_account = accounts.get(fallback_name)
+        if fallback_account is None:
+            _log.warning(
+                "claude_account_fallback %r not in accounts map %s — skipping fallback",
+                fallback_name, sorted(accounts),
+            )
+        else:
+            try:
+                fallback_secret = sm.get_secret_value(
+                    SecretId=fallback_account.secret_name
+                )
+                fallback_token = fallback_secret.get("SecretString")
+                if not fallback_token:
+                    _log.warning(
+                        "Secret for fallback account %r has no SecretString"
+                        " — skipping fallback",
+                        fallback_name,
+                    )
+                else:
+                    fallback = ClaudeFallbackCredential(
+                        account=fallback_name,
+                        type=fallback_account.type,
+                        token=fallback_token,
+                    )
+            except Exception as exc:
+                _log.warning(
+                    "Secrets Manager fetch failed for fallback account %r: %s"
+                    " — skipping fallback",
+                    fallback_name, type(exc).__name__,
+                )
+
     return ClaudeCredentialsResponse(
         repo=body.repo,
         account=account_name,
         type=account.type,
         token=token,
+        fallback=fallback,
     )

@@ -164,6 +164,7 @@ def test_returns_oauth_token_via_default(
         "account": "primary",
         "type": "oauth",
         "token": "sk-oauth-token-value",
+        "fallback": None,
     }
     assert sm.calls == ["treadmill/claude-primary"]
 
@@ -280,3 +281,136 @@ def test_503_when_account_entry_invalid(
         r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
     assert r.status_code == 503
     assert "primary" in r.text
+
+
+# ── ADR-0066 fallback credential ─────────────────────────────────────────────
+
+
+def test_fallback_none_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = {
+        "primary": {"type": "oauth", "secret_name": "treadmill/claude-primary"},
+    }
+    sm = _FakeSecretsManager(
+        by_id={"treadmill/claude-primary": "sk-oauth-token-value"}
+    )
+    store = _FakeStore()
+    # RepoConfig with no claude_account_fallback set.
+    store.by_repo["o/r"] = RepoConfig(repo="o/r", claude_account="primary")
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=store, sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    assert r.status_code == 200, r.text
+    assert r.json()["fallback"] is None
+
+
+def test_fallback_populated_with_valid_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = {
+        "primary":  {"type": "oauth",   "secret_name": "treadmill/claude-primary"},
+        "fallback": {"type": "api_key", "secret_name": "treadmill/claude-fallback"},
+    }
+    sm = _FakeSecretsManager(by_id={
+        "treadmill/claude-primary":  "sk-oauth-primary",
+        "treadmill/claude-fallback": "sk-api-fallback",
+    })
+    store = _FakeStore()
+    store.by_repo["o/r"] = RepoConfig(
+        repo="o/r", claude_account="primary", claude_account_fallback="fallback"
+    )
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=store, sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["account"] == "primary"
+    assert body["token"] == "sk-oauth-primary"
+    assert body["fallback"] == {
+        "account": "fallback",
+        "type": "api_key",
+        "token": "sk-api-fallback",
+    }
+
+
+def test_fallback_none_when_account_not_in_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = {
+        "primary": {"type": "oauth", "secret_name": "treadmill/claude-primary"},
+    }
+    sm = _FakeSecretsManager(
+        by_id={"treadmill/claude-primary": "sk-oauth-primary"}
+    )
+    store = _FakeStore()
+    store.by_repo["o/r"] = RepoConfig(
+        repo="o/r", claude_account="primary", claude_account_fallback="missing"
+    )
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=store, sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    # Primary succeeds; fallback absent in map → best-effort None, not 404.
+    assert r.status_code == 200, r.text
+    assert r.json()["fallback"] is None
+
+
+def test_fallback_none_when_secret_fetch_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = {
+        "primary":  {"type": "oauth", "secret_name": "treadmill/claude-primary"},
+        "fallback": {"type": "oauth", "secret_name": "treadmill/claude-fallback"},
+    }
+    sm = _FakeSecretsManager(
+        by_id={"treadmill/claude-primary": "sk-oauth-primary"},
+        raise_for="treadmill/claude-fallback",
+    )
+    store = _FakeStore()
+    store.by_repo["o/r"] = RepoConfig(
+        repo="o/r", claude_account="primary", claude_account_fallback="fallback"
+    )
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=store, sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    # Primary succeeds; fallback SM error → best-effort None, not 502.
+    assert r.status_code == 200, r.text
+    assert r.json()["fallback"] is None
+
+
+def test_fallback_none_when_secret_has_no_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = {
+        "primary":  {"type": "oauth", "secret_name": "treadmill/claude-primary"},
+        "fallback": {"type": "oauth", "secret_name": "treadmill/claude-fallback"},
+    }
+    sm = _FakeSecretsManager(by_id={
+        "treadmill/claude-primary":  "sk-oauth-primary",
+        "treadmill/claude-fallback": None,
+    })
+    store = _FakeStore()
+    store.by_repo["o/r"] = RepoConfig(
+        repo="o/r", claude_account="primary", claude_account_fallback="fallback"
+    )
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=store, sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    # Primary succeeds; fallback secret has no SecretString → best-effort None.
+    assert r.status_code == 200, r.text
+    assert r.json()["fallback"] is None
