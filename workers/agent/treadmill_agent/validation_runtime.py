@@ -48,12 +48,16 @@ class ValidationVerdict(BaseModel):
 
     Sibling to ``ReviewVerdict`` (ADR-0027). The LLM is instructed to
     emit a JSON block with ``verdict`` and ``rationale`` fields; this
-    model validates the output shape.
+    model validates the output shape. ``result`` is accepted as an
+    alias for ``verdict`` because 116 judge runs on 2026-05-21 errored
+    on a strict-envelope ``ValidationError`` after emitting ``result``
+    instead — those verdicts were otherwise valid but lost to a
+    brittle output contract.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    verdict: Literal["pass", "fail"]
+    verdict: Literal["pass", "fail"] = Field(alias="result")
     rationale: str = Field(..., max_length=4000)
 
 
