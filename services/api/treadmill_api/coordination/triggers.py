@@ -3162,6 +3162,7 @@ async def handle_scheduled_tick(
         created_by="scheduler",
         title=f"schedule:{schedule.workflow_id}",
         workflow_version=wv,
+        schedule_id=schedule.id,
     )
 
 
@@ -3171,6 +3172,14 @@ _COALESCE_PENDING_TICKS_SQL = text("""
     WHERE t.plan_id = :system_plan_id
       AND t.created_by = 'scheduler'
       AND t.workflow_version_id = :workflow_version_id
+      AND EXISTS (
+          SELECT 1
+          FROM events e
+          WHERE e.task_id = t.id
+            AND e.entity_type = 'task'
+            AND e.action = 'registered'
+            AND (e.payload->>'schedule_id')::uuid = :schedule_id
+      )
       AND NOT EXISTS (
           SELECT 1
           FROM workflow_runs r
@@ -3187,11 +3196,15 @@ _COALESCE_PENDING_TICKS_SQL = text("""
       )
 """)
 """Find Tasks that represent prior unconsumed scheduler ticks for the
-given ``workflow_version_id``. "Pending" = registered but no
-``workflow_run_steps`` row has been picked up by a worker
+given ``(schedule_id, workflow_version_id)`` pair. "Pending" = registered
+but no ``workflow_run_steps`` row has been picked up by a worker
 (``started_at IS NULL``), and the task itself is not already
-terminal/escalated. Kept module-level so the SQL stays in one place
-for review."""
+terminal/escalated. The ``schedule_id`` EXISTS clause uses the JSONB
+payload of the ``task.registered`` event (populated by
+``_dispatch_via_synthetic_task`` when ``schedule_id`` is provided) so
+tasks from different schedules sharing the same ``workflow_version_id``
+are never incorrectly coalesced. Kept module-level so the SQL stays in
+one place for review."""
 
 
 async def _coalesce_pending_ticks_for_schedule(
@@ -3231,6 +3244,7 @@ async def _coalesce_pending_ticks_for_schedule(
         {
             "system_plan_id": SYSTEM_PLAN_ID,
             "workflow_version_id": workflow_version_id,
+            "schedule_id": schedule_id,
         },
     )
     pending_task_ids: list[uuid.UUID] = [row[0] for row in result.all()]
@@ -3268,6 +3282,7 @@ async def _dispatch_via_synthetic_task(
     created_by: str,
     title: str,
     workflow_version: WorkflowVersion | None = None,
+    schedule_id: uuid.UUID | None = None,
 ) -> uuid.UUID | None:
     """ADR-0057: create a synthetic ``Task`` and dispatch via the normal
     task-bound path so workers see a normal task body.
@@ -3286,6 +3301,13 @@ async def _dispatch_via_synthetic_task(
     coalesce helper and the dispatch share one SELECT). When ``None``
     the helper looks it up itself — preserves the
     ``routers/workflow_triggers.py`` call site.
+
+    ``schedule_id`` is set by ``handle_scheduled_tick`` so that the
+    ``task.registered`` event carries it in its JSONB payload. The
+    coalesce helper queries that payload to scope cancellation to a
+    single schedule, preventing cross-schedule collisions when two
+    schedules bind the same ``workflow_version_id``. Non-scheduler
+    callers (e.g. ``routers/workflow_triggers.py``) leave this ``None``.
 
     Returns the run's id, or ``None`` if the workflow has no version
     (un-seeded install) or no steps (degenerate workflow). The caller
@@ -3330,6 +3352,7 @@ async def _dispatch_via_synthetic_task(
             title=task.title,
             workflow_version_id=wv.id,
             plan_id=SYSTEM_PLAN_ID,
+            schedule_id=schedule_id,
         ),
         plan_id=SYSTEM_PLAN_ID,
         task_id=task.id,

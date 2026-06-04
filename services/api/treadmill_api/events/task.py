@@ -136,6 +136,12 @@ class TaskRegistered(EventPayload):
     The task is in the *registered* state — not yet ready for dispatch
     until a ``TaskReady`` event fires (or the task is auto-readied because
     its plan is in ``active`` and it has no unsatisfied dependencies).
+
+    ``schedule_id`` is populated only for synthetic tasks spawned by the
+    scheduler (``_dispatch_via_synthetic_task`` in ``coordination/triggers.py``).
+    The coalesce helper uses it to scope pending-tick cancellation to a
+    single schedule, preventing cross-schedule collisions when two schedules
+    bind the same workflow version. Non-scheduler callers leave it ``None``.
     """
 
     ENTITY_TYPE: ClassVar[str] = "task"
@@ -145,6 +151,7 @@ class TaskRegistered(EventPayload):
     title: str
     workflow_version_id: uuid.UUID
     plan_id: uuid.UUID
+    schedule_id: uuid.UUID | None = None
 
 
 class TaskReady(EventPayload):
