@@ -77,6 +77,9 @@ jobs:
       - name: Sync workspace deps
         run: uv sync --frozen --all-packages
 
+      - name: Install aws-cdk
+        run: npm install -g aws-cdk@2
+
       - name: Boot smoke environment
         id: smoke_boot
         run: |
