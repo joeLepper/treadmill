@@ -712,13 +712,38 @@ def test_build_always_allowed_includes_static_and_api_host(
 def test_build_always_allowed_omits_api_host_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from treadmill_local.egress_proxy import _ALWAYS_ALLOWED_STATIC, build_always_allowed
+    from treadmill_local.egress_proxy import (
+        _ALWAYS_ALLOWED_STATIC,
+        INSTALL_DEFAULTS,
+        build_always_allowed,
+    )
 
     monkeypatch.delenv("TREADMILL_API_HOST", raising=False)
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
     monkeypatch.delenv("AWS_REGION", raising=False)
     result = build_always_allowed()
-    assert result == list(_ALWAYS_ALLOWED_STATIC)
+    assert result == list(_ALWAYS_ALLOWED_STATIC) + list(INSTALL_DEFAULTS)
+
+
+def test_build_always_allowed_includes_package_registries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-06-04 — author-side validation gates run ``uv run pytest``,
+    which builds the project venv at invocation time and downloads wheels.
+    With registries scoped to the install phase only, every uv-run gate
+    failed with ``tunnel error`` and tasks looped through gate-broken
+    architect resolutions. Registries are now always-allowed (same trust
+    the install phase already granted)."""
+    from treadmill_local.egress_proxy import build_always_allowed
+
+    monkeypatch.delenv("TREADMILL_API_HOST", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    result = build_always_allowed()
+    assert "pypi.org" in result
+    assert "files.pythonhosted.org" in result
+    assert "registry.npmjs.org" in result
+    assert "registry.yarnpkg.com" in result
 
 
 def test_build_always_allowed_appends_aws_service_hostnames_per_region(

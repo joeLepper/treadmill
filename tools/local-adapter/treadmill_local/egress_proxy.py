@@ -66,11 +66,21 @@ INSTALL_DEFAULTS: list[str] = [
 
 
 def build_always_allowed() -> list[str]:
-    """Return always_allowed list, appending TREADMILL_API_HOST when set
-    plus the region-templated AWS service hostnames from
-    ``_AWS_SERVICE_NAMES`` (read from ``AWS_DEFAULT_REGION``).
+    """Return always_allowed list, appending the package registries from
+    ``INSTALL_DEFAULTS``, ``TREADMILL_API_HOST`` when set, plus the
+    region-templated AWS service hostnames from ``_AWS_SERVICE_NAMES``
+    (read from ``AWS_DEFAULT_REGION``).
     """
     hosts = list(_ALWAYS_ALLOWED_STATIC)
+    # 2026-06-04 — package registries are always-allowed, not just
+    # install-phase: author-side validation gates use the standard
+    # ``cd <pkg> && uv run pytest`` pattern, and ``uv run`` builds the
+    # project venv at invocation time, downloading wheels from
+    # pypi.org / files.pythonhosted.org. Phase-scoping these hosts broke
+    # every uv-run validation gate fleet-wide ("tunnel error" → gate-broken
+    # architect loops, e.g. task 57598e7a). No new trust is granted: the
+    # same hosts were already reachable during the install phase.
+    hosts.extend(INSTALL_DEFAULTS)
     api_host = os.environ.get("TREADMILL_API_HOST")
     if api_host:
         hosts.append(api_host)
