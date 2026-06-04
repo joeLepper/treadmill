@@ -13,6 +13,7 @@ from treadmill_api.models.onboarding import (
     RepoProfileRow,
 )
 from treadmill_api.models.plan import Plan
+from treadmill_api.models.review_queue import ReviewQueueRowMixin
 from treadmill_api.models.run import WorkflowRun, WorkflowRunStep
 from treadmill_api.models.task import Task, TaskDependency, TaskPR, TaskValidation
 from treadmill_api.models.triage_finding import TriageFindingRow
@@ -41,6 +42,7 @@ __all__ = [
     "RepoConfigRow",
     "RepoContextDocRow",
     "RepoProfileRow",
+    "ReviewQueueRowMixin",
     "Role",
     "RoleHook",
     "RoleSkill",
