@@ -97,6 +97,19 @@ async def _send_with_retry(
                 status_code in _RETRYABLE_STATUSES
                 or _is_rate_limited(exc.response)
             )
+            # DIAGNOSTIC (2026-06-04): record the exact GitHub status + the
+            # rate-limit headers for every non-2xx, so we can see what GitHub
+            # actually returns on the failing mints (the 502s are invariant to
+            # caching, so confirm whether GitHub is even being hit). Remove once
+            # root-caused.
+            logger.warning(
+                "DIAG github_app: %s on %s %s retryable=%s retry-after=%s "
+                "x-ratelimit-remaining=%s body=%r",
+                status_code, method, url, retryable,
+                exc.response.headers.get("Retry-After"),
+                exc.response.headers.get("x-ratelimit-remaining"),
+                (exc.response.text or "")[:160],
+            )
             if not retryable or attempt == _RETRY_MAX_ATTEMPTS - 1:
                 raise
             last_exc = exc

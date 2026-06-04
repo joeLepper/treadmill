@@ -69,6 +69,9 @@ async def mint_installation_token(
     # fallback for callers without a lifespan-wired cache (e.g. unit tests).
     cache = getattr(request.app.state, "installation_token_cache", None)
     if cache is not None:
+        # DIAGNOSTIC (2026-06-04): the intermittent-502 has been invariant to
+        # caching/retry fixes; log the exact failure shape (cache type, repo,
+        # GitHub status + body) to end the speculation. Remove once root-caused.
         try:
             if body.repo:
                 installation_id = await cache.installation_id_for(body.repo)
@@ -80,10 +83,24 @@ async def mint_installation_token(
                 status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc),
             ) from exc
         except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "DIAG installation-token: cache-path GitHub %s repo=%s "
+                "cache=%s url=%s body=%r",
+                exc.response.status_code, body.repo, type(cache).__name__,
+                str(exc.request.url), (exc.response.text or "")[:200],
+            )
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
                 detail=f"GitHub API error minting token: {exc.response.status_code}",
             ) from exc
+        except Exception as exc:  # noqa: BLE001 — diagnostic catch-all, re-raises
+            logger.warning(
+                "DIAG installation-token: cache-path UNEXPECTED %s repo=%s "
+                "cache=%s: %s",
+                type(exc).__name__, body.repo, type(cache).__name__,
+                str(exc)[:200],
+            )
+            raise
         return InstallationTokenResponse(
             token=tok.token,
             expires_at=tok.expires_at.isoformat(),
