@@ -132,9 +132,12 @@ def test_wf_tune_judge_prompts_has_single_optimize_step() -> None:
 
 
 def test_wf_tune_judge_prompts_step_row_added() -> None:
-    """A WorkflowVersionStep row for the ``optimize`` step is added
-    during seeding. (The ``workflow_version_id`` FK is not asserted —
-    it's server-generated on a real DB and ``None`` under MagicMock.)"""
+    """WorkflowVersionStep rows for the ``optimize`` step are added
+    during seeding — one for ``wf-tune-judge-prompts`` (ADR-0053 Wave 2)
+    and one for ``wf-tune-role-prompts`` (ADR-0056 Wave 4), both sharing
+    the same ``role-prompt-optimizer`` role. (The ``workflow_version_id``
+    FK is not asserted — it's server-generated on a real DB and ``None``
+    under MagicMock.)"""
     session = _make_session()
     seed_starters_if_empty(session)
 
@@ -142,12 +145,14 @@ def test_wf_tune_judge_prompts_step_row_added() -> None:
         s for s in _added_of(session, WorkflowVersionStep)
         if s.role_id == "role-prompt-optimizer"
     ]
-    assert len(steps) == 1, (
-        f"expected exactly one WorkflowVersionStep bound to "
-        f"role-prompt-optimizer, got {len(steps)}"
+    assert len(steps) == 2, (
+        f"expected exactly two WorkflowVersionStep rows bound to "
+        f"role-prompt-optimizer (one for wf-tune-judge-prompts, one for "
+        f"wf-tune-role-prompts per ADR-0056 Wave 4), got {len(steps)}"
     )
-    assert steps[0].step_name == "optimize"
-    assert steps[0].step_index == 0
+    for step in steps:
+        assert step.step_name == "optimize"
+        assert step.step_index == 0
 
 
 # ── Idempotency (non-empty DB short-circuits before adding) ──────────────────
