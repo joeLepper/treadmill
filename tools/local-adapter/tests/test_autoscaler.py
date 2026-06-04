@@ -859,3 +859,102 @@ def test_egress_proxy_enabled_respects_explicit_false_escape_hatch(
     misconfiguration that needs the unproxied path to bisect against."""
     monkeypatch.setenv("TREADMILL_EGRESS_PROXY_ENABLED", "false")
     assert _read_egress_proxy_enabled() is False
+
+
+# ── ADR-0069 staleness guard wiring at the loop head ──────────────────────────
+
+
+class _RecordingGuard:
+    """Records changed() / reexec() invocations. ``reexec`` raises
+    ``_ReexecSentinel`` so the loop terminates in the test path
+    instead of looping forever waiting for a real ``os.execv``."""
+
+    def __init__(self, changed: bool) -> None:
+        self._changed = changed
+        self.changed_calls = 0
+        self.reexec_calls: list[Path | None] = []
+
+    def changed(self) -> bool:
+        self.changed_calls += 1
+        return self._changed
+
+    def reexec(self, pid_file: Path | None = None) -> None:
+        self.reexec_calls.append(pid_file)
+        raise _ReexecSentinel()
+
+
+class _ReexecSentinel(Exception):
+    """Stand-in for ``os.execv`` not returning. Lets tests assert that
+    ``reexec`` was called before the loop did any tick work."""
+
+
+def test_run_loop_head_reexecs_before_first_tick_when_guard_reports_stale(
+    tmp_path,
+) -> None:
+    """ADR-0069 safe-point: a stale guard reports drift at the TOP of
+    the loop, BEFORE ``tick()`` runs. Verified by patching
+    ``queue_depth_fn`` (the first thing ``tick()`` calls) to record the
+    call order: if reexec fires first, the queue depth function is
+    never invoked."""
+    queue_calls: list[str] = []
+
+    def queue_depth() -> tuple[int, int]:
+        queue_calls.append("called")
+        return 0, 0
+
+    fake = _Fake()
+    fake.queue_depth = queue_depth  # type: ignore[method-assign]
+    guard = _RecordingGuard(changed=True)
+    a = Autoscaler(
+        queue_depth_fn=fake.queue_depth,
+        worker_count_fn=fake.worker_count,
+        start_worker_fn=fake.start_worker,
+        min_count=0,
+        max_count=1,
+        tick_seconds=0.0,
+        staleness_guard=guard,
+        staleness_pid_file=tmp_path / "autoscaler.pid",
+    )
+
+    with pytest.raises(_ReexecSentinel):
+        a.run()
+
+    # The guard.reexec is called BEFORE tick() runs, so queue_depth
+    # never gets a chance to fire. Pin the ordering with this assert.
+    assert queue_calls == []
+    assert guard.changed_calls == 1
+    assert guard.reexec_calls == [tmp_path / "autoscaler.pid"]
+
+
+def test_run_loop_proceeds_normally_when_guard_reports_not_stale() -> None:
+    """No drift → no re-exec, and ``tick()`` executes as usual. Verifies
+    the False branch of the loop-head check doesn't accidentally short
+    out the tick."""
+    fake = _Fake(visible=0, current=0)
+    guard = _RecordingGuard(changed=False)
+    a = Autoscaler(
+        queue_depth_fn=fake.queue_depth,
+        worker_count_fn=fake.worker_count,
+        start_worker_fn=fake.start_worker,
+        min_count=0,
+        max_count=1,
+        tick_seconds=0.0,
+        staleness_guard=guard,
+    )
+
+    _run_one_tick(a)
+
+    assert guard.reexec_calls == []
+    assert guard.changed_calls >= 1
+
+
+def test_run_with_no_guard_runs_loop_unchanged() -> None:
+    """Backwards compat: omitting ``staleness_guard`` keeps the legacy
+    no-self-heal behavior. The loop runs and ticks as before."""
+    fake = _Fake(visible=0, current=0)
+    a = _autoscaler(fake)  # constructs without a guard
+
+    _run_one_tick(a)
+
+    # Sanity check: the tick produced a snapshot rather than blowing up.
+    assert fake.starts == 0

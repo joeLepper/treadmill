@@ -255,3 +255,100 @@ async def test_replay_skips_quiet_ticks():
     await runner._replay_schedule(schedule, window_start, now, publisher)
 
     assert fire_calls == []
+
+
+# ── ADR-0069 staleness guard wiring at the loop head ──────────────────────────
+
+
+class _RecordingGuard:
+    """Records changed() / reexec() invocations. The ``reexec`` path
+    raises ``_ReexecSentinel`` so the loop terminates in the test path
+    instead of looping forever waiting for a real ``os.execv``."""
+
+    def __init__(self, changed: bool) -> None:
+        self._changed = changed
+        self.changed_calls = 0
+        self.reexec_calls = 0
+
+    def changed(self) -> bool:
+        self.changed_calls += 1
+        return self._changed
+
+    def reexec(self, pid_file=None) -> None:
+        self.reexec_calls += 1
+        raise _ReexecSentinel()
+
+
+class _ReexecSentinel(Exception):
+    """Stand-in for ``os.execv`` not returning."""
+
+
+@pytest.mark.asyncio
+async def test_run_loop_head_reexecs_before_first_tick_when_stale():
+    """ADR-0069 safe-point: a stale guard short-circuits the loop at
+    its top, BEFORE ``_tick`` runs. Verified by mocking ``_tick`` and
+    asserting it was never awaited."""
+    runner = SchedulerRunner(MagicMock())
+    guard = _RecordingGuard(changed=True)
+    runner._staleness_guard = guard
+
+    tick_mock = AsyncMock()
+    runner._tick = tick_mock  # type: ignore[method-assign]
+
+    with pytest.raises(_ReexecSentinel):
+        await runner._run()
+
+    assert tick_mock.await_count == 0
+    assert guard.reexec_calls == 1
+    assert guard.changed_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_loop_proceeds_when_not_stale(monkeypatch):
+    """No drift → no re-exec, and ``_tick`` runs as usual. Drives one
+    iteration by patching ``asyncio.sleep`` to break after the first
+    tick (the loop has no native termination signal)."""
+    runner = SchedulerRunner(MagicMock())
+    guard = _RecordingGuard(changed=False)
+    runner._staleness_guard = guard
+
+    tick_mock = AsyncMock()
+    runner._tick = tick_mock  # type: ignore[method-assign]
+
+    iteration = {"count": 0}
+
+    async def fake_sleep(_seconds):
+        iteration["count"] += 1
+        raise _ReexecSentinel()  # repurposed sentinel to break out
+
+    import treadmill_api.scheduler.runner as runner_mod
+    monkeypatch.setattr(runner_mod.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(_ReexecSentinel):
+        await runner._run()
+
+    assert tick_mock.await_count == 1
+    assert guard.reexec_calls == 0
+    assert guard.changed_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_with_no_guard_runs_loop_unchanged(monkeypatch):
+    """Backwards compat for the API-lifespan path: omitting
+    ``staleness_guard`` (default ``None``) keeps the legacy
+    no-self-heal behavior. The loop ticks as before."""
+    runner = SchedulerRunner(MagicMock())
+
+    tick_mock = AsyncMock()
+    runner._tick = tick_mock  # type: ignore[method-assign]
+
+    async def fake_sleep(_seconds):
+        raise _ReexecSentinel()
+
+    import treadmill_api.scheduler.runner as runner_mod
+    monkeypatch.setattr(runner_mod.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(_ReexecSentinel):
+        await runner._run()
+
+    assert tick_mock.await_count == 1

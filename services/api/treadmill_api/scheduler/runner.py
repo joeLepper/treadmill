@@ -18,15 +18,26 @@ Startup (missed-tick replay, Q35.c):
   Iterate over the 4-hour look-back window. For each cron fire time between
   ``last_fired_at`` (or ``created_at``) and now, fire if jitter-adjusted
   time ≤ now and schedule is not quiet.
+
+ADR-0069 self-heal: when spawned as a host subprocess by
+``treadmill-local up``, ``main()`` constructs a ``StalenessGuard`` over
+``treadmill_api`` and passes it to the runner. The loop calls
+``maybe_reexec`` at the top of each iteration (before ``_tick``) so a
+services/api/** PR merge propagates to the host-side scheduler within
+one poll interval, rather than waiting for an operator to bounce
+``treadmill-local up``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -58,9 +69,21 @@ class SchedulerRunner:
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
         publisher: EventPublisher | None = None,
+        *,
+        staleness_guard: Any = None,
+        staleness_pid_file: Path | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._publisher = publisher
+        # ADR-0069 self-heal: when set, ``_run`` consults the guard at
+        # the top of each iteration (a safe re-exec point — no DB tx
+        # in flight, no publish pending) and re-execs the process when
+        # the watched package's bytes drifted from startup. ``None``
+        # disables the check (in-process tests, the API-lifespan path
+        # where the runner is a sibling asyncio task rather than a
+        # standalone subprocess).
+        self._staleness_guard = staleness_guard
+        self._staleness_pid_file = staleness_pid_file
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -89,12 +112,35 @@ class SchedulerRunner:
         # a fresh traceback for the next incident.
         error_logger = RateLimitedErrorLogger(logger)
         while True:
+            # ADR-0069 safe-point: top of loop, before _tick(). Any DB
+            # transaction from the previous tick has already committed
+            # or rolled back; nothing is mid-flight. ``_maybe_reexec``
+            # is a no-op when the guard is ``None`` (in-process tests
+            # and the API-lifespan path); when set, it re-execs the
+            # process via ``os.execv`` if the watched package bytes
+            # have changed since startup.
+            self._maybe_reexec()
             try:
                 await self._tick()
                 error_logger.reset()
             except Exception as exc:
                 error_logger.log(exc, "scheduler: tick failed")
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+    def _maybe_reexec(self) -> None:
+        """ADR-0069 staleness check. Synchronous: ``os.execv`` doesn't
+        return on success, so dropping into asyncio is unnecessary.
+
+        Errors in ``changed()`` are swallowed by the guard itself
+        (mid-sync transient I/O shouldn't push us to re-exec into a
+        broken state). A failed ``os.execv`` raises ``OSError`` and we
+        let that propagate — the process is in an undefined state and
+        crashing loudly beats running on stale code.
+        """
+        if self._staleness_guard is None:
+            return
+        if self._staleness_guard.changed():
+            self._staleness_guard.reexec(self._staleness_pid_file)
 
     async def _tick(self) -> None:
         now = datetime.now(tz=timezone.utc)
@@ -281,7 +327,6 @@ async def _amain() -> None:
       AWS_DEFAULT_REGION  — boto3 region
       AWS_ENDPOINT_URL    — moto override; absent in dev-local/fully-remote
     """
-    import os
     import signal
 
     import boto3
@@ -302,7 +347,21 @@ async def _amain() -> None:
         publisher = SNSEventPublisher(sns_client, topic_arn)
         set_publisher(publisher)
 
-    runner = SchedulerRunner(sessionmaker=session_factory, publisher=publisher)
+    # ADR-0069: build the staleness guard from the dev-local adapter
+    # package iff it's importable in this environment. The scheduler
+    # subprocess is spawned by ``treadmill-local up`` (workspace install
+    # → both packages present), and the import is deferred to runtime
+    # so production deploys without the adapter on PYTHONPATH still
+    # boot — they just won't self-heal, which is fine because production
+    # uses container immutability for the same property.
+    staleness_guard, staleness_pid_file = _build_staleness_wiring()
+
+    runner = SchedulerRunner(
+        sessionmaker=session_factory,
+        publisher=publisher,
+        staleness_guard=staleness_guard,
+        staleness_pid_file=staleness_pid_file,
+    )
     stop = asyncio.Event()
 
     loop = asyncio.get_running_loop()
@@ -317,10 +376,31 @@ async def _amain() -> None:
     await engine.dispose()
 
 
-def main() -> int:
-    import os
-    from pathlib import Path
+def _build_staleness_wiring() -> tuple[Any, Path | None]:
+    """Return ``(guard, pid_file)`` for the dev-local subprocess path.
 
+    Defers the import of ``treadmill_local.staleness`` to runtime so
+    production deploys without the adapter package on ``PYTHONPATH``
+    still boot (the scheduler subprocess is dev-local-only by design;
+    production uses container immutability for the same self-heal
+    property). Returns ``(None, None)`` if the adapter isn't importable.
+
+    Fingerprints ``treadmill_api`` (the scheduler's own package) so a
+    ``services/api/**`` merge — picked up on disk by the deploy
+    watcher's ``_sync_local_to_origin`` — triggers a re-exec within one
+    poll interval. Pinning the ``module`` to this entrypoint means the
+    re-exec'd process re-enters ``main()`` cleanly.
+    """
+    try:
+        from treadmill_local.staleness import StalenessGuard
+    except ImportError:
+        return None, None
+    guard = StalenessGuard("treadmill_api", module="treadmill_api.scheduler.runner")
+    pid_file = Path(".treadmill-local") / "scheduler.pid"
+    return guard, pid_file
+
+
+def main() -> int:
     from treadmill_api.scheduler.bounded_logging import configure_rotating_logging
 
     # The subprocess owns its own log file — the parent passes the path
@@ -330,6 +410,16 @@ def main() -> int:
     log_file_env = os.environ.get("TREADMILL_SCHEDULER_LOG_FILE")
     log_file = Path(log_file_env) if log_file_env else Path(".treadmill-local") / "scheduler.log"
     configure_rotating_logging(log_file)
+
+    # ADR-0069: rewrite the PID file with our own pid at startup. The
+    # parent's ``_start_scheduler_dev_local`` wrote ``proc.pid`` after
+    # spawn, which matches us on first boot — but after an ``os.execv``
+    # re-exec the new process owns the same pid file and must claim it
+    # so the parent's ``_pid_alive`` + ``_stop_scheduler`` keep working.
+    pid_file = Path(".treadmill-local") / "scheduler.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
     asyncio.run(_amain())
     return 0
 
