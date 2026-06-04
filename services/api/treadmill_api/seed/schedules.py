@@ -120,6 +120,75 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "created_by": "auto-seed",
     },
     {
+        # ADR-0056 Wave 4: weekly retrospective tune for role-code-author.
+        # The author role is the highest-volume terminal step in the
+        # codebase, so a small prompt win compounds across every wf-author /
+        # wf-feedback / wf-ci-fix / wf-conflict dispatch — exactly the
+        # AUTHOR-type case ADR-0056's retrospective scorer was added for.
+        #
+        # Sunday 21:00 Pacific — NOT 20:00, because the
+        # wf-crystallize-learning sweep (above) fires at Sunday 20:00 and
+        # we don't want the two heavy weekly jobs racing on the same tick.
+        # Subsequent role tunes step one hour per weekday (Mon 21:00 for
+        # reviewer, Tue 21:00 for validator) so the worker pool sees them
+        # spread across nights rather than all stacked Saturday/Sunday.
+        #
+        # ``payload_template`` carries ``repo`` (REQUIRED — taskless
+        # dispatch reads ``rendered_payload["repo"]`` for the worker
+        # workspace, an empty value silently hangs the step) and
+        # ``role_id`` (the new ADR-0056 schema key replacing
+        # ``judge_role``; the optimizer prompt still accepts both for
+        # backward compat with the pre-rename role-architect schedule).
+        "workflow_id": "wf-tune-role-prompts",
+        "cron_expression": "0 21 * * 0",  # Sunday 9pm Pacific
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {
+            "trigger": "scheduled-tune",
+            "repo": "joeLepper/treadmill",
+            "role_id": "role-code-author",
+        },
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
+    {
+        # ADR-0056 Wave 4: weekly tune for role-reviewer. JUDGE-type role
+        # per the optimizer's id-based type detection (id contains
+        # ``reviewer``) — when a labeled corpus is present the scorer
+        # uses ``evaluate_judge_prompt`` on the held-out slice; without
+        # one it falls back to the retrospective scorer (ADR-0056).
+        # Monday 21:00 Pacific — one weekday past the code-author tune
+        # to stagger the worker load.
+        "workflow_id": "wf-tune-role-prompts",
+        "cron_expression": "0 21 * * 1",  # Monday 9pm Pacific
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {
+            "trigger": "scheduled-tune",
+            "repo": "joeLepper/treadmill",
+            "role_id": "role-reviewer",
+        },
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
+    {
+        # ADR-0056 Wave 4: weekly tune for role-validator. JUDGE-type
+        # role per the optimizer's id-based type detection (id contains
+        # ``validator``). Tuesday 21:00 Pacific — one weekday past
+        # role-reviewer's tune.
+        "workflow_id": "wf-tune-role-prompts",
+        "cron_expression": "0 21 * * 2",  # Tuesday 9pm Pacific
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {
+            "trigger": "scheduled-tune",
+            "repo": "joeLepper/treadmill",
+            "role_id": "role-validator",
+        },
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
+    {
         # ADR-0061 Step 5: periodic UI triage via Playwright. Every 4 h on
         # minute 7 — offset from the hour to avoid the hourly thundering
         # herd while still landing several runs per day so the labelable

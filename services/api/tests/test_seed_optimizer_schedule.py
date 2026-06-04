@@ -50,8 +50,11 @@ def test_optimizer_payload_specifies_judge_role() -> None:
 
 
 def test_existing_schedules_unchanged() -> None:
-    """Regression net: the Wave 3 seed addition must not drop the four
-    prior schedules. Five schedules total after this lands."""
+    """Regression net: the Wave 3 seed addition (and Wave 4's three
+    role-tuning rows on top) must not drop any prior schedule. The row
+    count tracks rows, not unique workflow_ids: Wave 4 introduces a
+    single new workflow_id (``wf-tune-role-prompts``) under three
+    distinct crons (code-author / reviewer / validator)."""
     workflow_ids = [s["workflow_id"] for s in SEED_SCHEDULES]
     for expected in (
         "wf-documentarian-audit",
@@ -59,10 +62,13 @@ def test_existing_schedules_unchanged() -> None:
         "wf-stuck-task-sweep",
         "wf-o11y-regression-scan",
         "wf-tune-judge-prompts",
+        "wf-tune-role-prompts",  # ADR-0056 Wave 4
         "wf-ui-triage",  # ADR-0061
         "wf-escalation-close-sweep",  # ADR-0062 Step 2
     ):
         assert expected in workflow_ids, f"missing {expected} in SEED_SCHEDULES"
-    assert len(SEED_SCHEDULES) == 7, (
-        f"expected 7 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
+    assert len(SEED_SCHEDULES) == 10, (
+        f"expected 10 schedules (7 unique workflow_ids; Wave 4 fans "
+        f"wf-tune-role-prompts across 3 crons), got "
+        f"{len(SEED_SCHEDULES)}: {workflow_ids}"
     )

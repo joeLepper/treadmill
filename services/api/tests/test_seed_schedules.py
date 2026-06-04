@@ -26,15 +26,21 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-escalation-close-sweep",  # ADR-0062 Step 2 (added 2026-06-02)
     "wf-o11y-regression-scan",
     "wf-tune-judge-prompts",  # ADR-0053 Wave 3 (added 2026-05-26)
+    "wf-tune-role-prompts",  # ADR-0056 Wave 4 (added 2026-06-04, x3 crons)
     "wf-ui-triage",  # ADR-0061 Step 5 (added 2026-05-28)
 }
+
+# ADR-0056 Wave 4 added 3 new rows under a single workflow_id
+# (``wf-tune-role-prompts``), so the row count diverges from the
+# workflow-id count: 7 unique workflow_ids, 10 rows.
+_EXPECTED_ROW_COUNT = 10
 
 
 # ── SEED_SCHEDULES content invariants ────────────────────────────────────────
 
 
-def test_seed_schedules_has_seven_entries() -> None:
-    assert len(SEED_SCHEDULES) == 7
+def test_seed_schedules_has_expected_row_count() -> None:
+    assert len(SEED_SCHEDULES) == _EXPECTED_ROW_COUNT
 
 
 def test_seed_schedules_workflow_ids() -> None:
@@ -42,19 +48,28 @@ def test_seed_schedules_workflow_ids() -> None:
     assert ids == _EXPECTED_WORKFLOW_IDS
 
 
-def test_no_duplicate_workflow_ids() -> None:
-    ids = [s["workflow_id"] for s in SEED_SCHEDULES]
-    assert len(ids) == len(set(ids)), f"duplicate workflow_ids: {ids}"
+def test_no_duplicate_workflow_cron_pairs() -> None:
+    """Dedup is on ``(workflow_id, cron_expression)`` — the same key
+    ``seed_schedules()`` uses to skip existing rows on the HTTP path.
+    Multiple rows under one workflow_id (Wave 4 fans
+    ``wf-tune-role-prompts`` across three crons) is intentional."""
+    keys = [(s["workflow_id"], s["cron_expression"]) for s in SEED_SCHEDULES]
+    assert len(keys) == len(set(keys)), f"duplicate (workflow_id, cron) pairs: {keys}"
 
 
 def test_seed_schedules_cron_expressions() -> None:
-    by_wf = {s["workflow_id"]: s["cron_expression"] for s in SEED_SCHEDULES}
-    assert by_wf["wf-documentarian-audit"] == "0 9 * * 1"
-    assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
-    assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
-    assert by_wf["wf-escalation-close-sweep"] == "*/2 * * * *"
-    assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
-    assert by_wf["wf-ui-triage"] == "7 */4 * * *"
+    # Workflows with a single row keyable by workflow_id.
+    single = {
+        s["workflow_id"]: s["cron_expression"]
+        for s in SEED_SCHEDULES
+        if s["workflow_id"] != "wf-tune-role-prompts"
+    }
+    assert single["wf-documentarian-audit"] == "0 9 * * 1"
+    assert single["wf-crystallize-learning"] == "0 20 * * 0"
+    assert single["wf-stuck-task-sweep"] == "*/10 * * * *"
+    assert single["wf-escalation-close-sweep"] == "*/2 * * * *"
+    assert single["wf-o11y-regression-scan"] == "*/15 * * * *"
+    assert single["wf-ui-triage"] == "7 */4 * * *"
 
 
 def test_seed_schedules_quiet_hours() -> None:
@@ -158,9 +173,9 @@ def _existing_client(existing: list[dict]) -> MagicMock:
     return client
 
 
-def test_seed_schedules_creates_all_seven_on_fresh_install() -> None:
+def test_seed_schedules_creates_all_rows_on_fresh_install() -> None:
     created = seed_schedules(_fresh_client())
-    assert created == 7
+    assert created == _EXPECTED_ROW_COUNT
 
 
 def test_seed_schedules_idempotent_when_all_exist() -> None:
@@ -184,18 +199,17 @@ def test_seed_schedules_no_posts_when_all_exist() -> None:
 
 
 def test_seed_schedules_only_posts_missing() -> None:
-    """When one schedule already exists, only the remaining six are POSTed."""
+    """When one schedule already exists, only the remaining rows are POSTed."""
     existing = [{"workflow_id": "wf-documentarian-audit", "cron_expression": "0 9 * * 1"}]
     client = _existing_client(existing)
     created = seed_schedules(client)
-    assert created == 6
+    assert created == _EXPECTED_ROW_COUNT - 1
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
     posted_wf_ids = {c.kwargs["json"]["workflow_id"] for c in post_calls}
     assert "wf-documentarian-audit" not in posted_wf_ids
-    assert len(posted_wf_ids) == 6
 
 
-def test_seed_schedules_posts_all_seven_workflow_ids() -> None:
+def test_seed_schedules_posts_all_workflow_ids() -> None:
     client = _fresh_client()
     seed_schedules(client)
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
@@ -253,16 +267,18 @@ def test_seed_schedules_posts_correct_cron_expressions() -> None:
     client = _fresh_client()
     seed_schedules(client)
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
-    by_wf = {
+    # Workflows with a single POSTed row keyable by workflow_id.
+    single = {
         c.kwargs["json"]["workflow_id"]: c.kwargs["json"]["cron_expression"]
         for c in post_calls
+        if c.kwargs["json"]["workflow_id"] != "wf-tune-role-prompts"
     }
-    assert by_wf["wf-documentarian-audit"] == "0 9 * * 1"
-    assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
-    assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
-    assert by_wf["wf-escalation-close-sweep"] == "*/2 * * * *"
-    assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
-    assert by_wf["wf-ui-triage"] == "7 */4 * * *"
+    assert single["wf-documentarian-audit"] == "0 9 * * 1"
+    assert single["wf-crystallize-learning"] == "0 20 * * 0"
+    assert single["wf-stuck-task-sweep"] == "*/10 * * * *"
+    assert single["wf-escalation-close-sweep"] == "*/2 * * * *"
+    assert single["wf-o11y-regression-scan"] == "*/15 * * * *"
+    assert single["wf-ui-triage"] == "7 */4 * * *"
 
 
 # ── seed_schedules_if_empty() — DB path ──────────────────────────────────────
@@ -283,11 +299,11 @@ def test_seed_schedules_if_empty_skips_when_rows_exist() -> None:
     session.commit.assert_not_called()
 
 
-def test_seed_schedules_if_empty_inserts_seven_on_fresh_db() -> None:
+def test_seed_schedules_if_empty_inserts_all_rows_on_fresh_db() -> None:
     session = _make_session(existing_count=0)
     result = seed_schedules_if_empty(session)
-    assert result == 7
-    assert session.add.call_count == 7
+    assert result == _EXPECTED_ROW_COUNT
+    assert session.add.call_count == _EXPECTED_ROW_COUNT
     session.commit.assert_called_once()
 
 
@@ -320,13 +336,17 @@ def test_seed_schedules_if_empty_correct_workflow_ids() -> None:
 def test_seed_schedules_if_empty_correct_cron_expressions() -> None:
     session = _make_session(existing_count=0)
     seed_schedules_if_empty(session)
-    added = {c.args[0].workflow_id: c.args[0].cron_expression
-             for c in session.add.call_args_list}
-    assert added["wf-documentarian-audit"] == "0 9 * * 1"
-    assert added["wf-crystallize-learning"] == "0 20 * * 0"
-    assert added["wf-stuck-task-sweep"] == "*/10 * * * *"
-    assert added["wf-escalation-close-sweep"] == "*/2 * * * *"
-    assert added["wf-o11y-regression-scan"] == "*/15 * * * *"
+    # Workflows with a single inserted row keyable by workflow_id.
+    single = {
+        c.args[0].workflow_id: c.args[0].cron_expression
+        for c in session.add.call_args_list
+        if c.args[0].workflow_id != "wf-tune-role-prompts"
+    }
+    assert single["wf-documentarian-audit"] == "0 9 * * 1"
+    assert single["wf-crystallize-learning"] == "0 20 * * 0"
+    assert single["wf-stuck-task-sweep"] == "*/10 * * * *"
+    assert single["wf-escalation-close-sweep"] == "*/2 * * * *"
+    assert single["wf-o11y-regression-scan"] == "*/15 * * * *"
 
 
 def test_seed_schedules_if_empty_documentarian_quiet_hours() -> None:

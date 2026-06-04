@@ -43,6 +43,7 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-crystallize-learning",
     "wf-audit-rule-corpus",
     "wf-tune-judge-prompts",
+    "wf-tune-role-prompts",  # ADR-0056 Wave 4 (canonical successor slug)
     "wf-ui-triage",  # ADR-0061
 }
 
@@ -671,6 +672,7 @@ def test_single_step_workflows_match_adr_0015_and_0032_matrix() -> None:
         "wf-author", "wf-review", "wf-validate", "wf-doc-amend",
         "wf-architecture-resolve", "wf-audit-rule-corpus",
         "wf-tune-judge-prompts",
+        "wf-tune-role-prompts",  # ADR-0056 Wave 4
         "wf-ui-triage",  # ADR-0061
     }
 

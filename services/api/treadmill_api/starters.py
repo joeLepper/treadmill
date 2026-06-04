@@ -1356,17 +1356,43 @@ STARTERS: list[dict[str, Any]] = [
         ],
     },
     {
-        # ADR-0053 Wave 2: single-step optimizer workflow. The operator
-        # triggers this manually with a payload of
-        # ``{judge_role, corpus_s3_uri}``; the role-prompt-optimizer
-        # proposes one variant, scores it on a held-out slice via
-        # ``evaluate_judge_prompt``, and either opens a PR or reports
-        # "no improvement". No schedule yet (Wave 3 — see ADR-0053).
+        # ADR-0056 Wave 4: single-step optimizer workflow — the
+        # canonical slug going forward, generalized from
+        # ``wf-tune-judge-prompts`` (ADR-0053 Wave 2) to cover ALL
+        # role types (judges scored against gold corpora per
+        # ADR-0053; AUTHOR + PROCEDURAL roles scored retrospectively
+        # against runtime outcomes per ADR-0056). The operator (or
+        # the seeded schedule) dispatches with payload
+        # ``{role_id, [corpus_s3_uri]}``; the role-prompt-optimizer
+        # detects the target's type, picks the right scorer, proposes
+        # one variant, scores both, and either opens a PR or reports
+        # "no improvement".
+        "id": "wf-tune-role-prompts",
+        "description": (
+            "Propose + score one refined variant of a target role's "
+            "prompt — judge corpus (ADR-0053) for JUDGE roles, "
+            "retrospective runtime aggregate (ADR-0056) for AUTHOR + "
+            "PROCEDURAL roles."
+        ),
+        "roles": _roles_for("role-prompt-optimizer"),
+        "steps": [
+            {"name": "optimize", "role_id": "role-prompt-optimizer"},
+        ],
+    },
+    {
+        # Deprecated alias for wf-tune-role-prompts; kept for the
+        # role-architect schedule registered before ADR-0056.
+        #
+        # ADR-0056 Wave 4 renamed the canonical workflow slug. The
+        # old slug stays registered (same role/step config) so the
+        # pre-rename ``wf-tune-judge-prompts`` schedule row still
+        # resolves on dispatch — the optimizer prompt accepts both
+        # the new ``role_id`` payload key and the legacy
+        # ``judge_role`` synonym for backward compatibility.
         "id": "wf-tune-judge-prompts",
         "description": (
-            "Propose + score one refined variant of a judge role's "
-            "prompt against the held-out slice of its labeled corpus "
-            "(ADR-0053)."
+            "Deprecated alias for wf-tune-role-prompts; kept for the "
+            "role-architect schedule registered before ADR-0056."
         ),
         "roles": _roles_for("role-prompt-optimizer"),
         "steps": [
