@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -181,6 +182,173 @@ def run_deterministic(
         )
 
 
+def _parse_touched_paths(diff: str, repo_dir: Path) -> list[Path]:
+    """Collect post-image paths from a unified ``diff``.
+
+    Mirrors ``gather_agent_md_context``'s parsing: any line starting with
+    ``+++ b/`` (excluding ``/dev/null``) contributes one path joined to
+    ``repo_dir``. Adds and modifies are covered; deletes resolve to
+    ``/dev/null`` and are skipped.
+    """
+    touched: list[Path] = []
+    for line in diff.splitlines():
+        if not line.startswith("+++ b/"):
+            continue
+        rel = line[len("+++ b/") :].strip()
+        if not rel or rel == "/dev/null":
+            continue
+        touched.append(repo_dir / rel)
+    return touched
+
+
+_ADR_REF_RE = re.compile(r"\bADR-(\d{4})\b")
+_PLAN_REF_RE = re.compile(r"docs/plans/(\d{4}-\d{2}-\d{2}-[\w\-]+\.md)")
+_ADJACENT_DOCS_CAP = 50_000
+
+
+def gather_cited_adrs_context(diff: str, repo_dir: Path) -> str:
+    """Return the content of every ADR cited (by ``ADR-NNNN`` token)
+    anywhere in ``diff`` — the diff envelope plus each touched file's
+    contents that the diff includes. Each match is resolved by globbing
+    ``docs/adrs/NNNN-*.md`` under ``repo_dir``; unreadable files are
+    skipped. Returns ``""`` when no matches resolve, so the caller can
+    omit the prompt section."""
+    if not diff:
+        return ""
+
+    repo_dir = Path(repo_dir).resolve()
+    refs = sorted({m.group(1) for m in _ADR_REF_RE.finditer(diff)})
+
+    blocks: list[str] = []
+    seen: set[Path] = set()
+    adrs_dir = repo_dir / "docs" / "adrs"
+    for num in refs:
+        try:
+            matches = sorted(adrs_dir.glob(f"{num}-*.md"))
+        except OSError:
+            continue
+        for adr in matches:
+            if adr in seen:
+                continue
+            seen.add(adr)
+            try:
+                content = adr.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            try:
+                relpath = adr.relative_to(repo_dir)
+            except ValueError:
+                continue
+            blocks.append(f"### {relpath}\n{content}")
+    return "\n\n".join(blocks)
+
+
+def gather_cited_plans_context(diff: str, repo_dir: Path) -> str:
+    """Return the content of every plan cited by path (``docs/plans/
+    YYYY-MM-DD-...md``) anywhere in ``diff``. Skip files that don't
+    exist or can't be read. Empty string if none resolve."""
+    if not diff:
+        return ""
+
+    repo_dir = Path(repo_dir).resolve()
+    refs = sorted({m.group(1) for m in _PLAN_REF_RE.finditer(diff)})
+
+    blocks: list[str] = []
+    seen: set[Path] = set()
+    plans_dir = repo_dir / "docs" / "plans"
+    for name in refs:
+        plan_path = plans_dir / name
+        if plan_path in seen:
+            continue
+        seen.add(plan_path)
+        if not plan_path.is_file():
+            continue
+        try:
+            content = plan_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            relpath = plan_path.relative_to(repo_dir)
+        except ValueError:
+            continue
+        blocks.append(f"### {relpath}\n{content}")
+    return "\n\n".join(blocks)
+
+
+def gather_adjacent_docs_context(diff: str, repo_dir: Path) -> str:
+    """Return the content of documentation files adjacent to each path
+    touched by ``diff``. For each touched file we glob ``*.md`` siblings
+    in the same directory and ``*.md`` files in the parent's ``docs/``
+    sibling. ``AGENT.md`` is skipped (it is supplied separately by
+    ``gather_agent_md_context``). Total content is capped at
+    ``_ADJACENT_DOCS_CAP`` (~50k chars) and truncated with a sentinel
+    when the cap is exceeded, so the judge prompt does not bloat on
+    repos with large docs trees."""
+    if not diff:
+        return ""
+
+    repo_dir = Path(repo_dir).resolve()
+    touched = _parse_touched_paths(diff, repo_dir)
+
+    doc_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in touched:
+        parent = path.parent.resolve()
+        candidate_dirs = [parent, parent.parent / "docs"]
+        for d in candidate_dirs:
+            if not d.is_dir():
+                continue
+            try:
+                d_resolved = d.resolve()
+            except OSError:
+                continue
+            if d_resolved != repo_dir and repo_dir not in d_resolved.parents:
+                continue
+            try:
+                md_iter = sorted(d.glob("*.md"))
+            except OSError:
+                continue
+            for md in md_iter:
+                if md.name == "AGENT.md":
+                    continue
+                try:
+                    md_resolved = md.resolve()
+                except OSError:
+                    continue
+                if md_resolved in seen:
+                    continue
+                seen.add(md_resolved)
+                doc_paths.append(md)
+
+    blocks: list[str] = []
+    total = 0
+    truncated = False
+    for md in doc_paths:
+        try:
+            content = md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            relpath = md.relative_to(repo_dir)
+        except ValueError:
+            continue
+        block = f"### {relpath}\n{content}"
+        if total + len(block) > _ADJACENT_DOCS_CAP:
+            remaining = _ADJACENT_DOCS_CAP - total
+            if remaining > 0:
+                blocks.append(block[:remaining])
+                total += remaining
+            truncated = True
+            break
+        blocks.append(block)
+        total += len(block)
+
+    result = "\n\n".join(blocks)
+    if truncated:
+        result += "\n\n[adjacent docs truncated at 50000 chars]"
+    return result
+
+
 def gather_agent_md_context(repo_dir: Path, diff: str) -> str:
     """Return the content of every AGENT.md that governs a file touched
     by ``diff`` — the nearest AGENT.md walking up from each touched
@@ -249,8 +417,15 @@ def run_llm_judge(
 
     The composed prompt also includes the content of every AGENT.md
     that governs a file touched by ``diff`` (nearest ancestor walk),
-    so judges like ADR-0030's docs-current-with-pr can see the
-    component-level documentation they're asked to evaluate.
+    plus three further context blocks parallel to the AGENT_MD
+    injection: ``CITED_ADRS`` (ADRs referenced by ``ADR-NNNN`` token in
+    the diff), ``CITED_PLANS`` (plans referenced by ``docs/plans/
+    YYYY-MM-DD-...md`` path in the diff), and ``ADJACENT_DOCS``
+    (``*.md`` siblings near touched files, capped at ~50k chars). These
+    repair the input-starvation that caused judges like ADR-0030's
+    docs-current-with-pr — whose prompt body declares all four inputs
+    — to conclude that "none exists" and false-pass the whole rule
+    population.
 
     Args:
         check: object with .id, .kind, .severity, .prompt attributes
@@ -267,10 +442,25 @@ def run_llm_judge(
 
     agent_md = gather_agent_md_context(repo_dir, diff or "")
     agent_md_section = f"## AGENT_MD\n{agent_md}\n\n" if agent_md else ""
+    cited_adrs = gather_cited_adrs_context(diff or "", repo_dir)
+    cited_plans = gather_cited_plans_context(diff or "", repo_dir)
+    adjacent_docs = gather_adjacent_docs_context(diff or "", repo_dir)
+    cited_adrs_section = (
+        f"## CITED_ADRS\n{cited_adrs}\n\n" if cited_adrs else ""
+    )
+    cited_plans_section = (
+        f"## CITED_PLANS\n{cited_plans}\n\n" if cited_plans else ""
+    )
+    adjacent_docs_section = (
+        f"## ADJACENT_DOCS\n{adjacent_docs}\n\n" if adjacent_docs else ""
+    )
 
     prompt = (
         f"{check.prompt}\n\n"
         f"{agent_md_section}"
+        f"{cited_adrs_section}"
+        f"{cited_plans_section}"
+        f"{adjacent_docs_section}"
         f"## PR diff\n{diff}\n\n"
         f"## Task spec\n{task_spec}\n\n"
         f"Respond with a JSON block containing 'verdict' ('pass' or 'fail') "

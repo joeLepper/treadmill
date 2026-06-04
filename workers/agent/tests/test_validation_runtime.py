@@ -17,7 +17,10 @@ import pytest
 from treadmill_agent.validation_runtime import (
     CheckResult,
     ValidationVerdict,
+    gather_adjacent_docs_context,
     gather_agent_md_context,
+    gather_cited_adrs_context,
+    gather_cited_plans_context,
     run_deterministic,
     run_llm_judge,
 )
@@ -455,6 +458,305 @@ def test_run_llm_judge_no_agent_md_section_when_absent(tmp_path: Path) -> None:
 
     prompt = mock_run.call_args.kwargs["prompt"]
     assert "## AGENT_MD" not in prompt
+
+
+# ── gather_cited_adrs_context tests ──────────────────────────────────────────
+
+
+def test_gather_cited_adrs_context_resolves_referenced_adr(tmp_path: Path) -> None:
+    """A diff that names ``ADR-0123`` returns that ADR's body under a
+    ``### docs/adrs/...md`` header."""
+    adrs_dir = tmp_path / "docs" / "adrs"
+    adrs_dir.mkdir(parents=True)
+    (adrs_dir / "0123-something-important.md").write_text(
+        "# ADR-0123\n\nADR_BODY_CONTENT\n"
+    )
+
+    diff = (
+        "diff --git a/foo.py b/foo.py\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+see ADR-0123 for context\n"
+    )
+
+    result = gather_cited_adrs_context(diff, tmp_path)
+
+    assert "### docs/adrs/0123-something-important.md" in result
+    assert "ADR_BODY_CONTENT" in result
+
+
+def test_gather_cited_adrs_context_empty_when_no_refs(tmp_path: Path) -> None:
+    """Diff with no ADR-NNNN tokens returns ''."""
+    (tmp_path / "docs" / "adrs").mkdir(parents=True)
+    diff = "--- a/foo.py\n+++ b/foo.py\n+ no adr here\n"
+    assert gather_cited_adrs_context(diff, tmp_path) == ""
+
+
+def test_gather_cited_adrs_context_skips_missing_adr(tmp_path: Path) -> None:
+    """A reference to a non-existent ADR is silently skipped."""
+    (tmp_path / "docs" / "adrs").mkdir(parents=True)
+    diff = "--- a/foo.py\n+++ b/foo.py\n+see ADR-9999\n"
+    assert gather_cited_adrs_context(diff, tmp_path) == ""
+
+
+def test_gather_cited_adrs_context_dedupes_repeated_refs(tmp_path: Path) -> None:
+    """Repeated ADR-NNNN mentions yield one block."""
+    adrs_dir = tmp_path / "docs" / "adrs"
+    adrs_dir.mkdir(parents=True)
+    (adrs_dir / "0042-dup.md").write_text("ONE_BLOCK_ONLY\n")
+    diff = "--- a/foo.py\n+++ b/foo.py\n+ADR-0042 and again ADR-0042\n"
+    result = gather_cited_adrs_context(diff, tmp_path)
+    assert result.count("ONE_BLOCK_ONLY") == 1
+
+
+def test_gather_cited_adrs_context_empty_diff(tmp_path: Path) -> None:
+    assert gather_cited_adrs_context("", tmp_path) == ""
+
+
+# ── gather_cited_plans_context tests ─────────────────────────────────────────
+
+
+def test_gather_cited_plans_context_resolves_referenced_plan(
+    tmp_path: Path,
+) -> None:
+    """A diff that names ``docs/plans/2026-05-21-foo.md`` returns that
+    plan's body under a header."""
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "2026-05-21-foo.md").write_text("PLAN_BODY_CONTENT\n")
+
+    diff = (
+        "--- a/bar.py\n"
+        "+++ b/bar.py\n"
+        "+# implements docs/plans/2026-05-21-foo.md\n"
+    )
+
+    result = gather_cited_plans_context(diff, tmp_path)
+
+    assert "### docs/plans/2026-05-21-foo.md" in result
+    assert "PLAN_BODY_CONTENT" in result
+
+
+def test_gather_cited_plans_context_skips_missing_plan(tmp_path: Path) -> None:
+    """Reference to a non-existent plan path returns ''."""
+    (tmp_path / "docs" / "plans").mkdir(parents=True)
+    diff = "+see docs/plans/2026-05-21-not-real.md\n"
+    assert gather_cited_plans_context(diff, tmp_path) == ""
+
+
+def test_gather_cited_plans_context_empty_when_no_refs(tmp_path: Path) -> None:
+    diff = "--- a/foo.py\n+++ b/foo.py\n+no plan here\n"
+    assert gather_cited_plans_context(diff, tmp_path) == ""
+
+
+def test_gather_cited_plans_context_empty_diff(tmp_path: Path) -> None:
+    assert gather_cited_plans_context("", tmp_path) == ""
+
+
+# ── gather_adjacent_docs_context tests ───────────────────────────────────────
+
+
+def test_gather_adjacent_docs_context_returns_sibling_markdown(
+    tmp_path: Path,
+) -> None:
+    """A touched file with a README.md sibling returns the README content."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    (component / "README.md").write_text("ADJACENT_README_CONTENT\n")
+
+    diff = (
+        "--- a/services/api/foo.py\n"
+        "+++ b/services/api/foo.py\n"
+    )
+
+    result = gather_adjacent_docs_context(diff, tmp_path)
+
+    assert "### services/api/README.md" in result
+    assert "ADJACENT_README_CONTENT" in result
+
+
+def test_gather_adjacent_docs_context_skips_agent_md(tmp_path: Path) -> None:
+    """``AGENT.md`` is supplied by ``gather_agent_md_context`` and must
+    not also appear in the adjacent-docs block."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    (component / "AGENT.md").write_text("AGENT_MD_BODY\n")
+    (component / "README.md").write_text("README_BODY\n")
+
+    diff = "--- a/services/api/foo.py\n+++ b/services/api/foo.py\n"
+
+    result = gather_adjacent_docs_context(diff, tmp_path)
+
+    assert "AGENT_MD_BODY" not in result
+    assert "README_BODY" in result
+
+
+def test_gather_adjacent_docs_context_finds_docs_sibling(tmp_path: Path) -> None:
+    """A docs/ directory next to the touched file's parent is harvested."""
+    (tmp_path / "services" / "api").mkdir(parents=True)
+    docs = tmp_path / "services" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "design.md").write_text("DESIGN_NOTES\n")
+
+    diff = "--- a/services/api/foo.py\n+++ b/services/api/foo.py\n"
+
+    result = gather_adjacent_docs_context(diff, tmp_path)
+
+    assert "### services/docs/design.md" in result
+    assert "DESIGN_NOTES" in result
+
+
+def test_gather_adjacent_docs_context_empty_when_none(tmp_path: Path) -> None:
+    (tmp_path / "lonely").mkdir()
+    diff = "--- a/lonely/bar.py\n+++ b/lonely/bar.py\n"
+    assert gather_adjacent_docs_context(diff, tmp_path) == ""
+
+
+def test_gather_adjacent_docs_context_truncates_above_cap(tmp_path: Path) -> None:
+    """Total content above the ~50k char cap is truncated, with a
+    sentinel appended so the judge knows the input was clipped."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    big = "X" * 60_000
+    (component / "big.md").write_text(big)
+
+    diff = "--- a/services/api/foo.py\n+++ b/services/api/foo.py\n"
+
+    result = gather_adjacent_docs_context(diff, tmp_path)
+
+    # The cap is ~50k; allow up to ~50.5k including the sentinel.
+    assert len(result) < 51_000
+    assert "truncated" in result.lower()
+
+
+def test_gather_adjacent_docs_context_empty_diff(tmp_path: Path) -> None:
+    assert gather_adjacent_docs_context("", tmp_path) == ""
+
+
+# ── run_llm_judge integration with all three new sections ────────────────────
+
+
+def test_run_llm_judge_includes_cited_adrs(tmp_path: Path) -> None:
+    """ADR cited in the diff appears in a ## CITED_ADRS section."""
+    adrs_dir = tmp_path / "docs" / "adrs"
+    adrs_dir.mkdir(parents=True)
+    (adrs_dir / "0077-cited.md").write_text("CITED_ADR_BODY\n")
+
+    check = _check(kind="llm-judge", prompt="criterion")
+    diff = (
+        "--- a/foo.py\n+++ b/foo.py\n"
+        "+# rationale per ADR-0077\n"
+    )
+
+    with patch("treadmill_agent.claude_code.run_claude") as mock_run:
+        mock_run.return_value = '```json\n{"verdict":"pass","rationale":"ok"}\n```'
+        run_llm_judge(check, tmp_path, diff, "spec", "model", timeout_seconds=5)
+
+    prompt = mock_run.call_args.kwargs["prompt"]
+    assert "## CITED_ADRS" in prompt
+    assert "CITED_ADR_BODY" in prompt
+
+
+def test_run_llm_judge_includes_cited_plans(tmp_path: Path) -> None:
+    """Plan cited by path in the diff appears in a ## CITED_PLANS section."""
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "2026-05-21-x.md").write_text("CITED_PLAN_BODY\n")
+
+    check = _check(kind="llm-judge", prompt="criterion")
+    diff = (
+        "--- a/foo.py\n+++ b/foo.py\n"
+        "+# implements docs/plans/2026-05-21-x.md\n"
+    )
+
+    with patch("treadmill_agent.claude_code.run_claude") as mock_run:
+        mock_run.return_value = '```json\n{"verdict":"pass","rationale":"ok"}\n```'
+        run_llm_judge(check, tmp_path, diff, "spec", "model", timeout_seconds=5)
+
+    prompt = mock_run.call_args.kwargs["prompt"]
+    assert "## CITED_PLANS" in prompt
+    assert "CITED_PLAN_BODY" in prompt
+
+
+def test_run_llm_judge_includes_adjacent_docs(tmp_path: Path) -> None:
+    """Adjacent ``*.md`` sibling appears under a ## ADJACENT_DOCS section."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    (component / "README.md").write_text("ADJACENT_README_BODY\n")
+
+    check = _check(kind="llm-judge", prompt="criterion")
+    diff = (
+        "--- a/services/api/foo.py\n"
+        "+++ b/services/api/foo.py\n"
+    )
+
+    with patch("treadmill_agent.claude_code.run_claude") as mock_run:
+        mock_run.return_value = '```json\n{"verdict":"pass","rationale":"ok"}\n```'
+        run_llm_judge(check, tmp_path, diff, "spec", "model", timeout_seconds=5)
+
+    prompt = mock_run.call_args.kwargs["prompt"]
+    assert "## ADJACENT_DOCS" in prompt
+    assert "ADJACENT_README_BODY" in prompt
+
+
+def test_run_llm_judge_section_order_when_all_present(tmp_path: Path) -> None:
+    """When all four context sources exist, the prompt assembles them in
+    AGENT_MD → CITED_ADRS → CITED_PLANS → ADJACENT_DOCS → PR diff →
+    Task spec order. This is what callers (judge prompts) declare they
+    expect."""
+    component = tmp_path / "services" / "api"
+    component.mkdir(parents=True)
+    (component / "AGENT.md").write_text("AGENT_MD_BODY\n")
+    (component / "README.md").write_text("ADJACENT_README_BODY\n")
+    adrs_dir = tmp_path / "docs" / "adrs"
+    adrs_dir.mkdir(parents=True)
+    (adrs_dir / "0077-cited.md").write_text("CITED_ADR_BODY\n")
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "2026-05-21-x.md").write_text("CITED_PLAN_BODY\n")
+
+    check = _check(kind="llm-judge", prompt="criterion")
+    diff = (
+        "--- a/services/api/foo.py\n"
+        "+++ b/services/api/foo.py\n"
+        "+# per ADR-0077 and docs/plans/2026-05-21-x.md\n"
+    )
+
+    with patch("treadmill_agent.claude_code.run_claude") as mock_run:
+        mock_run.return_value = '```json\n{"verdict":"pass","rationale":"ok"}\n```'
+        run_llm_judge(check, tmp_path, diff, "spec", "model", timeout_seconds=5)
+
+    prompt = mock_run.call_args.kwargs["prompt"]
+    sections = [
+        "## AGENT_MD",
+        "## CITED_ADRS",
+        "## CITED_PLANS",
+        "## ADJACENT_DOCS",
+        "## PR diff",
+        "## Task spec",
+    ]
+    positions = [prompt.index(s) for s in sections]
+    assert positions == sorted(positions)
+
+
+def test_run_llm_judge_omits_sections_when_empty(tmp_path: Path) -> None:
+    """When the diff cites nothing and no adjacent docs exist, none of
+    the three new section headers appear (an empty ``## CITED_ADRS``
+    block would mislead the judge — the docs-currency false-pass we are
+    trying to avoid)."""
+    check = _check(kind="llm-judge", prompt="criterion")
+    diff = "--- a/orphan.py\n+++ b/orphan.py\n"
+
+    with patch("treadmill_agent.claude_code.run_claude") as mock_run:
+        mock_run.return_value = '```json\n{"verdict":"pass","rationale":"ok"}\n```'
+        run_llm_judge(check, tmp_path, diff, "spec", "model", timeout_seconds=5)
+
+    prompt = mock_run.call_args.kwargs["prompt"]
+    assert "## CITED_ADRS" not in prompt
+    assert "## CITED_PLANS" not in prompt
+    assert "## ADJACENT_DOCS" not in prompt
 
 
 # ── ValidationVerdict model tests ────────────────────────────────────────────
