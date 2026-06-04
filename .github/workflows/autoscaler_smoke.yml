@@ -15,6 +15,8 @@ on:
       - services/egress-proxy/**
       - workers/agent/Dockerfile
       - infra/treadmill_infra/stacks/**
+      - .github/workflows/autoscaler_smoke.yml
+      - tools/local-adapter/scripts/smoke_boot.sh
 
 jobs:
   smoke:
