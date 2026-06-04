@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -515,6 +517,16 @@ def _execute(
         # wf-crystallize-learning routes to the same handler for the
         # rule-authoring step (step 2). Both branches on role.id /
         # workflow_id keep the output_kind schema stable.
+        # wf-conflict pre-resolver (ADR-0048 + triage finding 71ed396b):
+        # before calling Claude for role-conflict-analyzer, attempt a
+        # deterministic rebase + additive-list-head pre-resolution.  If all
+        # conflicts match the four-condition pattern, skip the LLM call
+        # entirely and return a synthetic StepOutput.
+        if ctx.role.id == "role-conflict-analyzer" and not dry_run:
+            preresolve_output = _try_preresolve_conflict(repo_dir)
+            if preresolve_output is not None:
+                return preresolve_output, None
+
         if ctx.role.id == "role-crystallization-judge":
             return handle_crystallization(disposition_ctx), token_usage
         if ctx.role.id == "role-architect" and ctx.workflow_id == "wf-crystallize-learning":
@@ -539,6 +551,91 @@ def _execute(
                 f"dispatch table; known kinds: {sorted(DISPOSITIONS)}"
             )
         return handler(disposition_ctx), token_usage
+
+
+def _try_preresolve_conflict(
+    repo_dir: Any,
+) -> "StepOutput | None":
+    """Attempt a rebase + deterministic pre-resolution for role-conflict-analyzer.
+
+    Runs ``git rebase origin/main`` on the checked-out task branch.  If the
+    rebase produces conflicts, passes the working tree to
+    ``resolve_additive_list_head``.  When every conflict matches the
+    additive-list-head pattern:
+
+      1. All files are staged by the pre-resolver (``git add`` per file).
+      2. ``git rebase --continue`` completes the rebase.
+      3. A synthetic ``StepOutput`` is returned — no LLM call needed.
+
+    When any conflicts remain unresolved, the rebase is aborted so
+    Claude can perform it cleanly from the original state.
+
+    Returns ``None`` to signal "fall through to Claude" in all non-trivial
+    cases.
+    """
+    from treadmill_agent.conflict_preresolve import resolve_additive_list_head
+    from treadmill_agent.events import Artifact, Metadata, StepOutput
+
+    rebase = subprocess.run(
+        ["git", "-C", str(repo_dir), "rebase", "origin/main"],
+        capture_output=True, text=True,
+    )
+
+    if rebase.returncode == 0:
+        # Clean rebase — no conflicts to resolve via pre-resolver.
+        return None
+
+    summary = resolve_additive_list_head(repo_dir)
+
+    if not summary.all_resolved:
+        # Some conflicts remain; abort so Claude sees a clean working tree.
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "rebase", "--abort"],
+            capture_output=True, text=True,
+        )
+        return None
+
+    # All conflicts resolved — complete the rebase.
+    env = {**os.environ, "GIT_EDITOR": "true", "EDITOR": "true"}
+    continue_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "rebase", "--continue"],
+        env=env, capture_output=True, text=True,
+    )
+
+    if continue_result.returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "rebase", "--abort"],
+            capture_output=True, text=True,
+        )
+        return None
+
+    resolved_files = [
+        str(r.path.relative_to(repo_dir))
+        for r in summary.results
+        if r.status.value == "resolved"
+    ]
+    artifact_text = (
+        f"auto-resolved-additive-list-head: resolved {summary.resolved_count} "
+        f"conflict(s) in {len(resolved_files)} file(s): "
+        + ", ".join(resolved_files)
+    )
+    return StepOutput(
+        summary=artifact_text,
+        decision="resolution clear",
+        commit_sha=None,
+        artifacts=[Artifact(kind="analysis", value=artifact_text)],
+        payload={"task_directive": {
+            "summary": artifact_text,
+            "files": resolved_files,
+            "intent": (
+                "rebase completed automatically via additive-list-head "
+                "pre-resolver; push the rebased branch"
+            ),
+            "out_of_scope": [],
+            "validation": [],
+        }},
+        metadata=Metadata(),
+    )
 
 
 def _step_token_usage(
