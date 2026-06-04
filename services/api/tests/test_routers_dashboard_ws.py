@@ -10,11 +10,16 @@ Coverage:
 
   * ``hello`` frame on connect.
   * A published event lands on the socket as ``{type: event, ...}`` with
-    the projected shape the dashboard consumes.
+    the projected shape the dashboard consumes (including ``plan_id``).
   * ``heartbeat`` frames fire periodically (we shrink the interval via
     the route's ``heartbeat_interval`` query param).
   * Disconnecting the client tears down cleanly without raising into
     the router runtime.
+  * ``?created_by=<label>`` filter: matching events arrive, non-matching
+    and ownerless events are dropped.
+  * Owner resolution is cached per-connection: two events for the same
+    plan_id trigger exactly one ``_lookup_created_by`` call.
+  * A lookup exception drops the event but leaves the socket alive.
 """
 
 from __future__ import annotations
@@ -75,6 +80,30 @@ def _valid_payload() -> TaskRegistered:
     )
 
 
+def _make_record(
+    *,
+    plan_id: str | None = None,
+    task_id: str | None = None,
+    entity_type: str = "task",
+    action: str = "registered",
+) -> dict:
+    """Directly construct a broadcast record dict without hitting the DB.
+
+    Used by filter tests so we can control plan_id / task_id precisely
+    without building full Event + EventPayload objects.
+    """
+    return {
+        "event_id": str(uuid.uuid4()),
+        "entity_type": entity_type,
+        "action": action,
+        "task_id": task_id,
+        "plan_id": plan_id,
+        "run_id": None,
+        "step_id": None,
+        "payload": "{}",
+    }
+
+
 # ── tests ──────────────────────────────────────────────────────────────────────
 
 
@@ -102,7 +131,8 @@ def test_hello_frame_is_sent_on_connect() -> None:
 def test_published_event_lands_on_socket() -> None:
     """An event row INSERT (modeled here as the publisher's record being
     handed to the in-process broadcaster) lands on the socket as the
-    projected ``event`` frame the dashboard consumes.
+    projected ``event`` frame the dashboard consumes, including the new
+    ``plan_id`` field (ADR-0068).
 
     We invoke the broadcaster directly instead of awaiting
     ``LoggingEventPublisher.publish`` because Starlette's ``TestClient``
@@ -131,6 +161,7 @@ def test_published_event_lands_on_socket() -> None:
                 "entity_type": "task",
                 "action": "registered",
                 "task_id": str(event.task_id),
+                "plan_id": None,
                 "ts": frame["ts"],
             }
             assert frame["ts"]
@@ -205,3 +236,126 @@ def test_disconnect_does_not_crash_endpoint() -> None:
             "/api/v1/dashboard/ws/events"
         ) as ws2:
             assert ws2.receive_json()["type"] == "hello"
+
+
+def test_created_by_filter_passes_matching_drops_others(monkeypatch) -> None:
+    """``?created_by=lbl-a`` forwards the matching event and silently
+    drops a non-matching event and an ownerless event (ADR-0068).
+
+    Sentinel approach: after the three events we publish a second
+    matching event as a sentinel so we can read exactly two event frames
+    and assert both carry the expected plan_id — without relying on
+    timing to prove the dropped events never arrived.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_a = str(uuid.uuid4())
+    plan_b = str(uuid.uuid4())
+
+    async def stub_lookup(plan_id, task_id, session_factory=None):
+        if plan_id == plan_a:
+            return "lbl-a"
+        if plan_id == plan_b:
+            return "lbl-b"
+        return None
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_lookup)
+
+    app = _build_app()
+    rec_b = _make_record(plan_id=plan_b)          # non-matching (lbl-b)
+    rec_ownerless = _make_record()                  # no plan_id, no task_id
+    rec_a = _make_record(plan_id=plan_a)           # matching (lbl-a)
+    rec_sentinel = _make_record(plan_id=plan_a)    # second matching (sentinel)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?created_by=lbl-a"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec_b)
+            _broadcast_local(rec_ownerless)
+            _broadcast_local(rec_a)
+            _broadcast_local(rec_sentinel)
+
+            frame1 = ws.receive_json()
+            frame2 = ws.receive_json()
+
+    assert frame1["type"] == "event"
+    assert frame1["plan_id"] == plan_a
+    assert frame2["type"] == "event"
+    assert frame2["plan_id"] == plan_a
+
+
+def test_created_by_lookup_is_cached(monkeypatch) -> None:
+    """Two events for the same plan_id trigger exactly one
+    ``_lookup_created_by`` call — the per-connection cache absorbs the
+    second (ADR-0068).
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_a = str(uuid.uuid4())
+    call_count = 0
+
+    async def stub_lookup(plan_id, task_id, session_factory=None):
+        nonlocal call_count
+        call_count += 1
+        return "lbl-a" if plan_id == plan_a else None
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_lookup)
+
+    app = _build_app()
+    rec1 = _make_record(plan_id=plan_a)
+    rec2 = _make_record(plan_id=plan_a)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?created_by=lbl-a"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec1)
+            _broadcast_local(rec2)
+
+            frame1 = ws.receive_json()
+            frame2 = ws.receive_json()
+
+    assert frame1["type"] == "event"
+    assert frame2["type"] == "event"
+    assert call_count == 1  # second event hit the cache
+
+
+def test_lookup_exception_drops_event_socket_survives(monkeypatch) -> None:
+    """A ``_lookup_created_by`` exception drops the event and logs, but
+    the socket stays alive — a subsequent matching event still arrives
+    (ADR-0068 belt-and-braces requirement).
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_bad = str(uuid.uuid4())
+    plan_good = str(uuid.uuid4())
+
+    async def stub_lookup(plan_id, task_id, session_factory=None):
+        if plan_id == plan_bad:
+            raise RuntimeError("simulated DB failure")
+        return "lbl-a"
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_lookup)
+
+    app = _build_app()
+    rec_bad = _make_record(plan_id=plan_bad)    # lookup raises → drop
+    rec_good = _make_record(plan_id=plan_good)  # lookup succeeds → send
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?created_by=lbl-a"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec_bad)
+            _broadcast_local(rec_good)
+
+            frame = ws.receive_json()
+
+    assert frame["type"] == "event"
+    assert frame["plan_id"] == plan_good

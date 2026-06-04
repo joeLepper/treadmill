@@ -12,7 +12,7 @@ Wire shape — three message ``type``s the client must handle:
   * ``hello``     — sent once on connect; carries server ``ts``.
   * ``event``     — one per published event row. Carries the small set
                     of fields the dashboard cares about (``entity_type``,
-                    ``action``, ``task_id``, ``ts``, ``id``).
+                    ``action``, ``task_id``, ``plan_id``, ``ts``, ``id``).
   * ``heartbeat`` — every ``heartbeat_interval`` seconds. Lets a client
                     detect a dead socket faster than TCP keepalive does.
 
@@ -24,16 +24,27 @@ let one slow consumer wedge the publish loop's in-process queue.
 The heartbeat interval is configurable so tests don't have to wait 25 s
 to observe one. Production callers (the auto-discovery loop) get the
 default.
+
+Optional ``?created_by=<label>`` filter (ADR-0068): when set, only event
+frames whose owning plan or task matches the label are forwarded.
+Ownership is resolved via ``plans.created_by`` (preferred) or
+``tasks.created_by``; ownerless events are dropped on filtered
+connections. Heartbeat and hello frames bypass the filter entirely.
+Resolution is cached per-connection so each plan/task is queried at most
+once per socket lifetime.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from treadmill_api.eventbus import subscribe_local, unsubscribe_local
 
@@ -69,6 +80,7 @@ def _event_frame(record: dict[str, Any]) -> dict[str, Any]:
         "entity_type": record.get("entity_type"),
         "action": record.get("action"),
         "task_id": record.get("task_id"),
+        "plan_id": record.get("plan_id"),
         "ts": _now_iso(),
     }
 
@@ -93,6 +105,42 @@ async def _safe_send(websocket: WebSocket, frame: dict[str, Any]) -> bool:
         return False
 
 
+async def _lookup_created_by(
+    plan_id: str | None,
+    task_id: str | None,
+    session_factory: Any = None,
+) -> str | None:
+    """Look up the created_by label for an event record.
+
+    Prefers ``plan_id`` → ``plans.created_by``; falls back to
+    ``task_id`` → ``tasks.created_by``. Returns ``None`` when neither
+    resolves or when no session factory is available (e.g. no
+    ``DATABASE_URL`` at startup).
+
+    Tests monkeypatch this function with a stub mapping to avoid DB
+    access — the caller in ``events_socket`` always calls the module-
+    level name so the patch is effective.
+    """
+    if plan_id is None and task_id is None:
+        return None
+    if session_factory is None:
+        return None
+    async with session_factory() as session:
+        if plan_id is not None:
+            result = await session.execute(
+                text("SELECT created_by FROM plans WHERE id = :id"),
+                {"id": uuid.UUID(plan_id)},
+            )
+            row = result.fetchone()
+            return row[0] if row else None
+        result = await session.execute(
+            text("SELECT created_by FROM tasks WHERE id = :id"),
+            {"id": uuid.UUID(task_id)},
+        )
+        row = result.fetchone()
+        return row[0] if row else None
+
+
 @router.websocket("/ws/events")
 async def events_socket(
     websocket: WebSocket,
@@ -102,6 +150,16 @@ async def events_socket(
         description=(
             "Seconds between heartbeat frames. Defaults to 25; tests can "
             "shrink it to observe the cadence without long waits."
+        ),
+    ),
+    created_by: str | None = Query(
+        None,
+        max_length=255,
+        description=(
+            "When set, only event frames whose owning plan or task "
+            "carries this created_by label are forwarded. Heartbeat and "
+            "hello frames are unaffected. Events with no resolvable "
+            "owner are dropped on filtered connections."
         ),
     ),
 ) -> None:
@@ -127,6 +185,22 @@ async def events_socket(
         unsubscribe_local(queue)
         await _safe_close(websocket)
         return
+
+    # Build a session factory for owner lookups (used only when
+    # ``created_by`` is active). Falls back to None when the engine
+    # wasn't wired (no DATABASE_URL), in which case ``_lookup_created_by``
+    # returns None and every event is ownerless-dropped on a filtered
+    # connection.
+    _engine = getattr(websocket.app.state, "engine", None)
+    _session_factory = (
+        async_sessionmaker(_engine, expire_on_commit=False)
+        if _engine is not None
+        else None
+    )
+    # Per-connection owner cache: ``"plan:<id>"`` / ``"task:<id>"`` → label.
+    # Populated on first lookup; never evicted (connections are
+    # short-lived relative to plan/task lifetimes).
+    _owner_cache: dict[str, str | None] = {}
 
     # ``receive`` doubles as a disconnect detector — the dashboard never
     # sends client→server frames, so any completion of this task is our
@@ -154,6 +228,33 @@ async def events_socket(
             if event_task in done:
                 record = event_task.result()
                 event_task = asyncio.create_task(queue.get())
+
+                if created_by is not None:
+                    plan_id = record.get("plan_id")
+                    task_id = record.get("task_id")
+                    if plan_id:
+                        cache_key = f"plan:{plan_id}"
+                    elif task_id:
+                        cache_key = f"task:{task_id}"
+                    else:
+                        # Ownerless event — drop on filtered connections.
+                        continue
+
+                    if cache_key not in _owner_cache:
+                        try:
+                            _owner_cache[cache_key] = await _lookup_created_by(
+                                plan_id, task_id, _session_factory
+                            )
+                        except Exception:
+                            logger.exception(
+                                "created_by lookup failed for %s; dropping event",
+                                cache_key,
+                            )
+                            continue  # drop; socket stays alive
+
+                    if _owner_cache.get(cache_key) != created_by:
+                        continue  # label mismatch → drop
+
                 if not await _safe_send(websocket, _event_frame(record)):
                     break
 
