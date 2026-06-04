@@ -6,6 +6,7 @@ package registers every model on ``Base.metadata`` so alembic
 schema.
 """
 
+from treadmill_api.models.architect_gold import ArchitectGoldRow
 from treadmill_api.models.event import Event
 from treadmill_api.models.onboarding import (
     RepoConfigRow,
@@ -34,6 +35,7 @@ from treadmill_api.models.schedule import Schedule
 from treadmill_api.models.workflow_dispatch_dedup import WorkflowDispatchDedup
 
 __all__ = [
+    "ArchitectGoldRow",
     "Event",
     "EventTrigger",
     "Hook",
