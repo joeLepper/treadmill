@@ -1,6 +1,6 @@
 # Plan: ADR-0065 — Real-Docker autoscaler smoke gate (implementation)
 
-- **Status:** drafting
+- **Status:** completed
 - **Date:** 2026-06-02
 - **Related ADRs:** ADR-0065 (the decision), ADR-0064 (the network
   topology the smoke validates), ADR-0060 (the original egress

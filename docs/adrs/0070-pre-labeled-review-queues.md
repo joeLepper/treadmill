@@ -1,6 +1,6 @@
 # ADR-0070: Pre-labeled review queues — generalized cybernetic label surface
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-06-04
 - **Related:**
   - ADR-0052 (judgment-role prompts from human-labeled corpora) — the corpus shape this surfaces

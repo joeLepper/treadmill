@@ -1,6 +1,6 @@
 # Plan: ADR-0063 — Lazy-reconciliation cache for webhook FK resolution (implementation)
 
-- **Status:** active
+- **Status:** completed
 - **Date:** 2026-05-29
 - **Related ADRs:** ADR-0063 (the decision), ADR-0007 (existing
   cache-then-heal we generalize), ADR-0049 (App-identity ingress

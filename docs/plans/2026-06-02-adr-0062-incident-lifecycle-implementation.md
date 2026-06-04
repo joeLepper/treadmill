@@ -1,6 +1,6 @@
 # Plan: ADR-0062 — operator escalations as incidents with MTTR + notification fan-out (implementation)
 
-- **Status:** drafting
+- **Status:** completed
 - **Date:** 2026-06-02
 - **Related ADRs:** ADR-0062 (the decision, amended 2026-05-29 to
   cover the terminal-step-failure producer), ADR-0048 (existing
