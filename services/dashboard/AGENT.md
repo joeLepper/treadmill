@@ -19,7 +19,16 @@ src/
                PageLayout, Lifecycle, Metric, ConnectionAffordance, etc.
   api/         types.ts (canonical shapes), mock.ts (in-process fixture),
                queries.ts (TanStack Query hooks), sim.ts (freshness sim)
-  pages/       Overview.tsx (the / route), TaskDetail.tsx (/tasks/:id)
+  review/      ADR-0070 pre-labeled review-queue substrate:
+               types.ts (ReviewRow / ReviewKindViewer / ReviewLabelInput),
+               useReviewKeyboard.ts (closed shortcut set), ConfidenceStrip.tsx
+               (per-kind bucket + accuracy strip), FlipThroughLayout.tsx
+               (the one-row-at-a-time chrome), registry.ts (auto-discovers
+               per-kind viewers via import.meta.glob), viewers/ (per-kind
+               viewers, one .tsx per kind; substep 1.3 ships zero viewers).
+  pages/       Overview.tsx (the / route), TaskDetail.tsx (/tasks/:id),
+               TriageLabeling.tsx (the ADR-0061 precedent the review/
+               chrome generalizes; not yet refactored onto it).
   index.css    Tailwind v4 entry + tokens.css import
   main.tsx     QueryClientProvider + BrowserRouter shell
   App.tsx      Routes
@@ -104,6 +113,30 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+- **ADR-0070 substep 1.3 — shared review-queue chrome** — new
+  `src/review/` substrate that generalizes the `TriageLabeling`
+  flip-through page into a reusable surface every "operator
+  sanity-checks LLM" queue can ride on. `types.ts` defines the
+  `ReviewRow<TCandidate, TLlm>` shape plus the
+  `ReviewLabelInput` write contract. `useReviewKeyboard.ts` is the
+  closed shortcut set (`space`/`x`/`s`/`?`/`j`/`k`) with the
+  `<input>`/`<textarea>`/`[contenteditable]` focus guard so typing into
+  the notes field doesn't trigger shortcuts. `ConfidenceStrip.tsx` is
+  the pure-presentation header strip (high/medium/low buckets + optional
+  per-kind accuracy pill). `FlipThroughLayout.tsx` is the chrome itself
+  — it wraps `PageLayout`, owns the keyboard handler, dispatches a
+  `review:request-override-focus` custom event on `x` so per-kind
+  viewers can focus their override-reason field, and renders the
+  per-kind body via the registry-selected viewer. `registry.ts`
+  auto-discovers viewers via `import.meta.glob('./viewers/*.tsx', {
+  eager: true })`; substep 1.3 ships zero real viewers (just
+  `viewers/_README.txt` documenting the contract), so every lookup
+  returns null until substep 2 lands `architect-gold`. None of the
+  existing pages (`TriageLabeling.tsx` included) consume this substrate
+  yet — the refactor lands in substep 2's per-kind work. Test coverage
+  pins the shortcut mappings, the input-focus guard, the disabled-state,
+  the empty-queue copy, the space-to-accept one-keystroke path, the
+  accuracy-pill rendering, and the empty-registry invariant.
 - **UI-fix — triage finding `71ed396b`** — Wired the `open·pr` Button in `ActionBar` (`src/pages/TaskDetail.tsx`) to its missing `onClick`. It now opens `https://github.com/{task.repo}/pull/{task.pr.pr_number}` in a new tab via `window.open(..., '_blank')`, satisfying DESIGN.md Page 2's required "Open PR on GitHub (deeplink)" affordance — previously the button rendered with the `ExternalLink` icon but no navigation, so the operator could see the affordance but not use it. Regression guarded by a new `ActionBar` test in `src/pages/TaskDetail.test.tsx` that spies on `window.open` and asserts the URL/target.
 - **UI-fix — triage finding `0b1dbe45`** — `deriveLifecycleIdx` in `src/design/Lifecycle.tsx` was falling through to the default `return 0` (REGISTERED) for composite `derived_status` strings such as `pr_opened (wf-conflict: failed)`, because none of the enumerated branches matched. The stepper therefore highlighted step 01 amber for tasks that obviously had an open PR and an active workflow run. Added a branch that maps any status starting with `pr_opened` or containing the `(wf-` workflow-run suffix to lifecycle index 1 (EXECUTING) before the final fallback. Regression pinned by `src/design/Lifecycle.test.tsx`.
 - **UI-fix — triage finding `7e4ab8f6` (manual ship)** — Added `aria-label` to each `ack` Button in the Overview escalation strip (`src/pages/Overview.tsx`), formatted as `Acknowledge {esc.title} escalation`. Threaded `aria-label` through the `Button` design primitive (`src/design/Button.tsx`) since it didn't previously forward arbitrary HTML attributes. Satisfies WCAG 1.3.1 by making each ack button's task relationship determinable to assistive tech (previously all 49 buttons read as bare "ack"). Authored by the v1.3 `role-ui-triage` worker (task `d3ac6992`) but the cybernetic loop's Playwright-validation gate proved unsatisfiable pre-merge — gate probed the deployed bundle at `http://treadmill-dashboard:80/`, which still had the bug — so the task was cancelled and the diff applied manually. See the follow-up ADR-0061 amendment for the gate-strategy fix.
