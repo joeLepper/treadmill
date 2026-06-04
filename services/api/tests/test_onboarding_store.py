@@ -50,6 +50,11 @@ def test_onboarding_models_and_store_shape() -> None:
     assert RepoContextDocRow.__tablename__ == "repo_context_docs"
     assert RepoWorkerBinaryRow.__tablename__ == "repo_worker_binaries"
 
+    # ADR-0066: fallback column is present on the ORM model.
+    assert hasattr(RepoConfigRow, "claude_account_fallback"), (
+        "RepoConfigRow missing claude_account_fallback column"
+    )
+
     for method in (
         "upsert_repo_config",
         "get_repo_config",
