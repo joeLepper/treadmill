@@ -7,7 +7,7 @@
  * removed in B10; these tests pin the removal so a future revert doesn't
  * silently reintroduce an action with no backing endpoint.
  */
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ActionBar } from './TaskDetail';
@@ -59,5 +59,20 @@ describe('ActionBar', () => {
     const task = makeTask({ escalated: true });
     render(<ActionBar task={task} onCancel={vi.fn()} onAck={vi.fn()} />);
     expect(screen.getByText(/ack·escalation/)).toBeInTheDocument();
+  });
+
+  it('open·pr deeplinks to the GitHub PR URL (triage finding 71ed396b)', () => {
+    const task = makeTask({
+      repo: 'osmo/web',
+      pr: { ...basePR, pr_number: 980 },
+    });
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(<ActionBar task={task} onCancel={vi.fn()} onAck={vi.fn()} />);
+    fireEvent.click(screen.getByText(/open·pr/));
+    expect(openSpy).toHaveBeenCalledWith(
+      'https://github.com/osmo/web/pull/980',
+      '_blank',
+    );
+    openSpy.mockRestore();
   });
 });

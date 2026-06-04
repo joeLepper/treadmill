@@ -1042,7 +1042,16 @@ export function ActionBar({
         </Button>
       )}
       {hasPR && (
-        <Button size="md" iconLeft={<ExternalLink size={12} />}>
+        <Button
+          size="md"
+          iconLeft={<ExternalLink size={12} />}
+          onClick={() =>
+            window.open(
+              'https://github.com/' + task.repo + '/pull/' + task.pr!.pr_number,
+              '_blank',
+            )
+          }
+        >
           open·pr
         </Button>
       )}
