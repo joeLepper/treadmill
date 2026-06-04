@@ -416,3 +416,114 @@ def test_fetch_claude_credentials_raises_on_malformed_payload(
 
     with pytest.raises(StartupAuthError, match="malformed|missing field"):
         startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+
+
+# ── ADR-0066: fallback parsing on the resolver response ─────────────────────
+
+
+def test_fetch_claude_credentials_parses_nested_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0066: an optional nested ``fallback: {account, type, token}``
+    on the resolver response is attached to ``ClaudeCreds.fallback``.
+    The nested credential is itself a ``ClaudeCreds`` with its own
+    ``fallback=None`` (no chaining)."""
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        return _FakeResp({
+            "repo": "o/r",
+            "account": "primary", "type": "oauth", "token": "tok-primary",
+            "fallback": {
+                "account": "secondary", "type": "api_key", "token": "sk-fallback",
+            },
+        })
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    creds = startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+    assert creds is not None
+    assert creds.account == "primary"
+    assert creds.token == "tok-primary"
+    assert creds.fallback is not None
+    assert creds.fallback.account == "secondary"
+    assert creds.fallback.type == "api_key"
+    assert creds.fallback.token == "sk-fallback"
+    # The nested credential never chains further.
+    assert creds.fallback.fallback is None
+
+
+def test_fetch_claude_credentials_returns_none_fallback_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Response without a ``fallback`` block is ADR-0055 behaviour:
+    ``creds.fallback is None`` (no usage-limit retry possible)."""
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        return _FakeResp({
+            "repo": "o/r",
+            "account": "primary", "type": "oauth", "token": "tok-primary",
+        })
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    creds = startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+    assert creds is not None
+    assert creds.fallback is None
+
+
+def test_fetch_claude_credentials_tolerates_null_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit ``fallback: null`` on the response is equivalent to omission:
+    ``creds.fallback is None``."""
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        return _FakeResp({
+            "repo": "o/r",
+            "account": "primary", "type": "oauth", "token": "tok-primary",
+            "fallback": None,
+        })
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+
+    creds = startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+    assert creds is not None
+    assert creds.fallback is None
+
+
+def test_fetch_claude_credentials_fallback_log_never_includes_token(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ADR-0066 + ADR-0055: the resolved-credential log line carries
+    ``account`` / ``type`` (and the fallback's same fields when present)
+    but never the token. Protects against a future log-format regression
+    that would leak the fallback's secret into stdout / Grafana."""
+    import logging as _logging
+
+    settings = _settings()
+
+    def fake_urlopen(req, timeout):
+        return _FakeResp({
+            "repo": "o/r",
+            "account": "primary", "type": "oauth", "token": "tok-PRIMARY-SECRET",
+            "fallback": {
+                "account": "secondary", "type": "api_key",
+                "token": "sk-FALLBACK-SECRET",
+            },
+        })
+
+    monkeypatch.setattr(startup_auth.urllib.request, "urlopen", fake_urlopen)
+    with caplog.at_level(_logging.INFO, logger="treadmill.agent.startup_auth"):
+        startup_auth.fetch_claude_credentials(settings=settings, repo="o/r")
+
+    rendered = "\n".join(r.getMessage() for r in caplog.records)
+    assert "tok-PRIMARY-SECRET" not in rendered
+    assert "sk-FALLBACK-SECRET" not in rendered
+    # The account identifiers ARE present so the operator can confirm
+    # the resolver populated the fallback.
+    assert "primary" in rendered
+    assert "secondary" in rendered

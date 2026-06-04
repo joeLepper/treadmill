@@ -45,17 +45,23 @@ class StartupAuthError(RuntimeError):
 
 @dataclass(frozen=True)
 class ClaudeCreds:
-    """Resolved Claude credential for a step (ADR-0055).
+    """Resolved Claude credential for a step (ADR-0055, ADR-0066).
 
     Returned by :func:`fetch_claude_credentials`; consumed by
     :func:`treadmill_agent.claude_code.build_claude_env` to set
     ``CLAUDE_CODE_OAUTH_TOKEN`` (``oauth``) or ``ANTHROPIC_API_KEY``
     (``api_key``) on the Claude Code subprocess env.
+
+    ``fallback`` (ADR-0066) is the operator-configured secondary account
+    the worker swaps in when the primary's Claude Code subprocess exits
+    with a usage-limit signature. ``None`` when the repo did not opt in
+    or the resolver could not produce a fallback credential.
     """
 
     account: str
     type: Literal["oauth", "api_key"]
     token: str
+    fallback: "ClaudeCreds | None" = None
 
 
 def fetch_claude_credentials(
@@ -95,20 +101,43 @@ def fetch_claude_credentials(
             f"failed to fetch claude credentials via {url}: {exc}"
         ) from exc
     try:
+        # ADR-0066: an optional nested ``fallback`` block on the response
+        # carries the operator's secondary account credential. Build the
+        # nested ``ClaudeCreds`` (without further nesting) when present.
+        fallback_raw = payload.get("fallback")
+        fallback_creds: ClaudeCreds | None = None
+        if fallback_raw is not None:
+            fallback_creds = ClaudeCreds(
+                account=fallback_raw["account"],
+                type=fallback_raw["type"],
+                token=fallback_raw["token"],
+                fallback=None,
+            )
         creds = ClaudeCreds(
             account=payload["account"],
             type=payload["type"],
             token=payload["token"],
+            fallback=fallback_creds,
         )
     except (KeyError, TypeError) as exc:
         raise StartupAuthError(
             f"claude credential response malformed: missing field {exc}"
         ) from exc
     # Never log the token; account+type identifies the routing decision.
-    logger.info(
-        "fetched claude credential: account=%s type=%s repo=%s",
-        creds.account, creds.type, repo,
-    )
+    # ADR-0066: log presence + account/type of the fallback (but not its
+    # token) so the operator can confirm the resolver populated it.
+    if creds.fallback is not None:
+        logger.info(
+            "fetched claude credential: account=%s type=%s repo=%s "
+            "fallback_account=%s fallback_type=%s",
+            creds.account, creds.type, repo,
+            creds.fallback.account, creds.fallback.type,
+        )
+    else:
+        logger.info(
+            "fetched claude credential: account=%s type=%s repo=%s",
+            creds.account, creds.type, repo,
+        )
     return creds
 
 

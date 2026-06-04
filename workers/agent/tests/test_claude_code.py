@@ -671,3 +671,246 @@ def test_run_claude_code_token_usage_none_for_plain_text_stub(
 
     assert result.token_usage is None
     assert result.model is None
+
+
+# ── ADR-0066: usage-limit fallback ──────────────────────────────────────────
+
+
+# Captured strings from ``@anthropic-ai/claude-code@2.1.138`` for an
+# exhausted OAuth subscription in ``--print --output-format json`` mode.
+# The CLI surfaces the message in the JSON envelope's ``result`` field
+# (with ``is_error: true``) and / or on stderr; the matcher must catch
+# both shapes. These samples are pinned so a future Claude Code bump
+# that changes the wording trips the test before it silently breaks the
+# fallback path in prod.
+_USAGE_LIMIT_JSON_RESULT = (
+    '{"type": "result", "is_error": true, "result": '
+    '"Claude AI usage limit reached. Your limit resets at 2026-06-04T20:00:00Z."}'
+)
+_USAGE_LIMIT_STDERR_RATE = (
+    "Error: rate_limit_error: This account is rate limited. Please try again later.\n"
+)
+_USAGE_LIMIT_STDERR_OVERLOADED = "API Error: 429 overloaded_error\n"
+
+
+def test_looks_like_usage_limit_matches_captured_samples() -> None:
+    """Pin the captured-sample strings against the matcher. If Claude
+    Code's wording for an exhausted OAuth subscription changes between
+    image bumps, this test fires before the fallback path goes silent."""
+    assert claude_code.looks_like_usage_limit(_USAGE_LIMIT_JSON_RESULT, "")
+    assert claude_code.looks_like_usage_limit("", _USAGE_LIMIT_STDERR_RATE)
+    assert claude_code.looks_like_usage_limit("", _USAGE_LIMIT_STDERR_OVERLOADED)
+    # Case-insensitive: USAGE LIMIT must match too.
+    assert claude_code.looks_like_usage_limit("USAGE LIMIT reached", "")
+    # ``quota`` markers, English ``limit reached`` and the standalone
+    # ``429`` token all fire on their own.
+    assert claude_code.looks_like_usage_limit("monthly quota exhausted", "")
+    assert claude_code.looks_like_usage_limit("limit reached for today", "")
+    assert claude_code.looks_like_usage_limit("HTTP 429 Too Many Requests", "")
+
+
+def test_looks_like_usage_limit_ignores_ordinary_failures() -> None:
+    """Ordinary, non-quota failure modes must NOT fire the matcher or
+    the fallback will silently spend the secondary subscription on
+    unrelated errors (transport, auth, invalid args, syntax errors)."""
+    assert not claude_code.looks_like_usage_limit("", "Error: connection refused")
+    assert not claude_code.looks_like_usage_limit("", "Authentication failed: invalid token")
+    assert not claude_code.looks_like_usage_limit("", "Error: unknown flag --frob")
+    assert not claude_code.looks_like_usage_limit("syntax error", "")
+    assert not claude_code.looks_like_usage_limit("", "")
+    # ``4290 ms`` must not look like a 429.
+    assert not claude_code.looks_like_usage_limit("", "duration: 4290 ms")
+
+
+def _creds(account: str = "primary", *, fallback: object = None) -> object:
+    """Build a real ``ClaudeCreds`` (used at the ContextVar) so we exercise
+    the production code path, not a mock."""
+    from treadmill_agent.startup_auth import ClaudeCreds
+    return ClaudeCreds(
+        account=account, type="oauth", token=f"tkn-{account}",
+        fallback=fallback,  # type: ignore[arg-type]
+    )
+
+
+def test_usage_limit_failure_with_fallback_retries_with_fallback_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0066: when the primary's run exits non-zero with a usage-limit
+    signature AND the resolved ``ClaudeCreds`` carry a fallback, the
+    wrapper re-runs the same cmd once under the fallback's env. The stub
+    logs the token env it observed plus the invocation number; the test
+    asserts invocation 1 saw the primary token, invocation 2 saw the
+    fallback, and that ``record_claude_fallback`` was emitted."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    log = tmp_path / "calls.log"
+    stub = tmp_path / "fake-claude"
+    # On call 1: usage-limit message + exit 1. On call 2: success JSON
+    # envelope (so the wrapper goes down the normal happy path).
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'TOKEN_SEEN="${{CLAUDE_CODE_OAUTH_TOKEN:-NONE}}"\n'
+        f'COUNT=$(cat "{log}" 2>/dev/null | wc -l)\n'
+        f'echo "call=$((COUNT+1)) token=$TOKEN_SEEN" >> "{log}"\n'
+        'if [ "$COUNT" = "0" ]; then\n'
+        '  echo "Claude AI usage limit reached. Your limit resets at 2026-06-04T20:00:00Z." >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        '''printf '%s\\n' '{"type":"result","result":"recovered","usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'\n'''
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    fallback_creds = _creds("secondary")
+    primary = _creds("primary", fallback=fallback_creds)
+    token = claude_code.set_claude_creds(primary)
+    try:
+        from unittest.mock import patch
+        with patch(
+            "treadmill_agent.claude_code.observability.record_claude_fallback"
+        ) as mock_fallback:
+            result = claude_code.run_claude_code(
+                repo_dir=repo_dir, role=_role(),
+                task_title="t", task_description=None, plan_intent=None,
+                log_context={"repo": "o/r"},
+            )
+    finally:
+        claude_code.reset_claude_creds(token)
+
+    # The second run's output became the final result.
+    assert result.summary == "recovered"
+
+    # Two invocations, primary first, fallback second.
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2, f"expected 2 invocations, saw {lines!r}"
+    assert "call=1 token=tkn-primary" in lines[0]
+    assert "call=2 token=tkn-secondary" in lines[1]
+
+    # The OTel counter fired once with the account transition recorded.
+    mock_fallback.assert_called_once()
+    kwargs = mock_fallback.call_args.kwargs
+    assert kwargs["from_account"] == "primary"
+    assert kwargs["to_account"] == "secondary"
+    assert kwargs["repo"] == "o/r"
+    assert kwargs["role"] == "role-author"
+
+
+def test_usage_limit_failure_without_fallback_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same usage-limit failure, but no fallback configured on the
+    resolved creds: the wrapper runs exactly once and raises
+    ``CodeAuthorError`` so the runner can map this to ``step.failed``."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    log = tmp_path / "calls.log"
+    stub = tmp_path / "fake-claude"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "called" >> "{log}"\n'
+        'echo "rate_limit_error: please try again later" >&2\n'
+        'exit 1\n'
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    primary = _creds("primary", fallback=None)
+    token = claude_code.set_claude_creds(primary)
+    try:
+        from unittest.mock import patch
+        with patch(
+            "treadmill_agent.claude_code.observability.record_claude_fallback"
+        ) as mock_fallback:
+            with pytest.raises(claude_code.CodeAuthorError, match="exited 1"):
+                claude_code.run_claude_code(
+                    repo_dir=repo_dir, role=_role(),
+                    task_title="t", task_description=None, plan_intent=None,
+                )
+    finally:
+        claude_code.reset_claude_creds(token)
+
+    assert log.read_text().splitlines() == ["called"]
+    mock_fallback.assert_not_called()
+
+
+def test_non_usage_limit_failure_with_fallback_does_not_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-zero exit whose output does NOT match the usage-limit
+    matcher must NOT trigger fallback even when one is configured —
+    fallback is *only* the usage-limit escape hatch, not a generic
+    retry. The runner sees the raw ``CodeAuthorError``."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    log = tmp_path / "calls.log"
+    stub = tmp_path / "fake-claude"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "called" >> "{log}"\n'
+        'echo "Error: connection refused" >&2\n'
+        'exit 2\n'
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    fallback_creds = _creds("secondary")
+    primary = _creds("primary", fallback=fallback_creds)
+    token = claude_code.set_claude_creds(primary)
+    try:
+        from unittest.mock import patch
+        with patch(
+            "treadmill_agent.claude_code.observability.record_claude_fallback"
+        ) as mock_fallback:
+            with pytest.raises(claude_code.CodeAuthorError, match="exited 2"):
+                claude_code.run_claude_code(
+                    repo_dir=repo_dir, role=_role(),
+                    task_title="t", task_description=None, plan_intent=None,
+                )
+    finally:
+        claude_code.reset_claude_creds(token)
+
+    assert log.read_text().splitlines() == ["called"]
+    mock_fallback.assert_not_called()
+
+
+def test_run_claude_usage_limit_retries_with_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lightweight ``run_claude`` wrapper shares the fallback retry
+    with ``run_claude_code`` (both routed through ``_run_claude_with_fallback``)."""
+    log = tmp_path / "calls.log"
+    stub = tmp_path / "fake-claude"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'TOKEN_SEEN="${{CLAUDE_CODE_OAUTH_TOKEN:-NONE}}"\n'
+        f'COUNT=$(cat "{log}" 2>/dev/null | wc -l)\n'
+        f'echo "call=$((COUNT+1)) token=$TOKEN_SEEN" >> "{log}"\n'
+        'if [ "$COUNT" = "0" ]; then\n'
+        '  echo "usage limit reached" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'echo "ok"\n'
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BINARY", str(stub))
+
+    fallback_creds = _creds("secondary")
+    primary = _creds("primary", fallback=fallback_creds)
+    token = claude_code.set_claude_creds(primary)
+    try:
+        from unittest.mock import patch
+        with patch(
+            "treadmill_agent.claude_code.observability.record_claude_fallback"
+        ) as mock_fallback:
+            out = claude_code.run_claude(
+                prompt="x", model="claude-haiku-4-5-20251001",
+            )
+    finally:
+        claude_code.reset_claude_creds(token)
+
+    assert out.strip() == "ok"
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2
+    assert "token=tkn-primary" in lines[0]
+    assert "token=tkn-secondary" in lines[1]
+    mock_fallback.assert_called_once()

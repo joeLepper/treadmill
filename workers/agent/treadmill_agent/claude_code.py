@@ -21,6 +21,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -123,6 +124,170 @@ def build_claude_env(
     return env
 
 
+# ADR-0066 — usage-limit signatures emitted by Claude Code
+# (``@anthropic-ai/claude-code@2.1.138``) when the OAuth subscription is
+# exhausted in ``--print --output-format json`` mode. The message lands in
+# the JSON envelope's ``result`` string (with ``is_error: true``) and / or
+# on stderr. The matcher is intentionally conservative: it only fires on
+# tokens that imply a quota / throttling condition, not on generic auth or
+# transport failures, so spurious fallback never silently bills the
+# secondary account.
+_USAGE_LIMIT_SIGNATURES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"usage[\s_-]?limit", re.IGNORECASE),
+    # ``rate limit`` (English prose) and ``rate_limit_error`` (Anthropic
+    # API error code) both fire on the same stem.
+    re.compile(r"rate[\s_-]?limit", re.IGNORECASE),
+    re.compile(r"overloaded", re.IGNORECASE),
+    # Quota / limit-reached / window-reset phrasings.
+    re.compile(r"quota", re.IGNORECASE),
+    re.compile(r"limit reached", re.IGNORECASE),
+    re.compile(r"resets? at", re.IGNORECASE),
+    # ``429`` as a standalone token — the matcher requires word
+    # boundaries so an unrelated ``"4290 ms"`` does not trip it.
+    re.compile(r"\b429\b"),
+)
+
+
+def looks_like_usage_limit(stdout: str, stderr: str) -> bool:
+    """Return ``True`` when the subprocess output matches a usage-limit
+    signature (ADR-0066).
+
+    Matches case-insensitively against the concatenation of ``stdout`` +
+    ``stderr`` so a Claude Code JSON envelope carrying the message in its
+    ``result`` field is caught the same way as a stderr-only emission.
+    The matcher is deliberately narrow: it must not fire on ordinary
+    transport / auth / invalid-arg failures or the fallback will silently
+    spend the secondary subscription whenever Claude has any other
+    trouble. When the Claude Code version is bumped the captured-sample
+    tests pin the strings against the new release.
+    """
+    combined = f"{stdout}\n{stderr}"
+    return any(pattern.search(combined) for pattern in _USAGE_LIMIT_SIGNATURES)
+
+
+def _run_claude_subprocess(
+    cmd: list[str],
+    *,
+    cwd: str | None = None,
+    timeout: int,
+    log_extra: dict[str, Any] | None = None,
+) -> tuple[int, str, str]:
+    """Run ``cmd`` once and return ``(returncode, stdout_text, stderr_text)``.
+
+    Captures stdout / stderr line-by-line via the same ``bufsize=1`` +
+    two-pump-thread pattern both ``run_claude`` and ``run_claude_code``
+    have used since ADR-0020 phase 2; the env is whatever the caller has
+    already constructed via :func:`build_claude_env`. On
+    ``TimeoutExpired`` the process is killed and the reader threads are
+    joined before re-raising so no buffered output is dropped and no
+    daemon thread leaks past the call.
+    """
+    extra = dict(log_extra or {})
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1,
+        env=build_claude_env(os.environ, _CURRENT_CREDS.get()),
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_thread = threading.Thread(
+        target=_pump_stream,
+        args=(proc.stdout, stdout_lines, logging.INFO, "stdout", extra),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_pump_stream,
+        args=(proc.stderr, stderr_lines, logging.WARNING, "stderr", extra),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        raise
+    stdout_thread.join()
+    stderr_thread.join()
+    return returncode, "".join(stdout_lines), "".join(stderr_lines)
+
+
+def _run_claude_with_fallback(
+    cmd: list[str],
+    *,
+    cwd: str | None = None,
+    timeout: int,
+    log_extra: dict[str, Any] | None = None,
+    fallback_log_context: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """Run ``cmd`` once; on a usage-limit failure with a configured
+    fallback, re-run it once under the fallback's env and return the
+    final outcome (ADR-0066).
+
+    The first attempt uses whatever credential :data:`_CURRENT_CREDS`
+    carries; ``_run_claude_subprocess`` reads that ContextVar directly.
+    When the result is a non-zero exit *and* :func:`looks_like_usage_limit`
+    fires *and* ``creds.fallback is not None``, we rebind the ContextVar
+    to ``creds.fallback`` for the duration of the second run only, emit a
+    structured WARNING, and call
+    :func:`observability.record_claude_fallback`. The fallback retry
+    fires exactly once — there's no chain — so if it too hits a usage
+    limit the caller observes that final failure and the step fails.
+
+    ``fallback_log_context`` is optional ``{repo, role}`` for the OTel
+    counter dimensions; it does NOT carry tokens.
+    """
+    returncode, stdout_text, stderr_text = _run_claude_subprocess(
+        cmd, cwd=cwd, timeout=timeout, log_extra=log_extra,
+    )
+    if returncode == 0:
+        return returncode, stdout_text, stderr_text
+
+    creds = _CURRENT_CREDS.get()
+    if creds is None or creds.fallback is None:
+        return returncode, stdout_text, stderr_text
+    if not looks_like_usage_limit(stdout_text, stderr_text):
+        return returncode, stdout_text, stderr_text
+
+    # Usage-limit hit and a fallback is configured — re-run once with
+    # the fallback creds bound. Log only the account names; never the
+    # token. The ContextVar bind is scoped to the second subprocess
+    # and reset immediately after so the calling context is unaffected.
+    extra = dict(log_extra or {})
+    logger.warning(
+        "claude credential fallback fired: from_account=%s to_account=%s",
+        creds.account, creds.fallback.account,
+        extra=extra,
+    )
+    fctx = fallback_log_context or {}
+    try:
+        observability.record_claude_fallback(
+            from_account=creds.account,
+            to_account=creds.fallback.account,
+            repo=fctx.get("repo", ""),
+            role=fctx.get("role", ""),
+        )
+    except Exception:
+        logger.debug(
+            "claude fallback metric emission failed (non-fatal)",
+            extra=extra,
+        )
+
+    token = _CURRENT_CREDS.set(creds.fallback)
+    try:
+        return _run_claude_subprocess(
+            cmd, cwd=cwd, timeout=timeout, log_extra=log_extra,
+        )
+    finally:
+        _CURRENT_CREDS.reset(token)
+
+
 def run_claude(
     *,
     prompt: str,
@@ -138,6 +303,9 @@ def run_claude(
     Credential routing per ADR-0055: the subprocess env is built from
     :data:`_CURRENT_CREDS` (set by the runner around ``_execute``); when
     unset, the legacy ``CLAUDE_CREDENTIALS_PATH`` mount path stays in scope.
+    ADR-0066 layers a usage-limit fallback on top: if the primary's run
+    exits non-zero with a usage-limit signature and a fallback credential
+    is present, the call is retried once under the fallback's env.
 
     Args:
         prompt: The prompt to send to Claude
@@ -158,41 +326,14 @@ def run_claude(
     ]
     logger.info("running claude: model=%s", model)
 
-    stdout_lines: list[str] = []
-    stderr_lines: list[str] = []
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1,
-        env=build_claude_env(os.environ, _CURRENT_CREDS.get()),
-    )
-    assert proc.stdout is not None and proc.stderr is not None
-    stdout_thread = threading.Thread(
-        target=_pump_stream,
-        args=(proc.stdout, stdout_lines, logging.INFO, "stdout", {}),
-        daemon=True,
-    )
-    stderr_thread = threading.Thread(
-        target=_pump_stream,
-        args=(proc.stderr, stderr_lines, logging.WARNING, "stderr", {}),
-        daemon=True,
-    )
-    stdout_thread.start()
-    stderr_thread.start()
     try:
-        returncode = proc.wait(timeout=timeout_seconds)
+        returncode, stdout_text, stderr_text = _run_claude_with_fallback(
+            cmd, timeout=timeout_seconds,
+        )
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        stdout_thread.join()
-        stderr_thread.join()
         raise CodeAuthorError(f"Claude timed out after {timeout_seconds}s")
-    stdout_thread.join()
-    stderr_thread.join()
 
-    stdout_text = "".join(stdout_lines)
     if returncode != 0:
-        stderr_text = "".join(stderr_lines)
         raise CodeAuthorError(
             f"claude exited {returncode}\n"
             f"stdout:\n{stdout_text}\nstderr:\n{stderr_text}"
@@ -281,48 +422,19 @@ def run_claude_code(
         extra=base_extra,
     )
 
-    # ADR-0020 phase 2: stream stdout/stderr line-by-line instead of
-    # ``capture_output=True``. The reader threads write into
-    # ``stdout_lines`` / ``stderr_lines``; the main thread reads those
-    # lists only after ``thread.join()`` so no lock is needed.
-    stdout_lines: list[str] = []
-    stderr_lines: list[str] = []
-    proc = subprocess.Popen(
-        cmd, cwd=str(repo_dir),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1,
-        env=build_claude_env(os.environ, _CURRENT_CREDS.get()),
+    # ADR-0020 phase 2: stream stdout/stderr line-by-line. ADR-0066: the
+    # call is wrapped with a usage-limit fallback retry — if the first
+    # invocation exits non-zero with a usage-limit signature and a
+    # fallback credential is configured, the same cmd re-runs once
+    # under the fallback's env and the second outcome is returned here.
+    fctx: dict[str, str] = {"role": role.id}
+    ctx_for_fallback = log_context or {}
+    if "repo" in ctx_for_fallback:
+        fctx["repo"] = str(ctx_for_fallback["repo"])
+    returncode, stdout_text, stderr_text = _run_claude_with_fallback(
+        cmd, cwd=str(repo_dir), timeout=timeout_seconds,
+        log_extra=base_extra, fallback_log_context=fctx,
     )
-    assert proc.stdout is not None and proc.stderr is not None
-    stdout_thread = threading.Thread(
-        target=_pump_stream,
-        args=(proc.stdout, stdout_lines, logging.INFO, "stdout", base_extra),
-        daemon=True,
-    )
-    stderr_thread = threading.Thread(
-        target=_pump_stream,
-        args=(proc.stderr, stderr_lines, logging.WARNING, "stderr", base_extra),
-        daemon=True,
-    )
-    stdout_thread.start()
-    stderr_thread.start()
-    try:
-        returncode = proc.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        # Kill the process so the reader threads see EOF and exit; then
-        # join them so any buffered lines land in our accumulators before
-        # the caller observes the failure. Re-raise so the runner can map
-        # this to ``step.failed``.
-        proc.kill()
-        proc.wait()
-        stdout_thread.join()
-        stderr_thread.join()
-        raise
-    stdout_thread.join()
-    stderr_thread.join()
-
-    stdout_text = "".join(stdout_lines)
-    stderr_text = "".join(stderr_lines)
     if returncode != 0:
         raise CodeAuthorError(
             f"claude exited {returncode}\n"
