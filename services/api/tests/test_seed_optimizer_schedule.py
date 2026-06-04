@@ -13,11 +13,19 @@ from __future__ import annotations
 from treadmill_api.seed.schedules import SEED_SCHEDULES
 
 
-def _find_schedule(workflow_id: str) -> dict:
-    matches = [s for s in SEED_SCHEDULES if s["workflow_id"] == workflow_id]
+def _find_schedule(workflow_id: str, cron: str = "0 20 * * 6") -> dict:
+    """Find the single row for (workflow_id, cron). Strategy A (ADR-0056)
+    seeds ``wf-tune-judge-prompts`` twice under different crons, so the
+    legacy workflow-id-only lookup is ambiguous; this helper defaults to
+    the Saturday role-architect row so the existing optimizer-schedule
+    tests keep targeting it."""
+    matches = [
+        s for s in SEED_SCHEDULES
+        if s["workflow_id"] == workflow_id and s["cron_expression"] == cron
+    ]
     assert len(matches) == 1, (
-        f"expected exactly one SEED_SCHEDULES entry for {workflow_id!r}, "
-        f"got {len(matches)}"
+        f"expected exactly one SEED_SCHEDULES entry for "
+        f"{workflow_id!r} cron={cron!r}, got {len(matches)}"
     )
     return matches[0]
 
@@ -50,8 +58,10 @@ def test_optimizer_payload_specifies_judge_role() -> None:
 
 
 def test_existing_schedules_unchanged() -> None:
-    """Regression net: the Wave 3 seed addition must not drop the four
-    prior schedules. Five schedules total after this lands."""
+    """Regression net: every prior schedule slug must still be present.
+    Strategy A (ADR-0056 canary) added a second ``wf-tune-judge-prompts``
+    row (role-code-author Sunday) under the same slug, so the total row
+    count is now 8."""
     workflow_ids = [s["workflow_id"] for s in SEED_SCHEDULES]
     for expected in (
         "wf-documentarian-audit",
@@ -63,6 +73,6 @@ def test_existing_schedules_unchanged() -> None:
         "wf-escalation-close-sweep",  # ADR-0062 Step 2
     ):
         assert expected in workflow_ids, f"missing {expected} in SEED_SCHEDULES"
-    assert len(SEED_SCHEDULES) == 7, (
-        f"expected 7 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
+    assert len(SEED_SCHEDULES) == 8, (
+        f"expected 8 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
     )

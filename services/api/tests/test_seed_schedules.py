@@ -34,7 +34,7 @@ _EXPECTED_WORKFLOW_IDS = {
 
 
 def test_seed_schedules_has_seven_entries() -> None:
-    assert len(SEED_SCHEDULES) == 7
+    assert len(SEED_SCHEDULES) == 8
 
 
 def test_seed_schedules_workflow_ids() -> None:
@@ -42,19 +42,34 @@ def test_seed_schedules_workflow_ids() -> None:
     assert ids == _EXPECTED_WORKFLOW_IDS
 
 
-def test_no_duplicate_workflow_ids() -> None:
-    ids = [s["workflow_id"] for s in SEED_SCHEDULES]
-    assert len(ids) == len(set(ids)), f"duplicate workflow_ids: {ids}"
+def test_no_duplicate_workflow_id_cron_pairs() -> None:
+    # Strategy A (ADR-0056 canary): ``wf-tune-judge-prompts`` is now seeded
+    # twice (role-architect Saturday + role-code-author Sunday) under the
+    # same role-agnostic slug, so the uniqueness invariant moves to the
+    # composite ``(workflow_id, cron_expression)`` key — the same key the
+    # HTTP-driven seed path uses to detect already-present rows.
+    pairs = [(s["workflow_id"], s["cron_expression"]) for s in SEED_SCHEDULES]
+    assert len(pairs) == len(set(pairs)), f"duplicate (workflow_id, cron): {pairs}"
 
 
 def test_seed_schedules_cron_expressions() -> None:
-    by_wf = {s["workflow_id"]: s["cron_expression"] for s in SEED_SCHEDULES}
-    assert by_wf["wf-documentarian-audit"] == "0 9 * * 1"
-    assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
-    assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
-    assert by_wf["wf-escalation-close-sweep"] == "*/2 * * * *"
-    assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
-    assert by_wf["wf-ui-triage"] == "7 */4 * * *"
+    # Strategy A: ``wf-tune-judge-prompts`` carries two rows under different
+    # crons (role-architect on Saturday, role-code-author on Sunday). Pin
+    # the unique single-row crons by workflow_id, plus the two-row slug
+    # explicitly via the set of its cron expressions.
+    crons_by_wf: dict[str, list[str]] = {}
+    for s in SEED_SCHEDULES:
+        crons_by_wf.setdefault(s["workflow_id"], []).append(s["cron_expression"])
+    assert crons_by_wf["wf-documentarian-audit"] == ["0 9 * * 1"]
+    assert crons_by_wf["wf-crystallize-learning"] == ["0 20 * * 0"]
+    assert crons_by_wf["wf-stuck-task-sweep"] == ["*/10 * * * *"]
+    assert crons_by_wf["wf-escalation-close-sweep"] == ["*/2 * * * *"]
+    assert crons_by_wf["wf-o11y-regression-scan"] == ["*/15 * * * *"]
+    assert crons_by_wf["wf-ui-triage"] == ["7 */4 * * *"]
+    assert set(crons_by_wf["wf-tune-judge-prompts"]) == {
+        "0 20 * * 6",  # role-architect (existing)
+        "0 21 * * 0",  # role-code-author canary (ADR-0056)
+    }
 
 
 def test_seed_schedules_quiet_hours() -> None:
@@ -97,16 +112,19 @@ def test_scheduled_dispatch_payloads_carry_repo() -> None:
     ADR-0057) MUST carry ``repo`` in its payload_template — the
     schedule-payload-needs-repo trap: rendered_payload["repo"] feeds the
     worker workspace clone; an empty value silently hangs the step
-    pending forever. Both wf-tune-judge-prompts and wf-ui-triage rely on
-    this; the deterministic ops-bots (sweeps / audits / scans) do not
-    because they short-circuit before dispatch.
+    pending forever. Both wf-tune-judge-prompts (now two rows under
+    Strategy A — role-architect + role-code-author canary) and
+    wf-ui-triage rely on this; the deterministic ops-bots (sweeps /
+    audits / scans) do not because they short-circuit before dispatch.
     """
-    by_wf = {s["workflow_id"]: s["payload_template"] for s in SEED_SCHEDULES}
-    for wf_id in ("wf-tune-judge-prompts", "wf-ui-triage"):
-        payload = by_wf[wf_id]
+    for s in SEED_SCHEDULES:
+        if s["workflow_id"] not in ("wf-tune-judge-prompts", "wf-ui-triage"):
+            continue
+        payload = s["payload_template"]
         assert payload.get("repo"), (
-            f"{wf_id!r} payload_template missing non-empty 'repo' — "
-            f"taskless dispatch will hang the step (see schedule-payload-needs-repo)"
+            f"{s['workflow_id']!r} (cron {s['cron_expression']!r}) "
+            f"payload_template missing non-empty 'repo' — taskless dispatch "
+            f"will hang the step (see schedule-payload-needs-repo)"
         )
 
 
@@ -160,7 +178,7 @@ def _existing_client(existing: list[dict]) -> MagicMock:
 
 def test_seed_schedules_creates_all_seven_on_fresh_install() -> None:
     created = seed_schedules(_fresh_client())
-    assert created == 7
+    assert created == 8
 
 
 def test_seed_schedules_idempotent_when_all_exist() -> None:
@@ -184,11 +202,16 @@ def test_seed_schedules_no_posts_when_all_exist() -> None:
 
 
 def test_seed_schedules_only_posts_missing() -> None:
-    """When one schedule already exists, only the remaining six are POSTed."""
+    """When one schedule already exists, only the remaining seven are POSTed.
+
+    Under Strategy A (ADR-0056 canary), ``wf-tune-judge-prompts`` is seeded
+    twice (different crons) so the distinct workflow_id count in the POSTed
+    set stays at 6 even when 7 rows are created.
+    """
     existing = [{"workflow_id": "wf-documentarian-audit", "cron_expression": "0 9 * * 1"}]
     client = _existing_client(existing)
     created = seed_schedules(client)
-    assert created == 6
+    assert created == 7
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
     posted_wf_ids = {c.kwargs["json"]["workflow_id"] for c in post_calls}
     assert "wf-documentarian-audit" not in posted_wf_ids
@@ -253,16 +276,22 @@ def test_seed_schedules_posts_correct_cron_expressions() -> None:
     client = _fresh_client()
     seed_schedules(client)
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
-    by_wf = {
-        c.kwargs["json"]["workflow_id"]: c.kwargs["json"]["cron_expression"]
-        for c in post_calls
+    crons_by_wf: dict[str, list[str]] = {}
+    for c in post_calls:
+        crons_by_wf.setdefault(
+            c.kwargs["json"]["workflow_id"], []
+        ).append(c.kwargs["json"]["cron_expression"])
+    assert crons_by_wf["wf-documentarian-audit"] == ["0 9 * * 1"]
+    assert crons_by_wf["wf-crystallize-learning"] == ["0 20 * * 0"]
+    assert crons_by_wf["wf-stuck-task-sweep"] == ["*/10 * * * *"]
+    assert crons_by_wf["wf-escalation-close-sweep"] == ["*/2 * * * *"]
+    assert crons_by_wf["wf-o11y-regression-scan"] == ["*/15 * * * *"]
+    assert crons_by_wf["wf-ui-triage"] == ["7 */4 * * *"]
+    # Strategy A (ADR-0056 canary): two rows posted under the same slug.
+    assert set(crons_by_wf["wf-tune-judge-prompts"]) == {
+        "0 20 * * 6",  # role-architect (existing)
+        "0 21 * * 0",  # role-code-author canary (ADR-0056)
     }
-    assert by_wf["wf-documentarian-audit"] == "0 9 * * 1"
-    assert by_wf["wf-crystallize-learning"] == "0 20 * * 0"
-    assert by_wf["wf-stuck-task-sweep"] == "*/10 * * * *"
-    assert by_wf["wf-escalation-close-sweep"] == "*/2 * * * *"
-    assert by_wf["wf-o11y-regression-scan"] == "*/15 * * * *"
-    assert by_wf["wf-ui-triage"] == "7 */4 * * *"
 
 
 # ── seed_schedules_if_empty() — DB path ──────────────────────────────────────
@@ -286,8 +315,8 @@ def test_seed_schedules_if_empty_skips_when_rows_exist() -> None:
 def test_seed_schedules_if_empty_inserts_seven_on_fresh_db() -> None:
     session = _make_session(existing_count=0)
     result = seed_schedules_if_empty(session)
-    assert result == 7
-    assert session.add.call_count == 7
+    assert result == 8
+    assert session.add.call_count == 8
     session.commit.assert_called_once()
 
 
@@ -320,13 +349,21 @@ def test_seed_schedules_if_empty_correct_workflow_ids() -> None:
 def test_seed_schedules_if_empty_correct_cron_expressions() -> None:
     session = _make_session(existing_count=0)
     seed_schedules_if_empty(session)
-    added = {c.args[0].workflow_id: c.args[0].cron_expression
-             for c in session.add.call_args_list}
-    assert added["wf-documentarian-audit"] == "0 9 * * 1"
-    assert added["wf-crystallize-learning"] == "0 20 * * 0"
-    assert added["wf-stuck-task-sweep"] == "*/10 * * * *"
-    assert added["wf-escalation-close-sweep"] == "*/2 * * * *"
-    assert added["wf-o11y-regression-scan"] == "*/15 * * * *"
+    crons_by_wf: dict[str, list[str]] = {}
+    for c in session.add.call_args_list:
+        crons_by_wf.setdefault(
+            c.args[0].workflow_id, []
+        ).append(c.args[0].cron_expression)
+    assert crons_by_wf["wf-documentarian-audit"] == ["0 9 * * 1"]
+    assert crons_by_wf["wf-crystallize-learning"] == ["0 20 * * 0"]
+    assert crons_by_wf["wf-stuck-task-sweep"] == ["*/10 * * * *"]
+    assert crons_by_wf["wf-escalation-close-sweep"] == ["*/2 * * * *"]
+    assert crons_by_wf["wf-o11y-regression-scan"] == ["*/15 * * * *"]
+    # Strategy A (ADR-0056 canary): two rows added under the same slug.
+    assert set(crons_by_wf["wf-tune-judge-prompts"]) == {
+        "0 20 * * 6",  # role-architect (existing)
+        "0 21 * * 0",  # role-code-author canary (ADR-0056)
+    }
 
 
 def test_seed_schedules_if_empty_documentarian_quiet_hours() -> None:
