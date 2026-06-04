@@ -1,0 +1,168 @@
+name: Autoscaler smoke
+
+# Real-Docker smoke gate for the autoscaler-spawn surface (ADR-0065 Step 2).
+# After this PR merges, an operator must go to GitHub repo Settings → Branches
+# → Branch protection rules for main and mark autoscaler_smoke as a required
+# status check (that click-through cannot be automated).
+
+on:
+  pull_request:
+    paths:
+      - tools/local-adapter/treadmill_local/autoscaler.py
+      - tools/local-adapter/treadmill_local/runtime.py
+      - tools/local-adapter/treadmill_local/egress_proxy.py
+      - tools/local-adapter/treadmill_local/docker_client.py
+      - services/egress-proxy/**
+      - workers/agent/Dockerfile
+      - infra/treadmill_infra/stacks/**
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/api
+          load: true
+          tags: treadmill-api:dev
+          cache-from: type=gha,scope=treadmill-api
+          cache-to: type=gha,mode=max,scope=treadmill-api
+
+      - name: Build dashboard image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/dashboard
+          load: true
+          tags: treadmill-dashboard:dev
+          cache-from: type=gha,scope=treadmill-dashboard
+          cache-to: type=gha,mode=max,scope=treadmill-dashboard
+
+      - name: Build worker agent image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: workers/agent/Dockerfile
+          load: true
+          tags: treadmill-agent:dev
+          cache-from: type=gha,scope=treadmill-agent
+          cache-to: type=gha,mode=max,scope=treadmill-agent
+
+      - name: Build egress proxy image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/egress-proxy
+          load: true
+          tags: treadmill-egress-proxy:dev
+          cache-from: type=gha,scope=treadmill-egress-proxy
+          cache-to: type=gha,mode=max,scope=treadmill-egress-proxy
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync workspace deps
+        run: uv sync --frozen --all-packages
+
+      - name: Boot smoke environment
+        id: smoke_boot
+        run: |
+          BOOT_LOG=$(mktemp)
+          for attempt in 1 2; do
+            set +o errexit
+            bash tools/local-adapter/scripts/smoke_boot.sh \
+              --proxy-enabled true --timeout 300 2>&1 | tee "$BOOT_LOG"
+            BOOT_RC=${PIPESTATUS[0]}
+            set -o errexit
+
+            if [ "$BOOT_RC" -eq 0 ]; then
+              break
+            fi
+
+            if [ "$attempt" -eq 2 ]; then
+              echo "Smoke boot failed after $attempt attempt(s)" >&2
+              exit 1
+            fi
+
+            # Retry only on Docker daemon flakiness; pure assertion failures do not retry.
+            if grep -qE \
+                "cannot connect to the Docker daemon|Error response from daemon|dial unix.*no such file|connection reset by peer" \
+                "$BOOT_LOG"; then
+              echo "Docker daemon transient error on attempt $attempt, retrying in 10s..."
+              sleep 10
+            else
+              echo "Non-transient boot failure on attempt $attempt, not retrying" >&2
+              exit 1
+            fi
+          done
+
+      - name: Assert worker container is running
+        id: worker
+        run: |
+          WORKER_ID=$(docker ps --filter label=treadmill.role=worker --format '{{.ID}}' | head -1)
+          if [ -z "$WORKER_ID" ]; then
+            echo "No running container with label treadmill.role=worker" >&2
+            docker ps -a >&2
+            exit 1
+          fi
+          echo "worker_id=$WORKER_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Assert API healthz reachable from worker
+        run: |
+          docker exec "${{ steps.worker.outputs.worker_id }}" \
+            curl -sf --max-time 10 http://treadmill-api:8088/healthz
+
+      - name: Assert proxy allow — api.github.com CONNECT succeeds
+        run: |
+          docker exec "${{ steps.worker.outputs.worker_id }}" \
+            curl -sf --max-time 15 \
+            -x http://treadmill-egress-proxy:3128 \
+            https://api.github.com
+
+      - name: Assert proxy deny — nonexistent.test CONNECT returns 403
+        run: |
+          DENY_OUT=$(docker exec "${{ steps.worker.outputs.worker_id }}" \
+            curl -v --max-time 5 \
+            -x http://treadmill-egress-proxy:3128 \
+            https://nonexistent.test 2>&1 || true)
+          echo "$DENY_OUT"
+          echo "$DENY_OUT" | grep -q "< HTTP/1.1 403" || {
+            echo "Expected HTTP 403 from egress proxy for nonexistent.test but did not see it" >&2
+            exit 1
+          }
+
+      - name: Collect failure logs
+        if: failure()
+        run: |
+          mkdir -p /tmp/smoke-logs
+          WORKER_ID=$(docker ps -a --filter label=treadmill.role=worker \
+            --format '{{.ID}}' | head -1)
+          PROXY_ID=$(docker ps -a --filter name=treadmill-egress-proxy \
+            --format '{{.ID}}' | head -1)
+          [ -n "$WORKER_ID" ] && \
+            docker logs "$WORKER_ID" > /tmp/smoke-logs/worker.log 2>&1 || true
+          [ -n "$PROXY_ID" ] && \
+            docker logs "$PROXY_ID" > /tmp/smoke-logs/proxy.log 2>&1 || true
+          [ -n "${TREADMILL_AUTOSCALER_LOG_FILE:-}" ] && \
+            cp "$TREADMILL_AUTOSCALER_LOG_FILE" /tmp/smoke-logs/autoscaler.log || true
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs-${{ github.run_id }}
+          path: /tmp/smoke-logs/
+          if-no-files-found: warn
