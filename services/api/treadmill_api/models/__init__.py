@@ -14,6 +14,7 @@ from treadmill_api.models.onboarding import (
 )
 from treadmill_api.models.plan import Plan
 from treadmill_api.models.review_queue import ReviewQueueRowMixin
+from treadmill_api.models.review_dspy_variant_pr import ReviewDspyVariantPrRow
 from treadmill_api.models.run import WorkflowRun, WorkflowRunStep
 from treadmill_api.models.task import Task, TaskDependency, TaskPR, TaskValidation
 from treadmill_api.models.triage_finding import TriageFindingRow
@@ -43,7 +44,7 @@ __all__ = [
     "RepoContextDocRow",
     "RepoProfileRow",
     "ReviewQueueRowMixin",
-    "Role",
+    "ReviewDspyVariantPrRow",    "Role",
     "RoleHook",
     "RoleSkill",
     "RoleVersion",
