@@ -85,7 +85,11 @@ from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.events.schedule import ScheduledTick
-from treadmill_api.events.task import TaskEscalatedToOperator, TaskRegistered
+from treadmill_api.events.task import (
+    TaskCancelled,
+    TaskEscalatedToOperator,
+    TaskRegistered,
+)
 from treadmill_api.onboarding_store import OnboardingStore
 from treadmill_api.models import (
     Event,
@@ -3112,6 +3116,35 @@ async def handle_scheduled_tick(
         )
         return None
 
+    # Coalesce prior pending ticks for this schedule before dispatching a
+    # fresh one. The 2026-06-03 6-tick wf-ui-triage backlog showed that a
+    # role whose start latency exceeds the cron interval pile up: each
+    # tick produced a registered task whose step never reached
+    # ``started_at``, and the dashboard's overview surface drove 6 visible
+    # rows from one logical bot. Coalesce keys off the workflow's latest
+    # ``WorkflowVersion`` because there is no schedule_id column on
+    # tasks; in steady-state a schedule binds one workflow and resolves
+    # to one WV per tick, so this approximates "this schedule's prior
+    # pending ticks." The helper runs AFTER the two short-circuits above
+    # (sweeps don't synthesize Tasks) and BEFORE
+    # ``_dispatch_via_synthetic_task`` (so the newer tick survives, the
+    # older pendings are marked cancelled).
+    wv_for_coalesce = (
+        await session.execute(
+            select(WorkflowVersion)
+            .where(WorkflowVersion.workflow_id == schedule.workflow_id)
+            .order_by(WorkflowVersion.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if wv_for_coalesce is not None:
+        await _coalesce_pending_ticks_for_schedule(
+            session,
+            dispatcher,
+            schedule_id=schedule.id,
+            workflow_version_id=wv_for_coalesce.id,
+        )
+
     # ``ScheduledTick`` carries no fire_at field (ADR-0035 v0); the
     # Task's server-default ``created_at`` is the dispatch timestamp.
     return await _dispatch_via_synthetic_task(
@@ -3123,6 +3156,98 @@ async def handle_scheduled_tick(
         created_by="scheduler",
         title=f"schedule:{schedule.workflow_id}",
     )
+
+
+async def _coalesce_pending_ticks_for_schedule(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    schedule_id: uuid.UUID,
+    workflow_version_id: uuid.UUID,
+) -> list[uuid.UUID]:
+    """Cancel prior pending ticks for the same schedule before dispatching
+    a fresh one. Returns the list of cancelled task ids (empty when
+    nothing to coalesce).
+
+    "Pending" means the task has been registered but no step has begun
+    execution — i.e., no row in ``workflow_run_steps`` with a non-null
+    ``started_at``. A tick whose first step is mid-flight is left alone
+    (parallel runs are an explicit non-goal; we only collapse the queue
+    of unstarted dupes).
+
+    Match criteria (the (workflow_id, schedule_id) intent — schedule_id
+    is not stored on the task row, so the latest WV the schedule
+    dispatches under is the proxy):
+
+      * ``plan_id = SYSTEM_PLAN_ID``
+      * ``created_by = 'scheduler'``
+      * ``workflow_version_id = :wv_id``
+      * NO workflow_run_step row exists with non-null ``started_at``
+        for this task (still pending)
+      * NO terminal task lifecycle event exists for this task
+        (``cancelled`` / ``superseded`` / ``escalated_to_operator``) —
+        a prior pending that already got terminalized by some other
+        path is left alone.
+
+    For each match the helper emits ``task.cancelled`` via the existing
+    ``persist_and_publish`` seam with ``reason='superseded_by_newer_tick'``,
+    ``schedule_id=<schedule_id>``, ``cancelled_by='scheduler-coalesce'``.
+    The caller commits the session — same transactional contract as
+    ``_dispatch_via_synthetic_task``.
+    """
+    stmt = text(
+        """
+        SELECT t.id
+        FROM tasks t
+        WHERE t.plan_id = :plan_id
+          AND t.created_by = 'scheduler'
+          AND t.workflow_version_id = :wv_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM workflow_runs r
+            JOIN workflow_run_steps s ON s.run_id = r.id
+            WHERE r.task_id = t.id
+              AND s.started_at IS NOT NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM events e
+            WHERE e.task_id = t.id
+              AND e.entity_type = 'task'
+              AND e.action IN (
+                'cancelled', 'superseded', 'escalated_to_operator'
+              )
+          )
+        """
+    )
+    result = await session.execute(
+        stmt,
+        {"plan_id": SYSTEM_PLAN_ID, "wv_id": workflow_version_id},
+    )
+    task_ids: list[uuid.UUID] = list(result.scalars())
+
+    for task_id in task_ids:
+        await dispatcher.persist_and_publish(
+            session,
+            entity_type="task",
+            action="cancelled",
+            payload=TaskCancelled(
+                reason="superseded_by_newer_tick",
+                schedule_id=schedule_id,
+                cancelled_by="scheduler-coalesce",
+            ),
+            plan_id=SYSTEM_PLAN_ID,
+            task_id=task_id,
+        )
+
+    if task_ids:
+        logger.info(
+            "scheduled-tick coalesce: cancelled %d prior pending tick(s) "
+            "for schedule %s (wv=%s)",
+            len(task_ids), schedule_id, workflow_version_id,
+        )
+
+    return task_ids
 
 
 async def _dispatch_via_synthetic_task(

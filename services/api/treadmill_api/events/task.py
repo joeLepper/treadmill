@@ -159,12 +159,21 @@ class TaskReady(EventPayload):
 
 class TaskCancelled(EventPayload):
     """Emitted when a task is cancelled. Cancellation is terminal — no
-    workflow runs may be dispatched against the task afterward."""
+    workflow runs may be dispatched against the task afterward.
+
+    ``schedule_id`` + ``cancelled_by`` are populated by the scheduler
+    pending-tick coalesce path (a newer scheduled.tick supersedes a
+    prior pending tick for the same schedule before dispatch). Both
+    default to ``None`` so operator-cancel callers (the dashboard
+    cancel route) stay wire-compatible.
+    """
 
     ENTITY_TYPE: ClassVar[str] = "task"
     ACTION: ClassVar[str] = "cancelled"
 
     reason: str | None = None
+    schedule_id: uuid.UUID | None = None
+    cancelled_by: str | None = None
 
 
 class TaskRetry(EventPayload):
