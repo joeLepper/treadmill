@@ -214,3 +214,109 @@ async def test_cache_token_for_repo_resolves_then_mints(private_key_pem: str) ->
     assert tok1 == tok2 == "ghs_repo"
     assert calls["install"] == 1                         # repo→installation cached
     assert calls["token"] == 1                           # token cached
+
+
+# ── transient-failure retry (2026-06-04 intermittent-502 fix) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_fetch_retries_transient_then_succeeds(
+    private_key_pem: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("treadmill_api.github_app._RETRY_BASE_DELAY_SECONDS", 0.0)
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(502, text="bad gateway")   # transient
+        return httpx.Response(201, json={"token": "ghs_ok", "expires_at": expiry})
+
+    async with _client(handler) as client:
+        tok = await fetch_installation_token(
+            client, app_id="1", private_key_pem=private_key_pem, installation_id=4242,
+        )
+
+    assert tok.token == "ghs_ok"
+    assert calls["n"] == 3                               # two 502s retried, third won
+
+
+@pytest.mark.asyncio
+async def test_fetch_does_not_retry_non_transient(
+    private_key_pem: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("treadmill_api.github_app._RETRY_BASE_DELAY_SECONDS", 0.0)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(404, text="not found")
+
+    async with _client(handler) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await fetch_installation_token(
+                client, app_id="1", private_key_pem=private_key_pem,
+                installation_id=4242,
+            )
+
+    assert calls["n"] == 1                               # 404 is not retryable
+
+
+@pytest.mark.asyncio
+async def test_fetch_exhausts_retries_then_raises(
+    private_key_pem: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("treadmill_api.github_app._RETRY_BASE_DELAY_SECONDS", 0.0)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, text="unavailable")
+
+    async with _client(handler) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await fetch_installation_token(
+                client, app_id="1", private_key_pem=private_key_pem,
+                installation_id=4242,
+            )
+
+    assert calls["n"] == 4                               # _RETRY_MAX_ATTEMPTS
+
+
+# ── home-installation resolution (repo-less mint) ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_home_installation_id_caches_lowest(private_key_pem: str) -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        assert request.url.path == "/app/installations"
+        return httpx.Response(200, json=[{"id": 22}, {"id": 7}, {"id": 9}])
+
+    async with _client(handler) as client:
+        cache = InstallationTokenCache(
+            client, app_id="1", private_key_pem=private_key_pem,
+        )
+        first = await cache.home_installation_id()
+        second = await cache.home_installation_id()
+
+    assert first == second == 7                          # lowest id = home
+    assert calls["n"] == 1                               # cached after first resolve
+
+
+@pytest.mark.asyncio
+async def test_home_installation_id_none_raises_lookup(private_key_pem: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    async with _client(handler) as client:
+        cache = InstallationTokenCache(
+            client, app_id="1", private_key_pem=private_key_pem,
+        )
+        with pytest.raises(LookupError):
+            await cache.home_installation_id()

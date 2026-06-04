@@ -81,6 +81,75 @@ def test_github_error_is_502(monkeypatch) -> None:
     assert resp.status_code == 502
 
 
+# ── cache path (lifespan-wired InstallationTokenCache; 2026-06-04 fix) ────────
+
+
+def _client_with_cache(settings: SimpleNamespace, cache: object) -> TestClient:
+    app = FastAPI()
+    app.include_router(router)
+    app.state.settings = settings
+    app.state.installation_token_cache = cache
+    return TestClient(app)
+
+
+def test_uses_cache_when_wired(monkeypatch) -> None:
+    # The raw path must NOT run when a cache is present — make it explode if it does.
+    monkeypatch.setattr(
+        github_app, "resolve_installation_id",
+        AsyncMock(side_effect=AssertionError("raw mint path used despite cache")),
+    )
+    monkeypatch.setattr(
+        github_app, "fetch_installation_token",
+        AsyncMock(side_effect=AssertionError("raw mint path used despite cache")),
+    )
+    tok = InstallationToken("ghs_cached", datetime.now(timezone.utc) + timedelta(hours=1))
+    cache = SimpleNamespace(
+        installation_id_for=AsyncMock(return_value=4242),
+        home_installation_id=AsyncMock(return_value=99),
+        installation_token=AsyncMock(return_value=tok),
+    )
+    resp = _client_with_cache(_configured(), cache).post(
+        "/api/v1/github/installation-token", json={"repo": "o/n"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["token"] == "ghs_cached"
+    assert body["installation_id"] == 4242
+    cache.installation_id_for.assert_awaited_once_with("o/n")
+    cache.installation_token.assert_awaited_once_with(4242)
+
+
+def test_cache_no_repo_uses_home_installation() -> None:
+    tok = InstallationToken("ghs_home", datetime.now(timezone.utc) + timedelta(hours=1))
+    cache = SimpleNamespace(
+        installation_id_for=AsyncMock(),
+        home_installation_id=AsyncMock(return_value=7),
+        installation_token=AsyncMock(return_value=tok),
+    )
+    resp = _client_with_cache(_configured(), cache).post(
+        "/api/v1/github/installation-token", json={},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["installation_id"] == 7
+    cache.home_installation_id.assert_awaited_once()
+    cache.installation_token.assert_awaited_once_with(7)
+    cache.installation_id_for.assert_not_awaited()
+
+
+def test_cache_no_installations_is_503() -> None:
+    cache = SimpleNamespace(
+        installation_id_for=AsyncMock(),
+        home_installation_id=AsyncMock(
+            side_effect=LookupError("GitHub App has no installations"),
+        ),
+        installation_token=AsyncMock(),
+    )
+    resp = _client_with_cache(_configured(), cache).post(
+        "/api/v1/github/installation-token", json={},
+    )
+    assert resp.status_code == 503
+
+
 @pytest.mark.asyncio
 async def test_list_installation_ids_helper() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
