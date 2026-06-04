@@ -39,6 +39,7 @@ def build_review_router(
     output_model: type[BaseModel],
     verdict_attr: str,
     llm_label_attr: str = "llm_label",
+    confidence_attr: str = "llm_confidence",
 ) -> APIRouter:
     """Return an ``APIRouter`` with the four ADR-0070 review endpoints.
 
@@ -60,6 +61,13 @@ def build_review_router(
     llm_label_attr:
         Name of the column carrying the LLM recommendation (default
         ``"llm_label"``), used for accuracy math in ``GET /stats``.
+    confidence_attr:
+        Name of the column carrying the LLM's confidence tier (default
+        ``"llm_confidence"``).  ADR-0070 native kinds inherit the mixin's
+        ``llm_confidence`` column and should leave this at the default;
+        the ADR-0061-legacy ``TriageFindingRow`` uses ``confidence`` and
+        passes ``confidence_attr="confidence"`` so the CASE expression in
+        ``/next`` resolves to the right column.
 
     Route registration order
     ------------------------
@@ -71,7 +79,7 @@ def build_review_router(
     router: APIRouter = APIRouter(prefix=prefix)
 
     verdict_col = getattr(row_cls, verdict_attr)
-    confidence_col = getattr(row_cls, "llm_confidence")
+    confidence_col = getattr(row_cls, confidence_attr)
     created_at_col = getattr(row_cls, "created_at")
 
     # Confidence ordering: low < medium < high (deterministic CASE expression).
