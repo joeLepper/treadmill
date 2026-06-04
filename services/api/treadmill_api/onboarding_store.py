@@ -54,6 +54,7 @@ class OnboardingStore:
                 test_command=config.test_command,
                 lint_command=config.lint_command,
                 claude_account=config.claude_account,
+                claude_account_fallback=config.claude_account_fallback,
                 worker_deps_python=list(deps.python),
                 worker_deps_node=list(deps.node),
             )
@@ -65,6 +66,7 @@ class OnboardingStore:
             existing.test_command = config.test_command
             existing.lint_command = config.lint_command
             existing.claude_account = config.claude_account
+            existing.claude_account_fallback = config.claude_account_fallback
             existing.worker_deps_python = list(deps.python)
             existing.worker_deps_node = list(deps.node)
             existing.updated_at = sa.func.now()
@@ -123,6 +125,7 @@ class OnboardingStore:
             test_command=row.test_command,
             lint_command=row.lint_command,
             claude_account=row.claude_account,
+            claude_account_fallback=row.claude_account_fallback,
             worker_deps=worker_deps,
         )
 

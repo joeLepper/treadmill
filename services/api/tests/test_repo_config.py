@@ -52,6 +52,7 @@ def test_round_trip_via_to_dict():
         "test_command": "pytest",
         "lint_command": "ruff check .",
         "claude_account": "secondary",
+        "claude_account_fallback": None,
         "worker_deps": None,
     }
 
@@ -67,6 +68,7 @@ def test_round_trip_via_to_dict_with_worker_deps():
         "test_command": None,
         "lint_command": None,
         "claude_account": None,
+        "claude_account_fallback": None,
         "worker_deps": {
             "python": ["aws-cdk-lib==2.214.0"],
             "node": [],
@@ -102,3 +104,30 @@ def test_parse_defaults_claude_account_to_none():
 def test_parse_keeps_claude_account():
     cfg = parse_repo_config({"repo": "o/r", "claude_account": "secondary"})
     assert cfg.claude_account == "secondary"
+
+
+def test_parse_defaults_claude_account_fallback_to_none():
+    """ADR-0066: omitting ``claude_account_fallback`` defaults to None (no fallback)."""
+    cfg = parse_repo_config({"repo": "o/r"})
+    assert cfg.claude_account_fallback is None
+
+
+def test_parse_keeps_claude_account_fallback():
+    """ADR-0066: ``claude_account_fallback`` is parsed and stored correctly."""
+    cfg = parse_repo_config({"repo": "o/r", "claude_account_fallback": "backup"})
+    assert cfg.claude_account_fallback == "backup"
+
+
+def test_round_trip_claude_account_fallback():
+    """ADR-0066: ``claude_account_fallback`` survives to_dict → parse_repo_config."""
+    source = {
+        "repo": "o/r",
+        "mode": "conform",
+        "auto_merge_blocked": False,
+        "test_command": None,
+        "lint_command": None,
+        "claude_account": "primary",
+        "claude_account_fallback": "backup",
+        "worker_deps": None,
+    }
+    assert to_dict(parse_repo_config(source)) == source

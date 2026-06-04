@@ -127,6 +127,11 @@ class RepoConfigRow(Base):
     claude_account: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
+    # Fallback account when the primary hits a usage limit (ADR-0066).
+    # ``NULL`` means no fallback configured for this repo.
+    claude_account_fallback: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     # ADR-0059: per-repo Python / Node deps the worker installs before
     # task work. Binaries live in the ``repo_worker_binaries`` side table.
     worker_deps_python: Mapped[list[str]] = mapped_column(
