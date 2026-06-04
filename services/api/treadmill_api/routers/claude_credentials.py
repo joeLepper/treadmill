@@ -150,7 +150,13 @@ async def fetch_claude_credentials(
                 f"{account_name!r}: {type(exc).__name__}"
             ),
         )
-    token = secret.get("SecretString")
+    # Strip surrounding whitespace/newlines. A trailing newline in the stored
+    # secret makes the ``Bearer`` header an invalid HTTP header value — claude
+    # exits 1 with "Header has invalid value", which is non-recoverable AND not
+    # a usage-limit signature, so the fallback never fires and the worker
+    # crashloops. (2026-06-04 medicoder incident: both VLM builds wedged on a
+    # newline-tainted token after a subscription swap.)
+    token = (secret.get("SecretString") or "").strip()
     if not token:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -173,7 +179,7 @@ async def fetch_claude_credentials(
                 fallback_secret = sm.get_secret_value(
                     SecretId=fallback_account.secret_name
                 )
-                fallback_token = fallback_secret.get("SecretString")
+                fallback_token = (fallback_secret.get("SecretString") or "").strip()
                 if not fallback_token:
                     _log.warning(
                         "Secret for fallback account %r has no SecretString"
