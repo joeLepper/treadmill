@@ -36,6 +36,12 @@ terminal closes, and crashes.
 
 ## Recent changes
 
+- [#169](https://github.com/joeLepper/treadmill/pull/169) ADR-0073 Step 1 follow-up
+  — `treadmill-channel-launch` now fails loud with platform-specific install
+  hints when `tmux` is absent (apt / pacman / brew); guards the late-stage
+  `tmux has-session` failure mode. Precheck test added in
+  `tests/test_launcher_singleton.py`. (The cwd-handling piece this PR also
+  originally carried was superseded by the workdir state file in #188.)
 - ADR-0073 Step 1 cwd persistence — `launch-session.sh` now writes its
   resolved `$WORKDIR` to `$STATE_ROOT/workdir` before `exec claude`, and the
   systemd wrapper reads that file and passes it to `tmux new -d -s -c
