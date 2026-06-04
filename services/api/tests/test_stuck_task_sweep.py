@@ -273,8 +273,21 @@ async def test_handle_scheduled_tick_non_sweep_workflow_uses_role_path() -> None
     mock_schedule.status = "active"
     mock_schedule.workflow_id = "wf-documentarian-audit"
 
+    # handle_scheduled_tick now does a WorkflowVersion lookup ahead of the
+    # synthetic-task dispatch helper to parameterize the pending-tick
+    # coalesce probe (scheduler-collapse-pending-duplicates). Configure
+    # session.execute to return a result whose scalar_one_or_none yields
+    # a WV-shaped mock so the coalesce path runs (and a scalars() that
+    # yields no rows so no task.cancelled is emitted).
+    mock_wv = MagicMock()
+    mock_wv.id = uuid.uuid4()
+    mock_execute_result = MagicMock()
+    mock_execute_result.scalar_one_or_none = MagicMock(return_value=mock_wv)
+    mock_execute_result.scalars = MagicMock(return_value=iter([]))
+
     session = AsyncMock()
     session.get = AsyncMock(return_value=mock_schedule)
+    session.execute = AsyncMock(return_value=mock_execute_result)
 
     typed = ScheduledTick(
         schedule_id=schedule_id,
