@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: ADR-0059 Steps 4 + 5 — worker-deps-failed event + operator CLI
 
-- **Status:** active
+- **Status:** completed
 - **Date:** 2026-05-28
 - **Related ADRs:** ADR-0059, ADR-0058 (gate-broken — sibling
   escalation pattern this borrows from)

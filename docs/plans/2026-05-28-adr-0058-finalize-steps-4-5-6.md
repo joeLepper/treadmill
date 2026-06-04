@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: ADR-0058 finalize — Steps 4, 5, 6
 
-- **Status:** active
+- **Status:** completed
 - **Date:** 2026-05-28
 - **Related ADRs:** ADR-0058
 - **Supersedes:** none

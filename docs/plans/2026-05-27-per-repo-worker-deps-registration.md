@@ -1,6 +1,6 @@
 # Plan: Per-repo worker-dep registration
 
-- **Status:** drafting
+- **Status:** completed
 - **Date:** 2026-05-27
 - **Related ADRs:** ADR-0059, ADR-0050 (onboarding persistence), ADR-0055 (per-account Claude credentials), ADR-0058 (gate-broken verdict)
 

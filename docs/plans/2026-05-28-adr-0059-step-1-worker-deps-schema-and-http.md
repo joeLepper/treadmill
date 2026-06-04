@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: ADR-0059 Step 1 — worker_deps schema + HTTP
 
-- **Status:** active
+- **Status:** completed
 - **Date:** 2026-05-28
 - **Related ADRs:** ADR-0059, ADR-0050 (onboarding persistence), ADR-0055
   (per-account Claude credentials — shape this mirrors)

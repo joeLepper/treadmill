@@ -1,6 +1,6 @@
 # Plan: Architect `gate-broken` verdict
 
-- **Status:** drafting
+- **Status:** completed
 - **Date:** 2026-05-27
 - **Related ADRs:** ADR-0058
 

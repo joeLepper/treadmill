@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: Self-dispatching triage with Playwright validation
 
-- **Status:** drafting
+- **Status:** completed
 - **Date:** 2026-05-29
 - **Related ADRs:** ADR-0061 (role-ui-triage labelable visual-bug detection), ADR-0035 (scheduler), ADR-0057 (synthetic-task path for scheduled dispatches)
 

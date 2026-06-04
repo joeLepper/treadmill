@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: ADR-0059 Step 6 — materialization wiring integration + canary runbook
 
-- **Status:** drafting
+- **Status:** completed
 - **Date:** 2026-05-28
 - **Related ADRs:** ADR-0059 (per-repo worker-dep registration —
   Steps 1, 2, 4, 5 shipped), ADR-0060 (egress proxy — gates the
