@@ -169,6 +169,49 @@ def test_returns_oauth_token_via_default(
     assert sm.calls == ["treadmill/claude-primary"]
 
 
+# ── whitespace/newline in the stored secret is stripped ─────────────────────
+
+
+def test_strips_whitespace_and_newline_from_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A trailing newline in the stored secret made the Bearer header an invalid
+    # HTTP header value — claude exited 1 with "Header has invalid value",
+    # crashlooping the worker (2026-06-04 medicoder incident). The resolver must
+    # strip surrounding whitespace so a sloppily-stored secret can't break auth.
+    accounts = {
+        "primary": {"type": "oauth", "secret_name": "treadmill/claude-primary"},
+    }
+    sm = _FakeSecretsManager(
+        by_id={"treadmill/claude-primary": "  sk-oauth-token-value\n"}
+    )
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=_FakeStore(), sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    assert r.status_code == 200, r.text
+    assert r.json()["token"] == "sk-oauth-token-value"   # stripped, no \n
+
+
+def test_502_when_secret_is_only_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A secret that is only whitespace strips to empty → treated as no token.
+    accounts = {
+        "primary": {"type": "oauth", "secret_name": "treadmill/claude-primary"},
+    }
+    sm = _FakeSecretsManager(by_id={"treadmill/claude-primary": "   \n"})
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=_FakeStore(), sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    assert r.status_code == 502, r.text
+
+
 # ── happy path: api_key via explicit per-repo override ──────────────────────
 
 
