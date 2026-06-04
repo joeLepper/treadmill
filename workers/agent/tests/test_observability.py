@@ -18,6 +18,7 @@ def _fresh_module():
     mod._meter_provider = None
     mod._initialized = False
     mod._token_counters.clear()
+    mod._fallback_counter = None
     return mod
 
 
@@ -236,6 +237,73 @@ def test_record_token_usage_reuses_counters_across_calls(monkeypatch):
         cache_creation_tokens=0, cache_read_tokens=0,
     )
     assert mod._token_counters["input"] is counter_after_first
+
+
+# ── record_claude_fallback (ADR-0066) ────────────────────────────────────────
+
+
+def test_record_claude_fallback_does_not_raise_with_noop_provider(monkeypatch):
+    """No-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset — mirrors
+    record_token_usage's silent-emission contract."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mod = _fresh_module()
+    mod.configure()
+
+    mod.record_claude_fallback(
+        from_account="primary", to_account="secondary",
+        repo="o/r", role="role-author",
+    )
+    # No assertion needed — we're verifying it doesn't raise.
+
+
+def test_record_claude_fallback_creates_counter_once(monkeypatch):
+    """First call lazily creates the ``treadmill.claude.fallback``
+    counter; subsequent calls reuse the same instrument."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mod = _fresh_module()
+    mod.configure()
+
+    assert mod._fallback_counter is None
+
+    mod.record_claude_fallback(
+        from_account="primary", to_account="secondary",
+    )
+    counter_after_first = mod._fallback_counter
+    assert counter_after_first is not None
+
+    mod.record_claude_fallback(
+        from_account="primary", to_account="secondary",
+        repo="o/r2", role="role-other",
+    )
+    assert mod._fallback_counter is counter_after_first
+
+
+def test_record_claude_fallback_optional_repo_role_default_empty(monkeypatch):
+    """``repo`` / ``role`` are optional — omitted calls succeed and the
+    counter receives empty-string attribute values."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mod = _fresh_module()
+    mod.configure()
+
+    # Capture the args by replacing the counter with a recorder after
+    # the first call lazily creates it.
+    mod.record_claude_fallback(
+        from_account="primary", to_account="secondary",
+    )
+    calls = []
+    original_add = mod._fallback_counter.add
+    mod._fallback_counter.add = lambda value, attrs: calls.append((value, attrs))
+    try:
+        mod.record_claude_fallback(
+            from_account="primary", to_account="secondary",
+        )
+    finally:
+        mod._fallback_counter.add = original_add
+
+    assert calls == [(1, {
+        "from_account": "primary", "to_account": "secondary",
+        "repo": "", "role": "",
+    })]
 
 
 def test_record_token_usage_fresh_module_resets_counters(monkeypatch):

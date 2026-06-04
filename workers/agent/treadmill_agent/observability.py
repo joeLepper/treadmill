@@ -15,6 +15,7 @@ _tracer_provider: Any = None
 _meter_provider: Any = None
 _initialized = False
 _token_counters: dict[str, Any] = {}
+_fallback_counter: Any = None
 
 
 def _configure_otel() -> None:
@@ -26,6 +27,8 @@ def _configure_otel() -> None:
 
     _initialized = True
     _token_counters.clear()
+    global _fallback_counter
+    _fallback_counter = None
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name = os.getenv("OTEL_SERVICE_NAME", "treadmill-worker")
 
@@ -192,3 +195,39 @@ def record_token_usage(
     _token_counters["output"].add(output_tokens, attrs)
     _token_counters["cache_creation"].add(cache_creation_tokens, attrs)
     _token_counters["cache_read"].add(cache_read_tokens, attrs)
+
+
+def record_claude_fallback(
+    *,
+    from_account: str,
+    to_account: str,
+    repo: str = "",
+    role: str = "",
+) -> None:
+    """Emit one OTel counter increment for an ADR-0066 fallback firing.
+
+    ``treadmill.claude.fallback`` carries attributes ``from_account``,
+    ``to_account``, ``repo``, ``role`` so the operator can see which
+    primary saturated, which fallback caught the call, and on which
+    repo / role. The counter is lazily created on first call and reused
+    thereafter (mirrors :func:`record_token_usage`). No-op when
+    OTEL_EXPORTER_OTLP_ENDPOINT is unset — the NoOp MeterProvider
+    absorbs the call silently.
+    """
+    global _fallback_counter
+    if not _initialized:
+        _configure_otel()
+
+    if _fallback_counter is None:
+        meter = _meter_provider.get_meter("treadmill.claude")
+        _fallback_counter = meter.create_counter("treadmill.claude.fallback")
+
+    _fallback_counter.add(
+        1,
+        {
+            "from_account": from_account,
+            "to_account": to_account,
+            "repo": repo,
+            "role": role,
+        },
+    )
