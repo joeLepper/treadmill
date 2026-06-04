@@ -82,6 +82,25 @@ def test_build_none_when_unconfigured() -> None:
     assert build_github_clients(_settings()).client is None
 
 
+def test_app_path_uses_in_process_cache_without_redis() -> None:
+    from treadmill_api.github_app import InstallationTokenCache
+
+    clients = build_github_clients(
+        _settings(app_id="42", private_key="-----PEM-----")
+    )
+    assert isinstance(clients.installation_cache, InstallationTokenCache)
+
+
+def test_app_path_uses_redis_cache_when_redis_supplied() -> None:
+    from treadmill_api.github_app import RedisInstallationTokenCache
+
+    clients = build_github_clients(
+        _settings(app_id="42", private_key="-----PEM-----"),
+        redis_client=object(),     # any non-None redis selects the Redis backend
+    )
+    assert isinstance(clients.installation_cache, RedisInstallationTokenCache)
+
+
 # ── auth hook ─────────────────────────────────────────────────────────────────
 
 

@@ -100,7 +100,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # installation-token client when the App is configured
     # (``GITHUB_APP_ID`` + ``GITHUB_APP_PRIVATE_KEY``), else the legacy
     # static-PAT client, else ``None`` (handlers short-circuit cleanly).
-    github_clients = build_github_clients(settings)
+    # Pass the redis client so the App-path token cache is Redis-backed —
+    # tokens then survive API recreates and are shared fleet-wide, collapsing
+    # GitHub mint volume to ~1/installation/hour (2026-06-04 durable fix).
+    # Falls back to the in-process cache when redis is None.
+    github_clients = build_github_clients(settings, redis_client=redis)
     github_client = github_clients.client
     if github_client is None:
         logger.warning(
