@@ -113,6 +113,10 @@ class GitHubClients:
 
     client: httpx.AsyncClient | None
     _aux: list[httpx.AsyncClient] = field(default_factory=list)
+    installation_cache: InstallationTokenCache | None = None
+    """The App-path token cache (``None`` on the PAT / no-auth paths). Exposed
+    so the ``/installation-token`` route mints through the same cache the API's
+    own GitHub client uses, instead of re-minting raw on every call."""
 
     async def aclose(self) -> None:
         if self.client is not None:
@@ -134,7 +138,15 @@ def build_github_clients(settings: Settings) -> GitHubClients:
     """
     if settings.github_app_id and settings.github_app_private_key:
         minting = httpx.AsyncClient(timeout=10.0)
-        provider = build_github_auth_provider(settings, minting)
+        # Build the cache explicitly (rather than via build_github_auth_provider)
+        # so it can be exposed on GitHubClients — the /installation-token route
+        # reuses this same cache + minting client instead of re-minting raw.
+        cache = InstallationTokenCache(
+            minting,
+            app_id=settings.github_app_id,
+            private_key_pem=settings.github_app_private_key,
+        )
+        provider = _AppAuthProvider(cache)
         client = httpx.AsyncClient(
             base_url=_GITHUB_API_BASE,
             headers=dict(_GITHUB_HEADERS),
@@ -145,7 +157,7 @@ def build_github_clients(settings: Settings) -> GitHubClients:
             "GitHub auth: App path active (app_id=%s) — per-repo installation tokens",
             settings.github_app_id,
         )
-        return GitHubClients(client=client, _aux=[minting])
+        return GitHubClients(client=client, _aux=[minting], installation_cache=cache)
     if settings.github_token:
         client = httpx.AsyncClient(
             base_url=_GITHUB_API_BASE,

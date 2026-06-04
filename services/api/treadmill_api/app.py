@@ -206,6 +206,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.sns_client = sns_client
     app.state.sqs_client = sqs_client
     app.state.github_client = github_client
+    # The App-path token cache (None on PAT / no-auth). The
+    # /installation-token route mints through this instead of re-minting raw
+    # per call — caching ~1h tokens collapses the fleet's busiest GitHub call
+    # to roughly one mint per installation per refresh window (2026-06-04 fix).
+    app.state.installation_token_cache = github_clients.installation_cache
     app.state.publisher = publisher
     app.state.consumer = consumer
     app.state.replay_loop = replay_loop

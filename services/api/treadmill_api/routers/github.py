@@ -60,6 +60,37 @@ async def mint_installation_token(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GitHub App not configured (GITHUB_APP_ID / private key unset)",
         )
+    # Preferred path: mint through the long-lived InstallationTokenCache wired
+    # in the app lifespan. It caches ~1h tokens (refresh-before-expiry) and
+    # serializes concurrent mints, so the fleet's busiest GitHub call collapses
+    # to ~one real mint per installation per refresh window — and the bare
+    # github_app calls underneath retry transient 5xx/429 with backoff. Together
+    # these fix the 2026-06-04 intermittent-502 wedge. The raw path below is the
+    # fallback for callers without a lifespan-wired cache (e.g. unit tests).
+    cache = getattr(request.app.state, "installation_token_cache", None)
+    if cache is not None:
+        try:
+            if body.repo:
+                installation_id = await cache.installation_id_for(body.repo)
+            else:
+                installation_id = await cache.home_installation_id()
+            tok = await cache.installation_token(installation_id)
+        except LookupError as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc),
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail=f"GitHub API error minting token: {exc.response.status_code}",
+            ) from exc
+        return InstallationTokenResponse(
+            token=tok.token,
+            expires_at=tok.expires_at.isoformat(),
+            installation_id=installation_id,
+            repo=body.repo,
+        )
+
     app_id = settings.github_app_id
     pk = settings.github_app_private_key
 
