@@ -85,7 +85,11 @@ from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.events.schedule import ScheduledTick
-from treadmill_api.events.task import TaskEscalatedToOperator, TaskRegistered
+from treadmill_api.events.task import (
+    TaskCancelled,
+    TaskEscalatedToOperator,
+    TaskRegistered,
+)
 from treadmill_api.onboarding_store import OnboardingStore
 from treadmill_api.models import (
     Event,
@@ -3112,6 +3116,41 @@ async def handle_scheduled_tick(
         )
         return None
 
+    # Resolve the WorkflowVersion once so the coalesce helper and
+    # ``_dispatch_via_synthetic_task`` share the lookup (the dispatch
+    # call below accepts the pre-resolved row via ``workflow_version=``
+    # and skips its internal SELECT). When no version is seeded yet, the
+    # behavior is the same as the dispatch path: log a warning + return
+    # None without touching the coalesce or task-insert paths.
+    wv_result = await session.execute(
+        select(WorkflowVersion)
+        .where(WorkflowVersion.workflow_id == schedule.workflow_id)
+        .order_by(WorkflowVersion.version.desc())
+        .limit(1)
+    )
+    wv = wv_result.scalar_one_or_none()
+    if wv is None:
+        logger.warning(
+            "scheduled-tick: no WorkflowVersion for %s; skipping dispatch "
+            "(run starters seed?)",
+            schedule.workflow_id,
+        )
+        return None
+
+    # Collapse any prior pending ticks for the same schedule before
+    # emitting a fresh one — addresses the 6-tick wf-ui-triage backlog
+    # observed 2026-06-03 (see
+    # ``docs/learnings/2026-06-03-scheduler-should-dedupe-pending-ticks.md``).
+    # The two deterministic-detector workflows above never reach here
+    # because they short-circuit; their ticks don't synthesize Tasks at
+    # all, so there is nothing to coalesce.
+    await _coalesce_pending_ticks_for_schedule(
+        session,
+        dispatcher,
+        schedule_id=schedule.id,
+        workflow_version_id=wv.id,
+    )
+
     # ``ScheduledTick`` carries no fire_at field (ADR-0035 v0); the
     # Task's server-default ``created_at`` is the dispatch timestamp.
     return await _dispatch_via_synthetic_task(
@@ -3122,7 +3161,101 @@ async def handle_scheduled_tick(
         trigger=f"schedule:{typed.schedule_id}",
         created_by="scheduler",
         title=f"schedule:{schedule.workflow_id}",
+        workflow_version=wv,
     )
+
+
+_COALESCE_PENDING_TICKS_SQL = text("""
+    SELECT t.id
+    FROM tasks t
+    WHERE t.plan_id = :system_plan_id
+      AND t.created_by = 'scheduler'
+      AND t.workflow_version_id = :workflow_version_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM workflow_runs r
+          JOIN workflow_run_steps s ON s.run_id = r.id
+          WHERE r.task_id = t.id
+            AND s.started_at IS NOT NULL
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM events e
+          WHERE e.task_id = t.id
+            AND e.entity_type = 'task'
+            AND e.action IN ('cancelled', 'superseded', 'escalated_to_operator')
+      )
+""")
+"""Find Tasks that represent prior unconsumed scheduler ticks for the
+given ``workflow_version_id``. "Pending" = registered but no
+``workflow_run_steps`` row has been picked up by a worker
+(``started_at IS NULL``), and the task itself is not already
+terminal/escalated. Kept module-level so the SQL stays in one place
+for review."""
+
+
+async def _coalesce_pending_ticks_for_schedule(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    schedule_id: uuid.UUID,
+    workflow_version_id: uuid.UUID,
+) -> list[uuid.UUID]:
+    """Cancel prior pending ticks for the same schedule before
+    dispatching a fresh one. Returns the list of cancelled task ids
+    (empty when nothing to coalesce).
+
+    "Pending" means the task has been registered but no step has begun
+    execution — i.e., no row in ``workflow_run_steps`` with a non-null
+    ``started_at``. In-flight ticks (a step has been claimed by a
+    worker) are intentionally left alone — parallel runs of the same
+    workflow are allowed; we only collapse the *backlog* of unconsumed
+    ticks that pile up when a worker pool is saturated or the schedule
+    over-fires.
+
+    The two deterministic-detector workflows
+    (``wf-stuck-task-sweep`` + ``wf-escalation-close-sweep``) never
+    reach this helper — they short-circuit in
+    ``handle_scheduled_tick`` *before* the synthetic-Task path runs,
+    so they have no Task rows to coalesce.
+
+    Each cancelled task gets a ``task.cancelled`` event with
+    ``reason="superseded_by_newer_tick"`` + the schedule id + the
+    ``"scheduler-coalesce"`` author tag, so audit consumers can
+    distinguish coalesce-cancellations from operator-driven ones (the
+    ``routers/dashboard/cancel.py`` path leaves ``schedule_id`` +
+    ``cancelled_by`` as None).
+    """
+    result = await session.execute(
+        _COALESCE_PENDING_TICKS_SQL,
+        {
+            "system_plan_id": SYSTEM_PLAN_ID,
+            "workflow_version_id": workflow_version_id,
+        },
+    )
+    pending_task_ids: list[uuid.UUID] = [row[0] for row in result.all()]
+
+    for task_id in pending_task_ids:
+        await dispatcher.persist_and_publish(
+            session,
+            entity_type="task",
+            action="cancelled",
+            payload=TaskCancelled(
+                reason="superseded_by_newer_tick",
+                schedule_id=schedule_id,
+                cancelled_by="scheduler-coalesce",
+            ),
+            plan_id=SYSTEM_PLAN_ID,
+            task_id=task_id,
+        )
+
+    if pending_task_ids:
+        logger.info(
+            "scheduled-tick: coalesced %d prior pending tick(s) for "
+            "schedule %s (workflow_version %s)",
+            len(pending_task_ids), schedule_id, workflow_version_id,
+        )
+    return pending_task_ids
 
 
 async def _dispatch_via_synthetic_task(
@@ -3134,6 +3267,7 @@ async def _dispatch_via_synthetic_task(
     trigger: str,
     created_by: str,
     title: str,
+    workflow_version: WorkflowVersion | None = None,
 ) -> uuid.UUID | None:
     """ADR-0057: create a synthetic ``Task`` and dispatch via the normal
     task-bound path so workers see a normal task body.
@@ -3147,17 +3281,25 @@ async def _dispatch_via_synthetic_task(
     ``"registered"`` (the dispatch_task default). Schedulers and operator
     surfaces can still distinguish themselves via ``created_by``.
 
+    ``workflow_version`` lets the caller pass a pre-resolved
+    ``WorkflowVersion`` row (``handle_scheduled_tick`` does this so the
+    coalesce helper and the dispatch share one SELECT). When ``None``
+    the helper looks it up itself — preserves the
+    ``routers/workflow_triggers.py`` call site.
+
     Returns the run's id, or ``None`` if the workflow has no version
     (un-seeded install) or no steps (degenerate workflow). The caller
     must commit the session.
     """
-    wv_result = await session.execute(
-        select(WorkflowVersion)
-        .where(WorkflowVersion.workflow_id == workflow_id)
-        .order_by(WorkflowVersion.version.desc())
-        .limit(1)
-    )
-    wv = wv_result.scalar_one_or_none()
+    if workflow_version is None:
+        wv_result = await session.execute(
+            select(WorkflowVersion)
+            .where(WorkflowVersion.workflow_id == workflow_id)
+            .order_by(WorkflowVersion.version.desc())
+            .limit(1)
+        )
+        workflow_version = wv_result.scalar_one_or_none()
+    wv = workflow_version
     if wv is None:
         logger.warning(
             "synthetic-task dispatch (%s): no WorkflowVersion for %s; "

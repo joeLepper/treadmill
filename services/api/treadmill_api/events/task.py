@@ -159,12 +159,22 @@ class TaskReady(EventPayload):
 
 class TaskCancelled(EventPayload):
     """Emitted when a task is cancelled. Cancellation is terminal — no
-    workflow runs may be dispatched against the task afterward."""
+    workflow runs may be dispatched against the task afterward.
+
+    ``schedule_id`` + ``cancelled_by`` are populated when the scheduler
+    coalesces duplicate pending ticks for the same schedule (the
+    ``_coalesce_pending_ticks_for_schedule`` helper in
+    ``coordination/triggers.py``). Operator-driven cancellations
+    (``routers/dashboard/cancel.py``) leave both as None — the route's
+    body carries only ``reason``.
+    """
 
     ENTITY_TYPE: ClassVar[str] = "task"
     ACTION: ClassVar[str] = "cancelled"
 
     reason: str | None = None
+    schedule_id: uuid.UUID | None = None
+    cancelled_by: str | None = None
 
 
 class TaskRetry(EventPayload):
