@@ -2214,6 +2214,32 @@ class LocalRuntime:
             return False
         return self._pid_alive(pid)
 
+    # ── ADR-0069 accelerator ──────────────────────────────────────────────────
+
+    def restart_host_processes(self) -> None:
+        """Recycle the autoscaler + scheduler subprocesses.
+
+        Called by the deploy-watcher's adapter-category action after
+        ``_sync_local_to_origin`` has pulled new ``tools/local-adapter/**``
+        bytes into the local clone. The watcher has already self-healed
+        at its own loop head (it is now running new bytes); this method
+        propagates the new code to the SIBLINGS by stopping them, then
+        starting them — which re-imports ``treadmill_local`` fresh in
+        each subprocess. Dev-local only: requires a ``deployment_config``
+        because both starters take their config from the per-deployment
+        YAML.
+        """
+        if self.deployment_config is None:
+            console.print(
+                "[yellow]• restart_host_processes called without a "
+                "deployment_config; skipping (legacy/test path).[/yellow]"
+            )
+            return
+        self._stop_autoscaler()
+        self._stop_scheduler()
+        self._start_autoscaler_dev_local()
+        self._start_scheduler_dev_local()
+
     @staticmethod
     def _pid_alive(pid: int) -> bool:
         try:

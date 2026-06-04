@@ -9,7 +9,7 @@ Dispatch table (first-match wins; order is significant):
   - ``services/dashboard/**`` → dashboard (RECREATE container — build path lives in the runtime helper)
   - ``workers/agent/**``      → agent     (docker build only; workers are one-shot per ADR-0018)
   - ``infra/**``              → infra     (notify-only; do NOT shell out)
-  - ``tools/local-adapter/**`` → adapter   (notify-only)
+  - ``tools/local-adapter/**`` → adapter   (sync local clone + restart host sibling processes per ADR-0069)
   - other                     → ignored
 
 The class is split from its subprocess entrypoint deliberately.
@@ -56,7 +56,13 @@ _DISPATCH_TABLE: list[tuple[str, str]] = [
     ("tools/local-adapter/", "adapter"),
 ]
 
-_NOTIFY_ONLY_CATEGORIES: frozenset[str] = frozenset({"infra", "adapter"})
+# ADR-0069: ``adapter`` was previously notify-only. After the staleness
+# self-heal landed it gained an explicit action — sync the local clone
+# to origin/main and restart the autoscaler + scheduler siblings via the
+# injected ``restart_host_processes_fn`` — so a ``tools/local-adapter/**``
+# merge propagates within one watcher iteration instead of waiting for
+# the operator to bounce ``treadmill-local up``.
+_NOTIFY_ONLY_CATEGORIES: frozenset[str] = frozenset({"infra"})
 
 _POLL_WAIT_SECONDS: int = 20
 _HEALTH_TIMEOUT_SECONDS: int = 30
@@ -110,6 +116,9 @@ class DeployWatcher:
         api_health_url: str,
         state_file: Path,
         repo_root: Path,
+        restart_host_processes_fn: Callable[[], None] | None = None,
+        staleness_guard: Any = None,
+        staleness_pid_file: Path | None = None,
     ) -> None:
         self._receive_fn = receive_fn
         self._ack_fn = ack_fn
@@ -119,10 +128,23 @@ class DeployWatcher:
         self._api_health_url = api_health_url
         self._state_file = state_file
         self._repo_root = repo_root
+        # ADR-0069 accelerator: the ``adapter`` category invokes this
+        # after ``_sync_local_to_origin`` so a ``tools/local-adapter/**``
+        # merge restarts the autoscaler + scheduler within the same
+        # watcher iteration. Wired by the deploy-watcher's ``main()``
+        # against ``LocalRuntime.restart_host_processes``; ``None``
+        # disables the accelerator (legacy/test paths log + skip).
+        self._restart_host_processes_fn = restart_host_processes_fn
+        # ADR-0069 self-heal: when set, ``run()`` re-execs the watcher
+        # at each loop head before processing messages, so a stale
+        # watcher heals BEFORE running the adapter-category action.
+        self._staleness_guard = staleness_guard
+        self._staleness_pid_file = staleness_pid_file
         self._stop_event = threading.Event()
 
     def run(self) -> None:
         """Poll until stop() is called or a signal is received."""
+        from treadmill_local.staleness import maybe_reexec
         from treadmill_local.subprocess_logging import RateLimitedErrorLogger
         # Rate-limit the loop's error path so a persistent failure
         # (queue unreachable, GitHub auth expired) doesn't dump a full
@@ -132,6 +154,12 @@ class DeployWatcher:
         error_logger = RateLimitedErrorLogger(logger)
         logger.info("deploy watcher starting (state=%s)", self._state_file)
         while not self._stop_event.is_set():
+            # ADR-0069 safe-point: top of loop, BETWEEN event batches.
+            # Re-exec here (never mid-handler) so a stale watcher heals
+            # before running the adapter-category accelerator that
+            # would otherwise restart its siblings with the OLD code's
+            # idea of how to restart them.
+            maybe_reexec(self._staleness_guard, self._staleness_pid_file)
             try:
                 messages = self._receive_fn()
                 for msg in messages:
@@ -218,6 +246,8 @@ class DeployWatcher:
             self._action_dashboard()
         elif category == "agent":
             self._action_agent()
+        elif category == "adapter":
+            self._action_adapter()
         elif category in _NOTIFY_ONLY_CATEGORIES:
             self._action_notify(category, files)
         else:
@@ -317,6 +347,29 @@ class DeployWatcher:
         )
         logger.info("agent image rebuilt (workers are one-shot; no restart needed)")
 
+    def _action_adapter(self) -> None:
+        # ADR-0069 accelerator: a ``tools/local-adapter/**`` merge means
+        # the autoscaler + scheduler + this watcher are all running on
+        # pre-merge bytes. The watcher self-healed at the loop head
+        # (it's running new bytes by the time this method is reached);
+        # this action propagates the new source to the SIBLINGS by
+        # syncing the local clone to origin/main and then stopping +
+        # restarting the autoscaler and scheduler through the runtime
+        # helpers. Without the injected ``restart_host_processes_fn``
+        # (legacy/test paths) the action falls back to the pre-ADR-0069
+        # notify-only behavior so the watcher itself stays useful.
+        self._sync_local_to_origin()
+        if self._restart_host_processes_fn is None:
+            logger.info(
+                "adapter merge: no restart_host_processes_fn wired; "
+                "siblings will self-heal at their own next tick"
+            )
+            return
+        self._restart_host_processes_fn()
+        logger.info(
+            "adapter merge: autoscaler + scheduler restarted from new source"
+        )
+
     def _action_notify(self, category: str, files: list[str]) -> None:
         logger.info(
             "deploy event: category=%s requires manual action; affected_files=%s",
@@ -368,7 +421,12 @@ def main() -> int:
     # Imports are local to keep DeployWatcher itself dependency-free for tests.
     import boto3
 
-    from treadmill_local.runtime import DEPLOY_WATCHER_LOG_FILE
+    from treadmill_local.runtime import (
+        DEPLOY_WATCHER_LOG_FILE,
+        DEPLOY_WATCHER_PID_FILE,
+        STATE_DIR,
+    )
+    from treadmill_local.staleness import StalenessGuard
     from treadmill_local.subprocess_logging import configure_rotating_logging
 
     # The subprocess owns its own log file — the parent passes the
@@ -378,6 +436,12 @@ def main() -> int:
     log_file_env = os.environ.get("TREADMILL_DEPLOY_WATCHER_LOG_FILE")
     log_file = Path(log_file_env) if log_file_env else DEPLOY_WATCHER_LOG_FILE
     configure_rotating_logging(log_file)
+
+    # ADR-0069: rewrite the PID file with our own pid at startup so a
+    # re-exec'd process owns the pid file the parent uses for
+    # ``_pid_alive`` + ``_stop_deploy_watcher``.
+    STATE_DIR.mkdir(exist_ok=True)
+    DEPLOY_WATCHER_PID_FILE.write_text(str(os.getpid()))
 
     github_owner = os.environ["GITHUB_OWNER"]
     github_repo_name = os.environ["GITHUB_REPO"]
@@ -469,6 +533,7 @@ def main() -> int:
     # to drive and the API action is a no-op — that path only exists for
     # legacy/test scenarios; production ``services/api/**`` PR merges always
     # come through the dev-local watcher.
+    restart_host_processes_fn: Callable[[], None] | None
     if cfg is not None:
         from treadmill_local.runtime import LocalRuntime
         runtime = LocalRuntime(
@@ -481,6 +546,17 @@ def main() -> int:
 
         def recreate_dashboard() -> None:
             runtime.recreate_dashboard_container()
+
+        # ADR-0069 accelerator: a ``tools/local-adapter/**`` merge
+        # restarts the autoscaler + scheduler so they pick up the
+        # new bytes immediately. The injected callable goes through
+        # the runtime helper so the watcher class itself never
+        # imports runtime internals — same pattern as the
+        # ``recreate_*`` closures above.
+        def restart_host_processes() -> None:
+            runtime.restart_host_processes()
+
+        restart_host_processes_fn = restart_host_processes
 
         api_health_url = (
             cfg["local"]["api_url"].rstrip("/") + "/health/ready"
@@ -498,7 +574,14 @@ def main() -> int:
                 "no-op (fully-local / test mode)."
             )
 
+        # No runtime instance in fully-local/test mode → the watcher
+        # falls back to logging the merge without restarting siblings.
+        restart_host_processes_fn = None
         api_health_url = "http://localhost:8088/health/ready"
+
+    # ADR-0069: fingerprint our package bytes at startup; the loop
+    # head consults this each iteration to decide whether to re-exec.
+    staleness_guard = StalenessGuard(module="treadmill_local.deploy_watcher")
 
     watcher = DeployWatcher(
         receive_fn=receive,
@@ -509,6 +592,9 @@ def main() -> int:
         api_health_url=api_health_url,
         state_file=state_file,
         repo_root=repo_root,
+        restart_host_processes_fn=restart_host_processes_fn,
+        staleness_guard=staleness_guard,
+        staleness_pid_file=DEPLOY_WATCHER_PID_FILE,
     )
 
     def _on_signal(_signum: int, _frame: Any) -> None:

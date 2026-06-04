@@ -95,6 +95,8 @@ def _make_watcher(
     pr_files_fn=None,
     api_health_url: str = "http://localhost:8088/health/ready",
     dashboard_calls: list[str] | None = None,
+    restart_host_processes_calls: list[str] | None = None,
+    staleness_guard=None,
 ) -> tuple[DeployWatcher, list[str], list[str]]:
     """Construct a watcher with controllable PR-files response.
 
@@ -104,7 +106,9 @@ def _make_watcher(
     ADR-0024 captured was the watcher skipping recreate entirely). The
     dashboard recreate hook is the symmetric sibling for
     ``services/dashboard/**`` merges (ADR-0056); pass a list via
-    ``dashboard_calls`` to capture invocations.
+    ``dashboard_calls`` to capture invocations. ADR-0069 adds an
+    analogous accelerator hook for ``tools/local-adapter/**`` merges
+    (``restart_host_processes_calls``).
 
     Returns ``(watcher, acked_handles, recreate_calls)``.
     """
@@ -124,6 +128,11 @@ def _make_watcher(
         if dashboard_calls is not None:
             dashboard_calls.append("recreate")
 
+    restart_host_processes_fn = None
+    if restart_host_processes_calls is not None:
+        def restart_host_processes_fn() -> None:  # type: ignore[no-redef]
+            restart_host_processes_calls.append("restart")
+
     watcher = DeployWatcher(
         receive_fn=lambda: [],
         ack_fn=lambda h: acked.append(h),
@@ -133,6 +142,8 @@ def _make_watcher(
         api_health_url=api_health_url,
         state_file=tmp_path / "state.json",
         repo_root=Path("/fake-repo"),
+        restart_host_processes_fn=restart_host_processes_fn,
+        staleness_guard=staleness_guard,
     )
     return watcher, acked, recreate_calls
 
@@ -415,16 +426,181 @@ def test_infra_notify_only(mock_run, tmp_path):
 
 
 @patch("subprocess.run")
-def test_adapter_notify_only(mock_run, tmp_path):
-    """adapter changes must log a notification and NOT call subprocess."""
+def test_adapter_falls_back_to_notify_when_no_restart_fn(mock_run, tmp_path):
+    """ADR-0069 backwards compat: when ``restart_host_processes_fn`` is
+    unwired (legacy/test paths constructed without it), the adapter
+    action still runs ``_sync_local_to_origin`` but skips the sibling
+    restart — siblings will self-heal at their own next tick. The
+    watcher does NOT shell out for the missing restart, just logs."""
+    mock_run.side_effect = [
+        MagicMock(returncode=0),                       # git fetch
+        MagicMock(returncode=0, stderr=""),            # git merge --ff-only
+        MagicMock(returncode=0, stdout="abc1234\n"),   # git rev-parse --short HEAD
+    ]
     watcher, acked, _ = _make_watcher(
         tmp_path, pr_files=["tools/local-adapter/pyproject.toml"],
     )
 
     watcher._process_message(_sqs_msg(4, "jkl012"))
 
-    mock_run.assert_not_called()
+    # Sync prefix ran (the bytes need to be on disk before any restart),
+    # but no other subprocesses fired and no other handlers ran.
+    assert mock_run.call_args_list[0].args[0] == [
+        "git", "-C", "/fake-repo", "fetch", "origin", "--quiet",
+    ]
+    assert mock_run.call_args_list[1].args[0] == [
+        "git", "-C", "/fake-repo", "merge", "--ff-only", "origin/main",
+    ]
+    for call in mock_run.call_args_list:
+        cmd = call.args[0]
+        assert cmd[:2] != ["docker", "build"]
     assert acked == ["rh-4"]
+
+
+@patch("subprocess.run")
+def test_adapter_action_syncs_then_restarts_host_processes(mock_run, tmp_path):
+    """ADR-0069 accelerator: a ``tools/local-adapter/**`` merge syncs
+    the local clone to origin/main and THEN invokes the injected
+    ``restart_host_processes_fn`` — the order matters because the
+    siblings are restarted from disk and must see the new bytes."""
+    mock_run.side_effect = [
+        MagicMock(returncode=0),                       # git fetch
+        MagicMock(returncode=0, stderr=""),            # git merge --ff-only
+        MagicMock(returncode=0, stdout="abc1234\n"),   # git rev-parse --short HEAD
+    ]
+    restart_calls: list[str] = []
+    watcher, acked, _ = _make_watcher(
+        tmp_path,
+        pr_files=["tools/local-adapter/treadmill_local/cli.py"],
+        restart_host_processes_calls=restart_calls,
+    )
+
+    watcher._process_message(_sqs_msg(40, "adaptsha"))
+
+    # Sync prefix ran first.
+    assert mock_run.call_args_list[0].args[0] == [
+        "git", "-C", "/fake-repo", "fetch", "origin", "--quiet",
+    ]
+    assert mock_run.call_args_list[1].args[0] == [
+        "git", "-C", "/fake-repo", "merge", "--ff-only", "origin/main",
+    ]
+    # No docker build — host processes don't ship in a container.
+    for call in mock_run.call_args_list:
+        cmd = call.args[0]
+        assert cmd[:2] != ["docker", "build"]
+    # Restart fired exactly once.
+    assert restart_calls == ["restart"]
+    assert acked == ["rh-40"]
+
+
+def test_adapter_category_no_longer_notify_only():
+    """ADR-0069: the ``adapter`` category was removed from
+    ``_NOTIFY_ONLY_CATEGORIES`` so a ``tools/local-adapter/**`` merge
+    has an explicit handler. Pin this so a future revert of the
+    notify-only frozenset can't silently disable the accelerator."""
+    from treadmill_local.deploy_watcher import _NOTIFY_ONLY_CATEGORIES
+
+    assert "adapter" not in _NOTIFY_ONLY_CATEGORIES
+    # ``infra`` stays notify-only — the action there is operator-side
+    # tooling that doesn't have a local equivalent.
+    assert "infra" in _NOTIFY_ONLY_CATEGORIES
+
+
+# ── ADR-0069 staleness guard wiring at the loop head ──────────────────────────
+
+
+class _RecordingGuard:
+    """Records changed() / reexec() invocations. ``reexec`` raises
+    ``_ReexecSentinel`` so the loop terminates in the test path
+    instead of looping forever waiting for a real ``os.execv``."""
+
+    def __init__(self, changed: bool) -> None:
+        self._changed = changed
+        self.changed_calls = 0
+        self.reexec_calls = 0
+
+    def changed(self) -> bool:
+        self.changed_calls += 1
+        return self._changed
+
+    def reexec(self, pid_file=None) -> None:
+        self.reexec_calls += 1
+        raise _ReexecSentinel()
+
+
+class _ReexecSentinel(Exception):
+    """Stand-in for ``os.execv`` not returning."""
+
+
+def test_run_loop_head_reexecs_before_processing_when_stale(tmp_path):
+    """ADR-0069 safe-point: a stale watcher heals BEFORE the
+    accelerator runs, so the new bytes recreate siblings correctly.
+    Verified by patching ``receive_fn`` to record whether it was
+    called — if reexec fires first, no messages are received."""
+    receive_calls: list[str] = []
+
+    def receive_fn() -> list:
+        receive_calls.append("called")
+        return []
+
+    guard = _RecordingGuard(changed=True)
+    watcher = DeployWatcher(
+        receive_fn=receive_fn,
+        ack_fn=lambda h: None,
+        get_pr_files_fn=lambda pr: [],
+        recreate_api_fn=lambda: None,
+        recreate_dashboard_fn=lambda: None,
+        api_health_url="http://localhost:8088/health/ready",
+        state_file=tmp_path / "state.json",
+        repo_root=Path("/fake-repo"),
+        staleness_guard=guard,
+    )
+
+    with pytest.raises(_ReexecSentinel):
+        watcher.run()
+
+    # reexec fires BEFORE the first receive call — that's the whole
+    # point of the loop-head safe point.
+    assert receive_calls == []
+    assert guard.reexec_calls == 1
+    assert guard.changed_calls == 1
+
+
+def test_run_loop_proceeds_when_not_stale(tmp_path):
+    """No drift → no re-exec. ``receive_fn`` runs; the loop tries the
+    next iteration. We break out via stop() once a single iteration
+    completes."""
+    receive_count = {"n": 0}
+
+    def receive_fn() -> list:
+        receive_count["n"] += 1
+        return []
+
+    guard = _RecordingGuard(changed=False)
+    watcher = DeployWatcher(
+        receive_fn=receive_fn,
+        ack_fn=lambda h: None,
+        get_pr_files_fn=lambda pr: [],
+        recreate_api_fn=lambda: None,
+        recreate_dashboard_fn=lambda: None,
+        api_health_url="http://localhost:8088/health/ready",
+        state_file=tmp_path / "state.json",
+        repo_root=Path("/fake-repo"),
+        staleness_guard=guard,
+    )
+
+    # Stop the loop on the first receive call so the test terminates.
+    def receive_and_stop() -> list:
+        receive_count["n"] += 1
+        watcher.stop()
+        return []
+
+    watcher._receive_fn = receive_and_stop
+    watcher.run()
+
+    assert receive_count["n"] == 1
+    assert guard.reexec_calls == 0
+    assert guard.changed_calls >= 1
 
 
 # ── State-file idempotency ────────────────────────────────────────────────────

@@ -134,6 +134,8 @@ class Autoscaler:
         max_count: int,
         tick_seconds: float = 2.0,
         reap_dead_workers_fn: Callable[[], int] | None = None,
+        staleness_guard: Any = None,
+        staleness_pid_file: Path | None = None,
     ) -> None:
         if min_count < 0:
             raise ValueError(f"min_count must be >= 0, got {min_count}")
@@ -148,6 +150,14 @@ class Autoscaler:
         self.min_count = min_count
         self.max_count = max_count
         self.tick_seconds = tick_seconds
+        # ADR-0069 self-heal: the production wiring constructs a
+        # ``StalenessGuard`` over the ``treadmill_local`` package and
+        # passes it here; ``run()`` consults it at the TOP of each
+        # iteration (before ``tick()``) and re-execs the process when
+        # the bytes drifted. ``None`` disables the check (legacy
+        # fully-local path + tests that don't care about self-heal).
+        self.staleness_guard = staleness_guard
+        self.staleness_pid_file = staleness_pid_file
         self._stop_event = threading.Event()
 
     def tick(self) -> AutoscalerTick:
@@ -191,6 +201,7 @@ class Autoscaler:
         observable as soon as the log mtime falls outside the
         threshold.
         """
+        from treadmill_local.staleness import maybe_reexec
         from treadmill_local.subprocess_logging import RateLimitedErrorLogger
         # Rate-limit the loop's error path so a persistent failure
         # (queue unreachable, expired credentials) doesn't dump a full
@@ -203,6 +214,11 @@ class Autoscaler:
             self.min_count, self.max_count, self.tick_seconds,
         )
         while not self._stop_event.is_set():
+            # ADR-0069 safe-point: top of loop, before tick(), so a
+            # re-exec never tears down a mid-flight container start
+            # or reap. ``maybe_reexec`` is a no-op when the guard is
+            # ``None`` (legacy path) or when source has not changed.
+            maybe_reexec(self.staleness_guard, self.staleness_pid_file)
             try:
                 t = self.tick()
                 # The tick line stays at INFO unconditionally — it's the
@@ -265,7 +281,14 @@ def main() -> int:
     import boto3
     import docker
 
-    from treadmill_local.runtime import AUTOSCALER_LOG_FILE, LABEL_KEY, LocalRuntime
+    from treadmill_local.runtime import (
+        AUTOSCALER_LOG_FILE,
+        AUTOSCALER_PID_FILE,
+        LABEL_KEY,
+        STATE_DIR,
+        LocalRuntime,
+    )
+    from treadmill_local.staleness import StalenessGuard
     from treadmill_local.subprocess_logging import configure_rotating_logging
 
     # The subprocess owns its own log file — the parent passes the
@@ -275,6 +298,14 @@ def main() -> int:
     log_file_env = os.environ.get("TREADMILL_AUTOSCALER_LOG_FILE")
     log_file = Path(log_file_env) if log_file_env else AUTOSCALER_LOG_FILE
     configure_rotating_logging(log_file)
+
+    # ADR-0069: rewrite the PID file with our own pid at startup. The
+    # parent's ``_start_autoscaler*`` wrote ``proc.pid`` after spawn,
+    # which matches us on first boot — but after an ``os.execv`` re-exec
+    # the new process owns the same pid file and must claim it so the
+    # parent's ``_pid_alive`` + ``_stop_autoscaler`` keep working.
+    STATE_DIR.mkdir(exist_ok=True)
+    AUTOSCALER_PID_FILE.write_text(str(os.getpid()))
 
     infra_dir = Path(os.environ["TREADMILL_INFRA_DIR"])
     family = os.environ["TREADMILL_AUTOSCALER_FAMILY"]
@@ -418,6 +449,12 @@ def main() -> int:
                 )
         return reaped
 
+    # ADR-0069: fingerprint our package bytes at startup; the loop
+    # consults this each iteration to decide whether to re-exec. The
+    # entrypoint module is pinned so ``os.execv`` re-enters this exact
+    # ``main()`` rather than the package root.
+    staleness_guard = StalenessGuard(module="treadmill_local.autoscaler")
+
     autoscaler = Autoscaler(
         queue_depth_fn=get_depth,
         worker_count_fn=count_workers,
@@ -426,6 +463,8 @@ def main() -> int:
         min_count=min_count,
         max_count=max_count,
         tick_seconds=tick,
+        staleness_guard=staleness_guard,
+        staleness_pid_file=AUTOSCALER_PID_FILE,
     )
 
     def _on_signal(_signum: int, _frame: Any) -> None:
