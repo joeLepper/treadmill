@@ -95,6 +95,13 @@ wheel. `EXPOSE 3128` matches the autoscaler's spawn assumption.
 
 ## Recent changes
 
+- ADR-0065 Step 2: the `autoscaler_smoke` GitHub Actions workflow
+  (`.github/workflows/autoscaler_smoke.yml`) now covers this service
+  as part of the autoscaler-spawn surface path filter. Any change
+  under `services/egress-proxy/**` triggers the real-Docker smoke
+  gate, which boots the stack with `--proxy-enabled true`, asserts
+  the proxy allows `api.github.com` CONNECTs, and asserts it returns
+  403 for un-allowlisted hosts.
 - ADR-0064 Step 2: `ensure_egress_proxy_container` multi-attaches
   the proxy container to `treadmill-local` immediately after the
   initial spawn on `treadmill-egress`. Without this the proxy could
