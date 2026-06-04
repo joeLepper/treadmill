@@ -1,0 +1,10 @@
+{
+  "name": "cc-channel-treadmill",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code channel pushing Treadmill dispatched-work lifecycle events into the originating session (ADR-0068)",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

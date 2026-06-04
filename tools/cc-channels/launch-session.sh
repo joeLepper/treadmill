@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# launch-session.sh — start a labeled Claude Code session with its channels
+# (ADR-0067 phone access + ADR-0068 treadmill events; shared conventions).
+#
+# The <label> is the session identity primitive (ADR-0068 Part 1):
+#   * names the session's Telegram bot (the phone's chat list = session list)
+#   * keys the channel state dirs under ~/.cc-channels/<label>/
+#   * is the value the session MUST pass as `--created-by <label>` on every
+#     `treadmill plan submit`, so the events channel receives its own work.
+#
+# Usage:
+#   launch-session.sh <label> [workdir] [-- <extra claude args>]
+#
+# Telegram (optional per session): put the bot's token in
+#   ~/.cc-channels/<label>/telegram.env   as   TELEGRAM_BOT_TOKEN=...
+# When absent, the session launches with the treadmill-events channel only.
+#
+# One-time setup (see tools/cc-channel-treadmill/README.md):
+#   * bun installed; `bun install` run in tools/cc-channel-treadmill/
+#   * "treadmill-events" registered in ~/.claude.json mcpServers (absolute path)
+#   * telegram plugin installed + paired, sender allowlist configured FIRST
+#     (bypassed-permission sessions: ungated inbound = prompt injection).
+#
+# Pinned against: Claude Code 2.1.161. Channels are a research preview —
+# re-verify the --channels / --dangerously-load-development-channels contract
+# after CC upgrades (ADR-0067/0068 watch-out).
+set -euo pipefail
+
+LABEL="${1:?usage: launch-session.sh <label> [workdir] [-- extra claude args]}"
+shift
+WORKDIR="$PWD"
+if [[ $# -gt 0 && "$1" != "--" ]]; then
+  WORKDIR="$1"; shift
+fi
+[[ "${1:-}" == "--" ]] && shift
+
+STATE_ROOT="$HOME/.cc-channels/$LABEL"
+mkdir -p "$STATE_ROOT/telegram" "$STATE_ROOT/treadmill"
+
+# ── treadmill-events channel (ADR-0068) ─────────────────────────────────────
+export TREADMILL_SESSION_LABEL="$LABEL"
+# Direct API port — the :8080 auth proxy does not upgrade WebSockets.
+export TREADMILL_API_URL="${TREADMILL_API_URL:-http://localhost:8088}"
+
+# ── telegram channel (ADR-0067), only when this label has a bot ─────────────
+CHANNEL_ARGS=()
+TELEGRAM_ENV="$STATE_ROOT/telegram.env"
+if [[ -f "$TELEGRAM_ENV" ]]; then
+  # shellcheck disable=SC1090
+  source "$TELEGRAM_ENV"          # provides TELEGRAM_BOT_TOKEN
+  export TELEGRAM_BOT_TOKEN
+  export TELEGRAM_STATE_DIR="$STATE_ROOT/telegram"
+  CHANNEL_ARGS+=(--channels plugin:telegram@claude-plugins-official)
+else
+  echo "[launch-session] no $TELEGRAM_ENV — starting without the telegram channel" >&2
+fi
+
+# Custom channels stay behind the development flag during the research
+# preview (per-entry bypass; --channels entries are NOT covered by it).
+CHANNEL_ARGS+=(--dangerously-load-development-channels server:treadmill-events)
+
+# Bypass permission prompts (ADR-0067): these are long-lived, away-from-keyboard
+# sessions driven from the phone — a permission prompt nobody is at the terminal
+# to answer would stall the session indefinitely. This is why the inbound
+# sender-allowlist gate (telegram :access policy allowlist) is MANDATORY, not
+# optional: with permissions bypassed, an ungated channel message is direct
+# code-execution. Pair + allowlist each bot before relying on it.
+CHANNEL_ARGS+=(--dangerously-skip-permissions)
+
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "[launch-session] label=$LABEL workdir=$WORKDIR channels=${CHANNEL_ARGS[*]}" >&2
+echo "[launch-session] reminder: dispatch with --created-by $LABEL" >&2
+echo "[launch-session] permissions BYPASSED — set the sender allowlist before relying on the bot:" >&2
+echo "[launch-session]   DM the bot, then:  $_HERE/cc-access.py --label $LABEL pair <code>" >&2
+echo "[launch-session]   then lock it down:  $_HERE/cc-access.py --label $LABEL policy allowlist" >&2
+echo "[launch-session]   (use cc-access.py, NOT /telegram:access — the stock skill targets the wrong state dir under per-bot isolation)" >&2
+
+cd "$WORKDIR"
+exec claude "${CHANNEL_ARGS[@]}" "$@"
