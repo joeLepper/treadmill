@@ -433,6 +433,18 @@ class CoordinationConsumer:
                 await self._maybe_fire_author_feedback_on_step_failed(
                     session, step_id,
                 )
+            # ADR-0062 Step 1: when a ``step.failed`` lands on a run that
+            # has no further pending steps to dispatch AND no sibling
+            # ``task.escalated_to_operator`` event has fired against the
+            # task within the dedup window, escalate with
+            # ``reason='terminal_step_failure'``. Sibling to the
+            # cap-reached / gate-broken escalators — these own their own
+            # cases; this producer covers the leftover "the run ran out
+            # of recovery and nobody else raised" path.
+            if action == "failed":
+                await self._maybe_dispatch_terminal_step_failure(
+                    session, step_id,
+                )
             # ADR-0038: ralph-loop deadlock arbitration. When a
             # wf-feedback step completes with ``responded-without-change``
             # while the underlying review still says ``changes_requested``,
@@ -1996,6 +2008,40 @@ class CoordinationConsumer:
                 "_maybe_fire_author_feedback_on_step_failed: dispatch "
                 "failed for step %s; prior projection committed, will "
                 "retry on redelivery",
+                step_id,
+            )
+
+    async def _maybe_dispatch_terminal_step_failure(
+        self,
+        session: AsyncSession,
+        step_id: str,
+    ) -> None:
+        """ADR-0062 Step 1: emit ``task.escalated_to_operator`` when a
+        ``step.failed`` arrives on a run with no remaining steps to
+        dispatch and no sibling escalation already covers the case.
+
+        Delegates to
+        ``triggers.maybe_dispatch_terminal_step_failure_escalation``.
+        The trigger checks for remaining pending steps (returns silently
+        if any remain — the cross-step loop will advance), and checks
+        the dedup window against recent ``task.escalated_to_operator``
+        events on the same task. Failures are logged but do not
+        propagate — the prior projection has already committed.
+        """
+        if self.dispatcher is None:
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_dispatch_terminal_step_failure_escalation,
+        )
+        try:
+            await maybe_dispatch_terminal_step_failure_escalation(
+                session, self.dispatcher, step_id=step_id,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_dispatch_terminal_step_failure: dispatch failed "
+                "for step %s; prior projection committed, will retry on "
+                "redelivery",
                 step_id,
             )
 

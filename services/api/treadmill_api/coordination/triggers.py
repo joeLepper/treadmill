@@ -2432,6 +2432,185 @@ async def maybe_dispatch_gate_broken_escalation(
     return event.id if event is not None else None
 
 
+# ADR-0062: window inside which a sibling ``task.escalated_to_operator``
+# event (e.g. wf-conflict-cap-reached, wf-ci-fix-cap-reached) is treated
+# as having already covered the same step.failed signal. Keeps the
+# terminal-step-failure producer from double-emitting on cases the
+# cap-reached path already raised.
+_TERMINAL_STEP_FAILURE_DEDUP_WINDOW = timedelta(minutes=5)
+
+
+async def maybe_dispatch_terminal_step_failure_escalation(
+    session: AsyncSession,
+    dispatcher: Any,
+    *,
+    step_id: str,
+) -> uuid.UUID | None:
+    """ADR-0062 Step 1: escalate to operator when a ``step.failed`` lands
+    on a workflow run that has no remaining steps to dispatch and no
+    sibling escalation has already fired for the task.
+
+    Predicate (all must hold):
+      * The terminating step exists and belongs to a resolvable task.
+      * The run that owns the step has no remaining ``pending`` step
+        with a higher ``step_index`` than the failing step (i.e. the
+        cross-step orchestrator will not advance the run further).
+      * No ``task.escalated_to_operator`` event has fired against the
+        same task within the last
+        ``_TERMINAL_STEP_FAILURE_DEDUP_WINDOW``. This is the dedup
+        seam with the cap-reached producers (``_emit_arch_cap_reached``,
+        ``_emit_operator_escalation``): if either has already raised an
+        escalation for this task, the cap-reached event already
+        captured the operator-visible signal.
+
+    Effect: emit ``task.escalated_to_operator`` with
+    ``reason='terminal_step_failure'``, ``step_name=<failing step>``,
+    and ``gate_log_excerpt`` populated from the step row's captured
+    ``error`` (when present and non-empty) so the operator sees the
+    proximate failure on the escalation event without re-running the
+    loop. The amend-cap counter is NOT touched — a terminal step
+    failure isn't an architect verdict.
+
+    Skip conditions return ``None``:
+      * ``dispatcher`` is None (test stubs / narrow tests).
+      * The step row can't be resolved (deleted between dispatch +
+        terminal projection).
+      * The owning task can't be resolved.
+      * The run has at least one pending step past the failing step
+        (cross-step orchestrator will advance; the loop will retry and
+        a later terminal will own the escalation).
+      * A recent sibling ``task.escalated_to_operator`` exists within
+        the dedup window.
+
+    Returns the new ``task.escalated_to_operator`` event id on
+    success, or ``None`` on any skip condition.
+    """
+    if dispatcher is None:
+        return None
+    try:
+        step_uuid = uuid.UUID(str(step_id))
+    except (ValueError, TypeError):
+        logger.warning(
+            "terminal-step-failure dispatch: malformed step_id %r; skipping",
+            step_id,
+        )
+        return None
+
+    # Resolve the step row + the owning task + repo in one join. The
+    # step row carries the ``error`` text the consumer just persisted
+    # via the StepFailed projection, plus the ``step_name`` we surface
+    # on the escalation payload.
+    step_row_result = await session.execute(
+        select(
+            WorkflowRunStep.id.label("step_id"),
+            WorkflowRunStep.run_id,
+            WorkflowRunStep.step_index,
+            WorkflowRunStep.step_name,
+            WorkflowRunStep.error.label("step_error"),
+            Task.id.label("task_id"),
+            Task.repo,
+            Task.plan_id,
+        )
+        .join(WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id)
+        .join(Task, Task.id == WorkflowRun.task_id)
+        .where(WorkflowRunStep.id == step_uuid)
+        .limit(1)
+    )
+    step_row = step_row_result.first()
+    if step_row is None:
+        logger.debug(
+            "terminal-step-failure dispatch: step %s has no resolvable "
+            "task; skipping",
+            step_id,
+        )
+        return None
+
+    # Predicate: does the owning run have any pending step with a
+    # higher index than the failing step? If yes, the cross-step
+    # orchestrator will advance and we let the next terminal own the
+    # escalation decision. ``pending`` is the pre-dispatch status the
+    # dispatcher writes at run-creation time (per
+    # ``cross_step._find_next_pending_step``).
+    pending_result = await session.execute(
+        select(func.count())
+        .select_from(WorkflowRunStep)
+        .where(
+            WorkflowRunStep.run_id == step_row.run_id,
+            WorkflowRunStep.step_index > step_row.step_index,
+            WorkflowRunStep.status == "pending",
+        )
+    )
+    remaining_pending = pending_result.scalar_one() or 0
+    if remaining_pending > 0:
+        logger.debug(
+            "terminal-step-failure dispatch: run %s has %d pending step(s) "
+            "past index %d; skipping (cross-step loop will advance)",
+            step_row.run_id, remaining_pending, step_row.step_index,
+        )
+        return None
+
+    # Dedup window: another escalation event for the same task within
+    # the last 5 minutes (the cap-reached producers) covers this case.
+    cutoff = datetime.now(timezone.utc) - _TERMINAL_STEP_FAILURE_DEDUP_WINDOW
+    recent_escalation_result = await session.execute(
+        select(Event.id)
+        .where(
+            Event.task_id == step_row.task_id,
+            Event.entity_type == "task",
+            Event.action == "escalated_to_operator",
+            Event.created_at >= cutoff,
+        )
+        .limit(1)
+    )
+    if recent_escalation_result.first() is not None:
+        logger.debug(
+            "terminal-step-failure dispatch: task %s already has a recent "
+            "escalation event within the dedup window; skipping",
+            step_row.task_id,
+        )
+        return None
+
+    # Source the gate_log_excerpt from the step row's captured ``error``
+    # column (the projection writer for ``step.failed`` persists
+    # ``StepFailed.error`` here). Strip + cap at 4000 chars to match
+    # the field's validator bound.
+    raw_excerpt = (step_row.step_error or "").strip()
+    gate_log_excerpt: str | None = raw_excerpt[:4000] if raw_excerpt else None
+
+    try:
+        event = await dispatcher.persist_and_publish(
+            session,
+            entity_type="task",
+            action="escalated_to_operator",
+            payload=TaskEscalatedToOperator(
+                task_id=step_row.task_id,
+                repo=step_row.repo,
+                last_verdict=None,
+                last_reasoning=None,
+                run_ids=[str(step_row.run_id)],
+                reason="terminal_step_failure",
+                gate_log_excerpt=gate_log_excerpt,
+                step_name=step_row.step_name,
+            ),
+            plan_id=step_row.plan_id,
+            task_id=step_row.task_id,
+        )
+    except Exception:
+        logger.exception(
+            "terminal-step-failure dispatch: failed to emit escalation "
+            "event for task %s (step %s); operator must check logs",
+            step_row.task_id, step_id,
+        )
+        return None
+
+    logger.info(
+        "terminal-step-failure dispatch: task %s escalated to operator "
+        "(reason=terminal_step_failure, step=%s, step_name=%s)",
+        step_row.task_id, step_id, step_row.step_name,
+    )
+    return event.id if event is not None else None
+
+
 async def _maybe_close_parent_pr_for_supersede(
     session: AsyncSession,
     *,
