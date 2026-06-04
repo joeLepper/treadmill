@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# treadmill-channel-launch <label>
+#
+# Idempotently brings up tmux session <label> and sends the cc-channels
+# launcher into it. Foreground process: stays alive while the tmux session
+# exists so systemd (ADR-0073) sees the service as live. Exits when the
+# tmux session ends, at which point systemd may restart on-failure.
+#
+# Single-instance contract: if launch-session.sh is already running for
+# this label (its PID is in launcher.pid and is alive), refuse to start.
+# This prevents a restarted systemd unit from injecting a second launcher
+# into an existing tmux window.
+set -euo pipefail
+
+LABEL="${1:?usage: treadmill-channel-launch <label>}"
+REPO_DIR="${TREADMILL_REPO_DIR:-$HOME/treadmill}"
+LAUNCHER="$REPO_DIR/tools/cc-channels/launch-session.sh"
+
+STATE_DIR="$HOME/.cc-channels/$LABEL"
+PIDFILE="$STATE_DIR/launcher.pid"
+
+mkdir -p "$STATE_DIR"
+
+# Belt-and-suspenders single-instance guard: launch-session.sh writes the
+# PID file; we check it here so systemd restart storms don't inject a second
+# launcher while Claude is still running in the tmux window.
+if [[ -f "$PIDFILE" ]]; then
+  PID=$(cat "$PIDFILE")
+  if kill -0 "$PID" 2>/dev/null; then
+    echo "[treadmill-channel-launch] launcher already alive for label '$LABEL' (pid $PID); refusing to start" >&2
+    exit 1
+  fi
+  # Stale PID file — launch-session.sh crashed without cleanup; clear it.
+  rm -f "$PIDFILE"
+fi
+
+# Ensure the tmux session exists (idempotent: no-op if already present).
+if ! tmux has-session -t "$LABEL" 2>/dev/null; then
+  tmux new-session -d -s "$LABEL"
+fi
+
+# Send the launcher into the tmux session. --resume-by-label tells
+# launch-session.sh this is a supervised invocation; it strips the flag
+# before forwarding args to claude.
+tmux send-keys -t "$LABEL" "exec $LAUNCHER --resume-by-label $LABEL" Enter
+
+# Stay alive while the tmux session exists so systemd tracks us as the
+# service process. When launch-session.sh / Claude exit, the tmux session
+# may end on its own; then we exit and systemd decides whether to restart.
+while tmux has-session -t "$LABEL" 2>/dev/null; do
+  sleep 30
+done

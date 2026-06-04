@@ -26,8 +26,17 @@
 # after CC upgrades (ADR-0067/0068 watch-out).
 set -euo pipefail
 
-LABEL="${1:?usage: launch-session.sh <label> [workdir] [-- extra claude args]}"
-shift
+# Accept either:
+#   launch-session.sh <label> [workdir] [-- extra claude args]
+# or (from treadmill-channel-launch, ADR-0073 supervised path):
+#   launch-session.sh --resume-by-label <label>
+if [[ "${1:-}" == "--resume-by-label" ]]; then
+  LABEL="${2:?--resume-by-label requires a label}"
+  shift 2
+else
+  LABEL="${1:?usage: launch-session.sh <label> [workdir] [-- extra claude args]}"
+  shift
+fi
 WORKDIR="$PWD"
 if [[ $# -gt 0 && "$1" != "--" ]]; then
   WORKDIR="$1"; shift
@@ -36,6 +45,24 @@ fi
 
 STATE_ROOT="$HOME/.cc-channels/$LABEL"
 mkdir -p "$STATE_ROOT/telegram" "$STATE_ROOT/treadmill"
+
+# Single-instance guard (ADR-0073): refuse if another launcher is already
+# running for this label. treadmill-channel-launch checks this too, but the
+# guard here prevents a direct invocation from spawning a duplicate session
+# while a supervised instance is alive.
+PIDFILE="$STATE_ROOT/launcher.pid"
+if [[ -f "$PIDFILE" ]]; then
+  _pid=$(cat "$PIDFILE")
+  if kill -0 "$_pid" 2>/dev/null; then
+    echo "[launch-session] ERROR: launcher already running for label '$LABEL' (pid $_pid)" >&2
+    echo "[launch-session] To attach to the existing session: cc-attach $LABEL" >&2
+    echo "[launch-session] To stop the supervised session: systemctl --user stop treadmill-channel@$LABEL.service" >&2
+    exit 1
+  fi
+  rm -f "$PIDFILE"
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
 
 # ── treadmill-events channel (ADR-0068) ─────────────────────────────────────
 export TREADMILL_SESSION_LABEL="$LABEL"
@@ -99,4 +126,6 @@ echo "[launch-session]   then lock it down:  $_HERE/cc-access.py --label $LABEL 
 echo "[launch-session]   (use cc-access.py, NOT /telegram:access — the stock skill targets the wrong state dir under per-bot isolation)" >&2
 
 cd "$WORKDIR"
-exec claude "${CHANNEL_ARGS[@]}" "${SESSION_ARGS[@]}" "$@"
+# Do not use `exec` here: the EXIT trap must fire when Claude exits so
+# the PID file is cleaned up (exec replaces the shell and traps don't run).
+claude "${CHANNEL_ARGS[@]}" "${SESSION_ARGS[@]}" "$@"

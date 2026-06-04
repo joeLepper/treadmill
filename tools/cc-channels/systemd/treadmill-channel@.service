@@ -1,0 +1,21 @@
+[Unit]
+Description=Treadmill orchestrator session (label %i)
+After=default.target
+
+[Service]
+Type=simple
+# Idempotent launcher: creates the tmux session if missing,
+# then sends the Claude launch into it. Foreground (stays
+# alive for systemd to supervise). See ADR-0073.
+#
+# Override TREADMILL_REPO_DIR via a drop-in if the repo is not at ~/treadmill:
+#   mkdir -p ~/.config/systemd/user/treadmill-channel@.service.d/
+#   echo -e '[Service]\nEnvironment=TREADMILL_REPO_DIR=/path/to/treadmill' \
+#     > ~/.config/systemd/user/treadmill-channel@.service.d/override.conf
+#   systemctl --user daemon-reload
+ExecStart=%h/treadmill/tools/cc-channels/systemd/treadmill-channel-launch %i
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
