@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Usage: treadmill-channel-launch <label>
+#
+# Idempotently brings up tmux session <label> and runs the
+# cc-channels launcher inside it. Foreground process: stays
+# alive while the tmux session exists (so systemd sees the
+# service as live). Exits when the tmux session ends.
+#
+# Override the repo clone location with TREADMILL_REPO_DIR
+# if you cloned somewhere other than $HOME/treadmill.
+set -euo pipefail
+
+LABEL="${1:?label required}"
+REPO_DIR="${TREADMILL_REPO_DIR:-$HOME/treadmill}"
+LAUNCHER="$REPO_DIR/tools/cc-channels/launch-session.sh"
+
+# Single-instance contract per ADR-0073: refuse to start
+# if another launcher is alive for this label. The launcher
+# itself enforces the same contract; we check up-front so
+# systemd doesn't restart-loop against a competing run.
+PIDFILE="$HOME/.cc-channels/$LABEL/launcher.pid"
+if [ -f "$PIDFILE" ]; then
+  PID=$(cat "$PIDFILE")
+  if kill -0 "$PID" 2>/dev/null; then
+    echo "launcher already alive for label $LABEL (pid $PID); refusing to start" >&2
+    exit 1
+  fi
+  # Stale; clean up.
+  rm -f "$PIDFILE"
+fi
+
+# Ensure tmux session exists.
+if ! tmux has-session -t "$LABEL" 2>/dev/null; then
+  tmux new -d -s "$LABEL"
+fi
+
+# Send the launcher into the tmux session. `exec` so the
+# tmux pane dies when the launcher exits, which lets the
+# foreground loop below notice and return control to systemd.
+tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL" Enter
+
+# Keep ourselves alive while the tmux session exists.
+while tmux has-session -t "$LABEL" 2>/dev/null; do
+  sleep 30
+done

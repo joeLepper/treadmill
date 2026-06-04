@@ -37,6 +37,21 @@ fi
 STATE_ROOT="$HOME/.cc-channels/$LABEL"
 mkdir -p "$STATE_ROOT/telegram" "$STATE_ROOT/treadmill"
 
+# Single-instance contract per ADR-0073: refuse to start if another launcher is
+# alive for this label. Belt-and-suspenders with the systemd wrapper's check;
+# this layer guards against an operator bypassing the wrapper with a direct
+# invocation. We use kill -0 to distinguish a live PID from a stale file (e.g.
+# left over from a power-cut); a stale file is silently cleaned up.
+PIDFILE="$STATE_ROOT/launcher.pid"
+if [[ -f "$PIDFILE" ]]; then
+  _pid=$(cat "$PIDFILE")
+  if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null; then
+    echo "[launch-session] launcher already alive for label $LABEL (pid $_pid); refusing to start" >&2
+    exit 1
+  fi
+  rm -f "$PIDFILE"
+fi
+
 # ── treadmill-events channel (ADR-0068) ─────────────────────────────────────
 export TREADMILL_SESSION_LABEL="$LABEL"
 # Direct API port — the :8080 auth proxy does not upgrade WebSockets.
@@ -99,4 +114,9 @@ echo "[launch-session]   then lock it down:  $_HERE/cc-access.py --label $LABEL 
 echo "[launch-session]   (use cc-access.py, NOT /telegram:access — the stock skill targets the wrong state dir under per-bot isolation)" >&2
 
 cd "$WORKDIR"
+# `exec` replaces this shell with claude; the PID we record now stays valid
+# for the lifetime of the claude process. We do not register an EXIT trap to
+# unlink the file (it would not fire across exec) — stale entries are detected
+# on next start via the kill -0 check above.
+echo $$ > "$PIDFILE"
 exec claude "${CHANNEL_ARGS[@]}" "${SESSION_ARGS[@]}" "$@"

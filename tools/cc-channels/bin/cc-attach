@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Usage: cc-attach <label>
+#
+# Thin wrapper: attach to the supervised tmux session
+# hosting the Claude orchestrator for <label>. Detach with
+# Ctrl-b d to leave the session running. Stop the session
+# via `systemctl --user stop treadmill-channel@<label>.service`,
+# not by killing tmux from inside.
+set -euo pipefail
+
+LABEL="${1:?label required}"
+if ! tmux has-session -t "$LABEL" 2>/dev/null; then
+  cat >&2 <<EOF
+No supervised tmux session for label $LABEL.
+Install + start the systemd unit:
+  systemctl --user enable --now treadmill-channel@$LABEL.service
+Then re-run: cc-attach $LABEL
+EOF
+  exit 1
+fi
+exec tmux a -t "$LABEL"
