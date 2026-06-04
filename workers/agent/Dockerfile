@@ -50,19 +50,32 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # ~150 MB for chromium-headless-shell. A future ADR moves Playwright
 # to a sidecar image if footprint becomes a problem.
 ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright
-# NODE_PATH lets `node /opt/triage/probe.mjs` resolve the globally-
-# installed `playwright` package without a per-script symlink. The
-# 2026-05-29 v1.3 wf-ui-triage run reported having to symlink
-# /opt/triage/node_modules/playwright → /usr/lib/node_modules/playwright
-# at runtime because the v1.2 prompt's bash invocation didn't carry
-# NODE_PATH and the .claude/settings.json allowlist didn't permit an
-# env-var-prefixed form. Setting NODE_PATH at the image level resolves
-# both: the probe scripts pick up node_modules from npm's global
-# install dir, no per-run workaround needed.
+# `NODE_PATH=/usr/lib/node_modules` (kept for CJS callers, even though
+# the triage probes don't need it) is structurally incapable of
+# resolving bare-specifier `import` in ESM `.mjs` files — Node's ESM
+# loader does not consult NODE_PATH, full stop. The probe scripts at
+# `/opt/triage/probe.mjs` + `walk.mjs` use
+# `import { chromium } from 'playwright'`, which ESM resolves by
+# walking `<script_dir>/node_modules/playwright` upward — and finds
+# nothing because the global install at `/usr/lib/node_modules/playwright`
+# is invisible to the ESM walk.
+#
+# PR #101 set NODE_PATH and verified the fix by running
+# `node -e "require('playwright')"`. That call uses CJS resolution,
+# which DOES consult NODE_PATH, so the verification passed — but the
+# actual consumer is ESM, so the production path stayed broken (caught
+# 2026-06-04 by triage finding `01c3d04d` filing
+# `ERR_MODULE_NOT_FOUND` against itself).
+#
+# The durable fix: place a `node_modules/playwright` next to the
+# probe scripts. Symlink to the canonical global install (no
+# duplication, no extra disk, no second package.json to drift).
 ENV NODE_PATH=/usr/lib/node_modules
 RUN npm install -g playwright@1.55.0 \
     && mkdir -p $PLAYWRIGHT_BROWSERS_PATH \
-    && npx --yes playwright install chromium-headless-shell --with-deps
+    && npx --yes playwright install chromium-headless-shell --with-deps \
+    && mkdir -p /opt/triage/node_modules \
+    && ln -s /usr/lib/node_modules/playwright /opt/triage/node_modules/playwright
 
 # Triage probe scripts the role-ui-triage prompt invokes by absolute
 # path. Drop in workers/agent/scripts/triage/ on the host; bake to
