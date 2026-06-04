@@ -67,6 +67,29 @@ CHANNEL_ARGS+=(--dangerously-load-development-channels server:treadmill-events)
 # code-execution. Pair + allowlist each bot before relying on it.
 CHANNEL_ARGS+=(--dangerously-skip-permissions)
 
+# Per-label persistent session: one stable Claude Code session per label, so
+# `launch-session.sh <label>` always lands back in that label's own session
+# without the operator passing --resume. We mint a session id on first launch
+# and record it under the label's state dir; later launches resume it. Skip
+# this entirely if the operator passed their own --resume/--continue/
+# --session-id in the extra args (their flag wins).
+SESSION_FILE="$STATE_ROOT/session-id"
+_user_set_session=false
+for _a in "$@"; do
+  case "$_a" in -r|--resume|-c|--continue|--session-id) _user_set_session=true ;; esac
+done
+SESSION_ARGS=()
+if ! $_user_set_session; then
+  if [[ -f "$SESSION_FILE" ]]; then
+    SESSION_ARGS=(--resume "$(cat "$SESSION_FILE")")
+  else
+    _sid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    echo "$_sid" > "$SESSION_FILE"
+    SESSION_ARGS=(--session-id "$_sid")
+    echo "[launch-session] minted new session id for '$LABEL' (recorded in $SESSION_FILE)" >&2
+  fi
+fi
+
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "[launch-session] label=$LABEL workdir=$WORKDIR channels=${CHANNEL_ARGS[*]}" >&2
 echo "[launch-session] reminder: dispatch with --created-by $LABEL" >&2
@@ -76,4 +99,4 @@ echo "[launch-session]   then lock it down:  $_HERE/cc-access.py --label $LABEL 
 echo "[launch-session]   (use cc-access.py, NOT /telegram:access — the stock skill targets the wrong state dir under per-bot isolation)" >&2
 
 cd "$WORKDIR"
-exec claude "${CHANNEL_ARGS[@]}" "$@"
+exec claude "${CHANNEL_ARGS[@]}" "${SESSION_ARGS[@]}" "$@"
