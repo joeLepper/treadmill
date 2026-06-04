@@ -33,6 +33,7 @@ from treadmill_cli.commands.learnings import learnings_app
 from treadmill_cli.commands.onboarding import onboarding_app
 from treadmill_cli.commands.schedules import schedules_app
 from treadmill_cli.config import load_config
+from treadmill_cli.identity import resolve_created_by
 from treadmill_cli.observe import observe_app
 
 
@@ -168,7 +169,7 @@ def plan_submit(
                 intent=intent,
                 doc_path=doc_path,
                 doc_content=doc_content,
-                created_by=created_by,
+                created_by=resolve_created_by(created_by),
                 dev=dev,
             )
             console.print(f"[green]plan created:[/green] [bold]{plan['id']}[/bold]")

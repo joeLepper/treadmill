@@ -7,7 +7,6 @@ maps to a single API call on the /api/v1/schedules surface.
 from __future__ import annotations
 
 import json
-import os
 from typing import Annotated, Any
 
 import typer
@@ -16,6 +15,7 @@ from rich.table import Table
 
 from treadmill_cli.api_client import ApiClient, ApiError
 from treadmill_cli.config import load_config
+from treadmill_cli.identity import resolve_created_by
 
 schedules_app = typer.Typer(
     name="schedules",
@@ -94,8 +94,7 @@ def schedules_create(
     )] = None,
 ) -> None:
     """Create a new active schedule that dispatches a workflow on a cron cadence."""
-    if created_by is None:
-        created_by = os.environ.get("USER") or "operator"
+    created_by = resolve_created_by(created_by)
 
     payload_dict: dict[str, Any] = {}
     if payload is not None:
