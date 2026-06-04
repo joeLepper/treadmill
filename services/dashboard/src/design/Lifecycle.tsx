@@ -29,6 +29,7 @@ export function deriveLifecycleIdx(status: string | null | undefined): number {
   if (status === 'awaiting_review' || status === 'mergeable') return 2;
   if (status === 'executing' || (status && status.startsWith('blocked'))) return 1;
   if (status === 'failed' || status === 'cancelled') return 1;
+  if (status && (status.startsWith('pr_opened') || status.includes('(wf-'))) return 1;
   return 0;
 }
 
