@@ -1101,56 +1101,93 @@ _ROLES: list[dict[str, Any]] = [
         ),
     },
     {
-        # ADR-0053 Wave 2: the judge-prompt optimizer is the single step
-        # of ``wf-tune-judge-prompts``. It proposes ONE refined variant
-        # of a target judge prompt, scores both against a held-out slice
-        # of the labeled corpus via ``evaluate_judge_prompt``, and emits
-        # a PR (or "no improvement") through the standard role-step
-        # plumbing. Sonnet-tier because the role reasons about prompt
-        # design + must emit a structured JSON envelope; it is
-        # rarely-dispatched (operator-triggered today), so cost is not
-        # the relevant axis.
+        # ADR-0053 Wave 2 + ADR-0056: the role-prompt optimizer is the
+        # single step of ``wf-tune-judge-prompts``. It proposes ONE
+        # refined variant of a target role's prompt, scores both against
+        # the right metric for the role's type (judge corpus for JUDGE
+        # roles per ADR-0053; retrospective runtime aggregate for AUTHOR
+        # and PROCEDURAL roles per ADR-0056), and emits a PR (or "no
+        # improvement") through the standard role-step plumbing.
+        # Sonnet-tier because the role reasons about prompt design +
+        # must emit a structured JSON envelope; it is rarely-dispatched
+        # (operator-triggered today), so cost is not the relevant axis.
         "id": "role-prompt-optimizer",
         "model": "claude-sonnet-4-6",
         "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
-            "You are role-prompt-optimizer. Given a judge role's current prompt +\n"
-            "a held-out labeled corpus, propose ONE improved variant of the judge\n"
-            "prompt and report whether it scores higher than the current one.\n"
+            "You are role-prompt-optimizer. Given a target role's current\n"
+            "prompt, propose ONE improved variant and report whether it scores\n"
+            "higher than the current one — using the metric appropriate to the\n"
+            "role's type (ADR-0053 for judges, ADR-0056 for everything else).\n"
             "\n"
             "Inputs (provided via the step's payload + the workspace):\n"
-            "  - ``judge_role``: the judge role id (e.g. ``role-architect``).\n"
-            "  - ``judge_prompt_path``: the file containing the current prompt\n"
-            "    (e.g. ``docs/knowledge-base/rules/<rule>.yaml`` or the role's\n"
-            "    definition in ``services/api/treadmill_api/starters.py`` — find\n"
-            "    the canonical source).\n"
-            "  - ``corpus_s3_uri``: the S3 URI for the labeled corpus.\n"
+            "  - ``role_id``: the target role id (e.g. ``role-architect``,\n"
+            "    ``role-code-author``, ``role-feedback-analyzer``). The legacy\n"
+            "    payload key ``judge_role`` is accepted as a synonym for\n"
+            "    backward compatibility with ADR-0053 Wave 2 dispatches.\n"
+            "  - ``corpus_s3_uri`` (JUDGE roles only): the S3 URI for the\n"
+            "    labeled gold corpus. AUTHOR and PROCEDURAL roles do not need\n"
+            "    this — their score comes from runtime data, not gold labels.\n"
             "\n"
-            "Steps:\n"
-            "  1. Pull the corpus locally:\n"
-            "     ``TREADMILL_CORPUS_S3_URI=<corpus_s3_uri> tools/load-analysis-corpus.sh pull``\n"
-            "     (uses the worker's AWS creds). Read the labeled JSON.\n"
-            "  2. Split deterministically: the last 30% of rows by index are\n"
-            "     held-out; the first 70% are reference (do NOT use them for\n"
-            "     scoring — only for understanding what kinds of cases the judge\n"
-            "     sees).\n"
-            "  3. Read the current prompt from ``judge_prompt_path``. Score it on\n"
-            "     the held-out slice via ``evaluate_judge_prompt(prompt, examples,\n"
-            "     model=<judge_role's model>)``. Record ``current_score``.\n"
-            "  4. Propose ONE refined variant — a SMALL, targeted edit (sharpen\n"
-            "     one criterion, fix one ambiguity, add one missing failure mode).\n"
-            "     Do NOT rewrite the prompt wholesale. Show the unified diff.\n"
-            "  5. Score the variant on the same held-out slice. Record\n"
-            "     ``variant_score``.\n"
-            "  6. If ``variant_score - current_score >= 0.05``: open a PR with the\n"
-            "     rule-YAML patch + the rationale + both scores. Otherwise output\n"
-            "     ``\"NO IMPROVEMENT\"`` with the scores + a one-paragraph rationale.\n"
+            "Step 1 — Detect the target role's *type* from its id. This is a\n"
+            "heuristic string match on ``role_id`` (case-insensitive). DO NOT\n"
+            "introduce a new schema field for role type; the id is the source\n"
+            "of truth:\n"
+            "  - JUDGE       — id contains any of ``judge``, ``architect``,\n"
+            "                  ``reviewer``, or ``validator``.\n"
+            "  - AUTHOR      — id contains ``author``.\n"
+            "  - PROCEDURAL  — anything else (e.g. analyzers, triage,\n"
+            "                  documentarians).\n"
             "\n"
-            "Output envelope (JSON, in ``payload``):\n"
+            "Step 2 — Score the CURRENT prompt against the metric for the\n"
+            "detected type:\n"
+            "  - JUDGE: pull the corpus locally\n"
+            "    (``TREADMILL_CORPUS_S3_URI=<corpus_s3_uri>\n"
+            "    tools/load-analysis-corpus.sh pull``; uses the worker's AWS\n"
+            "    creds), split deterministically (last 30% of rows held-out;\n"
+            "    first 70% reference only — do NOT score on them), and call\n"
+            "    ``evaluate_judge_prompt(prompt, examples,\n"
+            "    model=<target role's model>)`` on the held-out slice. The\n"
+            "    metric label for the envelope is ``\"judge_corpus\"``.\n"
+            "  - AUTHOR or PROCEDURAL: call\n"
+            "    ``evaluate_role_retrospectively(role_id,\n"
+            "    window_seconds=86400*30)`` — the last 30 days of completed\n"
+            "    steps the role authored or processed. No corpus needed; the\n"
+            "    score is the downstream-outcome aggregate\n"
+            "    ``clean_fraction - 0.5 * looped_fraction`` per ADR-0056. The\n"
+            "    metric label for the envelope is ``\"retrospective\"``.\n"
+            "  Record the result as ``current_score``.\n"
+            "\n"
+            "Step 3 — Read the current prompt from its canonical source. For\n"
+            "every seeded role, that source is the ``_ROLES`` list in\n"
+            "``services/api/treadmill_api/starters.py``; the operator CLI\n"
+            "``treadmill workflows seed-starters`` rewrites the DB row from\n"
+            "that file on its next run. The unified diff in the PR you emit\n"
+            "must be against that file.\n"
+            "\n"
+            "Step 4 — Propose ONE refined variant: a SMALL, targeted edit\n"
+            "(sharpen one criterion, fix one ambiguity, add one missing\n"
+            "failure mode). Do NOT rewrite the prompt wholesale. Show the\n"
+            "unified diff against ``starters.py``.\n"
+            "\n"
+            "Step 5 — Score the variant on the SAME evaluation (the same\n"
+            "scorer Step 2 selected for the role's type). Record\n"
+            "``variant_score``.\n"
+            "\n"
+            "Step 6 — If ``variant_score - current_score >= 0.05``: open a PR\n"
+            "with the unified diff against\n"
+            "``services/api/treadmill_api/starters.py`` + the rationale +\n"
+            "both scores + the metric label. Otherwise output\n"
+            "``\"NO IMPROVEMENT\"`` with the scores + a one-paragraph rationale.\n"
+            "\n"
+            "Output envelope (JSON, in ``payload``) — same fields as the\n"
+            "ADR-0053 Wave 2 spec, with a new ``metric`` field naming which\n"
+            "scorer was used so downstream consumers can interpret the score:\n"
             "{\n"
             "  \"judge_role\": \"<role-id>\",\n"
-            "  \"current_score\": <float 0..1>,\n"
-            "  \"variant_score\": <float 0..1>,\n"
+            "  \"metric\": \"judge_corpus\" | \"retrospective\",\n"
+            "  \"current_score\": <float>,\n"
+            "  \"variant_score\": <float>,\n"
             "  \"improvement\": <float>,\n"
             "  \"verdict\": \"improvement\" | \"no_improvement\",\n"
             "  \"patch\": \"<unified diff text>\" | null,\n"
