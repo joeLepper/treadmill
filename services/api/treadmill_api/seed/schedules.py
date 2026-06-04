@@ -120,6 +120,29 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "created_by": "auto-seed",
     },
     {
+        # ADR-0056 canary: weekly retrospective tuning for an AUTHOR role.
+        # Same workflow slug as the role-architect row above (Strategy A —
+        # ``wf-tune-judge-prompts`` is now role-agnostic; see the retitled
+        # description in ``starters.py``). Sunday 21:00 Pacific avoids the
+        # 20:00 learnings-crystallization tick. New rows use ``role_id``
+        # (the canonical key per the role-prompt-optimizer prompt); the
+        # role-architect row above keeps ``judge_role`` for backward
+        # compat. ``repo`` is REQUIRED per the schedule-payload-needs-repo
+        # finding — taskless dispatch reads ``rendered_payload["repo"]``
+        # for the worker workspace, and an empty value hangs the step
+        # pending forever.
+        "workflow_id": "wf-tune-judge-prompts",
+        "cron_expression": "0 21 * * 0",  # Sunday 9pm Pacific
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {
+            "repo": "joeLepper/treadmill",
+            "role_id": "role-code-author",
+        },
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
+    {
         # ADR-0061 Step 5: periodic UI triage via Playwright. Every 4 h on
         # minute 7 — offset from the hour to avoid the hourly thundering
         # herd while still landing several runs per day so the labelable

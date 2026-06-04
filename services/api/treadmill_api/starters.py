@@ -1364,9 +1364,13 @@ STARTERS: list[dict[str, Any]] = [
         # "no improvement". No schedule yet (Wave 3 — see ADR-0053).
         "id": "wf-tune-judge-prompts",
         "description": (
-            "Propose + score one refined variant of a judge role's "
-            "prompt against the held-out slice of its labeled corpus "
-            "(ADR-0053)."
+            "Propose + score one refined variant of a target role's "
+            "prompt using the metric appropriate to the role's type "
+            "(judge corpus for JUDGE roles per ADR-0053; retrospective "
+            "runtime aggregate for AUTHOR and PROCEDURAL roles per "
+            "ADR-0056). Slug kept as ``wf-tune-judge-prompts`` for "
+            "schedule-row continuity (Strategy A); the name is now "
+            "technically misleading but mechanically clean."
         ),
         "roles": _roles_for("role-prompt-optimizer"),
         "steps": [
