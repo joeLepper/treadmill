@@ -751,6 +751,19 @@ def test_build_always_allowed_uses_aws_region_when_default_unset(
     assert "sqs.us-east-1.amazonaws.com" in result
 
 
+def test_build_always_allowed_includes_bare_github_and_wildcards() -> None:
+    """ADR-0060 + 2026-06-03 git-clone wedge — bare `github.com` is
+    in the allowlist explicitly because the proxy's fnmatch glob
+    semantics mean `*.github.com` does NOT match the parent.
+    git clone over HTTPS hits the bare hostname; without this entry
+    every clone fails."""
+    from treadmill_local.egress_proxy import _ALWAYS_ALLOWED_STATIC
+
+    assert "github.com" in _ALWAYS_ALLOWED_STATIC
+    assert "*.github.com" in _ALWAYS_ALLOWED_STATIC
+    assert "*.githubusercontent.com" in _ALWAYS_ALLOWED_STATIC
+
+
 def test_build_install_allowed_merges_defaults_and_urls() -> None:
     from treadmill_local.egress_proxy import INSTALL_DEFAULTS, build_install_allowed
 

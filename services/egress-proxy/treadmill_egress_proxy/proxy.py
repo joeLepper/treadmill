@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fnmatch
 import hashlib
 import json
 import sys
@@ -53,6 +54,17 @@ def _extract_proxy_auth_password(headers: dict[str, str]) -> str | None:
     return decoded.split(":", 1)[1]
 
 
+def _matches(hostname: str, patterns: list[str]) -> bool:
+    """Glob match — exact OR wildcard. Entries like ``*.github.com`` in the
+    allowlist match ``api.github.com`` / ``raw.githubusercontent.com`` /
+    etc. via ``fnmatch``; exact entries like ``github.com`` still match
+    only that string. ADR-0060: the allowlist was authored with wildcard
+    syntax intent (``*.githubusercontent.com``); plain ``in`` checks
+    silently never matched and the 2026-06-03 wedge surfaced it when
+    git clone reached bare ``github.com``."""
+    return any(fnmatch.fnmatchcase(hostname, p) for p in patterns)
+
+
 def _decide(
     hostname: str,
     allowlist: WorkerAllowlist | None,
@@ -63,10 +75,10 @@ def _decide(
     if allowlist is None:
         return False, "unknown", "no_config_for_worker"
 
-    if hostname in allowlist.always_allowed:
+    if _matches(hostname, allowlist.always_allowed):
         return True, "always", "always_allowed"
 
-    if hostname in allowlist.install_allowed:
+    if _matches(hostname, allowlist.install_allowed):
         if password is None:
             return False, "install", "credential_required"
         if _sha256_hex(password) == allowlist.install_credential_hash:

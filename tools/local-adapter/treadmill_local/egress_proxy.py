@@ -23,14 +23,21 @@ EGRESS_PROXY_CONTAINER_NAME = "treadmill-egress-proxy"
 EGRESS_PROXY_IMAGE = "treadmill-egress-proxy:dev"
 
 # Static always-allowed hostnames for every worker (ADR-0060).
-# AWS regional service hostnames (SQS for the work queue; future:
-# SecretsManager, S3, etc.) are appended via build_always_allowed()
-# using AWS_DEFAULT_REGION so the same code targets any deployment.
+# AWS regional service hostnames (SQS, SNS, SecretsManager) are
+# appended via build_always_allowed() using AWS_DEFAULT_REGION so the
+# same code targets any deployment.
+#
+# The proxy matches these via fnmatch glob — ``*.github.com`` matches
+# any subdomain. Bare ``github.com`` is listed explicitly because
+# glob wildcards do not match the parent domain (``*.github.com``
+# does not match ``github.com`` itself); git clone over HTTPS hits
+# the bare hostname, which broke at the 2026-06-03 wedge.
 _ALWAYS_ALLOWED_STATIC: list[str] = [
     "api.anthropic.com",
     "api.github.com",
-    "*.githubusercontent.com",
+    "github.com",
     "*.github.com",
+    "*.githubusercontent.com",
 ]
 
 # AWS service hostnames the worker must reach to pick up work + read

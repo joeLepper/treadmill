@@ -215,3 +215,30 @@ async def test_no_config_for_worker_returns_403(tmp_path):
     finally:
         server.close()
         await server.wait_closed()
+
+
+# ── glob matching: `*.github.com` matches subdomains, bare matches exact ─────
+
+def test_matches_glob_subdomain():
+    """`*.github.com` matches subdomains via fnmatch."""
+    from treadmill_egress_proxy.proxy import _matches
+    assert _matches("api.github.com", ["*.github.com"])
+    assert _matches("raw.githubusercontent.com", ["*.githubusercontent.com"])
+
+
+def test_matches_glob_does_not_match_bare_parent():
+    """`*.github.com` does NOT match bare `github.com` — fnmatch glob
+    semantics. The 2026-06-03 wedge surfaced this when `git clone
+    https://github.com/...` reached the bare hostname and got denied.
+    The fix is to list bare `github.com` explicitly in the allowlist
+    alongside the wildcard."""
+    from treadmill_egress_proxy.proxy import _matches
+    assert not _matches("github.com", ["*.github.com"])
+    # but the exact entry does match:
+    assert _matches("github.com", ["github.com", "*.github.com"])
+
+
+def test_matches_exact_entry():
+    from treadmill_egress_proxy.proxy import _matches
+    assert _matches("api.anthropic.com", ["api.anthropic.com"])
+    assert not _matches("api.anthropic.org", ["api.anthropic.com"])
