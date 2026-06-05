@@ -3608,8 +3608,72 @@ async def maybe_auto_merge_on_mergeable(
         )
         return False
 
-    task_id = row.task_id
+    return await _arm_auto_merge_for_task(session, redis_client, row.task_id)
 
+
+async def maybe_auto_merge_on_github_event(
+    session: AsyncSession,
+    redis_client: Any,
+    *,
+    repo: str,
+    pr_number: int | None,
+) -> bool:
+    """Set/push the auto-merge cooling-off deadline when a ``github.*`` event
+    that can flip mergeability lands — closing the arming-coverage gap behind
+    accept-as-is / late-CI orphans.
+
+    ``maybe_auto_merge_on_mergeable`` only fires on ``step.completed``. A task
+    can cross into ``derived_mergeability='mergeable'`` because of a github
+    event that is **not** a step completion — CI finishing green
+    (``check_run_completed``), a clean re-push (``pr_synchronize``), a conflict
+    clearing, or a late ``pr_opened``. Without this entrypoint those
+    transitions never re-arm and a green, approved PR strands (the
+    accept-as-is / #133 / #185 orphan class; see
+    ``docs/plans/2026-06-05-accept-as-is-open-pr-not-terminal.md`` M2).
+
+    Resolves ``task_id`` from ``task_prs (repo, pr_number)`` — every
+    mergeability-affecting github verb carries both — then delegates to the
+    shared arming body. It is **strictly safe**: the body only sets the
+    deadline when the mergeability VIEW already reads ``mergeable`` (validate
+    pass + review approved + CI ok + no conflict), and ``fire_elapsed_auto_merges``
+    re-verifies before the merge PUT, so this can never merge anything that
+    isn't already fully mergeable.
+
+    Returns ``True`` if the deadline was set/pushed, ``False`` otherwise.
+    """
+    if redis_client is None:
+        return False
+    if not repo or pr_number is None:
+        return False
+
+    result = await session.execute(
+        select(TaskPR.task_id).where(
+            TaskPR.repo == repo,
+            TaskPR.pr_number == pr_number,
+        )
+    )
+    row = result.first()
+    if row is None:
+        logger.debug(
+            "auto-merge: no task_pr for %s#%s; skipping github-event arm",
+            repo, pr_number,
+        )
+        return False
+
+    return await _arm_auto_merge_for_task(session, redis_client, row.task_id)
+
+
+async def _arm_auto_merge_for_task(
+    session: AsyncSession,
+    redis_client: Any,
+    task_id: Any,
+) -> bool:
+    """Shared arming body. Given a resolved ``task_id``, check the
+    ``task_mergeability`` VIEW + plan / repo opt-outs and set (or push) the
+    30-second cooling-off deadline. Reached from both the ``step.completed``
+    path (``maybe_auto_merge_on_mergeable``) and the github-event path
+    (``maybe_auto_merge_on_github_event``); the skip-condition semantics are
+    identical regardless of which signal triggered the re-evaluation."""
     # Skip if auto-merge was already dispatched for this task.
     fired_key = AUTO_MERGE_FIRED_KEY_PREFIX + str(task_id)
     if await redis_client.exists(fired_key):
