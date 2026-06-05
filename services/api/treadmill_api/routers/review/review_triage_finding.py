@@ -135,8 +135,13 @@ class _TriageFindingReviewRow(TriageFindingRow):
     def id(cls) -> Any:  # noqa: F811
         """Class form: lets the factory write ``select(row_cls).where(row_cls.id == ...)``
         even though the underlying column is named ``finding_id``.
+
+        The ``.label("id")`` is required so that subqueries built via
+        ``select(row_cls.id).subquery()`` expose a column named ``id``
+        (not ``finding_id``), matching the ``last_100_subq.c.id`` access
+        in ``review_stats.compute_stats``.
         """
-        return cls.finding_id
+        return cls.finding_id.label("id")
 
 
 router = build_review_router(
