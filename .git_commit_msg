@@ -1,0 +1,14 @@
+ADR-0074 nothing-to-do short-circuit for architect disposition
+
+Implement three-clause guard that short-circuits architect on empty-diff
+re-dispatches: zero commits ahead, validator passed, author accepted.
+Eliminates wasted Claude calls and amend-cap budget burn per ADR-0029.
+
+- _short_circuit_nothing_to_do(ctx) checks: git count==0, validator==pass,
+  author==accept-as-is signal
+- Returns synthetic envelope with short_circuit_reason field for telemetry
+- Graceful fallback on git failure; architect runs normally
+
+Tests cover positive and negative cases for all three clauses.
+
+Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>
