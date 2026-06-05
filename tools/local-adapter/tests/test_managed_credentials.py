@@ -13,6 +13,7 @@ import pytest
 from treadmill_local import runtime as runtime_module
 from treadmill_local.managed_credentials import (
     ManagedCredentialsFileError,
+    resolve_boto3_session,
     resolve_managed_host_credentials,
 )
 from treadmill_local.runtime import LocalRuntime
@@ -111,6 +112,54 @@ def test_resolve_unreadable_file_raises(tmp_path: Path) -> None:
     finally:
         # Restore permissions so tmp_path cleanup works.
         creds_file.chmod(0o644)
+
+
+# ── resolve_boto3_session tests ───────────────────────────────────────────────
+
+
+def test_resolve_boto3_session_file_absent_uses_profile(tmp_path: Path) -> None:
+    with patch("treadmill_local.managed_credentials.boto3.Session") as mock_cls:
+        resolve_boto3_session("my-profile", "us-east-1", tmp_path / "missing.json")
+        mock_cls.assert_called_once_with(profile_name="my-profile", region_name="us-east-1")
+
+
+def test_resolve_boto3_session_file_present_uses_keys(tmp_path: Path) -> None:
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text(json.dumps({
+        "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+        "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    }))
+    with patch("treadmill_local.managed_credentials.boto3.Session") as mock_cls:
+        resolve_boto3_session("my-profile", "us-east-1", creds_file)
+        mock_cls.assert_called_once_with(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            region_name="us-east-1",
+        )
+
+
+def test_resolve_boto3_session_file_with_session_token(tmp_path: Path) -> None:
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text(json.dumps({
+        "access_key_id": "AKIA",
+        "secret_access_key": "SECRET",
+        "session_token": "TOKEN",
+    }))
+    with patch("treadmill_local.managed_credentials.boto3.Session") as mock_cls:
+        resolve_boto3_session("my-profile", "us-west-2", creds_file)
+        mock_cls.assert_called_once_with(
+            aws_access_key_id="AKIA",
+            aws_secret_access_key="SECRET",
+            aws_session_token="TOKEN",
+            region_name="us-west-2",
+        )
+
+
+def test_resolve_boto3_session_malformed_raises(tmp_path: Path) -> None:
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("not-json")
+    with pytest.raises(ManagedCredentialsFileError):
+        resolve_boto3_session("my-profile", "us-east-1", creds_file)
 
 
 # ── runtime integration tests ─────────────────────────────────────────────────

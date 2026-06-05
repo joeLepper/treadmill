@@ -31,6 +31,7 @@ from rich.table import Table
 
 from treadmill_local.managed_credentials import (
     ManagedCredentialsFileError,
+    resolve_boto3_session,
     resolve_managed_host_credentials,
 )
 from treadmill_local.provisioner import MotoProvisioner
@@ -484,7 +485,7 @@ class LocalRuntime:
         region = cfg["aws_region"]
         secret_name = cfg["secrets"]["api_aws_credentials_secret_name"]
 
-        session = boto3.Session(profile_name=profile, region_name=region)
+        session = resolve_boto3_session(profile, region)
         secrets = session.client("secretsmanager")
         try:
             resp = secrets.get_secret_value(SecretId=secret_name)
@@ -545,7 +546,7 @@ class LocalRuntime:
         region = cfg["aws_region"]
         secret_name = cfg["secrets"]["worker_aws_credentials_secret_name"]
 
-        session = boto3.Session(profile_name=profile, region_name=region)
+        session = resolve_boto3_session(profile, region)
         secrets = session.client("secretsmanager")
         try:
             resp = secrets.get_secret_value(SecretId=secret_name)
@@ -596,7 +597,7 @@ class LocalRuntime:
         region = cfg["aws_region"]
         secret_name = cfg["secrets"]["github_pat_secret_name"]
 
-        session = boto3.Session(profile_name=profile, region_name=region)
+        session = resolve_boto3_session(profile, region)
         secrets = session.client("secretsmanager")
         try:
             resp = secrets.get_secret_value(SecretId=secret_name)
@@ -631,7 +632,7 @@ class LocalRuntime:
         """
         profile = cfg["aws_profile"]
         region = cfg["aws_region"]
-        session = boto3.Session(profile_name=profile, region_name=region)
+        session = resolve_boto3_session(profile, region)
         secrets = session.client("secretsmanager")
         try:
             resp = secrets.get_secret_value(SecretId=secret_name)
