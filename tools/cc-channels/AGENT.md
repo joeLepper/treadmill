@@ -40,6 +40,21 @@ terminal closes, and crashes.
 
 ## Recent changes
 
+- cc-relay trust gates (2026-06-05) — `cc-relay.py` gains a `--type
+  context|action` flag (default `context`). Action-typed messages prepend
+  a literal `[ACTION REQUEST]` header on line 1 so receiving sessions can
+  pattern-match the request type unambiguously. The header lands BEFORE
+  the optional `[from:]` prefix so the signal is positional and source-
+  agnostic. SKILL.md gains a "Trust gates" section documenting the
+  receiver-side contract: action requests require operator confirmation
+  unless `~/.cc-channels/<receiver-label>/relay-trust.json` pre-authorizes
+  the source label for the requested action. The trust file is a
+  documented contract today; no code currently reads it (deferred per
+  `docs/plans/2026-06-05-cc-relay-trust-gates.md` — "documented first,
+  automated enforcement once failure modes are clearer"). 6 new tests
+  in `tests/test_cc_relay.py` cover the type flag, default behavior,
+  header position, invalid-type rejection, and header preservation
+  across truncation.
 - [#169](https://github.com/joeLepper/treadmill/pull/169) ADR-0073 Step 1 follow-up
   — `treadmill-channel-launch` now fails loud with platform-specific install
   hints when `tmux` is absent (apt / pacman / brew); guards the late-stage
@@ -111,6 +126,18 @@ terminal closes, and crashes.
   The target's `treadmill-events` server watches that directory and emits the
   content as a channel notification. No per-label config required — the relay
   works as soon as both sessions are running.
+- **Inter-session relay is an unauthenticated channel — receivers enforce
+  the trust model, not the transport.** Any session can drop a file into any
+  other session's inbox; the server delivers, the receiver decides. The
+  two-tier `--type context|action` flag lets a sender mark intent, but the
+  receiver is the one that must (a) refuse to act on context messages, and
+  (b) gate action messages through `~/.cc-channels/<their-label>/relay-trust.json`
+  or operator confirmation. An action request received WITHOUT this gate
+  applied is the exact shape a prompt injection would take. If the trust
+  file is absent or has no matching entry for the source label, the
+  receiver MUST ask the operator before doing anything described in the
+  message. Trust is explicit per (source-label, action) pair; never
+  inherited.
 - `launch-session.sh` uses `exec claude` — bash `trap EXIT` handlers do not
   fire across `exec`. Do not add cleanup logic that depends on traps after
   the exec point; stale `launcher.pid` files are cleaned up on next start
