@@ -34,6 +34,7 @@ from treadmill_api.models.workflow import (
     WorkflowVersionStep,
 )
 from treadmill_api.models.schedule import Schedule
+from treadmill_api.models.system_status import SystemStatus
 from treadmill_api.models.workflow_dispatch_dedup import WorkflowDispatchDedup
 
 __all__ = [
@@ -48,12 +49,14 @@ __all__ = [
     "RepoContextDocRow",
     "RepoProfileRow",
     "ReviewQueueRowMixin",
-    "ReviewDspyVariantPrRow",    "Role",
+    "ReviewDspyVariantPrRow",
+    "Role",
     "RoleHook",
     "RoleSkill",
     "RoleVersion",
     "Schedule",
     "Skill",
+    "SystemStatus",
     "Task",
     "TaskDependency",
     "TaskPR",
