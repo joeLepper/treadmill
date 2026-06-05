@@ -53,30 +53,8 @@ This directory contains the Treadmill-native local adapter, the bridge between C
 - The autoscaler reads moto's SQS state directly; if moto's SQS implementation diverges from AWS behavior (message visibility, batch operations, long polling), the autoscaler may misbehave. Monitor the adapter's logs for scale-up/down decisions during development.
 - Host-side credential injection via `startup_auth.py` happens at adapter startup; if credentials rotate or become invalid mid-session, the running containers will not refresh them until the next `treadmill-local up`.
 
-## ADR-0065 autoscaler smoke path filter
-
-The `autoscaler_smoke` workflow (`.github/workflows/autoscaler_smoke.yml`) gates the
-autoscaler-spawn surface with a real-Docker smoke test. It triggers on `pull_request` events
-that touch any of these 7 paths:
-
-- `tools/local-adapter/treadmill_local/autoscaler.py`
-- `tools/local-adapter/treadmill_local/runtime.py`
-- `tools/local-adapter/treadmill_local/egress_proxy.py`
-- `tools/local-adapter/treadmill_local/docker_client.py`
-- `services/egress-proxy/**`
-- `workers/agent/Dockerfile`
-- `infra/treadmill_infra/stacks/**`
-
-**Rule:** Any new module added under the autoscaler spawn surface must also be added to the
-`paths:` filter in `autoscaler_smoke.yml` so the gate continues to run when that module
-changes.
-
-**Operator action (post-merge):** Go to GitHub repo Settings → Branches → Branch protection
-rules for `main` and mark `autoscaler_smoke` as a required status check. This click-through
-cannot be automated by a worker dispatch.
-
 ## Navigation
 
 - **Adjacent:** `infra/` (reads CDK synth output from this app); `services/api/`, `workers/agent/` (run as containers orchestrated by this adapter).
-- **Decisions:** ADR-0002 (local-first + CDK as single source of truth); ADR-0016 (dev-local deployment topology); ADR-0018 (autoscaler in dev-local mode); ADR-0019 (host-side credential injection); ADR-0060 (egress proxy + worker network isolation); ADR-0064 (multi-network attach for internal worker traffic — completes the ADR-0060 topology); ADR-0065 (real-Docker smoke gate — `scripts/smoke_boot.sh` + `.github/workflows/autoscaler_smoke.yml`); ADR-0072 (managed host processes read IAM credentials from file, not operator SSO).
+- **Decisions:** ADR-0002 (local-first + CDK as single source of truth); ADR-0016 (dev-local deployment topology); ADR-0018 (autoscaler in dev-local mode); ADR-0019 (host-side credential injection); ADR-0060 (egress proxy + worker network isolation); ADR-0064 (multi-network attach for internal worker traffic — completes the ADR-0060 topology); ADR-0065 (real-Docker smoke gate — `scripts/smoke_boot.sh` exists; the `.github/workflows/autoscaler_smoke.yml` companion was removed 2026-06-05 as never-passing, see ADR-0065 superseded note); ADR-0072 (managed host processes read IAM credentials from file, not operator SSO).
 - **Follow:** Start with ADR-0002 to understand why this adapter exists; read `runtime.py` and `autoscaler.py` to understand the startup and scaling flow.
