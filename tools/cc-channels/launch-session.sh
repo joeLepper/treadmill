@@ -64,6 +64,19 @@ if [[ -f "$PIDFILE" ]]; then
   rm -f "$PIDFILE"
 fi
 
+# Suppress claude's "Resuming the full session will consume a substantial
+# portion of your usage limits" prompt for supervised launches. The prompt
+# fires when both the recorded transcript age (default 70 min) and the
+# token count (default 100k) exceed claude's internal thresholds — common
+# for the long-lived sessions this launcher targets. Without this, every
+# supervised restart of a mature session wedges on a prompt the operator
+# isn't there to dismiss. Manual `claude` invocations are unaffected;
+# these overrides only enter the supervised process tree.
+# Reverse-engineered from claude 2.1.165 (`Rw9` in the bundled JS); the
+# in-binary env-var lookups are stable across recent patches.
+export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999
+export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999
+
 # ── treadmill-events channel (ADR-0068) ─────────────────────────────────────
 export TREADMILL_SESSION_LABEL="$LABEL"
 # Direct API port — the :8080 auth proxy does not upgrade WebSockets.
