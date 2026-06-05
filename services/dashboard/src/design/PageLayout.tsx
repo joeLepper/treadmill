@@ -12,6 +12,13 @@ import type { ReactNode } from 'react';
 import { Activity, Box, Search } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 
+interface NavEntry {
+  path: string;
+  label: string;
+  icon: ReactNode;
+  href?: string;
+}
+
 interface PageLayoutProps {
   title?: ReactNode;
   breadcrumb?: ReactNode;
@@ -134,9 +141,9 @@ function Skeleton() {
   );
 }
 
-const NAV = [
+const NAV: NavEntry[] = [
   { path: '/', label: 'Overview', icon: <Activity size={14} /> },
-  { path: '/tasks', label: 'Tasks', icon: <Box size={14} /> },
+  { path: '/tasks', label: 'Tasks', icon: <Box size={14} />, href: '/' },
 ];
 
 function Sidebar() {
@@ -202,7 +209,7 @@ function Sidebar() {
         return (
           <Link
             key={n.path}
-            to={n.path}
+            to={n.href ?? n.path}
             style={{
               display: 'flex',
               alignItems: 'center',
