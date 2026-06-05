@@ -86,20 +86,29 @@ async def compute_stats(
     # ── Last-100 accuracy ─────────────────────────────────────────────────────
     accuracy_last_100: float | None = None
     if labeled_total > 0:
-        # Subquery: the 100 most recently labeled rows by primary key.
-        last_100_subq = (
-            select(row_cls.id)
+        id_col = getattr(row_cls, "id")
+
+        # Inner SELECT: 100 most recently labeled row IDs.  Passed as a Select
+        # directly to .in_() to avoid column-key mismatch: if row_cls uses a
+        # hybrid_property that maps 'id' to a differently-named underlying
+        # column (e.g. _TriageFindingReviewRow.id → finding_id), a named
+        # Subquery would expose the column under its SQL name ("finding_id"),
+        # not the attribute name ("id"), causing subq.c.id to KeyError at
+        # query-construction time.  Passing the Select directly sidesteps the
+        # column-collection lookup entirely — SQLAlchemy 2.0 accepts Select in
+        # .in_() and generates the correlated IN clause correctly.
+        last_100_ids = (
+            select(id_col)
             .where(verdict_col.isnot(None))
             .order_by(labeled_at_col.desc())
             .limit(100)
-            .subquery()
         )
 
         # Count how many of those 100 rows agree with the LLM label.
         last_100_match: int = await session.scalar(
             select(func.count())
             .select_from(row_cls)
-            .where(row_cls.id.in_(select(last_100_subq.c.id)))
+            .where(id_col.in_(last_100_ids))
             .where(verdict_col == llm_col)
         ) or 0
 
