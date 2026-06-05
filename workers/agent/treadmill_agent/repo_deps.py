@@ -28,11 +28,14 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import io
 import json
 import logging
 import os
 import subprocess
+import tarfile
 import urllib.request
+import zipfile
 from contextvars import Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +50,18 @@ logger = logging.getLogger("treadmill.agent.repo_deps")
 _DEFAULT_OVERLAY_ROOT = Path("/var/treadmill/repo-overlays")
 _BINARY_DIR = Path("/var/treadmill/repo-bin")
 _SUBPROCESS_TIMEOUT = 300
+
+# ADR-0077: archive payloads are detected by URL extension. Lookup is
+# longest-suffix-wins so ``.tar.gz`` matches before ``.gz`` would.
+_ARCHIVE_EXTS: tuple[tuple[str, str], ...] = (
+    (".tar.gz", "tar.gz"),
+    (".tgz", "tar.gz"),
+    (".tar.bz2", "tar.bz2"),
+    (".tbz2", "tar.bz2"),
+    (".tar.xz", "tar.xz"),
+    (".txz", "tar.xz"),
+    (".zip", "zip"),
+)
 
 
 class WorkerDepsMaterializationError(RuntimeError):
@@ -105,6 +120,17 @@ class RepoOverlay:
             path_parts.append(str(self.venv_path / "bin"))
         if self.bin_path is not None:
             path_parts.append(str(self.bin_path))
+            # ADR-0077: archive-extracted binaries land in per-spec
+            # subdirectories under ``bin_path``. Adding each immediate
+            # subdirectory to PATH lets tools like pulumi find their
+            # sibling plugin binaries (pulumi-language-nodejs etc.)
+            # without an explicit per-tool entry. Raw single-binary
+            # installs are unaffected — they continue to resolve via
+            # the top-level entry.
+            if self.bin_path.is_dir():
+                for child in sorted(self.bin_path.iterdir()):
+                    if child.is_dir():
+                        path_parts.append(str(child))
         if self.node_modules_path is not None:
             path_parts.append(str(self.node_modules_path / ".bin"))
 
@@ -368,6 +394,140 @@ def _install_node(overlay_dir: Path, specs: list[str]) -> None:
         ) from exc
 
 
+def _detect_archive_kind(url: str) -> str | None:
+    """Return the archive kind for ``url`` per ADR-0077, or ``None`` for raw.
+
+    Matches by URL extension (longest suffix wins) — not by
+    Content-Type or magic-byte sniff — so the operator's intent is
+    visible in the curated ``--binary`` spec.
+    """
+    lowered = url.lower()
+    for suffix, kind in _ARCHIVE_EXTS:
+        if lowered.endswith(suffix):
+            return kind
+    return None
+
+
+def _extract_archive(payload: bytes, kind: str, dest: Path) -> None:
+    """Extract ``payload`` of ``kind`` into ``dest`` with traversal guards.
+
+    Rejects archive members whose resolved path would escape ``dest``
+    (Zip Slip / tar slip). Symlink and hardlink members are skipped
+    rather than recreated — onboarding-curated archives we ship today
+    don't need them, and allowing them widens the threat surface for
+    no current gain.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    resolved_dest = dest.resolve()
+    buf = io.BytesIO(payload)
+
+    def _is_inside(candidate: Path) -> bool:
+        try:
+            candidate.resolve().relative_to(resolved_dest)
+        except ValueError:
+            return False
+        return True
+
+    if kind == "zip":
+        with zipfile.ZipFile(buf) as zf:
+            for member in zf.infolist():
+                member_path = dest / member.filename
+                if not _is_inside(member_path):
+                    raise WorkerDepsMaterializationError(
+                        stage="binary",
+                        detail=(
+                            f"archive member escapes extraction root: "
+                            f"{member.filename!r}"
+                        ),
+                    )
+                zf.extract(member, dest)
+        return
+
+    tar_mode = {
+        "tar.gz": "r:gz",
+        "tar.bz2": "r:bz2",
+        "tar.xz": "r:xz",
+    }[kind]
+    with tarfile.open(fileobj=buf, mode=tar_mode) as tf:
+        for member in tf.getmembers():
+            if member.issym() or member.islnk():
+                continue
+            member_path = dest / member.name
+            if not _is_inside(member_path):
+                raise WorkerDepsMaterializationError(
+                    stage="binary",
+                    detail=(
+                        f"archive member escapes extraction root: "
+                        f"{member.name!r}"
+                    ),
+                )
+            # ``filter='data'`` is the safe default from PEP 706 — it
+            # rejects absolute paths, links, devices, etc. inside the
+            # tarfile module before any I/O. Composes with the manual
+            # escape guard above (which catches the same shape earlier
+            # so we can attribute the failure to a clearer message).
+            tf.extract(member, dest, filter="data")
+
+
+def _strip_single_top_dir(dest: Path) -> None:
+    """Hoist contents up one level if ``dest`` wraps a single directory.
+
+    Mirrors ``tar --strip-components=1`` for the common case where an
+    archive wraps everything in a ``<project>/`` or ``<project>-<v>/``
+    folder. Strict single-entry-and-it's-a-dir check; mixed top-level
+    entries are left untouched.
+    """
+    entries = list(dest.iterdir())
+    if len(entries) != 1:
+        return
+    sole = entries[0]
+    if not sole.is_dir():
+        return
+    # Move children up one level by renaming through a staging name to
+    # avoid colliding with the parent dir's own name.
+    staging = dest.parent / (sole.name + ".__strip_staging__")
+    sole.rename(staging)
+    for child in staging.iterdir():
+        child.rename(dest / child.name)
+    staging.rmdir()
+
+
+def _chmod_executables(root: Path) -> None:
+    """``chmod 0o755`` every regular file under ``root``.
+
+    Zip preserves no mode bits; some tarballs ship 0o644 even for
+    executables. Brute-forcing 0o755 inside the per-spec extraction
+    subtree is safe — no other specs share that subtree.
+    """
+    for path in root.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            path.chmod(0o755)
+
+
+def _download(url: str, name: str, proxy_url: str | None) -> bytes:
+    """Fetch ``url`` and return the raw bytes (with optional proxy)."""
+    try:
+        if proxy_url is not None:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler(
+                    {"http": proxy_url, "https": proxy_url},
+                ),
+            )
+            with opener.open(  # noqa: S310 — onboarding-curated URL
+                url, timeout=_SUBPROCESS_TIMEOUT,
+            ) as resp:
+                return resp.read()
+        with urllib.request.urlopen(  # noqa: S310 — onboarding-curated URL
+            url, timeout=_SUBPROCESS_TIMEOUT,
+        ) as resp:
+            return resp.read()
+    except Exception as exc:  # noqa: BLE001
+        raise WorkerDepsMaterializationError(
+            stage="binary",
+            detail=f"download failed for {name}: {exc}",
+        ) from exc
+
+
 def _install_binaries(binaries: list["BinarySpec"]) -> None:
     # Re-anchor each spec's target_path under the (module-level)
     # ``_BINARY_DIR`` so the binary lands where the rest of the worker
@@ -382,28 +542,7 @@ def _install_binaries(binaries: list["BinarySpec"]) -> None:
     for spec in binaries:
         relative = spec.target_path[len(BINARY_TARGET_PREFIX):]
         target = _BINARY_DIR / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if proxy_url is not None:
-                opener = urllib.request.build_opener(
-                    urllib.request.ProxyHandler(
-                        {"http": proxy_url, "https": proxy_url},
-                    ),
-                )
-                with opener.open(  # noqa: S310 — onboarding-curated URL
-                    spec.download_url, timeout=_SUBPROCESS_TIMEOUT,
-                ) as resp:
-                    payload = resp.read()
-            else:
-                with urllib.request.urlopen(  # noqa: S310 — onboarding-curated URL
-                    spec.download_url, timeout=_SUBPROCESS_TIMEOUT,
-                ) as resp:
-                    payload = resp.read()
-        except Exception as exc:  # noqa: BLE001
-            raise WorkerDepsMaterializationError(
-                stage="binary",
-                detail=f"download failed for {spec.name}: {exc}",
-            ) from exc
+        payload = _download(spec.download_url, spec.name, proxy_url)
         actual = hashlib.sha256(payload).hexdigest()
         if actual != spec.sha256_checksum:
             raise WorkerDepsMaterializationError(
@@ -413,5 +552,15 @@ def _install_binaries(binaries: list["BinarySpec"]) -> None:
                     f"expected={spec.sha256_checksum} actual={actual}"
                 ),
             )
-        target.write_bytes(payload)
-        target.chmod(0o755)
+        archive_kind = _detect_archive_kind(spec.download_url)
+        if archive_kind is None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            target.chmod(0o755)
+            continue
+        # ADR-0077: archive payload — interpret ``target_path`` as the
+        # extraction directory rather than a file path.
+        target.mkdir(parents=True, exist_ok=True)
+        _extract_archive(payload, archive_kind, target)
+        _strip_single_top_dir(target)
+        _chmod_executables(target)
