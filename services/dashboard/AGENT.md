@@ -168,6 +168,18 @@ silently drifts the UI's numeric vocabulary across pages.
   `Overview.tsx` and `TaskDetail.tsx`. Regression pinned by
   `src/pages/TriageLabeling.test.tsx` (mocks `useLiveSim` to return
   `mode: 'ws'` and asserts the "Live" affordance text reaches the DOM).
+
+- **UI-fix — triage finding `c8da98a6`** — `FlipThroughLayout`
+  (`src/review/FlipThroughLayout.tsx`) was calling `<PageLayout>` without
+  a `freshness` prop, so the `/review/:kind` route rendered the operator
+  chrome with no `<ConnectionAffordance>` chip — a DESIGN.md mandatory
+  rule #8 violation ("connection-freshness affordance always visible").
+  Wired `useLiveSim()` and passed
+  `freshness={<ConnectionAffordance mode={sim.mode} lastUpdated={sim.lastUpdated} />}`,
+  matching the pattern already used by `Overview.tsx` and
+  `TaskDetail.tsx`. Regression pinned by a new case in
+  `src/review/FlipThroughLayout.test.tsx` that mocks `useLiveSim` to
+  return `mode: 'ws'` and asserts the "Live" chip is present.
 - **ADR-0070 substep 1.4 — /review/:kind route + auto-discovery wire-up** —
   new `src/pages/ReviewKind.tsx` mounted at `/review/:kind` in
   `src/App.tsx` (registered BEFORE the `*` fallback so unknown
