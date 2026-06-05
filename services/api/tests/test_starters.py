@@ -252,6 +252,14 @@ def test_role_model_tier_invariant() -> None:
         "role-prompt-optimizer",
         "role-ui-triage",
         "role-dspy-variant-reviewer",  # ADR-0070 substep 4 — structured-output reasoner
+        # ADR-0070 substep 3 gold proposers — operator-triggered from the
+        # dashboard's review queue, structured-JSON envelope output. Same
+        # rationale as role-prompt-optimizer + role-ui-triage:
+        # rarely-dispatched (per labeling-session cadence, not per
+        # architect-decision throughput) + structured output reliability
+        # matters more than cost.
+        "role-architect-gold-proposer",
+        "role-validator-gold-proposer",
     }
     roles_by_id = {r["id"]: r for r in _all_roles()}
     assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
