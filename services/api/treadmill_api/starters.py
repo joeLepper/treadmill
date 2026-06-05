@@ -1239,7 +1239,7 @@ _ROLES: list[dict[str, Any]] = [
         # Sonnet-tier for structured JSON output reliability; on-demand,
         # so cost is not the primary axis.
         "id": "role-architect-gold-proposer",
-        "model": WORKER_MODEL,
+        "model": "claude-sonnet-4-6",
         "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
             "You are role-architect-gold-proposer (ADR-0070 substep 3).\n"
@@ -1288,7 +1288,7 @@ _ROLES: list[dict[str, Any]] = [
         # Sonnet-tier for structured JSON output reliability; on-demand,
         # so cost is not the primary axis.
         "id": "role-validator-gold-proposer",
-        "model": WORKER_MODEL,
+        "model": "claude-sonnet-4-6",
         "output_kind": OutputKind.ANALYSIS,
         "system_prompt": (
             "You are role-validator-gold-proposer (ADR-0070 substep 3).\n"
