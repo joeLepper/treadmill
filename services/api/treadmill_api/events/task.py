@@ -123,6 +123,13 @@ class TaskEscalationClosed(EventPayload):
     (``closed_at - opened_at``), computed at emit-time and stamped on
     every close so MTTR aggregation over a window is a simple
     column-scan rather than a paired-event join.
+
+    ``expected_followup`` optionally records what the operator expected
+    to happen next. Values are structured: ``learning:<slug>`` (issue a
+    learning), ``pr:<number>`` (related PR), ``adr:<NNNN>`` (architectural
+    decision record), or ``transient:<cause>`` (temporary issue, no followup).
+    Omitted or null values are counted as unreferenced closes by the weekly
+    sweep.
     """
 
     ENTITY_TYPE: ClassVar[str] = "task"
@@ -137,6 +144,7 @@ class TaskEscalationClosed(EventPayload):
     ]
     opened_at: datetime
     mttr_seconds: int
+    expected_followup: str | None = None
 
 
 class TaskEscalationAcknowledged(EventPayload):

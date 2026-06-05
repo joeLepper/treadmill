@@ -21,4 +21,6 @@ All four sweeps:
 
 ## Recent changes
 
-None yet.
+- **PR #???** — Added `expected_followup` field to `TaskEscalationClosed` event and `CloseRequest`/`CloseResponse` models. Auto-closes from the escalation-close sweep write `transient:auto_progress`; operator closes can optionally specify `learning:<slug>`, `pr:<number>`, `adr:<NNNN>`, or `transient:<cause>` to document intended followup. Null/empty values are counted as unreferenced.
+
+- **PR #???** — Added `unreferenced_close_report.py` sweep that fires weekly (Mondays 09:00 UTC). Sweeps past 7 days of `escalation_closed` events with null/empty `expected_followup`, groups by repo, and emits one `system.unreferenced_closes_report` event per repo for NotificationFanout (ADR-0062) to consume and alert operators.
