@@ -29,6 +29,7 @@ _EXPECTED_WORKFLOW_IDS = {
     "wf-ui-triage",  # ADR-0061 Step 5 (added 2026-05-28)
     "wf-terminal-gate-sweep",  # ADR-0047/0038/0042 (added 2026-06-05)
     "wf-step-starvation-sweep",  # ADR-0075 §1 (added 2026-06-05)
+    "wf-unreferenced-close-report",  # ADR-0075 §4 (added 2026-06-05)
 }
 
 
@@ -36,7 +37,7 @@ _EXPECTED_WORKFLOW_IDS = {
 
 
 def test_seed_schedules_has_seven_entries() -> None:
-    assert len(SEED_SCHEDULES) == 10
+    assert len(SEED_SCHEDULES) == 11
 
 
 def test_seed_schedules_workflow_ids() -> None:
@@ -181,7 +182,7 @@ def _existing_client(existing: list[dict]) -> MagicMock:
 
 def test_seed_schedules_creates_all_seven_on_fresh_install() -> None:
     created = seed_schedules(_fresh_client())
-    assert created == 10
+    assert created == 11
 
 
 def test_seed_schedules_idempotent_when_all_exist() -> None:
@@ -214,11 +215,11 @@ def test_seed_schedules_only_posts_missing() -> None:
     existing = [{"workflow_id": "wf-documentarian-audit", "cron_expression": "0 9 * * 1"}]
     client = _existing_client(existing)
     created = seed_schedules(client)
-    assert created == 9
+    assert created == 10
     post_calls = [c for c in client._request.call_args_list if c.args[0] == "POST"]
     posted_wf_ids = {c.kwargs["json"]["workflow_id"] for c in post_calls}
     assert "wf-documentarian-audit" not in posted_wf_ids
-    assert len(posted_wf_ids) == 8
+    assert len(posted_wf_ids) == 9
 
 
 def test_seed_schedules_posts_all_seven_workflow_ids() -> None:
@@ -319,8 +320,8 @@ def test_seed_schedules_if_empty_skips_when_rows_exist() -> None:
 def test_seed_schedules_if_empty_inserts_seven_on_fresh_db() -> None:
     session = _make_session(existing_count=0)
     result = seed_schedules_if_empty(session)
-    assert result == 10
-    assert session.add.call_count == 10
+    assert result == 11
+    assert session.add.call_count == 11
     session.commit.assert_called_once()
 
 

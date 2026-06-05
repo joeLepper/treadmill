@@ -35,7 +35,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, AsyncIterator, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -387,9 +387,9 @@ async def stream_escalations(
 )
 async def close_escalation(
     task_id: uuid.UUID,
-    request: CloseRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+    request: Annotated[CloseRequest, Body()] = CloseRequest(),
 ) -> CloseResponse:
     """Emit ``task.escalation_closed`` with ``close_reason='operator_close'``.
 
