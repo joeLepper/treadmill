@@ -1,34 +1,29 @@
 /**
- * TriageLabeling — `/triage` (ADR-0061).
+ * TriageFindingViewer — `/review/triage-finding` (ADR-0070 substep 2).
  *
- * Flip-through labeling UI: shows ONE unlabeled triage finding at a
- * time. Left column carries the evidence the labeler scores against
- * (screenshot, observation, evidence_pointer, proposed_resolution).
- * Right column carries the four ADR-0061 label questions
- * (``is_real_bug`` / ``severity`` / ``category`` / ``fix_in_dsl`` + free
- * notes) plus a Submit button.
+ * Viewer component for the triage-finding review queue. Displays evidence
+ * (screenshot, observation, evidence_pointer, proposed_resolution) and
+ * LLM recommendation in the main region, with label controls in the sidebar.
+ * Replaces the legacy `/triage` page (TriageLabeling.tsx).
  *
- * Per the labeling-UI-workflow pin and ADR-0061 v1: "Skip" leaves the
- * field ``null`` — null is itself a signal the optimizer trains against.
- * Submitting writes the labels via ``useLabelFinding`` and advances to
- * the next finding via the unlabeled-cache optimistic update.
+ * The framework chrome (FlipThroughLayout) owns the page layout, header,
+ * and accept/reject buttons. This viewer renders the candidate evidence
+ * body, LLM card, and label sidebar only.
  */
 
 import { type CSSProperties, type ReactNode, useEffect, useState } from 'react';
 
-import { Button } from '../design/Button';
-import { ConnectionAffordance } from '../design/ConnectionAffordance';
-import { PageLayout } from '../design/PageLayout';
-import { StateBadge } from '../design/StateBadge';
-
-import { useLabelFinding, useUnlabeledFindings } from '../api/queries';
-import { useLiveSim } from '../api/sim';
+import { Button } from '../../design/Button';
+import { StateBadge } from '../../design/StateBadge';
 import type {
   TriageCategory,
   TriageFinding,
-  TriageLabelInput,
   TriageSeverity,
-} from '../api/types';
+} from '../../api/types';
+import type {
+  ReviewKindViewerProps,
+  ReviewLabelInput,
+} from '../types';
 
 const CATEGORY_OPTIONS: TriageCategory[] = [
   'console_error',
@@ -43,8 +38,6 @@ const CATEGORY_OPTIONS: TriageCategory[] = [
 ];
 
 const SEVERITY_OPTIONS: TriageSeverity[] = ['high', 'medium', 'low'];
-
-const DEFAULT_LABELED_BY = 'operator';
 
 interface LabelDraft {
   label_is_real_bug: boolean | null;
@@ -62,121 +55,47 @@ const EMPTY_DRAFT: LabelDraft = {
   label_notes: '',
 };
 
-export function TriageLabeling() {
-  const sim = useLiveSim();
-  const { data: findings = [], isLoading, error, refetch } = useUnlabeledFindings();
-  const label = useLabelFinding();
+export default function TriageFindingViewer({
+  row,
+  onLabel,
+}: ReviewKindViewerProps<TriageFinding, string>) {
+  const finding = row.candidate;
 
-  const current = findings[0] ?? null;
-  const remaining = findings.length;
-
-  // Draft state is reset whenever the current finding changes — the
-  // operator's prior selections shouldn't leak into the next row.
   const [draft, setDraft] = useState<LabelDraft>(EMPTY_DRAFT);
+
+  // Draft state is reset whenever the row changes.
   useEffect(() => {
     setDraft(EMPTY_DRAFT);
-  }, [current?.finding_id]);
+  }, [row.id]);
 
   const onSubmit = () => {
-    if (!current) return;
-    const body: TriageLabelInput = {
-      label_is_real_bug: draft.label_is_real_bug,
+    const input: ReviewLabelInput & {
+      label_severity?: TriageSeverity | null;
+      label_category?: TriageCategory | null;
+      label_fix_in_dsl?: boolean | null;
+    } = {
+      label: String(draft.label_is_real_bug),
+      override_reason: draft.label_notes ? draft.label_notes : undefined,
+      notes: draft.label_notes ? draft.label_notes : undefined,
+      labeled_by: 'operator',
       label_severity: draft.label_severity,
       label_category: draft.label_category,
       label_fix_in_dsl: draft.label_fix_in_dsl,
-      label_notes: draft.label_notes ? draft.label_notes : null,
-      labeled_by: DEFAULT_LABELED_BY,
     };
-    label.mutate({ findingId: current.finding_id, label: body });
+    onLabel(input as ReviewLabelInput);
   };
 
   return (
-    <PageLayout
-      title="triage · labeling"
-      loading={isLoading}
-      error={error as Error | null}
-      freshness={<ConnectionAffordance mode={sim.mode} lastUpdated={sim.lastUpdated} />}
-      breadcrumb={
-        <span
-          style={{
-            fontSize: 10.5,
-            color: 'var(--tm-t4)',
-            fontFamily: 'var(--tm-mono)',
-            letterSpacing: 0.8,
-            textTransform: 'uppercase',
-          }}
-        >
-          treadmill · operator
-        </span>
-      }
-      actions={
-        <span
-          style={{
-            fontFamily: 'var(--tm-mono)',
-            fontSize: 11,
-            color: 'var(--tm-t3)',
-          }}
-        >
-          <span style={{ color: 'var(--tm-t4)' }}>queue</span>{' '}
-          <span className="tm-tnum" style={{ color: 'var(--tm-t1)' }}>
-            {remaining}
-          </span>{' '}
-          <span style={{ color: 'var(--tm-t4)' }}>unlabeled</span>
-        </span>
-      }
-    >
-      {!current ? (
-        <EmptyQueue onRefresh={() => refetch()} />
-      ) : (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 380px',
-            gap: 16,
-            alignItems: 'start',
-          }}
-        >
-          <EvidenceColumn finding={current} />
-          <LabelColumn
-            draft={draft}
-            onChange={setDraft}
-            onSubmit={onSubmit}
-            submitting={label.isPending}
-            error={label.error as Error | null}
-          />
-        </div>
-      )}
-    </PageLayout>
-  );
-}
-
-/* ─── Empty state ──────────────────────────────────────────────────── */
-
-function EmptyQueue({ onRefresh }: { onRefresh: () => void }) {
-  return (
     <div
       style={{
-        border: '1px solid var(--tm-border)',
-        borderRadius: 2,
-        background: 'var(--tm-surface)',
-        padding: '32px 16px',
-        textAlign: 'center',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 12,
-        alignItems: 'center',
-        fontFamily: 'var(--tm-mono)',
-        color: 'var(--tm-t3)',
-        fontSize: 12,
+        display: 'grid',
+        gridTemplateColumns: '1fr 380px',
+        gap: 16,
+        alignItems: 'start',
       }}
     >
-      <div style={{ fontSize: 13, color: 'var(--tm-t1)' }}>
-        // queue empty
-      </div>
-      <div>No unlabeled triage findings. Nothing to do here.</div>
-      <Button size="sm" onClick={onRefresh}>
-        check again
-      </Button>
+      <EvidenceColumn finding={finding} />
+      <LabelColumn draft={draft} onChange={setDraft} onSubmit={onSubmit} />
     </div>
   );
 }
@@ -194,6 +113,7 @@ function EvidenceColumn({ finding }: { finding: TriageFinding }) {
       }}
     >
       <Header finding={finding} />
+      <LlmCard finding={finding} />
       <Screenshot uri={finding.screenshot_uri} alt={finding.observation} />
       <FieldBlock label="observation">
         <Paragraph>{finding.observation}</Paragraph>
@@ -270,12 +190,36 @@ function Header({ finding }: { finding: TriageFinding }) {
   );
 }
 
+function LlmCard({ finding }: { finding: TriageFinding }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        padding: '12px 14px',
+        border: '1px solid var(--tm-border)',
+        borderRadius: 2,
+        background: 'var(--tm-surface)',
+      }}
+    >
+      <FieldLabel>llm recommendation</FieldLabel>
+      <div
+        style={{
+          display: 'flex',
+          gap: 12,
+          alignItems: 'center',
+        }}
+      >
+        <StateBadge state={finding.confidence} size="sm" />
+        <Mono style={{ color: 'var(--tm-t3)' }}>{finding.confidence}</Mono>
+      </div>
+      <Paragraph>{finding.proposed_resolution}</Paragraph>
+    </div>
+  );
+}
+
 function Screenshot({ uri, alt }: { uri: string; alt: string }) {
-  // S3 URIs (``s3://…``) can't be rendered directly. The triage
-  // pipeline currently writes ``s3://…/screen.png``; the dashboard
-  // doesn't yet have a presign endpoint, so http(s) URIs render
-  // directly and S3 URIs fall back to a labeled link until the
-  // presign surface lands.
   const isHttp = uri.startsWith('http://') || uri.startsWith('https://');
   if (!isHttp) {
     return (
@@ -320,17 +264,9 @@ interface LabelColumnProps {
   draft: LabelDraft;
   onChange: (draft: LabelDraft) => void;
   onSubmit: () => void;
-  submitting: boolean;
-  error: Error | null;
 }
 
-function LabelColumn({
-  draft,
-  onChange,
-  onSubmit,
-  submitting,
-  error,
-}: LabelColumnProps) {
+function LabelColumn({ draft, onChange, onSubmit }: LabelColumnProps) {
   const set = <K extends keyof LabelDraft>(key: K, value: LabelDraft[K]) => {
     onChange({ ...draft, [key]: value });
   };
@@ -405,24 +341,8 @@ function LabelColumn({
         />
       </div>
 
-      {error && (
-        <div
-          style={{
-            border: '1px solid var(--tm-danger-edge)',
-            background: 'var(--tm-danger-bg)',
-            color: 'var(--tm-danger-fg)',
-            padding: '6px 10px',
-            fontFamily: 'var(--tm-mono)',
-            fontSize: 11,
-            borderRadius: 2,
-          }}
-        >
-          {error.message}
-        </div>
-      )}
-
-      <Button kind="primary" onClick={onSubmit} disabled={submitting}>
-        {submitting ? 'submitting…' : 'submit & next'}
+      <Button kind="primary" onClick={onSubmit}>
+        submit & next
       </Button>
 
       <div
@@ -439,7 +359,7 @@ function LabelColumn({
   );
 }
 
-/* ─── Primitives (kept local — these are not page-chrome) ───────────── */
+/* ─── Primitives ───────────────────────────────────────────────────── */
 
 function FieldBlock({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -620,7 +540,7 @@ function SelectRow({
   );
 }
 
-/* ─── Tristate helpers (Yes/No/Skip ↔ boolean | null) ──────────────── */
+/* ─── Tristate helpers ──────────────────────────────────────────────── */
 
 function tristate(value: boolean | null): 'Yes' | 'No' | 'Skip' {
   if (value === true) return 'Yes';
@@ -633,4 +553,3 @@ function fromTristate(value: string): boolean | null {
   if (value === 'No') return false;
   return null;
 }
-

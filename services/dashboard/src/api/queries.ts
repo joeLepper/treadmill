@@ -133,6 +133,7 @@ export function useCancelTask() {
 
 const UNLABELED_KEY = ['triage', 'unlabeled'] as const;
 
+// TODO(substep 4): remove with the legacy /api/v1/triage/ endpoints
 export function useUnlabeledFindings() {
   return useQuery({
     queryKey: UNLABELED_KEY,
@@ -144,6 +145,7 @@ export function useUnlabeledFindings() {
   });
 }
 
+// TODO(substep 4): remove with the legacy /api/v1/triage/ endpoints
 export function useLabelFinding() {
   const qc = useQueryClient();
   return useMutation({

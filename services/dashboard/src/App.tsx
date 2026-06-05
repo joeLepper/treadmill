@@ -11,7 +11,6 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Overview } from './pages/Overview';
 import { ReviewKind } from './pages/ReviewKind';
 import { TaskDetail } from './pages/TaskDetail';
-import { TriageLabeling } from './pages/TriageLabeling';
 import DspyVariantPrReview from './review/dspy_variant_pr';
 
 export function App() {
@@ -19,7 +18,7 @@ export function App() {
     <Routes>
       <Route path="/" element={<Overview />} />
       <Route path="/tasks/:taskId" element={<TaskDetail />} />
-      <Route path="/triage" element={<TriageLabeling />} />
+      <Route path="/triage" element={<Navigate to="/review/triage-finding" replace />} />
       {/* Static /review/* routes MUST come before the dynamic /review/:kind
           so they are not swallowed by the param wildcard. */}
       <Route path="/review/dspy-variant-pr" element={<DspyVariantPrReview />} />
