@@ -118,6 +118,17 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+- **UI-fix — triage finding `300648e9`** — `src/pages/TriageLabeling.tsx`
+  was rendering without a `<ConnectionAffordance>` in the top bar,
+  violating DESIGN.md mandatory rule #8 ("connection-freshness affordance
+  always visible"). Imported `useLiveSim` from `../api/sim` and
+  `ConnectionAffordance` from `../design/ConnectionAffordance`, called
+  `const sim = useLiveSim()` inside the page, and threaded
+  `freshness={<ConnectionAffordance mode={sim.mode} lastUpdated={sim.lastUpdated} />}`
+  through to `<PageLayout>`. Matches the pattern already in
+  `Overview.tsx` and `TaskDetail.tsx`. Regression pinned by
+  `src/pages/TriageLabeling.test.tsx` (mocks `useLiveSim` to return
+  `mode: 'ws'` and asserts the "Live" affordance text reaches the DOM).
 - **ADR-0070 substep 1.4 — /review/:kind route + auto-discovery wire-up** —
   new `src/pages/ReviewKind.tsx` mounted at `/review/:kind` in
   `src/App.tsx` (registered BEFORE the `*` fallback so unknown

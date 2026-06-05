@@ -17,10 +17,12 @@
 import { type CSSProperties, type ReactNode, useEffect, useState } from 'react';
 
 import { Button } from '../design/Button';
+import { ConnectionAffordance } from '../design/ConnectionAffordance';
 import { PageLayout } from '../design/PageLayout';
 import { StateBadge } from '../design/StateBadge';
 
 import { useLabelFinding, useUnlabeledFindings } from '../api/queries';
+import { useLiveSim } from '../api/sim';
 import type {
   TriageCategory,
   TriageFinding,
@@ -61,6 +63,7 @@ const EMPTY_DRAFT: LabelDraft = {
 };
 
 export function TriageLabeling() {
+  const sim = useLiveSim();
   const { data: findings = [], isLoading, error, refetch } = useUnlabeledFindings();
   const label = useLabelFinding();
 
@@ -92,6 +95,7 @@ export function TriageLabeling() {
       title="triage · labeling"
       loading={isLoading}
       error={error as Error | null}
+      freshness={<ConnectionAffordance mode={sim.mode} lastUpdated={sim.lastUpdated} />}
       breadcrumb={
         <span
           style={{
