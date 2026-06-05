@@ -212,6 +212,28 @@ def test_502_when_secret_is_only_whitespace(
     assert r.status_code == 502, r.text
 
 
+def test_sanitizes_ansi_escapes_and_internal_newlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The 2026-06-04 carebrain incident: the stored token was captured from a
+    # colored terminal, so it carried ANSI escape sequences (\x1b[…m) AND
+    # internal newlines — which .strip() can't touch (invalid Bearer header,
+    # 80ms instant-fail). Sanitize must recover the clean token.
+    accounts = {
+        "primary": {"type": "oauth", "secret_name": "treadmill/claude-primary"},
+    }
+    tainted = "\x1b[0m\nsk-oauth-token-value\n\x1b[1;32m\n"
+    sm = _FakeSecretsManager(by_id={"treadmill/claude-primary": tainted})
+    app = _build_app(
+        accounts_json=json.dumps(accounts), default_account="primary",
+        store=_FakeStore(), sm=sm, monkeypatch=monkeypatch,
+    )
+    with TestClient(app) as client:
+        r = client.post("/api/v1/claude/credentials", json={"repo": "o/r"})
+    assert r.status_code == 200, r.text
+    assert r.json()["token"] == "sk-oauth-token-value"   # ANSI + newlines gone
+
+
 # ── happy path: api_key via explicit per-repo override ──────────────────────
 
 

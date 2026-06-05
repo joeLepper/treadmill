@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Annotated, Literal
 
 import boto3
@@ -40,6 +41,31 @@ from treadmill_api.onboarding_store import OnboardingStore
 router = APIRouter(prefix="/api/v1/claude", tags=["claude-credentials"])
 
 _log = logging.getLogger(__name__)
+
+# ANSI CSI / escape sequences — what a token pasted from a *decorated* terminal
+# picks up (e.g. ``\x1b[0m`` color resets).
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[@-Z\\-_]")
+
+
+def _sanitize_secret_token(raw: str | None) -> str:
+    """Return a usable bearer token from a stored secret, defensive against a
+    secret captured from a *decorated* terminal.
+
+    A leading/trailing newline alone made the ``Bearer`` header invalid
+    (PR #170 stripped that); the 2026-06-04 carebrain incident went further —
+    the stored token had embedded ANSI escape codes (``\\x1b[…m``) AND internal
+    newlines, which ``.strip()`` can't touch. Since an OAuth / API token can
+    contain none of: whitespace, ASCII control characters, or ANSI sequences,
+    removing all of them never corrupts a clean secret but recovers a tainted
+    one. Strip ANSI sequences first (so their visible ``[…m`` tail goes too),
+    then drop every whitespace + non-printable character.
+    """
+    if not raw:
+        return ""
+    stripped = _ANSI_ESCAPE_RE.sub("", raw)
+    return "".join(
+        ch for ch in stripped if ch.isprintable() and not ch.isspace()
+    )
 
 
 class ClaudeAccountConfig(BaseModel):
@@ -156,7 +182,7 @@ async def fetch_claude_credentials(
     # a usage-limit signature, so the fallback never fires and the worker
     # crashloops. (2026-06-04 medicoder incident: both VLM builds wedged on a
     # newline-tainted token after a subscription swap.)
-    token = (secret.get("SecretString") or "").strip()
+    token = _sanitize_secret_token(secret.get("SecretString"))
     if not token:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -179,7 +205,9 @@ async def fetch_claude_credentials(
                 fallback_secret = sm.get_secret_value(
                     SecretId=fallback_account.secret_name
                 )
-                fallback_token = (fallback_secret.get("SecretString") or "").strip()
+                fallback_token = _sanitize_secret_token(
+                    fallback_secret.get("SecretString")
+                )
                 if not fallback_token:
                     _log.warning(
                         "Secret for fallback account %r has no SecretString"
