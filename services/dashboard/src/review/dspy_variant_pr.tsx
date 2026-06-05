@@ -12,6 +12,7 @@
 import { type CSSProperties, type ReactNode, useEffect, useState } from 'react';
 
 import { Button } from '../design/Button';
+import { ConnectionAffordance } from '../design/ConnectionAffordance';
 import { PageLayout } from '../design/PageLayout';
 import { StateBadge } from '../design/StateBadge';
 
@@ -20,6 +21,7 @@ import {
   useDspyVariantPrStats,
   useLabelDspyVariantPr,
 } from '../api/queries';
+import { useLiveSim } from '../api/sim';
 import type {
   DspyVariantPrLabel,
   DspyVariantPrLabelInput,
@@ -43,6 +45,7 @@ const EMPTY_DRAFT: Draft = {
 };
 
 export default function DspyVariantPrReview() {
+  const sim = useLiveSim();
   const { data: rows = [], isLoading, error, refetch } = useDspyVariantPrQueue();
   const { data: stats } = useDspyVariantPrStats();
   const labelMutation = useLabelDspyVariantPr();
@@ -92,6 +95,7 @@ export default function DspyVariantPrReview() {
           treadmill · operator
         </span>
       }
+      freshness={<ConnectionAffordance mode={sim.mode} lastUpdated={sim.lastUpdated} />}
       actions={
         <span
           style={{

@@ -118,6 +118,18 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+- **UI-fix — triage finding `7022628a`** — `src/review/dspy_variant_pr.tsx`
+  was rendering without a `<ConnectionAffordance>` in the top bar,
+  violating DESIGN.md mandatory rule #8 ("connection-freshness affordance
+  always visible on every live page"). Imported `useLiveSim` from `../api/sim`
+  and `ConnectionAffordance` from `../design/ConnectionAffordance`, called
+  `const sim = useLiveSim()` inside the DspyVariantPrReview component, and
+  threaded `freshness={<ConnectionAffordance mode={sim.mode} lastUpdated={sim.lastUpdated} />}`
+  through to `<PageLayout>`. Matches the pattern already in `Overview.tsx`,
+  `TaskDetail.tsx`, and `TriageLabeling.tsx`. Regression pinned by
+  `src/review/dspy_variant_pr.test.tsx` (mocks `useLiveSim` to return
+  `mode: 'ws'` and asserts the "Live" affordance text reaches the DOM).
+
 - **ADR-0070 substep 2 step 2 — register triage-finding viewer** — New
   `src/review/viewers/triage-finding.tsx` default-export viewer component
   for the triage-finding review queue. Viewer auto-discovered by the
