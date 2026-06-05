@@ -34,6 +34,21 @@ terminal closes, and crashes.
 - `tests/test_launcher_singleton.py` — pytest for the launcher's
   PID-file refusal path (no tmux/systemd/claude invoked).
 
+## Per-session relay level (ADR-0071)
+
+`launch-session.sh` exports `TREADMILL_RELAY_LEVEL` (default `quiet`) into every
+session. The `treadmill-events` channel reads this value and gates Telegram relay
+accordingly:
+
+| Level | What the session relays |
+| --- | --- |
+| `quiet` (default) | `pr_merged` + unexpected-terminal states (`terminal_step_failure`, `cap_reached`, `gate_broken`, amend-exhausted, unresolved conflict, `cancelled`) |
+| `normal` | everything in `quiet` + PR opened, review verdicts, ci-fix loop entries |
+| `verbose` | everything in `normal` + step started/completed + other intermediate lifecycle |
+
+Override per session: `TREADMILL_RELAY_LEVEL=verbose launch-session.sh <label>`.
+Invalid values fall back to `quiet`.
+
 ## Recent changes
 
 - ADR-0073 Step 1 — systemd-user + tmux + `cc-attach` substrate for persistent,

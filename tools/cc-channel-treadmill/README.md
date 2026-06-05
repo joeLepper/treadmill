@@ -63,6 +63,7 @@ the session reads `<channel source="treadmill-events">` events and acts.
 | `TREADMILL_SESSION_LABEL` | (required) | session label = `created_by` routing key |
 | `TREADMILL_API_URL` | `http://localhost:8088` | Treadmill API base — must be the direct API port; the `:8080` auth proxy serves REST but does not upgrade WebSockets |
 | `TREADMILL_API_KEY` | `BUNKHOUSE_API_KEY` | Bearer for REST + WS |
+| `TREADMILL_RELAY_LEVEL` | `quiet` | Per-session relay verbosity (ADR-0071): `quiet`=merges+unexpected-terminal states only; `normal`=+PR opened/review verdicts/ci-fix entries; `verbose`=+step lifecycle. Invalid values fall back to `quiet`. |
 
 Pinned against Claude Code 2.1.161; channels are a research preview — re-verify
 the flag contract after CC upgrades.
