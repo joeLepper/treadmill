@@ -184,3 +184,55 @@ def test_action_header_persists_through_truncation(tmp_path: Path) -> None:
     assert len(content) == 4096
     assert content.startswith(cc_relay.ACTION_HEADER)
     assert content.endswith("[…]")
+
+
+def test_action_type_filename_contains_action(tmp_path: Path) -> None:
+    """When --type action, the written filename includes '-action' so
+    recipients can filter by filename without reading content."""
+    with patch("cc_relay.Path.home", return_value=tmp_path):
+        sys.argv = [
+            "cc-relay.py",
+            "--to", "treadmill-carla",
+            "--type", "action",
+            "test message",
+        ]
+        cc_relay.main()
+    files = list((tmp_path / ".cc-channels" / "treadmill-carla" / "relay").glob("*.md"))
+    assert len(files) == 1
+    assert "-action" in files[0].name
+
+
+def test_context_type_filename_no_action(tmp_path: Path) -> None:
+    """When --type context (explicit), the filename does not include
+    '-action' so the recipient knows it's context-only without reading."""
+    with patch("cc_relay.Path.home", return_value=tmp_path):
+        sys.argv = [
+            "cc-relay.py",
+            "--to", "treadmill-carla",
+            "--type", "context",
+            "test message",
+        ]
+        cc_relay.main()
+    files = list((tmp_path / ".cc-channels" / "treadmill-carla" / "relay").glob("*.md"))
+    assert len(files) == 1
+    assert "-action" not in files[0].name
+
+
+def test_action_filename_with_from_suffix(tmp_path: Path) -> None:
+    """When both --type action and --from are set, the filename includes
+    both '-action' and '-from-<label>' suffixes, with type before from."""
+    with patch("cc_relay.Path.home", return_value=tmp_path):
+        sys.argv = [
+            "cc-relay.py",
+            "--to", "treadmill-carla",
+            "--from", "treadmill-alan",
+            "--type", "action",
+            "test message",
+        ]
+        cc_relay.main()
+    files = list((tmp_path / ".cc-channels" / "treadmill-carla" / "relay").glob("*.md"))
+    assert len(files) == 1
+    assert "-action" in files[0].name
+    assert "-from-treadmill-alan" in files[0].name
+    # Verify the order: type before from
+    assert files[0].name.index("-action") < files[0].name.index("-from-")
