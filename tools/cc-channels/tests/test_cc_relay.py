@@ -98,7 +98,7 @@ def test_default_type_is_context_no_header(tmp_path: Path) -> None:
     assert cc_relay.ACTION_HEADER not in content
 
 
-def test_explicit_context_type_no_header(tmp_path: Path) -> None:
+def test_context_type_no_header(tmp_path: Path) -> None:
     """`--type context` is the documented spelling for the default; it must
     behave identically to omitting the flag."""
     with patch("cc_relay.Path.home", return_value=tmp_path):
@@ -113,7 +113,7 @@ def test_explicit_context_type_no_header(tmp_path: Path) -> None:
     assert files[0].read_text() == "context body"
 
 
-def test_action_type_prepends_header(tmp_path: Path) -> None:
+def test_action_type_adds_header(tmp_path: Path) -> None:
     """`--type action` prepends the literal `[ACTION REQUEST]` header on its
     own line, followed by a blank line, before the message body. The
     receiving session pattern-matches on this header to gate execution."""
