@@ -73,6 +73,7 @@ def _fake_task(task_id: uuid.UUID, repo: str = "example/repo") -> MagicMock:
     t.id = task_id
     t.repo = repo
     t.plan_id = uuid.uuid4()
+    t.created_by = "test-operator"  # str|None — escalation payload validates
     return t
 
 
