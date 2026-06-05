@@ -33,8 +33,11 @@ terminal closes, and crashes.
 - `systemd/treadmill-channel-launch` — wrapper invoked by the unit. Creates
   the tmux session if missing, sends the launcher into it, and stays in the
   foreground while the session exists (so systemd treats the service as live).
-- `bin/cc-attach` — thin `tmux a -t <label>` wrapper. The operator-facing
-  attach command.
+- `bin/cc-attach` — thin `tmux a -t <label>` wrapper. Attach to one session.
+- `bin/cc-dashboard` — operator dashboard. Opens a single tmux session
+  (`cc-dashboard`) with four panes side-by-side (one per label, left to right).
+  Each pane is independent: scroll with `<prefix> [`, exit copy mode with `q`.
+  If the session already exists, reattaches. Override labels with `--labels`.
 - `tests/test_launcher_singleton.py` — pytest for the launcher's
   PID-file refusal path (no tmux/systemd/claude invoked).
 

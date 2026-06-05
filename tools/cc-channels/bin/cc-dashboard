@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# cc-dashboard — one-row, four-column operator dashboard for all labelled sessions.
+#
+# Opens a tmux session named "cc-dashboard" with four panes side-by-side,
+# each attached to one orchestrator session. If the dashboard already exists,
+# reattaches to it.
+#
+# Scrolling: each pane scrolls independently.  In the outer (dashboard) tmux
+# session, press <prefix> [ to enter copy mode for the focused pane, use
+# arrow keys / PgUp/PgDn, then q to exit.
+#
+# Usage:
+#   cc-dashboard [--labels "alan bert carla donna"]
+#
+# The optional --labels flag overrides the default four labels (order = left to right).
+
+set -euo pipefail
+
+DASHBOARD="cc-dashboard"
+LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna)
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ATTACH="$BIN_DIR/cc-attach"
+
+# Parse optional --labels override
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --labels)
+            read -ra LABELS <<< "$2"
+            shift 2
+            ;;
+        *)
+            echo "usage: cc-dashboard [--labels \"label1 label2 label3 label4\"]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ ${#LABELS[@]} -lt 2 ]]; then
+    echo "cc-dashboard: need at least 2 labels" >&2
+    exit 1
+fi
+
+# If the dashboard session already exists, just reattach.
+if tmux has-session -t "$DASHBOARD" 2>/dev/null; then
+    exec tmux attach-session -t "$DASHBOARD"
+fi
+
+# Create a new detached session and attach the first label in pane 0.
+tmux new-session -d -s "$DASHBOARD"
+tmux send-keys -t "$DASHBOARD:0.0" "\"$ATTACH\" ${LABELS[0]}" Enter
+
+# Add one pane per remaining label, splitting horizontally each time.
+for label in "${LABELS[@]:1}"; do
+    tmux split-window -t "$DASHBOARD:0" -h
+    tmux send-keys -t "$DASHBOARD:0" "\"$ATTACH\" $label" Enter
+done
+
+# Even out all panes into a single row.
+tmux select-layout -t "$DASHBOARD:0" even-horizontal
+
+# Focus the leftmost pane.
+tmux select-pane -t "$DASHBOARD:0.0"
+
+exec tmux attach-session -t "$DASHBOARD"
