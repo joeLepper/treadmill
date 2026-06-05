@@ -50,9 +50,21 @@ if [ -f "$PIDFILE" ]; then
   rm -f "$PIDFILE"
 fi
 
-# Ensure tmux session exists.
+# Ensure tmux session exists at the right cwd. systemd-user runs the wrapper
+# with cwd=$HOME by default, so a bare `tmux new -d -s` would inherit that —
+# but `claude --resume <session-id>` binds to a transcript stored under a
+# slug derived from the cwd, so the wrong cwd silently loses the session.
+# We persist the label's intended cwd via `launch-session.sh` writing it to
+# `$STATE_ROOT/workdir`; fall back to $HOME/treadmill (matches the README
+# default for alan/bert/carla) when the file is missing.
+WORKDIR_FILE="$HOME/.cc-channels/$LABEL/workdir"
+if [ -f "$WORKDIR_FILE" ]; then
+  WORKDIR=$(cat "$WORKDIR_FILE")
+else
+  WORKDIR="${TREADMILL_REPO_DIR:-$HOME/treadmill}"
+fi
 if ! tmux has-session -t "$LABEL" 2>/dev/null; then
-  tmux new -d -s "$LABEL"
+  tmux new -d -s "$LABEL" -c "$WORKDIR"
 fi
 
 # Send the launcher into the tmux session. `exec` so the

@@ -36,6 +36,23 @@ terminal closes, and crashes.
 
 ## Recent changes
 
+- ADR-0073 Step 1 cwd persistence — `launch-session.sh` now writes its
+  resolved `$WORKDIR` to `$STATE_ROOT/workdir` before `exec claude`, and the
+  systemd wrapper reads that file and passes it to `tmux new -d -s -c
+  <workdir>`. Missing file → `$HOME/treadmill` fallback. Without this, the
+  supervised restart path (now structurally working after #184/#186/#187)
+  silently lost the session on every crash: systemd-user runs the wrapper
+  with cwd=$HOME, `tmux new -d -s` inherited that, `claude --resume <sid>`
+  ended up at `/home/joe`, couldn't find the per-label transcript under
+  `-home-joe-treadmill/` (or whatever the label's downstream repo slug is),
+  and opened
+  a fresh trust-prompt session. The crash test now resumes cleanly without
+  operator hands.
+- ADR-0073 Step 1 set-e silent-exit fix — `STATE=$(ps -p $PID -o state= |
+  head -c 1 || true)` in both singleton-check sites. Without `|| true`,
+  `set -euo pipefail` killed the wrapper silently any time the recorded
+  PID was dead (the case the singleton check was supposed to recover
+  from). systemd looped without ever producing stderr.
 - ADR-0073 Step 1 zombie-PID fix — both the systemd wrapper
   (`systemd/treadmill-channel-launch`) and the launcher
   (`launch-session.sh`) singleton checks now treat a `Z` (zombie) process state
