@@ -38,3 +38,7 @@ docs/analysis/
 
 # Treadmill adapt-mode doc mirror (other repos' context — never commit)
 .treadmill-docs/
+
+# ADR-0072: managed-host IAM credentials (mode 0600, never committed)
+managed-host-credentials*.json
+**/managed-host-credentials*.json

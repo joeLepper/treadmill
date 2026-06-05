@@ -12,6 +12,7 @@ discoverable for shutdown even after a crash.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
@@ -28,6 +29,10 @@ import docker
 from rich.console import Console
 from rich.table import Table
 
+from treadmill_local.managed_credentials import (
+    ManagedCredentialsFileError,
+    resolve_managed_host_credentials,
+)
 from treadmill_local.provisioner import MotoProvisioner
 from treadmill_local.runner import (
     ContainerSpec,
@@ -43,6 +48,7 @@ if TYPE_CHECKING:
     from docker.models.containers import Container
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 LABEL_KEY = "treadmill.managed"
 NETWORK_NAME = "treadmill-local"
@@ -1939,6 +1945,21 @@ class LocalRuntime:
         # into the parent env. dev-local must talk to real AWS.
         env.pop("AWS_ENDPOINT_URL", None)
 
+        # ADR-0072: managed host processes read IAM credentials from a
+        # Treadmill-owned file, not operator SSO. When the file exists, drop
+        # AWS_PROFILE entirely so boto3 only sees the env-var creds.
+        try:
+            managed = resolve_managed_host_credentials()
+        except ManagedCredentialsFileError:
+            logger.exception(
+                "managed-host-credentials file present but malformed; "
+                "refusing to fall back to operator SSO (ADR-0072)"
+            )
+            raise
+        if managed is not None:
+            env.pop("AWS_PROFILE", None)
+            env.update(managed)
+
         proc = subprocess.Popen(
             [sys.executable, "-m", "treadmill_local.autoscaler"],
             env=env,
@@ -2182,6 +2203,21 @@ class LocalRuntime:
             env["GITHUB_TOKEN"] = self._github_token
         # Defensive: drop the moto endpoint override if it leaked into the env.
         env.pop("AWS_ENDPOINT_URL", None)
+
+        # ADR-0072: managed host processes read IAM credentials from a
+        # Treadmill-owned file, not operator SSO. When the file exists, drop
+        # AWS_PROFILE entirely so boto3 only sees the env-var creds.
+        try:
+            managed = resolve_managed_host_credentials()
+        except ManagedCredentialsFileError:
+            logger.exception(
+                "managed-host-credentials file present but malformed; "
+                "refusing to fall back to operator SSO (ADR-0072)"
+            )
+            raise
+        if managed is not None:
+            env.pop("AWS_PROFILE", None)
+            env.update(managed)
 
         proc = subprocess.Popen(
             [sys.executable, "-m", "treadmill_local.deploy_watcher"],
