@@ -118,6 +118,8 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+- **ADR-0070 substep 2 step 3 — end-to-end accuracy widget verification** — new `src/review/viewers/triage-finding-stats.test.tsx` test mounts the `ReviewKind` framework page with `kind='triage-finding'` and exercises the full end-to-end accuracy widget path: mocks fetch to capture outbound URLs, confirms that `useReviewStats(kind)` substitutes the kind via path-substitution and hits `GET /api/v1/review/triage-finding/stats` (the critical wiring that ADR-0070 spec required the test to pin), asserts the widget renders the percentage when stats are present (testing 60%, 75%, 80% scenarios) and hides the accuracy pill when `label_accuracy` is null (unlabeled corpus). This is the "abstraction-proof-on-existing-surface" deliverable per ADR-0070 substep-2 spec — it validates that the framework's `useReviewStats(kind)` hook correctly wires the kind into the fetch path. Mirrors the pattern already in `src/pages/ReviewKind.test.tsx` for the broader framework, focusing here only on the stats hook's path-substitution contract.
+
 - **UI-fix — triage finding `7022628a`** — `src/review/dspy_variant_pr.tsx`
   was rendering without a `<ConnectionAffordance>` in the top bar,
   violating DESIGN.md mandatory rule #8 ("connection-freshness affordance
