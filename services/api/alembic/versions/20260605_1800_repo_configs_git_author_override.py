@@ -10,7 +10,7 @@ A CHECK constraint enforces that name and email are paired: either both are NULL
 (use defaults) or both are NOT NULL (use the override pair).
 
 Revision ID: 20260605_1800
-Revises: 20260605_1615
+Revises: 20260605_1700
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from alembic import op
 
 
 revision: str = "20260605_1800"
-down_revision: Union[str, Sequence[str], None] = "20260605_1615"
+down_revision: Union[str, Sequence[str], None] = "20260605_1700"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
