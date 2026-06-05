@@ -63,6 +63,26 @@ the session reads `<channel source="treadmill-events">` events and acts.
 | `TREADMILL_SESSION_LABEL` | (required) | session label = `created_by` routing key |
 | `TREADMILL_API_URL` | `http://localhost:8088` | Treadmill API base — must be the direct API port; the `:8080` auth proxy serves REST but does not upgrade WebSockets |
 | `TREADMILL_API_KEY` | `BUNKHOUSE_API_KEY` | Bearer for REST + WS |
+| `TREADMILL_RELAY_LEVEL` | `quiet` | ADR-0071 per-session relay verbosity; one of `quiet` / `normal` / `verbose` (invalid → `quiet`) |
+
+## Relay verbosity (ADR-0071)
+
+`TREADMILL_RELAY_LEVEL` governs which lifecycle events the session relays to its
+Telegram operator chat. The event-class mapping reuses the ADR-0062 escalation
+taxonomy — no new classification is invented here.
+
+- **`quiet` (default):** `pr_merged` (clean terminal success) + any unexpected
+  terminal state per the ADR-0062 escalation reasons (`terminal_step_failure`,
+  `cap_reached`, `gate_broken`, architect amend-exhausted, unresolved conflict,
+  `cancelled`). "Tell me when something finishes or goes wrong."
+- **`normal`:** + PR opened, review verdicts (approve / changes-requested),
+  ci-fix loop entries.
+- **`verbose`:** + step started/completed and other intermediate lifecycle.
+
+The level is set per-session by `tools/cc-channels/launch-session.sh` (default
+`quiet`); override per label by exporting `TREADMILL_RELAY_LEVEL` before launch.
+Always-on escalation fan-out (ADR-0062) is independent of this level — see
+`docs/adrs/0071-operator-notification-strategy-log-levels-two-layer.md`.
 
 Pinned against Claude Code 2.1.161; channels are a research preview — re-verify
 the flag contract after CC upgrades.

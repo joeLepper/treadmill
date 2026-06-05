@@ -27,6 +27,8 @@
  *   TREADMILL_SESSION_LABEL  required — this session's label / created_by key
  *   TREADMILL_API_URL        default: BUNKHOUSE_URL or http://localhost:8080
  *   TREADMILL_API_KEY        default: BUNKHOUSE_API_KEY (Bearer for REST + WS)
+ *   TREADMILL_RELAY_LEVEL    default: quiet — ADR-0071 relay verbosity;
+ *                            one of {quiet, normal, verbose}; invalid → quiet
  *
  * Tested against Claude Code 2.1.161 (channels research preview — the
  * --channels / --dangerously-load-development-channels contract may drift).
@@ -41,11 +43,42 @@ const LABEL = process.env.TREADMILL_SESSION_LABEL ?? ''
 const API = (process.env.TREADMILL_API_URL ?? 'http://localhost:8088').replace(/\/$/, '')
 const KEY = process.env.TREADMILL_API_KEY ?? process.env.BUNKHOUSE_API_KEY ?? ''
 
+// ADR-0071 per-session relay verbosity. The level governs WHICH events the
+// session relays to its Telegram operator chat; the event-class mapping is
+// pinned to the ADR-0062 escalation taxonomy (do not invent a new one).
+const RELAY_LEVELS = ['quiet', 'normal', 'verbose'] as const
+type RelayLevel = (typeof RELAY_LEVELS)[number]
+const RELAY_LEVEL: RelayLevel = (RELAY_LEVELS as readonly string[]).includes(
+  process.env.TREADMILL_RELAY_LEVEL ?? '',
+)
+  ? (process.env.TREADMILL_RELAY_LEVEL as RelayLevel)
+  : 'quiet'
+
 // No exit on a missing label. This server is registered user-scope, so Claude
 // Code spawns it in EVERY session — but it's only a channel in sessions the
 // launcher started with a label + the dev-channels flag. Without a label we
 // still connect (so MCP health shows green, not a failed server) but stay
 // inert: no WS, no notifications. The launch-time gate is at the bottom.
+
+// ADR-0071 relay-level descriptions, woven into the channel instructions so the
+// session knows the AUTHORITATIVE significant-set for the active level. The
+// event classes are pinned to ADR-0062's escalation taxonomy.
+const RELAY_LEVEL_BLURB: Record<RelayLevel, string> = {
+  quiet:
+    'RELAY LEVEL = quiet (default). Significant set: pr_merged (clean ' +
+    'terminal success) and any unexpected terminal state per the ADR-0062 ' +
+    'escalation reasons — terminal_step_failure, cap_reached, gate_broken, ' +
+    'architect amend-exhausted, unresolved conflict, cancelled. Skip ' +
+    'everything else.',
+  normal:
+    'RELAY LEVEL = normal. Significant set: the quiet set PLUS PR opened, ' +
+    'review verdicts (approve / changes-requested), and ci-fix loop entries. ' +
+    'Skip routine intermediate steps.',
+  verbose:
+    'RELAY LEVEL = verbose. Significant set: the normal set PLUS step ' +
+    'started/completed and other intermediate lifecycle events. Throttle if ' +
+    'a run is chatty.',
+}
 
 const mcp = new Server(
   { name: 'treadmill-events', version: '0.1.0' },
@@ -62,13 +95,14 @@ const mcp = new Server(
       'catch_up="true" event summarizes state recovered after a (re)connect — ' +
       'reconcile against it rather than assuming silence meant no progress. ' +
       'RELAY TO THE OPERATOR: if a Telegram channel is also active in this ' +
-      'session, push a concise summary of each SIGNIFICANT state change — PR ' +
-      'opened, PR merged, step/run failed, task done, operator escalation — to ' +
+      'session, push a concise summary of each SIGNIFICANT state change to ' +
       "the operator via the telegram reply tool (use the active chat's " +
-      'chat_id). Skip routine intermediate steps and throttle if a run is ' +
-      'chatty; relay structured facts (entity/action/ids), never raw event ' +
-      'prose. This keeps the operator informed away from the terminal without ' +
-      'a firehose. (Each session relays only its own label\'s work — the ' +
+      'chat_id). The active per-session verbosity (ADR-0071) is set via ' +
+      'TREADMILL_RELAY_LEVEL and pins the significant set: ' +
+      RELAY_LEVEL_BLURB[RELAY_LEVEL] +
+      ' Relay structured facts (entity/action/ids), never raw event prose. ' +
+      'This keeps the operator informed away from the terminal without a ' +
+      'firehose. (Each session relays only its own label\'s work — the ' +
       'channel is already filtered by created_by.)',
   },
 )

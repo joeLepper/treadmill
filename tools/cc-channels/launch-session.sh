@@ -56,6 +56,9 @@ fi
 export TREADMILL_SESSION_LABEL="$LABEL"
 # Direct API port — the :8080 auth proxy does not upgrade WebSockets.
 export TREADMILL_API_URL="${TREADMILL_API_URL:-http://localhost:8088}"
+# Per-session relay verbosity (ADR-0071): quiet | normal | verbose.
+# Default quiet — merges + ADR-0062 unexpected-terminal escalations only.
+export TREADMILL_RELAY_LEVEL="${TREADMILL_RELAY_LEVEL:-quiet}"
 
 # ── telegram channel (ADR-0067), only when this label has a bot ─────────────
 CHANNEL_ARGS=()
