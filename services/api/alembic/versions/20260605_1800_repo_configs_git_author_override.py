@@ -43,8 +43,8 @@ def upgrade() -> None:
     )
     op.create_check_constraint(
         "ck_repo_configs_git_author_paired",
+        "repo_configs",
         "(git_author_name IS NULL) = (git_author_email IS NULL)",
-        table_name="repo_configs",
     )
 
 

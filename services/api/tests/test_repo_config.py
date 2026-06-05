@@ -54,6 +54,9 @@ def test_round_trip_via_to_dict():
         "claude_account": "secondary",
         "claude_account_fallback": None,
         "worker_deps": None,
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": None,
     }
 
     assert to_dict(parse_repo_config(source)) == source
@@ -81,6 +84,9 @@ def test_round_trip_via_to_dict_with_worker_deps():
                 }
             ],
         },
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": None,
     }
 
     assert to_dict(parse_repo_config(source)) == source

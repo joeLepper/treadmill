@@ -115,6 +115,9 @@ def test_onboard_repo_explicit_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         "auto_merge_blocked": True,
         "claude_account": None,
         "worker_deps": {"python": [], "node": [], "binaries": []},
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": None,
     }
     assert session.committed
     assert len(store.profiles) == 1
@@ -266,6 +269,9 @@ def test_get_repo_returns_config(monkeypatch: pytest.MonkeyPatch) -> None:
         "lint_command": None,
         "claude_account": None,
         "worker_deps": {"python": [], "node": [], "binaries": []},
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": None,
     }
 
 
