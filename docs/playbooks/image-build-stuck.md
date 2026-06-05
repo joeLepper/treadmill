@@ -12,6 +12,32 @@ Example error:
 RuntimeError: docker build failed for treadmill-dashboard:dev; refusing to start containers with a stale image. Re-run with `--no-build` to bypass.
 ```
 
+## How to identify whether the fallback is engaged
+
+First, check if the `--no-build` escape hatch is currently active:
+
+**Dev-local:**
+
+```bash
+# Check if autoscaler is running with --no-build
+ps aux | grep treadmill-autoscaler | grep -i "no-build"
+
+# If it's running with --no-build, you'll see the flag in the process args
+# Or check the launcher config:
+grep -r "no-build" .treadmill-local/config/
+```
+
+**Cloud deployment:**
+
+```bash
+# Check the autoscaler pod's command args
+kubectl get pod <autoscaler-pod> -o yaml | grep -A 5 "args:"
+# Or check environment variables:
+kubectl exec <autoscaler-pod> -- env | grep NO_BUILD
+```
+
+If `--no-build` is active, the autoscaler is skipping image builds and using stale images. This is a temporary workaround—the fallback is engaged and the system is running degraded. Proceed to the root cause checklist to identify why the image build is failing.
+
 ## Root cause checklist
 
 - [ ] **Syntax error in application code**: A TypeScript, Python, or Go error in the codebase prevents the image from building. The error appears in the Docker build output but not in static CI checks (e.g., tsc error in TS code not caught by CI linting).
@@ -97,8 +123,39 @@ docker system df  # Docker image/container space
 
 **Short term (unblock the queue):**
 
-1. **Fix the root cause immediately**:
-   - If it's a code error (TS syntax, import error): Fix the bug directly in the code, commit, and push.
+**Decision: Roll back vs. fix forward**
+
+First, determine whether to roll back the problematic commit or fix forward:
+
+- **Roll back if**: The error was introduced in a recent commit (within the last few hours) and the fix requires significant changes. Reverting is faster.
+- **Fix forward if**: The error is in old code and you have a quick fix, or rolling back would lose recent work from other developers.
+
+**To identify the problematic commit:**
+
+```bash
+git log --oneline -20
+# Look for a recent commit that touched the file with the error (usually in the Dockerfile, a build script, or application code)
+
+# Or search for commits that touched the image build:
+git log --oneline -- Dockerfile treadmill/dashboard/package.json treadmill/dashboard/tsconfig.json
+```
+
+**If rolling back:**
+
+```bash
+# Option 1: Revert the problematic commit (preferred, creates a new commit)
+git revert <commit-hash>
+git push origin main
+
+# Option 2: Reset to the last known-good commit (if you're absolutely sure it's safe)
+git reset --hard <known-good-commit>
+git push --force origin main  # Use with caution; only if you're certain no one is building on that commit
+```
+
+**If fixing forward:**
+
+1. Fix the code error directly:
+   - If it's a code error (TS syntax, import error): Fix the bug in the code, commit, and push.
    - If it's a missing dependency: Add it to the dependency manifest (package.json, go.mod, etc.), commit, and push.
    - If it's a resource issue: Free up space (`docker system prune -a`, extend disk), or move the build to a machine with more resources.
 
