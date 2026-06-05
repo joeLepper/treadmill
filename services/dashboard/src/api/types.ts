@@ -312,3 +312,79 @@ export interface DspyVariantPrLabelInput {
   label_override_reason?: string | null;
   labeled_by: string;
 }
+
+/* ─── Architect Gold review (ADR-0070) ─────────────────────────────── */
+
+export type ArchitectGoldLabel = 'too-permissive' | 'too-strict' | 'correct' | 'exclude';
+export type ArchitectGoldVerdictEmitted = 'accept-as-is' | 'amend' | 'gate-broken';
+export type ArchitectGoldConfidence = 'high' | 'medium' | 'low';
+
+export interface ArchitectGoldRow {
+  id: string;
+  created_at: string;
+  source_url?: string | null;
+  source_pr_number?: number | null;
+  decision_id: string;
+  verdict_emitted: ArchitectGoldVerdictEmitted;
+  rationale_excerpt: string;
+  gate_log_uri: string | null;
+  llm_label: ArchitectGoldLabel;
+  llm_confidence: ArchitectGoldConfidence;
+  llm_rationale: string;
+  llm_prompt_version: string;
+  llm_model: string;
+  label_verdict: ArchitectGoldLabel | null;
+  label_notes: string | null;
+  label_override_reason: string | null;
+  labeled_by: string | null;
+  labeled_at: string | null;
+  label_guidelines_version: string | null;
+  outcome_state: string | null;
+  outcome_merged_at: string | null;
+}
+
+/** Body posted to ``POST /api/v1/review/architect-gold/:id/label``. */
+export interface ArchitectGoldLabelInput {
+  label_verdict: ArchitectGoldLabel;
+  label_notes?: string | null;
+  label_override_reason?: string | null;
+  labeled_by: string;
+}
+
+/* ─── Validator Gold review (ADR-0070) ──────────────────────────────── */
+
+export type ValidatorGoldLabel = 'correct-verdict' | 'wrong-verdict' | 'unclear';
+export type ValidatorGoldVerdictEmitted = 'pass' | 'fail';
+export type ValidatorGoldConfidence = 'high' | 'medium' | 'low';
+
+export interface ValidatorGoldRow {
+  id: string;
+  created_at: string;
+  source_url?: string | null;
+  source_pr_number?: number | null;
+  source_step_id: string;
+  verdict_emitted: ValidatorGoldVerdictEmitted;
+  script_excerpt: string;
+  artifact_excerpt: string;
+  llm_label: ValidatorGoldLabel;
+  llm_confidence: ValidatorGoldConfidence;
+  llm_rationale: string;
+  llm_prompt_version: string;
+  llm_model: string;
+  label_verdict: ValidatorGoldLabel | null;
+  label_notes: string | null;
+  label_override_reason: string | null;
+  labeled_by: string | null;
+  labeled_at: string | null;
+  label_guidelines_version: string | null;
+  outcome_state: string | null;
+  outcome_merged_at: string | null;
+}
+
+/** Body posted to ``POST /api/v1/review/validator-gold/:id/label``. */
+export interface ValidatorGoldLabelInput {
+  label_verdict: ValidatorGoldLabel;
+  label_notes?: string | null;
+  label_override_reason?: string | null;
+  labeled_by: string;
+}

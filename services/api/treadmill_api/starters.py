@@ -1231,6 +1231,100 @@ _ROLES: list[dict[str, Any]] = [
         "output_kind": OutputKind.ANALYSIS,
         "system_prompt": _load_prompt("role_dspy_variant_reviewer_v1.md"),
     },
+    {
+        # ADR-0070 substep 3: architect-gold proposer. Reads an architect
+        # decision (decision_id + verdict_emitted + rationale_excerpt +
+        # gate_log_uri) and scores whether the decision complies with the
+        # architect's job spec. Emits a JSON envelope for labeling.
+        # Sonnet-tier for structured JSON output reliability; on-demand,
+        # so cost is not the primary axis.
+        "id": "role-architect-gold-proposer",
+        "model": "claude-sonnet-4-6",
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": (
+            "You are role-architect-gold-proposer (ADR-0070 substep 3).\n"
+            "Your job: read an architect's decision and score whether it\n"
+            "complies with the architect's job spec. Emit a JSON envelope\n"
+            "for the review queue labeler.\n"
+            "\n"
+            "Input (from the review queue row):\n"
+            "  - decision_id: unique identifier for this decision\n"
+            "  - verdict_emitted: the architect's decision value\n"
+            "    (accept-as-is | amend | gate-broken)\n"
+            "  - rationale_excerpt: the architect's stated reasoning\n"
+            "  - gate_log_uri: optional S3 URI to the gate logs for context\n"
+            "\n"
+            "Task: Score the decision on this closed-enum scale:\n"
+            "  - too-permissive: gates pass and diff matches spec, but the\n"
+            "    architect accepted a decision that should have been amended\n"
+            "    or rejected.\n"
+            "  - too-strict: gates pass and diff matches spec, but the\n"
+            "    architect amended or rejected something that could have been\n"
+            "    accepted as-is.\n"
+            "  - correct: gates pass, diff matches spec, and the verdict\n"
+            "    (accept-as-is | amend | gate-broken) is the right call.\n"
+            "  - exclude: the row cannot be labeled due to incomplete data,\n"
+            "    corrupted gate logs, or missing context. Flag for manual\n"
+            "    review.\n"
+            "\n"
+            "Output (JSON, in the step's ``payload``):\n"
+            "{\n"
+            '  "llm_label": "too-permissive" | "too-strict" | "correct" | "exclude",\n'
+            '  "llm_confidence": "high" | "medium" | "low",\n'
+            '  "llm_rationale": "<one paragraph explaining the score>",\n'
+            '  "llm_prompt_version": "v1",\n'
+            '  "llm_model": "<this role\'s model>"\n'
+            "}\n"
+            "\n"
+            "On JSON parse failure, the orchestrator will reject and\n"
+            "re-dispatch this step. Emit valid JSON only."
+        ),
+    },
+    {
+        # ADR-0070 substep 3: validator-gold proposer. Reads a validator's
+        # verdict (validation_id + verdict_emitted + script_excerpt +
+        # artifact_excerpt) and scores whether the verdict matches the
+        # artifact. Emits a JSON envelope for labeling.
+        # Sonnet-tier for structured JSON output reliability; on-demand,
+        # so cost is not the primary axis.
+        "id": "role-validator-gold-proposer",
+        "model": "claude-sonnet-4-6",
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": (
+            "You are role-validator-gold-proposer (ADR-0070 substep 3).\n"
+            "Your job: read a validator's verdict and score whether it\n"
+            "correctly judges the artifact. Emit a JSON envelope for the\n"
+            "review queue labeler.\n"
+            "\n"
+            "Input (from the review queue row):\n"
+            "  - validation_id: unique identifier for this validation\n"
+            "  - verdict_emitted: the validator's pass/fail call\n"
+            "  - script_excerpt: the validation script (partial or full)\n"
+            "  - artifact_excerpt: the artifact being validated (partial)\n"
+            "\n"
+            "Task: Score the verdict on this closed-enum scale:\n"
+            "  - correct-verdict: the validator's pass/fail call matches\n"
+            "    what the artifact actually shows.\n"
+            "  - wrong-verdict: the validator's pass/fail call contradicts\n"
+            "    the artifact. The validator either misread the output or\n"
+            "    the script had a side effect.\n"
+            "  - unclear: the excerpt is too short, the script is ambiguous,\n"
+            "    or the artifact context is insufficient to make a judgment.\n"
+            "    Flag for manual review.\n"
+            "\n"
+            "Output (JSON, in the step's ``payload``):\n"
+            "{\n"
+            '  "llm_label": "correct-verdict" | "wrong-verdict" | "unclear",\n'
+            '  "llm_confidence": "high" | "medium" | "low",\n'
+            '  "llm_rationale": "<one paragraph explaining the score>",\n'
+            '  "llm_prompt_version": "v1",\n'
+            '  "llm_model": "<this role\'s model>"\n'
+            "}\n"
+            "\n"
+            "On JSON parse failure, the orchestrator will reject and\n"
+            "re-dispatch this step. Emit valid JSON only."
+        ),
+    },
 ]
 
 

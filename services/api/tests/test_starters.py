@@ -62,6 +62,8 @@ _EXPECTED_ROLE_IDS = {
     "role-prompt-optimizer",
     "role-ui-triage",  # ADR-0061
     "role-dspy-variant-reviewer",  # ADR-0070 substep 4
+    "role-architect-gold-proposer",  # ADR-0070 substep 3
+    "role-validator-gold-proposer",  # ADR-0070 substep 3
 }
 
 # Action-role ids that may appear as step 2 of a 2-step workflow. Per
