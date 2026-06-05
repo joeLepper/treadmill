@@ -11,6 +11,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   Bucket,
+  DspyVariantPrLabelInput,
+  DspyVariantPrRow,
   Escalation,
   Event,
   Account,
@@ -177,6 +179,81 @@ export function useLabelFinding() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: UNLABELED_KEY });
+    },
+  });
+}
+
+/* ─── DSPy variant PR review (ADR-0070) ─────────────────────────── */
+
+const DSPY_VARIANT_PR_KEY = ['review', 'dspy-variant-pr'] as const;
+
+export function useDspyVariantPrQueue(limit = 50) {
+  return useQuery({
+    queryKey: [...DSPY_VARIANT_PR_KEY, 'next', limit],
+    queryFn: async () =>
+      _apiFetch<DspyVariantPrRow[]>(
+        `/api/v1/review/dspy-variant-pr/next?limit=${limit}`,
+      ),
+    staleTime: STALE_MS,
+  });
+}
+
+export function useDspyVariantPrStats() {
+  return useQuery({
+    queryKey: [...DSPY_VARIANT_PR_KEY, 'stats'],
+    queryFn: async () =>
+      _apiFetch<{
+        total: number;
+        unlabeled: number;
+        labeled_total: number;
+        label_accuracy: number | null;
+        accuracy_last_100: number | null;
+      }>('/api/v1/review/dspy-variant-pr/stats'),
+    staleTime: STALE_MS,
+  });
+}
+
+export function useLabelDspyVariantPr() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      label,
+    }: { id: string; label: DspyVariantPrLabelInput }) => {
+      const res = await fetch(
+        `/api/v1/review/dspy-variant-pr/${id}/label`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(label),
+        },
+      );
+      if (!res.ok) {
+        throw new Error(`label dspy-variant-pr failed: HTTP ${res.status}`);
+      }
+      return (await res.json()) as DspyVariantPrRow;
+    },
+    onMutate: async ({ id }) => {
+      await qc.cancelQueries({ queryKey: DSPY_VARIANT_PR_KEY });
+      const prev = qc.getQueryData<DspyVariantPrRow[]>([
+        ...DSPY_VARIANT_PR_KEY, 'next', 50,
+      ]);
+      qc.setQueryData<DspyVariantPrRow[] | undefined>(
+        [...DSPY_VARIANT_PR_KEY, 'next', 50],
+        (old) => old?.filter((r) => r.id !== id),
+      );
+      return { prev };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) {
+        qc.setQueryData(
+          [...DSPY_VARIANT_PR_KEY, 'next', 50],
+          ctx.prev,
+        );
+      }
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: DSPY_VARIANT_PR_KEY });
     },
   });
 }
