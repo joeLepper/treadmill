@@ -39,6 +39,10 @@ def _make_task(task_id: uuid.UUID, repo: str = "test/repo") -> MagicMock:
     task.id = task_id
     task.repo = repo
     task.plan_id = uuid.uuid4()
+    # created_by must be a real str|None (not an auto-MagicMock) so the
+    # TaskEscalatedToOperator payload validates — the escalation now carries
+    # the spawning operator (ADR-0071 follow-up).
+    task.created_by = "test-operator"
     return task
 
 

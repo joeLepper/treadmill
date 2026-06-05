@@ -78,6 +78,19 @@ class TaskEscalatedToOperator(EventPayload):
     # default-None so the existing emitters that don't carry a single
     # owning step (cap-reached, stuck-task-sweep) remain wire-compatible.
     step_name: str | None = None
+    # Spawning operator label (``tasks.created_by``) for dashboard triage.
+    # Nullable — older tasks may not carry this; renders as `` by <label>``
+    # suffix on the escalation-open notification line when present.
+    created_by: str | None = None
+
+    @pydantic.field_validator("created_by", mode="before")
+    @classmethod
+    def _coerce_created_by(cls, v: object) -> str | None:
+        """An escalation must NEVER fail to emit because ``created_by`` isn't a
+        clean ``str | None`` — it's best-effort triage metadata. Coerce any
+        non-string (a missing column, a stray value) to ``None`` so the
+        operator's safety-net event always fires."""
+        return v if isinstance(v, str) else None
 
 
 class TaskEscalationClosed(EventPayload):
