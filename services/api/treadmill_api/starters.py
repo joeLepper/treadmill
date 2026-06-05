@@ -1430,7 +1430,11 @@ class StarterSeedError(Exception):
 
 
 def _all_roles() -> list[dict[str, Any]]:
-    """De-duplicate the roles referenced by the starters.
+    """De-duplicate the roles referenced by the starters, plus any
+    role defined in ``_ROLES`` that no workflow references (e.g.
+    on-demand-dispatched roles like ``role-dspy-variant-reviewer``
+    — ADR-0070 substep 4 — which the operator triggers by name and
+    that no workflow's ``steps`` list invokes).
 
     ``role-code-author`` is referenced by four workflows; this helper
     collapses repeated references so ``seed()`` POSTs each role exactly
@@ -1443,6 +1447,8 @@ def _all_roles() -> list[dict[str, Any]]:
     for wf in STARTERS:
         for role in wf["roles"]:
             seen.setdefault(role["id"], role)
+    for role in _ROLES:
+        seen.setdefault(role["id"], role)
     return list(seen.values())
 
 
