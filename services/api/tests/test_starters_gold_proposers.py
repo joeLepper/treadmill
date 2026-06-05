@@ -6,7 +6,7 @@ per ADR-0070.
 """
 
 from treadmill_api.models import OutputKind
-from treadmill_api.starters import _ROLES_BY_ID
+from treadmill_api.starters import _ROLES_BY_ID, WORKER_MODEL
 
 
 def test_architect_gold_proposer_role_exists() -> None:
@@ -14,7 +14,7 @@ def test_architect_gold_proposer_role_exists() -> None:
     role = _ROLES_BY_ID.get("role-architect-gold-proposer")
     assert role is not None, "role-architect-gold-proposer not found in _ROLES_BY_ID"
     assert role["id"] == "role-architect-gold-proposer"
-    assert role["model"] == "claude-sonnet-4-6"
+    assert role["model"] == WORKER_MODEL
     assert role["output_kind"] == OutputKind.ANALYSIS
 
 
@@ -41,7 +41,7 @@ def test_validator_gold_proposer_role_exists() -> None:
     role = _ROLES_BY_ID.get("role-validator-gold-proposer")
     assert role is not None, "role-validator-gold-proposer not found in _ROLES_BY_ID"
     assert role["id"] == "role-validator-gold-proposer"
-    assert role["model"] == "claude-sonnet-4-6"
+    assert role["model"] == WORKER_MODEL
     assert role["output_kind"] == OutputKind.ANALYSIS
 
 
