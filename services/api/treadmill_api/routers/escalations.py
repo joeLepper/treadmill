@@ -35,7 +35,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, AsyncIterator, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -71,10 +71,18 @@ class OpenEscalation(BaseModel):
     reason: str | None = None
 
 
+class CloseRequest(BaseModel):
+    """Request body for POST /api/v1/escalations/{task_id}/close."""
+    expected_followup: str | None = None
+    """Optional expected followup: learning:<slug>, pr:<number>, adr:<NNNN>,
+    or transient:<cause>. Defaults to null (unreferenced)."""
+
+
 class CloseResponse(BaseModel):
     task_id: str
     close_reason: Literal["operator_close"]
     mttr_seconds: int
+    expected_followup: str | None = None
 
 
 class AckResponse(BaseModel):
@@ -381,6 +389,7 @@ async def close_escalation(
     task_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+    request: Annotated[CloseRequest, Body()] = CloseRequest(),
 ) -> CloseResponse:
     """Emit ``task.escalation_closed`` with ``close_reason='operator_close'``.
 
@@ -415,7 +424,12 @@ async def close_escalation(
 
     now = datetime.now(timezone.utc)
     await emit_operator_close(
-        session, dispatcher, task_id=task_id, opened_at=opened_at, now=now,
+        session,
+        dispatcher,
+        task_id=task_id,
+        opened_at=opened_at,
+        now=now,
+        expected_followup=request.expected_followup,
     )
     await session.commit()
     mttr_seconds = int((now - opened_at).total_seconds())
@@ -423,6 +437,7 @@ async def close_escalation(
         task_id=str(task_id),
         close_reason="operator_close",
         mttr_seconds=mttr_seconds,
+        expected_followup=request.expected_followup,
     )
 
 

@@ -204,6 +204,21 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "jitter_seconds": 60,
         "created_by": "auto-seed",
     },
+    {
+        # Weekly unreferenced-close report — sweeps the past 7 days of
+        # escalation_closed events with expected_followup null/empty, groups
+        # by repo, and emits one system.unreferenced_closes_report event per
+        # repo. NotificationFanout (ADR-0062) consumes these for operator
+        # alerting. Runs weekly on Monday mornings so the team can review
+        # weekend closes before the week starts.
+        "workflow_id": "wf-unreferenced-close-report",
+        "cron_expression": "0 9 * * 1",  # Monday 9am UTC
+        "quiet_hours": None,
+        "quiet_tz": "UTC",
+        "payload_template": {"trigger": "scheduled-sweep"},
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
 ]
 
 

@@ -3130,6 +3130,17 @@ async def handle_scheduled_tick(
         await run_step_starvation_sweep(session, dispatcher)
         return None
 
+    # Same idiom for the unreferenced-close-report sweep — sweeps past 7 days
+    # of escalation closes with null/empty expected_followup, groups by repo,
+    # and emits one report per repo for NotificationFanout consumption.
+    from treadmill_api.coordination.unreferenced_close_report import (
+        UNREFERENCED_CLOSE_REPORT_WORKFLOW_ID,
+        run_unreferenced_close_report_sweep,
+    )
+    if schedule.workflow_id == UNREFERENCED_CLOSE_REPORT_WORKFLOW_ID:
+        await run_unreferenced_close_report_sweep(session, dispatcher)
+        return None
+
     repo = typed.rendered_payload.get("repo")
     if not repo:
         # ADR-0057 + ADR-0055 sibling: schedules without a payload.repo can't

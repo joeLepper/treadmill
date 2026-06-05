@@ -73,8 +73,9 @@ def test_existing_schedules_unchanged() -> None:
         "wf-escalation-close-sweep",  # ADR-0062 Step 2
         "wf-terminal-gate-sweep",  # ADR-0047/0038/0042
         "wf-step-starvation-sweep",  # ADR-0075 §1
+        "wf-unreferenced-close-report",  # ADR-0075 §4
     ):
         assert expected in workflow_ids, f"missing {expected} in SEED_SCHEDULES"
-    assert len(SEED_SCHEDULES) == 10, (
-        f"expected 10 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
+    assert len(SEED_SCHEDULES) == 11, (
+        f"expected 11 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
     )

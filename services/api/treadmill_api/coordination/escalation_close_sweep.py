@@ -192,6 +192,7 @@ async def emit_escalation_closed(
     opened_at: datetime,
     close_reason: CloseReason,
     now: datetime | None = None,
+    expected_followup: str | None = None,
 ) -> None:
     """Persist + publish one ``task.escalation_closed`` event.
 
@@ -234,6 +235,7 @@ async def emit_escalation_closed(
                 close_reason=close_reason,
                 opened_at=opened_at,
                 mttr_seconds=mttr_seconds,
+                expected_followup=expected_followup,
             ),
             plan_id=task.plan_id,
             task_id=task_id,
@@ -253,6 +255,7 @@ async def emit_operator_close(
     task_id: uuid.UUID,
     opened_at: datetime,
     now: datetime | None = None,
+    expected_followup: str | None = None,
 ) -> None:
     """Emit ``task.escalation_closed`` with ``close_reason='operator_close'``.
 
@@ -269,6 +272,7 @@ async def emit_operator_close(
         opened_at=opened_at,
         close_reason="operator_close",
         now=now,
+        expected_followup=expected_followup,
     )
 
 
@@ -320,6 +324,7 @@ async def run_escalation_close_sweep(
                 opened_at=row.opened_at,
                 close_reason=reason,
                 now=moment,
+                expected_followup="transient:auto_progress",
             )
             closed += 1
         except Exception:
