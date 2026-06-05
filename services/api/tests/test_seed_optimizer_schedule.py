@@ -60,8 +60,8 @@ def test_optimizer_payload_specifies_judge_role() -> None:
 def test_existing_schedules_unchanged() -> None:
     """Regression net: every prior schedule slug must still be present.
     Strategy A (ADR-0056 canary) added a second ``wf-tune-judge-prompts``
-    row (role-code-author Sunday) under the same slug, so the total row
-    count is now 8."""
+    row (role-code-author Sunday) under the same slug; ADR-0047/0038/0042
+    added ``wf-terminal-gate-sweep``, so the total row count is now 9."""
     workflow_ids = [s["workflow_id"] for s in SEED_SCHEDULES]
     for expected in (
         "wf-documentarian-audit",
@@ -71,8 +71,9 @@ def test_existing_schedules_unchanged() -> None:
         "wf-tune-judge-prompts",
         "wf-ui-triage",  # ADR-0061
         "wf-escalation-close-sweep",  # ADR-0062 Step 2
+        "wf-terminal-gate-sweep",  # ADR-0047/0038/0042
     ):
         assert expected in workflow_ids, f"missing {expected} in SEED_SCHEDULES"
-    assert len(SEED_SCHEDULES) == 8, (
-        f"expected 8 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
+    assert len(SEED_SCHEDULES) == 9, (
+        f"expected 9 schedules, got {len(SEED_SCHEDULES)}: {workflow_ids}"
     )

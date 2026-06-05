@@ -15,7 +15,7 @@ class TaskEscalatedToOperator(EventPayload):
     """Emitted when automated recovery is exhausted and operator
     intervention is required.
 
-    Four call sites today (the ``reason`` field discriminates):
+    Five call sites today (the ``reason`` field discriminates):
       * ``architect_cap`` — per ADR-0048 §3, wf-architecture-resolve hit
         its 5-attempt per-task cap (ADR-0029 Q29.e); see
         ``triggers._emit_arch_cap_reached``.
@@ -34,6 +34,11 @@ class TaskEscalatedToOperator(EventPayload):
         no concurrent cap-reached escalation. ``step_name`` is set
         to the failing step's name and ``gate_log_excerpt`` carries
         the step's captured error / log excerpt when present.
+      * ``terminal_gate_sweep`` — per ADR-0047, ADR-0038, ADR-0042,
+        the scheduled sweep detected a task with an architect
+        accept-as-is verdict (``review.override`` / ``validate.override``)
+        whose PR was never merged; see
+        ``terminal_gate_sweep.run_terminal_gate_sweep``.
 
     Surface via GET /api/v1/tasks?status=needs_operator and the
     dashboard's escalation bucket (``routers/dashboard/overview.py``).
@@ -57,6 +62,7 @@ class TaskEscalatedToOperator(EventPayload):
         "stuck_task_sweep",
         "gate-broken",
         "terminal_step_failure",
+        "terminal_gate_sweep",
     ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from

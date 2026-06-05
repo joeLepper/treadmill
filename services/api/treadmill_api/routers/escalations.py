@@ -228,7 +228,7 @@ _INSERT_ACK_SQL = text("""
 async def list_escalations(
     session: Annotated[AsyncSession, Depends(get_session)],
     reason: Annotated[
-        Literal["architect_cap", "stuck_task_sweep", "gate-broken"] | None,
+        Literal["architect_cap", "stuck_task_sweep", "gate-broken", "terminal_gate_sweep"] | None,
         Query(description="Filter to escalations with this ``payload.reason``."),
     ] = None,
     task: Annotated[
