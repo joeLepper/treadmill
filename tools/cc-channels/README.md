@@ -55,3 +55,12 @@ supervised instance.
 tmux sessions are recovered by systemd's `Restart=on-failure` after
 `RestartSec=5s`. Operator-initiated `systemctl --user stop` does NOT respawn —
 the wrapper traps SIGTERM/SIGINT and exits 0 so the unit stays stopped.
+
+**Per-label working directory.** The launcher records its resolved workdir
+to `~/.cc-channels/<label>/workdir` on every launch; the systemd wrapper
+reads that file and creates `tmux new -d -s -c <workdir>` so a restarted
+session lands at the same cwd as the original. Missing file → wrapper
+falls back to `$HOME/treadmill` (the default for `alan`/`bert`/`carla`).
+For labels operating on other repos (e.g. a label pointed at a downstream
+project), run `launch-session.sh <label> <workdir>` at least once to
+populate the file, or write it directly.

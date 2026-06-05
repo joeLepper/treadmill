@@ -129,6 +129,14 @@ echo "[launch-session]   then lock it down:  $_HERE/cc-access.py --label $LABEL 
 echo "[launch-session]   (use cc-access.py, NOT /telegram:access — the stock skill targets the wrong state dir under per-bot isolation)" >&2
 
 cd "$WORKDIR"
+# Persist the resolved workdir so the systemd wrapper can re-create tmux at
+# the right cwd after a crash. `claude --resume <session-id>` binds to
+# ~/.claude/projects/<cwd-slug>/<session-id>.jsonl — wrong cwd means the
+# transcript can't be found and claude opens a fresh trust-prompt session.
+# The supervised unit runs from cwd=$HOME by default, so without this file
+# the wrapper's `tmux new -d -s` inherits the wrong cwd. See
+# `docs/learnings/2026-06-04-systemd-default-cwd-breaks-claude-resume.md`.
+echo "$WORKDIR" > "$STATE_ROOT/workdir"
 # `exec` replaces this shell with claude; the PID we record now stays valid
 # for the lifetime of the claude process. We do not register an EXIT trap to
 # unlink the file (it would not fire across exec) — stale entries are detected
