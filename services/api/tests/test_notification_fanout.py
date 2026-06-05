@@ -30,6 +30,7 @@ import pytest
 from treadmill_api.coordination.notification_fanout import (
     NotificationFanout,
     _format_slack_body,
+    _format_telegram_text,
     make_notification_fanout,
 )
 
@@ -81,6 +82,8 @@ def _make_fanout(
     *,
     slack: str | None = None,
     raw: list[str] | None = None,
+    telegram_bot_token: str | None = None,
+    telegram_chat_id: str | None = None,
     http_client: Any | None = None,
 ) -> NotificationFanout:
     """Build a fanout for unit tests with an injected mock client.
@@ -91,6 +94,8 @@ def _make_fanout(
     return NotificationFanout(
         slack_webhook_url=slack,
         raw_webhook_urls=raw,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
         http_client=http_client,
     )
 
@@ -358,6 +363,8 @@ def test_make_notification_fanout_reads_settings_fields() -> None:
         "https://webhook.example/a",
         "https://webhook.example/b",
     ]
+    settings.telegram_bot_token = None
+    settings.telegram_chat_id = None
     fanout = make_notification_fanout(settings)
     assert fanout.slack_webhook_url == "https://hooks.slack/X"
     assert fanout.raw_webhook_urls == [
@@ -373,6 +380,8 @@ def test_make_notification_fanout_handles_empty_config() -> None:
     settings = MagicMock()
     settings.slack_webhook_url = None
     settings.notification_webhook_urls = []
+    settings.telegram_bot_token = None
+    settings.telegram_chat_id = None
     fanout = make_notification_fanout(settings)
     assert fanout.slack_webhook_url is None
     assert fanout.raw_webhook_urls == []
@@ -509,3 +518,254 @@ async def test_published_event_reaches_fanout_via_broadcaster() -> None:
         }
     finally:
         await fanout.stop()
+
+
+# ── Telegram (ADR-0071) ───────────────────────────────────────────────────────
+
+
+def test_telegram_open_text_is_plain_no_emoji_syntax() -> None:
+    """ADR-0071: the Telegram body reuses the Slack one-liner content
+    minus Slack's ``:emoji:`` syntax. Plain client renderers would print
+    the literal shortcode otherwise."""
+    record = _open_record(
+        task_id="abcdef12-3456-7890-abcd-ef1234567890",
+        reason="stuck_task_sweep",
+    )
+    text = _format_telegram_text(record)
+    assert ":rotating_light:" not in text
+    assert "abcdef12" in text
+    assert "stuck_task_sweep" in text
+    assert "escalated to operator" in text
+
+
+def test_telegram_close_text_includes_mttr() -> None:
+    """Close variant carries the same MTTR + close_reason content as the
+    Slack body, minus the ``:white_check_mark:`` emoji shortcode."""
+    record = _close_record(
+        task_id="11111111-2222-3333-4444-555555555555",
+        close_reason="pr_merged",
+        mttr_seconds=7200,
+    )
+    text = _format_telegram_text(record)
+    assert ":white_check_mark:" not in text
+    assert "11111111" in text
+    assert "pr_merged" in text
+    assert "mttr=7200s" in text
+    assert "escalation closed" in text
+
+
+def test_telegram_text_handles_missing_reason_gracefully() -> None:
+    """Same ``unknown`` fallback as the Slack body — old emitters that
+    predate ADR-0058 must not crash the Telegram formatter."""
+    record = _open_record()
+    record["payload"] = {}
+    text = _format_telegram_text(record)
+    assert "reason=unknown" in text
+
+
+@pytest.mark.asyncio
+async def test_telegram_post_on_open_event() -> None:
+    """``task.escalated_to_operator`` lands as one POST to the Telegram
+    sendMessage URL with ``{chat_id, text}`` body."""
+    client = _mock_http_client()
+    fanout = _make_fanout(
+        telegram_bot_token="secret-bot-token",
+        telegram_chat_id="-1001234567890",
+        http_client=client,
+    )
+    record = _open_record(reason="gate-broken")
+    await fanout.handle(record)
+    client.post.assert_awaited_once()
+    args, kwargs = client.post.call_args
+    assert args == (
+        "https://api.telegram.org/botsecret-bot-token/sendMessage",
+    )
+    body = kwargs["json"]
+    assert body["chat_id"] == "-1001234567890"
+    assert "escalated to operator" in body["text"]
+    assert "gate-broken" in body["text"]
+    assert ":rotating_light:" not in body["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_post_on_close_event() -> None:
+    """Close events land as a Telegram POST with MTTR in the text."""
+    client = _mock_http_client()
+    fanout = _make_fanout(
+        telegram_bot_token="t",
+        telegram_chat_id="42",
+        http_client=client,
+    )
+    record = _close_record(close_reason="re_progressed", mttr_seconds=600)
+    await fanout.handle(record)
+    client.post.assert_awaited_once()
+    args, kwargs = client.post.call_args
+    assert args == ("https://api.telegram.org/bott/sendMessage",)
+    assert kwargs["json"]["chat_id"] == "42"
+    assert "escalation closed" in kwargs["json"]["text"]
+    assert "mttr=600s" in kwargs["json"]["text"]
+    assert "re_progressed" in kwargs["json"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_skipped_when_only_token_set() -> None:
+    """Either field unset = no Telegram hop. Token alone is not enough."""
+    client = _mock_http_client()
+    fanout = _make_fanout(
+        telegram_bot_token="t",
+        telegram_chat_id=None,
+        http_client=client,
+    )
+    await fanout.handle(_open_record())
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_skipped_when_only_chat_id_set() -> None:
+    """Either field unset = no Telegram hop. Chat id alone is not enough."""
+    client = _mock_http_client()
+    fanout = _make_fanout(
+        telegram_bot_token=None,
+        telegram_chat_id="42",
+        http_client=client,
+    )
+    await fanout.handle(_open_record())
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_does_not_relay_non_escalation_events() -> None:
+    """Server fan-out is escalations-only (ADR-0071 Decision part 2). A
+    non-escalation event must not be relayed to Telegram even when the
+    Telegram target is configured."""
+    client = _mock_http_client()
+    fanout = _make_fanout(
+        telegram_bot_token="t",
+        telegram_chat_id="42",
+        http_client=client,
+    )
+    await fanout.handle({
+        "entity_type": "task",
+        "action": "registered",
+        "task_id": str(uuid.uuid4()),
+        "payload": {},
+    })
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_failure_does_not_block_slack_or_raw() -> None:
+    """A failing Telegram POST does not poison the other targets. ADR-0071
+    inherits the ADR-0062 per-target failure-isolation contract."""
+    client = _mock_http_client()
+    slack_url = "https://hooks.slack/ok"
+    raw_url = "https://webhook.example/ok"
+    telegram_url = "https://api.telegram.org/bott/sendMessage"
+
+    async def _post_side_effect(url: str, **_: Any) -> Any:
+        if url == telegram_url:
+            raise RuntimeError("telegram down")
+        return MagicMock()
+
+    client.post.side_effect = _post_side_effect
+    fanout = _make_fanout(
+        slack=slack_url,
+        raw=[raw_url],
+        telegram_bot_token="t",
+        telegram_chat_id="42",
+        http_client=client,
+    )
+    await fanout.handle(_open_record())
+    assert client.post.await_count == 3
+    posted_urls = {call.args[0] for call in client.post.call_args_list}
+    assert posted_urls == {slack_url, raw_url, telegram_url}
+
+
+@pytest.mark.asyncio
+async def test_slack_failure_does_not_block_telegram() -> None:
+    """Symmetric: a failing Slack POST does not skip the Telegram fan-out
+    that runs after the raw webhooks."""
+    client = _mock_http_client()
+    slack_url = "https://hooks.slack/fail"
+    telegram_url = "https://api.telegram.org/bott/sendMessage"
+
+    async def _post_side_effect(url: str, **_: Any) -> Any:
+        if url == slack_url:
+            raise RuntimeError("slack down")
+        return MagicMock()
+
+    client.post.side_effect = _post_side_effect
+    fanout = _make_fanout(
+        slack=slack_url,
+        telegram_bot_token="t",
+        telegram_chat_id="42",
+        http_client=client,
+    )
+    await fanout.handle(_open_record())
+    assert client.post.await_count == 2
+    posted_urls = {call.args[0] for call in client.post.call_args_list}
+    assert posted_urls == {slack_url, telegram_url}
+
+
+def test_make_notification_fanout_reads_telegram_fields() -> None:
+    """The factory wires the two Telegram fields off ``Settings`` so the
+    lifespan handler doesn't need to know the env-var names."""
+    settings = MagicMock()
+    settings.slack_webhook_url = None
+    settings.notification_webhook_urls = []
+    settings.telegram_bot_token = "secret-token"
+    settings.telegram_chat_id = "-1001"
+    fanout = make_notification_fanout(settings)
+    assert fanout.telegram_bot_token == "secret-token"
+    assert fanout.telegram_chat_id == "-1001"
+    assert fanout.is_configured is True
+
+
+def test_telegram_alone_makes_fanout_configured() -> None:
+    """Telegram is a first-class target (ADR-0071): a deployment with
+    only the Telegram settings set must still start the subscriber."""
+    fanout = NotificationFanout(
+        telegram_bot_token="t",
+        telegram_chat_id="42",
+    )
+    assert fanout.is_configured is True
+
+
+def test_settings_defaults_telegram_to_unset(monkeypatch) -> None:
+    """Both Telegram fields default to ``None`` so a deployment without
+    the env vars opts out cleanly."""
+    from treadmill_api.config import Settings
+
+    monkeypatch.delenv("TREADMILL_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TREADMILL_TELEGRAM_CHAT_ID", raising=False)
+    settings = Settings()
+    assert settings.telegram_bot_token is None
+    assert settings.telegram_chat_id is None
+
+
+def test_settings_reads_telegram_env(monkeypatch) -> None:
+    """``TREADMILL_TELEGRAM_BOT_TOKEN`` + ``TREADMILL_TELEGRAM_CHAT_ID`` map
+    to the corresponding settings fields."""
+    from treadmill_api.config import Settings
+
+    monkeypatch.setenv("TREADMILL_TELEGRAM_BOT_TOKEN", "secret-token")
+    monkeypatch.setenv("TREADMILL_TELEGRAM_CHAT_ID", "-1001234567890")
+    settings = Settings()
+    assert settings.telegram_bot_token == "secret-token"
+    assert settings.telegram_chat_id == "-1001234567890"
+
+
+@pytest.mark.asyncio
+async def test_start_is_noop_when_only_telegram_partial() -> None:
+    """When only one Telegram field is set (the other missing), the
+    target isn't configured — combined with no Slack/webhooks, ``start``
+    must short-circuit."""
+    fanout = NotificationFanout(
+        telegram_bot_token="t",
+        telegram_chat_id=None,
+    )
+    assert fanout.is_configured is False
+    await fanout.start()
+    assert fanout._task is None
+    assert fanout._queue is None
+    await fanout.stop()

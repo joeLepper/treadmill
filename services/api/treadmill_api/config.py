@@ -243,6 +243,22 @@ class Settings(BaseSettings):
         default="", alias="TREADMILL_NOTIFICATION_WEBHOOKS",
     )
 
+    # ── ADR-0071: Telegram escalation target ────────────────────────────────
+    # ``telegram_bot_token`` + ``telegram_chat_id`` — when BOTH are set, the
+    # notification-fanout subscriber POSTs every escalation open / close to
+    # ``https://api.telegram.org/bot<token>/sendMessage`` with a plain
+    # one-line summary (the same content as the Slack body, minus Slack's
+    # emoji syntax). Either field unset = no Telegram hop. The bot token is
+    # a secret — read from env, never logged. Telegram is a sibling target
+    # alongside Slack (ADR-0071 Decision part 2); Slack is retained, not
+    # replaced.
+    telegram_bot_token: str | None = Field(
+        default=None, alias="TREADMILL_TELEGRAM_BOT_TOKEN",
+    )
+    telegram_chat_id: str | None = Field(
+        default=None, alias="TREADMILL_TELEGRAM_CHAT_ID",
+    )
+
     @property
     def notification_webhook_urls(self) -> list[str]:
         """Parsed list of generic-webhook URLs. Empty list = no fan-out."""
