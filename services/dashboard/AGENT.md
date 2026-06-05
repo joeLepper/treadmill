@@ -18,7 +18,10 @@ src/
   design/      one-and-only-one primitives — StateBadge, DataTable,
                PageLayout, Lifecycle, Metric, ConnectionAffordance, etc.
   api/         types.ts (canonical shapes), mock.ts (in-process fixture),
-               queries.ts (TanStack Query hooks), sim.ts (freshness sim)
+               queries.ts (TanStack Query hooks), sim.ts (freshness sim),
+               review_queries.ts (per-kind ADR-0070 hooks: useReviewNext,
+               useReviewStats, useLabelReviewRow), review_types.ts
+               (StatsResponse wire shape).
   review/      ADR-0070 pre-labeled review-queue substrate:
                types.ts (ReviewRow / ReviewKindViewer / ReviewLabelInput),
                useReviewKeyboard.ts (closed shortcut set), ConfidenceStrip.tsx
@@ -28,10 +31,12 @@ src/
                viewers, one .tsx per kind; substep 1.3 ships zero viewers).
   pages/       Overview.tsx (the / route), TaskDetail.tsx (/tasks/:id),
                TriageLabeling.tsx (the ADR-0061 precedent the review/
-               chrome generalizes; not yet refactored onto it).
+               chrome generalizes; not yet refactored onto it),
+               ReviewKind.tsx (the /review/:kind route — single dynamic
+               page that every per-kind queue rides via the registry).
   index.css    Tailwind v4 entry + tokens.css import
   main.tsx     QueryClientProvider + BrowserRouter shell
-  App.tsx      Routes
+  App.tsx      Routes (/, /tasks/:taskId, /triage, /review/:kind)
 ```
 
 The handoff bundle from Claude Design (`treadmill-overview-v2.jsx`,
@@ -113,6 +118,36 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+- **ADR-0070 substep 1.4 — /review/:kind route + auto-discovery wire-up** —
+  new `src/pages/ReviewKind.tsx` mounted at `/review/:kind` in
+  `src/App.tsx` (registered BEFORE the `*` fallback so unknown
+  `/review/*` paths reach the in-page unknown-kind panel rather than
+  bouncing back to `/`). The page reads `useParams<{ kind }>()`, calls
+  `getViewer(kind)` from `src/review/registry.ts`, and when the kind is
+  unregistered renders a 404-style panel pointing at the registry
+  contract. When the kind IS registered the page wires three new hooks
+  in `src/api/review_queries.ts` — `useReviewNext(kind, *, limit?)`
+  (`GET /api/v1/review/<kind>/next?limit=…`, queryKey
+  `['review', kind, 'next']`, staleTime 3s), `useReviewStats(kind)`
+  (`GET /api/v1/review/<kind>/stats`, queryKey
+  `['review', kind, 'stats']`, staleTime 15s), and `useLabelReviewRow(kind)`
+  (`POST /api/v1/review/<kind>/<id>/label` carrying `ReviewLabelInput`,
+  optimistic update drops the labeled row from the unlabeled cache so
+  the chrome advances without a refetch — mirrors `useLabelFinding`
+  pattern in `queries.ts:145-182` — and invalidates the stats key on
+  settle). The page hands the first unlabeled row + the LLM stats to
+  `FlipThroughLayout` and pipes `onLabel` through the mutation; per-bucket
+  count breakdown is empty until the API grows it (the chrome's
+  `ConfidenceStrip` defaults missing buckets to zero, so the strip still
+  renders). New wire-shape file `src/api/review_types.ts` mirrors
+  `treadmill_api.services.review_stats.StatsResponse`. Test coverage:
+  `src/api/review_queries.test.tsx` pins the three hooks' URLs +
+  optimistic-update-and-rollback against the next cache;
+  `src/pages/ReviewKind.test.tsx` pins the unknown-kind panel
+  (no fetch issued), the registered-kind happy path (stub viewer
+  resolves via `vi.mock('../review/registry', …)`), and the
+  `space → POST /api/v1/review/<kind>/<id>/label` one-keystroke confirm
+  path carrying the LLM's label as the operator's verdict.
 - **ADR-0070 substep 1.3 — shared review-queue chrome** — new
   `src/review/` substrate that generalizes the `TriageLabeling`
   flip-through page into a reusable surface every "operator
