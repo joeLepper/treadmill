@@ -116,8 +116,10 @@ def _format_slack_body(record: dict[str, Any]) -> dict[str, Any]:
 
     if action == _OPEN_ACTION:
         reason = payload.get("reason") or "unknown"
+        created_by = payload.get("created_by")
+        by_clause = f" by {created_by}" if created_by else ""
         text = (
-            f"{_SLACK_EMOJI_OPENED} Task {short_id} escalated to operator "
+            f"{_SLACK_EMOJI_OPENED} Task {short_id} escalated to operator{by_clause} "
             f"— reason={reason}"
         )
     elif action == _CLOSE_ACTION:
@@ -149,8 +151,10 @@ def _format_telegram_text(record: dict[str, Any]) -> str:
 
     if action == _OPEN_ACTION:
         reason = payload.get("reason") or "unknown"
+        created_by = payload.get("created_by")
+        by_clause = f" by {created_by}" if created_by else ""
         return (
-            f"Task {short_id} escalated to operator — reason={reason}"
+            f"Task {short_id} escalated to operator{by_clause} — reason={reason}"
         )
     if action == _CLOSE_ACTION:
         reason = payload.get("close_reason") or "unknown"

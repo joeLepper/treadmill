@@ -78,6 +78,10 @@ class TaskEscalatedToOperator(EventPayload):
     # default-None so the existing emitters that don't carry a single
     # owning step (cap-reached, stuck-task-sweep) remain wire-compatible.
     step_name: str | None = None
+    # Spawning operator label (``tasks.created_by``) for dashboard triage.
+    # Nullable — older tasks may not carry this; renders as `` by <label>``
+    # suffix on the escalation-open notification line when present.
+    created_by: str | None = None
 
 
 class TaskEscalationClosed(EventPayload):

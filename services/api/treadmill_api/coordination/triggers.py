@@ -1011,6 +1011,7 @@ async def _emit_arch_cap_reached(
                 # can triage architect-cap fires separately from
                 # gate-broken cases.
                 reason="architect_cap",
+                created_by=task.created_by,
             ),
             plan_id=task.plan_id,
             task_id=task_id,
@@ -1090,6 +1091,7 @@ async def _emit_operator_escalation(
                 last_reasoning=detail,
                 run_ids=[],
                 reason=reason,
+                created_by=task.created_by,
             ),
             plan_id=task.plan_id,
             task_id=task_id,
@@ -2416,6 +2418,7 @@ async def maybe_dispatch_gate_broken_escalation(
                 run_ids=run_ids,
                 reason="gate-broken",
                 gate_log_excerpt=gate_log_excerpt[:4000],
+                created_by=task.created_by,
             ),
             plan_id=task.plan_id,
             task_id=task.id,
@@ -2514,6 +2517,7 @@ async def maybe_dispatch_terminal_step_failure_escalation(
             Task.id.label("task_id"),
             Task.repo,
             Task.plan_id,
+            Task.created_by,
         )
         .join(WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id)
         .join(Task, Task.id == WorkflowRun.task_id)
@@ -2595,6 +2599,7 @@ async def maybe_dispatch_terminal_step_failure_escalation(
                 reason="terminal_step_failure",
                 gate_log_excerpt=gate_log_excerpt,
                 step_name=step_row.step_name,
+                created_by=step_row.created_by,
             ),
             plan_id=step_row.plan_id,
             task_id=step_row.task_id,
