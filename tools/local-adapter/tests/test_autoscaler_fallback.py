@@ -129,18 +129,15 @@ def test_f_fallback_ticks_marks_image_build_broken() -> None:
     ), f"Expected image_build_broken in heartbeats, got: {fake.heartbeats}"
 
 
-def test_successful_build_in_non_fallback_mode() -> None:
-    """A successful build when not in fallback doesn't reset counter."""
+def test_successful_build_resets_counter() -> None:
+    """A successful build resets the counter to 0."""
     fake = _Fake(visible=1, current=0)
     fake.build_error_count = 2
     a = _autoscaler(fake, max_count=1)
 
     for i in range(2):
-        try:
-            a.tick()
-        except RuntimeError:
-            pass
+        a.tick()
 
     a.tick()
-    assert a._consecutive_build_failures == 2
+    assert a._consecutive_build_failures == 0
     assert a._fallback_ticks == 0

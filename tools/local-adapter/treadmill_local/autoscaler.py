@@ -198,6 +198,8 @@ class Autoscaler:
                 else:
                     # Normal tick: try to build images
                     self.start_worker_fn()
+                # Build succeeded; reset consecutive failure counter
+                self._consecutive_build_failures = 0
             except RuntimeError as exc:
                 # Only count docker build errors, not other RuntimeErrors
                 if "docker build" in str(exc).lower():
