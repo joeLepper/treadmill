@@ -29,11 +29,19 @@ LAUNCHER="$REPO_DIR/tools/cc-channels/launch-session.sh"
 PIDFILE="$HOME/.cc-channels/$LABEL/launcher.pid"
 if [ -f "$PIDFILE" ]; then
   PID=$(cat "$PIDFILE")
-  if kill -0 "$PID" 2>/dev/null; then
+  # `kill -0` reports success on zombies (the PID slot is occupied, but the
+  # process is `<defunct>` and won't be reaped until its parent exits or calls
+  # wait()). The 2026-06-04 alan crash test surfaced this: SIGKILL'd claude
+  # became a zombie under tmux; `kill -0` said "alive"; new wrapper attempts
+  # all refused; systemd's Restart=on-failure looped without recovering. We
+  # also check the process state via `ps`; a `Z` (zombie) is treated as dead
+  # for our purposes so the singleton check doesn't block recovery.
+  STATE=$(ps -p "$PID" -o state= 2>/dev/null | head -c 1)
+  if kill -0 "$PID" 2>/dev/null && [ "$STATE" != "Z" ]; then
     echo "launcher already alive for label $LABEL (pid $PID); refusing to start" >&2
     exit 1
   fi
-  # Stale; clean up.
+  # Stale or zombie; clean up.
   rm -f "$PIDFILE"
 fi
 
