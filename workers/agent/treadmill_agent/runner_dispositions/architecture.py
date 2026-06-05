@@ -512,11 +512,95 @@ def _branch_has_no_commits_against_main(repo_dir: Any) -> bool:
         return False
 
 
+def _find_most_recent_step_by_role(
+    prior_steps: list[Any], role_substr: str,
+) -> dict[str, Any] | None:
+    """Search prior_steps (in order) for the first step whose role_id
+    contains role_substr. Return the PriorStep.output dict if found,
+    None otherwise. Assumes prior_steps are ordered most-recent-first."""
+    for step in prior_steps:
+        if role_substr.lower() in step.role_id.lower():
+            return step.output
+    return None
+
+
+def _contains_accept_as_is_cue(text: str) -> bool:
+    """Check if text contains any of the accept-as-is prose cues."""
+    if not text:
+        return False
+    lower = text.lower()
+    cues = ("no changes needed", "already present", "accept-as-is", "nothing to remediate")
+    return any(cue in lower for cue in cues)
+
+
+def _short_circuit_nothing_to_do(ctx: DispositionContext) -> dict[str, Any] | None:
+    """Implement the three-clause guard for ADR-0074 nothing-to-do short-circuit.
+
+    Returns a synthetic accept-as-is envelope when all three clauses hold:
+    1. Zero commits ahead of origin/main
+    2. Most recent validator step verdict was "pass"
+    3. Most recent author step contains accept-as-is signal
+
+    Returns None if any clause fails; the caller falls through to normal
+    architect processing.
+    """
+    # Clause 1: zero commits ahead of origin/main
+    if not _branch_has_no_commits_against_main(ctx.repo_dir):
+        return None
+
+    # Clause 2: most recent validator verdict is pass
+    validator_output = _find_most_recent_step_by_role(
+        ctx.ctx.prior_steps, "validator"
+    )
+    if validator_output is None:
+        return None
+    # The validator output should have a "decision" field per ADR-0058/ADR-0027
+    validator_decision = validator_output.get("decision")
+    if validator_decision != "pass":
+        return None
+
+    # Clause 3: most recent author step contains accept-as-is signal
+    author_output = _find_most_recent_step_by_role(
+        ctx.ctx.prior_steps, "author"
+    )
+    if author_output is None:
+        return None
+    # Check explicit verdict field first
+    author_verdict = author_output.get("verdict")
+    if author_verdict == "accept-as-is":
+        pass  # Clause 3 satisfied
+    else:
+        # Check prose cues in reasoning or summary
+        author_reasoning = author_output.get("reasoning", "")
+        if not _contains_accept_as_is_cue(author_reasoning):
+            return None
+
+    # All three clauses hold — return synthetic envelope
+    envelope: dict[str, Any] = {
+        "verdict": "accept-as-is",
+        "reasoning": (
+            "No new commits ahead of origin/main; prior author and validator "
+            "steps confirm completion."
+        ),
+        "target_artifact": "",
+        "parsed_from_prose": False,
+        "short_circuit_reason": "nothing-to-do",
+    }
+    logger.info(
+        "short-circuit: nothing-to-do detected; all three clauses hold "
+        "(zero commits, validator pass, author accept-as-is)"
+    )
+    return envelope
+
+
 def handle(ctx: DispositionContext) -> StepOutput:
     """Parse the architect verdict envelope and emit the routing
     payload. No git or PR side effects — those happen downstream when
     the coordination consumer reads ``payload.dispatch`` and fires the
     next workflow.
+
+    Per ADR-0074, short-circuits on nothing-to-do (zero commits +
+    validator pass + author accept-as-is) without making a Claude call.
 
     On parse failure (``ArchitectVerdictParseError``) propagates as a
     step failure; wf-feedback can re-run the architect with an explicit
@@ -530,6 +614,42 @@ def handle(ctx: DispositionContext) -> StepOutput:
     that wf-feedback should re-engage to author the work. Prevents
     review.override from firing meaninglessly.
     """
+    # ADR-0074 short-circuit: deterministic nothing-to-do check
+    short_circuit_envelope = _short_circuit_nothing_to_do(ctx)
+    if short_circuit_envelope is not None:
+        # Return synthetic envelope without consulting Claude
+        dispatch_payload = _build_dispatch_payload(
+            verdict="accept-as-is",
+            target_artifact=short_circuit_envelope["target_artifact"],
+            remediation_summary=None,
+            rewritten_description=None,
+            task_id=ctx.ctx.task_id,
+            trigger=ctx.ctx.trigger,
+        )
+        pr_comment_payload = _build_pr_comment_payload(
+            verdict="accept-as-is",
+            reasoning=short_circuit_envelope["reasoning"],
+            target_artifact=short_circuit_envelope["target_artifact"],
+        )
+        payload: dict[str, Any] = {
+            "verdict": "accept-as-is",
+            "reasoning": short_circuit_envelope["reasoning"],
+            "target_artifact": short_circuit_envelope["target_artifact"],
+            "dispatch": dispatch_payload,
+            "parsed_from_prose": False,
+            "short_circuit_reason": "nothing-to-do",
+        }
+        if pr_comment_payload is not None:
+            payload["pr_comment"] = pr_comment_payload
+        return StepOutput(
+            summary="Short-circuited: nothing-to-do (zero commits, validator pass, author accept-as-is)",
+            decision="accept-as-is",
+            commit_sha=None,
+            artifacts=[],
+            payload=payload,
+            metadata=Metadata(),
+        )
+
     summary = ctx.claude_result.summary or ""
     # Pass the role's model so the structured-output retry can use the
     # same model that produced the prose. Sonnet's prose is sonnet's to
