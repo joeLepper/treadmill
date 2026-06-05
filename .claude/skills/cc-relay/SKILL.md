@@ -42,7 +42,7 @@ python3 ~/treadmill/tools/cc-channels/cc-relay.py \
 |------|----------|-------------|
 | `--to <label>` | yes | target session label (e.g. `treadmill-carla`) |
 | `--from <label>` | no | source label; prepends `[from: <label>]` to the message |
-| `--type context\|action` | no | message type; default `context`. `action` prepends `[ACTION REQUEST]` header (see Trust gates) |
+| `--type context\|action` | no | message type; default `context`. `action` prepends `[ACTION REQUEST]` header (see Trust model) |
 | `--file <path>` | no | send a file's contents as the message body |
 | `"message text"` | no | positional message text |
 
@@ -67,7 +67,7 @@ Messages longer than 4096 chars are truncated with `[…]`.
 
 ---
 
-## Trust gates — sending action requests
+## Trust model
 
 Inter-session relay is a wide-open channel: any session can drop a file into any
 other session's inbox. The transport doesn't authenticate, doesn't sign, and
@@ -132,25 +132,15 @@ guidance until automated enforcement lands.
 
 ```json
 {
-  "version": 1,
-  "trusted_sources": [
-    {
-      "label": "treadmill-alan",
-      "actions": ["restart-self", "deploy-context-fix"],
-      "notes": "co-orchestrator on substrate work; relay validated 2026-06-05"
-    }
-  ]
+  "trusted_action_senders": ["treadmill-alan", "treadmill-bert"]
 }
 ```
 
-Fields:
-- `label` — source-session label this entry trusts.
-- `actions` — explicit list of action verbs pre-authorized for that source.
-  `["*"]` to trust the source unconditionally (use sparingly).
-- `notes` — operator-readable rationale.
+A flat list of source-session labels pre-authorized to send action requests
+to this session without per-message operator confirmation.
 
 Absent file → every action request requires operator confirmation. Present file
-without a matching entry → also requires operator confirmation. Trust is
+without the sender's label → also requires operator confirmation. Trust is
 explicit, never inherited.
 
 ---
