@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api import repo_profile as repo_profile_mod
@@ -46,10 +46,30 @@ class OnboardRepoRequest(BaseModel):
     claude_account: str | None = None
     """Named Claude account for workers operating on this repo (ADR-0055).
     ``None`` defers to the deployment's ``claude_default_account``."""
+    git_author_name: str | None = None
+    """Per-repo git author name override (ADR-0076). ``None`` defers to the
+    deployment default. Must be paired with ``git_author_email``."""
+    git_author_email: str | None = None
+    """Per-repo git author email override (ADR-0076). ``None`` defers to the
+    deployment default. Must be paired with ``git_author_name``."""
+    commit_trailer: str | None = None
+    """Per-repo commit trailer override (ADR-0076). ``None`` uses the default
+    trailer, empty string suppresses it, any other value is used verbatim."""
     worker_deps: WorkerDeps | None = None
     """ADR-0059 per-repo worker extras. ``None`` (omitted) is treated as
     an empty :class:`WorkerDeps`; clients that want "no extras" can omit
     the field rather than serializing an empty object."""
+
+    @model_validator(mode="after")
+    def _validate_git_author_paired(self) -> OnboardRepoRequest:
+        """Enforce that git_author_name and git_author_email are paired."""
+        name_set = self.git_author_name is not None
+        email_set = self.git_author_email is not None
+        if name_set != email_set:
+            raise ValueError(
+                "git_author_name and git_author_email must both be set or both be null"
+            )
+        return self
 
 
 class OnboardRepoResponse(BaseModel):
@@ -57,6 +77,9 @@ class OnboardRepoResponse(BaseModel):
     mode: str
     auto_merge_blocked: bool
     claude_account: str | None = None
+    git_author_name: str | None = None
+    git_author_email: str | None = None
+    commit_trailer: str | None = None
     worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
 
 
@@ -88,6 +111,9 @@ async def onboard_repo(
         test_command=profile.test_command,
         lint_command=profile.lint_command,
         claude_account=body.claude_account,
+        git_author_name=body.git_author_name,
+        git_author_email=body.git_author_email,
+        commit_trailer=body.commit_trailer,
         worker_deps=worker_deps,
     )
 
@@ -101,6 +127,9 @@ async def onboard_repo(
         mode=mode,
         auto_merge_blocked=body.auto_merge_blocked,
         claude_account=body.claude_account,
+        git_author_name=body.git_author_name,
+        git_author_email=body.git_author_email,
+        commit_trailer=body.commit_trailer,
         worker_deps=worker_deps,
     )
 
@@ -112,6 +141,9 @@ class RepoConfigResponse(BaseModel):
     test_command: str | None = None
     lint_command: str | None = None
     claude_account: str | None = None
+    git_author_name: str | None = None
+    git_author_email: str | None = None
+    commit_trailer: str | None = None
     worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
 
 
@@ -142,5 +174,8 @@ async def get_repo(
         test_command=config.test_command,
         lint_command=config.lint_command,
         claude_account=config.claude_account,
+        git_author_name=config.git_author_name,
+        git_author_email=config.git_author_email,
+        commit_trailer=config.commit_trailer,
         worker_deps=config.worker_deps or WorkerDeps(),
     )

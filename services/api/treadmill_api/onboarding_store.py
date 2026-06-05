@@ -55,6 +55,9 @@ class OnboardingStore:
                 lint_command=config.lint_command,
                 claude_account=config.claude_account,
                 claude_account_fallback=config.claude_account_fallback,
+                git_author_name=config.git_author_name,
+                git_author_email=config.git_author_email,
+                commit_trailer=config.commit_trailer,
                 worker_deps_python=list(deps.python),
                 worker_deps_node=list(deps.node),
             )
@@ -67,6 +70,9 @@ class OnboardingStore:
             existing.lint_command = config.lint_command
             existing.claude_account = config.claude_account
             existing.claude_account_fallback = config.claude_account_fallback
+            existing.git_author_name = config.git_author_name
+            existing.git_author_email = config.git_author_email
+            existing.commit_trailer = config.commit_trailer
             existing.worker_deps_python = list(deps.python)
             existing.worker_deps_node = list(deps.node)
             existing.updated_at = sa.func.now()
@@ -126,6 +132,9 @@ class OnboardingStore:
             lint_command=row.lint_command,
             claude_account=row.claude_account,
             claude_account_fallback=row.claude_account_fallback,
+            git_author_name=row.git_author_name,
+            git_author_email=row.git_author_email,
+            commit_trailer=row.commit_trailer,
             worker_deps=worker_deps,
         )
 

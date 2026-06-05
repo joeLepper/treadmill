@@ -115,6 +115,9 @@ def test_onboard_repo_explicit_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         "auto_merge_blocked": True,
         "claude_account": None,
         "worker_deps": {"python": [], "node": [], "binaries": []},
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": None,
     }
     assert session.committed
     assert len(store.profiles) == 1
@@ -266,6 +269,9 @@ def test_get_repo_returns_config(monkeypatch: pytest.MonkeyPatch) -> None:
         "lint_command": None,
         "claude_account": None,
         "worker_deps": {"python": [], "node": [], "binaries": []},
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": None,
     }
 
 
@@ -490,3 +496,148 @@ def test_get_repo_returns_empty_worker_deps_when_unset(
         "node": [],
         "binaries": [],
     }
+
+
+# ── ADR-0076: git author override ───────────────────────────────────────────
+
+
+def test_onboard_repo_accepts_git_author_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0076: POST forwards git author override to the persisted RepoConfig."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "osmoai/osmo",
+        "profile": {"languages": ["python"]},
+        "git_author_name": "Joe Lepper",
+        "git_author_email": "josephlepper@gmail.com",
+        "commit_trailer": "",
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["git_author_name"] == "Joe Lepper"
+    assert payload["git_author_email"] == "josephlepper@gmail.com"
+    assert payload["commit_trailer"] == ""
+    assert store.configs[0].git_author_name == "Joe Lepper"
+    assert store.configs[0].git_author_email == "josephlepper@gmail.com"
+    assert store.configs[0].commit_trailer == ""
+
+
+def test_onboard_repo_accepts_git_author_override_with_trailer_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0076: custom trailer text is accepted and returned."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "example/repo",
+        "profile": {"languages": ["go"]},
+        "git_author_name": "Bot User",
+        "git_author_email": "bot@example.com",
+        "commit_trailer": "Custom-Trailer: value",
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["commit_trailer"] == "Custom-Trailer: value"
+    assert store.configs[0].commit_trailer == "Custom-Trailer: value"
+
+
+def test_onboard_repo_rejects_name_without_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0076: Pydantic validator rejects unpaired name/email."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "example/repo",
+        "profile": {"languages": ["python"]},
+        "git_author_name": "Joe Lepper",
+        "git_author_email": None,
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 422, response.text
+    assert not session.committed
+    assert store.configs == []
+
+
+def test_onboard_repo_rejects_email_without_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0076: Pydantic validator rejects unpaired email/name."""
+    session = _StubSession()
+    store = _FakeStore()
+    app = _build_app(session, store, monkeypatch)
+
+    body = {
+        "repo": "example/repo",
+        "profile": {"languages": ["python"]},
+        "git_author_name": None,
+        "git_author_email": "josephlepper@gmail.com",
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/onboarding/repos", json=body)
+
+    assert response.status_code == 422, response.text
+    assert not session.committed
+    assert store.configs == []
+
+
+def test_get_repo_returns_git_author_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0076: GET returns git author override fields."""
+    session = _StubSession()
+    store = _FakeStore()
+    store.config_by_repo["example/repo"] = RepoConfig(
+        repo="example/repo",
+        git_author_name="Joe Lepper",
+        git_author_email="josephlepper@gmail.com",
+        commit_trailer="",
+    )
+    app = _build_app(session, store, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/onboarding/repos/example/repo")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["git_author_name"] == "Joe Lepper"
+    assert payload["git_author_email"] == "josephlepper@gmail.com"
+    assert payload["commit_trailer"] == ""
+
+
+def test_get_repo_returns_none_for_unset_git_author_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0076: GET returns None for unset git author override fields."""
+    session = _StubSession()
+    store = _FakeStore()
+    store.config_by_repo["example/repo"] = RepoConfig(repo="example/repo")
+    app = _build_app(session, store, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/onboarding/repos/example/repo")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["git_author_name"] is None
+    assert payload["git_author_email"] is None
+    assert payload["commit_trailer"] is None
