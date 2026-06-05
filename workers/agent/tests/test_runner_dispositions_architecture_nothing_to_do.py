@@ -76,10 +76,11 @@ def _disp_ctx(
     *,
     repo_dir: Path,
     prior_steps: list[PriorStep] | None = None,
+    claude_summary: str = "unused",
 ) -> DispositionContext:
     return DispositionContext(
         ctx=_ctx(prior_steps=prior_steps),
-        claude_result=CodeAuthorResult(summary="unused"),
+        claude_result=CodeAuthorResult(summary=claude_summary),
         repo_dir=repo_dir,
         branch="task/x-add-thing",
         settings=_settings(),
@@ -146,13 +147,14 @@ def test_nothing_to_do_short_circuit_all_clauses_hold(tmp_path: Path) -> None:
 
     ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
 
-    # Stub Claude so any invocation raises (should not be called)
-    stub_client = MagicMock()
-    stub_client.side_effect = RuntimeError("Claude was called; short-circuit failed")
-
-    # Patch the Claude subprocess seam so we can verify it's NOT called
-    with patch("treadmill_agent.runner_dispositions.architecture.subprocess") as mock_subprocess:
-        mock_subprocess.run.side_effect = stub_client
+    # Patch only the Claude binary lookup so any architect Claude call would
+    # surface explicitly; the git rev-list call (clause 1) still runs for
+    # real because we only patch the Claude-invocation seam, not subprocess
+    # as a whole (which would break the `except (TimeoutExpired, ...)` clauses).
+    with patch(
+        "treadmill_agent.runner_dispositions.architecture._find_claude_binary",
+        side_effect=RuntimeError("Claude was called; short-circuit failed"),
+    ):
         out = handle_architecture(ctx)
 
     # Verify the short-circuit verdict was returned
@@ -160,8 +162,6 @@ def test_nothing_to_do_short_circuit_all_clauses_hold(tmp_path: Path) -> None:
     assert out.payload["short_circuit_reason"] == "nothing-to-do"
     assert out.payload["parsed_from_prose"] is False
     assert out.payload["dispatch"]["workflow_id"] == "wf-doc-amend"
-    # Claude was not called
-    assert not mock_subprocess.run.called
 
 
 def test_nothing_to_do_clause_1_fails_commits_exist(tmp_path: Path) -> None:
@@ -195,9 +195,6 @@ def test_nothing_to_do_clause_1_fails_commits_exist(tmp_path: Path) -> None:
         ),
     ]
 
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
-
-    # Mock Claude to return a normal verdict
     normal_verdict = (
         '```json\n'
         '{"verdict": "amend", "reasoning": "Work needs fixing", '
@@ -205,10 +202,8 @@ def test_nothing_to_do_clause_1_fails_commits_exist(tmp_path: Path) -> None:
         '"remediation_summary": "Fix it."}\n'
         '```'
     )
-    with patch.object(
-        ctx.claude_result, "summary", normal_verdict
-    ):
-        out = handle_architecture(ctx)
+    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
+    out = handle_architecture(ctx)
 
     # Architect ran and returned amend (not short-circuited)
     assert out.decision == "amend"
@@ -236,9 +231,6 @@ def test_nothing_to_do_clause_2_fails_validator_not_pass(tmp_path: Path) -> None
         ),
     ]
 
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
-
-    # Mock Claude to return a normal verdict
     normal_verdict = (
         '```json\n'
         '{"verdict": "amend", "reasoning": "Validation failed", '
@@ -246,10 +238,8 @@ def test_nothing_to_do_clause_2_fails_validator_not_pass(tmp_path: Path) -> None
         '"remediation_summary": "Fix it."}\n'
         '```'
     )
-    with patch.object(
-        ctx.claude_result, "summary", normal_verdict
-    ):
-        out = handle_architecture(ctx)
+    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
+    out = handle_architecture(ctx)
 
     # Architect ran (not short-circuited)
     assert out.decision == "amend"
@@ -280,9 +270,6 @@ def test_nothing_to_do_clause_3_fails_author_no_signal(tmp_path: Path) -> None:
         ),
     ]
 
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
-
-    # Mock Claude to return a normal verdict
     normal_verdict = (
         '```json\n'
         '{"verdict": "amend", "reasoning": "Work incomplete", '
@@ -290,10 +277,8 @@ def test_nothing_to_do_clause_3_fails_author_no_signal(tmp_path: Path) -> None:
         '"remediation_summary": "Fix it."}\n'
         '```'
     )
-    with patch.object(
-        ctx.claude_result, "summary", normal_verdict
-    ):
-        out = handle_architecture(ctx)
+    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
+    out = handle_architecture(ctx)
 
     # Architect ran (not short-circuited)
     assert out.decision == "amend"
@@ -327,13 +312,14 @@ def test_nothing_to_do_author_prose_cue_accept_as_is(tmp_path: Path) -> None:
 
     ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
 
-    with patch("treadmill_agent.runner_dispositions.architecture.subprocess") as mock_subprocess:
-        mock_subprocess.run.side_effect = RuntimeError("Claude was called")
+    with patch(
+        "treadmill_agent.runner_dispositions.architecture._find_claude_binary",
+        side_effect=RuntimeError("Claude was called"),
+    ):
         out = handle_architecture(ctx)
 
     assert out.decision == "accept-as-is"
     assert out.payload["short_circuit_reason"] == "nothing-to-do"
-    assert not mock_subprocess.run.called
 
 
 def test_nothing_to_do_git_command_fails_falls_back_to_architect(
@@ -360,8 +346,6 @@ def test_nothing_to_do_git_command_fails_falls_back_to_architect(
         ),
     ]
 
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
-
     # Mock subprocess.run to fail on the git rev-list call
     normal_verdict = (
         '```json\n'
@@ -369,6 +353,7 @@ def test_nothing_to_do_git_command_fails_falls_back_to_architect(
         '"target_artifact": ""}\n'
         '```'
     )
+    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
 
     def mock_subprocess_run(cmd, **kwargs):
         if isinstance(cmd, list) and "rev-list" in cmd:
@@ -378,9 +363,7 @@ def test_nothing_to_do_git_command_fails_falls_back_to_architect(
         result.returncode = 0
         return result
 
-    with patch.object(
-        ctx.claude_result, "summary", normal_verdict
-    ), patch(
+    with patch(
         "treadmill_agent.runner_dispositions.architecture.subprocess.run",
         side_effect=mock_subprocess_run,
     ):
@@ -407,8 +390,6 @@ def test_nothing_to_do_no_validator_step_falls_back(tmp_path: Path) -> None:
         ),
     ]
 
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
-
     normal_verdict = (
         '```json\n'
         '{"verdict": "amend", "reasoning": "No validator run", '
@@ -416,10 +397,8 @@ def test_nothing_to_do_no_validator_step_falls_back(tmp_path: Path) -> None:
         '"remediation_summary": "Fix it."}\n'
         '```'
     )
-    with patch.object(
-        ctx.claude_result, "summary", normal_verdict
-    ):
-        out = handle_architecture(ctx)
+    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
+    out = handle_architecture(ctx)
 
     assert out.decision == "amend"
     assert "short_circuit_reason" not in out.payload
@@ -440,8 +419,6 @@ def test_nothing_to_do_no_author_step_falls_back(tmp_path: Path) -> None:
         ),
     ]
 
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
-
     normal_verdict = (
         '```json\n'
         '{"verdict": "amend", "reasoning": "No author run", '
@@ -449,10 +426,8 @@ def test_nothing_to_do_no_author_step_falls_back(tmp_path: Path) -> None:
         '"remediation_summary": "Fix it."}\n'
         '```'
     )
-    with patch.object(
-        ctx.claude_result, "summary", normal_verdict
-    ):
-        out = handle_architecture(ctx)
+    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
+    out = handle_architecture(ctx)
 
     assert out.decision == "amend"
     assert "short_circuit_reason" not in out.payload
