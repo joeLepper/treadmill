@@ -36,6 +36,20 @@ terminal closes, and crashes.
 
 ## Recent changes
 
+- ADR-0073 Step 1 zombie-PID fix — both the systemd wrapper
+  (`systemd/treadmill-channel-launch`) and the launcher
+  (`launch-session.sh`) singleton checks now treat a `Z` (zombie) process state
+  as "dead" for the purposes of the launcher.pid guard. `kill -0` reports
+  success on zombies (the PID slot is occupied; the process is `<defunct>`),
+  which on 2026-06-04 caused the alan crash test to wedge: SIGKILL'd claude
+  became a zombie under tmux, the new wrapper's singleton check kept
+  reporting "launcher already alive (pid …)", systemd's `Restart=on-failure`
+  looped without recovering, unit stayed `activating`. After this fix the
+  check additionally inspects `ps -p $PID -o state=`; a `Z` head character is
+  treated as stale and the file is cleaned up. Without this, the previous
+  crash-survival fix (#184) couldn't actually complete a restart cycle on a
+  SIGKILL'd claude, which is the dominant crash mode for a Claude Code
+  session.
 - ADR-0073 Step 1 crash-survival fix — `systemd/treadmill-channel-launch` gains
   a `STOPPED_BY_OPERATOR` flag flipped by a `trap '...' TERM INT` handler, and
   the trailing `while tmux has-session …` loop is followed by an explicit

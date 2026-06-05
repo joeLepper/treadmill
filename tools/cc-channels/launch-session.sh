@@ -42,10 +42,16 @@ mkdir -p "$STATE_ROOT/telegram" "$STATE_ROOT/treadmill"
 # this layer guards against an operator bypassing the wrapper with a direct
 # invocation. We use kill -0 to distinguish a live PID from a stale file (e.g.
 # left over from a power-cut); a stale file is silently cleaned up.
+#
+# `kill -0` reports success on zombies — we additionally check the process
+# state so a `<defunct>` claude left over from a SIGKILL doesn't block the
+# next launch. See 2026-06-04 alan crash test (systemd wrapper failed to
+# recover for the same reason).
 PIDFILE="$STATE_ROOT/launcher.pid"
 if [[ -f "$PIDFILE" ]]; then
   _pid=$(cat "$PIDFILE")
-  if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null; then
+  _state=$(ps -p "$_pid" -o state= 2>/dev/null | head -c 1)
+  if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null && [[ "$_state" != "Z" ]]; then
     echo "[launch-session] launcher already alive for label $LABEL (pid $_pid); refusing to start" >&2
     exit 1
   fi
