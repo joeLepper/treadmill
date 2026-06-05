@@ -2450,3 +2450,39 @@ def test_start_observability_dev_local_raises_on_compose_failure(
 
     with pytest.raises(subprocess.CalledProcessError):
         rt._start_observability_dev_local()
+
+
+# ── ADR-0071: Telegram escalation fan-out env passthrough ────────────────────
+
+
+def test_dev_local_api_env_wires_telegram_fanout_when_both_set(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """Both telegram_bot_token + telegram_chat_id under ``notifications`` →
+    the API container gets TREADMILL_TELEGRAM_BOT_TOKEN + _CHAT_ID (chat_id
+    stringified) so the NotificationFanout's Telegram target activates."""
+    cfg = _valid_yaml_dict()
+    cfg["notifications"] = {
+        "telegram_bot_token": "12345:ABCdef",
+        "telegram_chat_id": 8956818786,
+    }
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_api_env(cfg)
+    assert env["TREADMILL_TELEGRAM_BOT_TOKEN"] == "12345:ABCdef"
+    assert env["TREADMILL_TELEGRAM_CHAT_ID"] == "8956818786"
+
+
+def test_dev_local_api_env_omits_telegram_when_absent_or_partial(
+    tmp_path: Path, fake_docker: MagicMock,
+) -> None:
+    """No ``notifications`` block, or only one of the two fields, leaves the
+    Telegram target off (no behavior change vs. pre-ADR-0071)."""
+    cfg = _valid_yaml_dict()
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker, cfg=cfg)
+    env = rt._dev_local_api_env(cfg)
+    assert "TREADMILL_TELEGRAM_BOT_TOKEN" not in env
+    assert "TREADMILL_TELEGRAM_CHAT_ID" not in env
+    # Partial (token only) is also off — both are required.
+    cfg["notifications"] = {"telegram_bot_token": "x"}
+    env2 = rt._dev_local_api_env(cfg)
+    assert "TREADMILL_TELEGRAM_BOT_TOKEN" not in env2
