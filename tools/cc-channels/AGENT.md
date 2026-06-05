@@ -24,9 +24,10 @@ terminal closes, and crashes.
   per-session `access.json` that the channel server actually reads; use this
   instead of the stock `/telegram:access` skill, which hardcodes the
   default state dir.
-- `cc-relay.py` — inter-session Telegram relay. Sends a message or file to
-  another named session's Telegram channel. Requires `TELEGRAM_CHAT_ID` in the
-  target's `telegram.env` (one-time setup).
+- `cc-relay.py` — inter-session relay. Drops a message or file into another
+  named session's relay inbox (`~/.cc-channels/<label>/relay/`). The target's
+  `treadmill-events` channel server picks it up and injects it as a channel
+  notification. No Telegram, no external dependency.
 - `systemd/treadmill-channel@.service` — systemd-user template unit; one
   instance per label.
 - `systemd/treadmill-channel-launch` — wrapper invoked by the unit. Creates
@@ -106,9 +107,10 @@ terminal closes, and crashes.
   the default `~/.claude/channels/telegram/`.
 - The stock `/telegram:access` skill silently edits the wrong (empty) file
   under the per-bot layout. Use `cc-access.py --label <label> ...` instead.
-- `cc-relay.py` requires `TELEGRAM_CHAT_ID=<numeric>` in each target label's
-  `telegram.env`. Retrieve it from the bot's chat history (open Telegram web,
-  find the DM with the bot, the id is in the URL) and add it once per label.
+- `cc-relay.py` writes to `~/.cc-channels/<to-label>/relay/` (auto-created).
+  The target's `treadmill-events` server watches that directory and emits the
+  content as a channel notification. No per-label config required — the relay
+  works as soon as both sessions are running.
 - `launch-session.sh` uses `exec claude` — bash `trap EXIT` handlers do not
   fire across `exec`. Do not add cleanup logic that depends on traps after
   the exec point; stale `launcher.pid` files are cleaned up on next start
