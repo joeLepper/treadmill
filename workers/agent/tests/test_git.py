@@ -575,3 +575,158 @@ def test_get_head_diff_text_truncates_when_over_cap(
     text, truncated = git.get_head_diff_text(repo_dir, max_chars=500)
     assert truncated is True
     assert len(text) == 500
+
+
+# ── ADR-0076 git author + trailer overrides ──────────────────────────────────
+
+
+def test_configure_local_identity_without_overrides_uses_env_vars(
+    bare_repos_dir: Path, workspace_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no overrides are passed, _configure_local_identity falls back
+    to env vars (existing behavior preserved)."""
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "custom@example.com")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Custom Author")
+
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    # Re-call _configure_local_identity with env vars set.
+    git._configure_local_identity(repo_dir)
+
+    # Verify env vars were applied via git config.
+    email_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.email"],
+        capture_output=True, text=True, check=True,
+    )
+    name_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.name"],
+        capture_output=True, text=True, check=True,
+    )
+    assert email_result.stdout.strip() == "custom@example.com"
+    assert name_result.stdout.strip() == "Custom Author"
+
+
+def test_configure_local_identity_with_overrides_applies_them(
+    bare_repos_dir: Path, workspace_dir: Path,
+) -> None:
+    """When overrides are passed, _configure_local_identity applies them
+    via git config."""
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    # Call with overrides.
+    git._configure_local_identity(
+        repo_dir,
+        author_name="Override Author",
+        author_email="override@example.com",
+    )
+
+    # Verify overrides were applied.
+    email_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.email"],
+        capture_output=True, text=True, check=True,
+    )
+    name_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.name"],
+        capture_output=True, text=True, check=True,
+    )
+    assert email_result.stdout.strip() == "override@example.com"
+    assert name_result.stdout.strip() == "Override Author"
+
+
+def test_commit_all_with_default_trailer_appends_co_authored_by(
+    bare_repos_dir: Path, workspace_dir: Path,
+) -> None:
+    """commit_all with trailer=None appends the default Co-Authored-By trailer."""
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    git.checkout_branch(repo_dir, "task/trailer-default")
+    (repo_dir / "file.txt").write_text("content\n")
+    git.commit_all(repo_dir, "Test commit\n\nSome body", trailer=None)
+
+    # Verify the default trailer is in the commit message.
+    msg_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "log", "-1", "--pretty=%B"],
+        capture_output=True, text=True, check=True,
+    )
+    assert "Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>" in msg_result.stdout
+
+
+def test_commit_all_with_empty_trailer_suppresses_trailer(
+    bare_repos_dir: Path, workspace_dir: Path,
+) -> None:
+    """commit_all with trailer="" emits no trailer."""
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    git.checkout_branch(repo_dir, "task/trailer-empty")
+    (repo_dir / "file.txt").write_text("content\n")
+    git.commit_all(repo_dir, "Test commit\n\nBody text", trailer="")
+
+    # Verify no trailer is in the commit message.
+    msg_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "log", "-1", "--pretty=%B"],
+        capture_output=True, text=True, check=True,
+    )
+    assert msg_result.stdout.strip() == "Test commit\n\nBody text"
+    assert "Co-Authored-By" not in msg_result.stdout
+
+
+def test_commit_all_with_custom_trailer_uses_verbatim(
+    bare_repos_dir: Path, workspace_dir: Path,
+) -> None:
+    """commit_all with trailer="custom" uses that trailer verbatim."""
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    git.checkout_branch(repo_dir, "task/trailer-custom")
+    (repo_dir / "file.txt").write_text("content\n")
+    custom_trailer = "Signed-off-by: Test User <test@example.com>"
+    git.commit_all(repo_dir, "Test commit", trailer=custom_trailer)
+
+    # Verify the custom trailer is in the commit message.
+    msg_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "log", "-1", "--pretty=%B"],
+        capture_output=True, text=True, check=True,
+    )
+    assert custom_trailer in msg_result.stdout
+
+
+def test_commit_all_with_author_overrides(
+    bare_repos_dir: Path, workspace_dir: Path,
+) -> None:
+    """commit_all applies author_name and author_email overrides to git config."""
+    _init_bare(bare_repos_dir, "owner/test-repo")
+    repo_dir = git.clone(
+        repo="owner/test-repo", mode="local",
+        bare_repos_dir=str(bare_repos_dir), workspace=workspace_dir,
+    )
+    git.checkout_branch(repo_dir, "task/author-override")
+    (repo_dir / "file.txt").write_text("content\n")
+    git.commit_all(
+        repo_dir,
+        "Test commit",
+        author_name="Custom Author",
+        author_email="custom@example.com",
+        trailer="",
+    )
+
+    # Verify the author is in the commit.
+    author_result = subprocess.run(
+        ["git", "-C", str(repo_dir), "log", "-1", "--pretty=%an <%ae>"],
+        capture_output=True, text=True, check=True,
+    )
+    assert "Custom Author <custom@example.com>" in author_result.stdout

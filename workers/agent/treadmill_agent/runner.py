@@ -50,6 +50,7 @@ from treadmill_agent.runner_dispositions import (
     handle_validation,
 )
 from treadmill_agent.runner_dispositions._context import DispositionContext
+from treadmill_api.repo_config import RepoConfig
 
 logger = logging.getLogger("treadmill.agent.runner")
 
@@ -362,11 +363,15 @@ def _handle_step(
             )
             raise
 
+        # ADR-0076: fetch per-repo git author + trailer overrides. Absence of
+        # config (repo not onboarded) is graceful; the deployment defaults apply.
+        repo_config = startup_auth.fetch_repo_config(settings, ctx.repo)
+
         creds_token = claude_code.set_claude_creds(claude_creds)
         overlay_token = repo_deps.bind_overlay(overlay)
         try:
             try:
-                output, token_usage = _execute(ctx, settings)
+                output, token_usage = _execute(ctx, settings, repo_config)
             except Exception as exc:
                 logger.exception("step %s failed during execution", ctx.step_id)
                 publisher.publish_step_failed(
@@ -390,7 +395,9 @@ def _handle_step(
 
 
 def _execute(
-    ctx: WorkerContext, settings: Settings,
+    ctx: WorkerContext,
+    settings: Settings,
+    repo_config: RepoConfig | None = None,
 ) -> tuple[StepOutput, StepTokenUsage | None]:
     """Do the actual work for a step. Returns the uniform ``StepOutput``
     envelope (ADR-0012) that lands in ``step.output`` via the coordination
@@ -440,6 +447,7 @@ def _execute(
                 branch=branch,
                 settings=settings,
                 is_dry_run=dry_run,
+                repo_config=repo_config,
             )
             # wf-validate makes no LLM call; token_usage is always None.
             return handle_validation(disposition_ctx), None
@@ -510,6 +518,7 @@ def _execute(
             branch=branch,
             settings=settings,
             is_dry_run=dry_run,
+            repo_config=repo_config,
         )
         # role-crystallization-judge routes to the crystallization handler
         # for CrystallizationVerdict envelope parsing (step 1 of

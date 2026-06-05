@@ -20,6 +20,7 @@ from pathlib import Path
 from treadmill_agent.api_client import WorkerContext
 from treadmill_agent.claude_code import CodeAuthorResult
 from treadmill_agent.config import Settings
+from treadmill_api.repo_config import RepoConfig
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,9 @@ class DispositionContext:
     ``settings`` carries the worker's static config (repo mode, etc).
     ``is_dry_run`` is the runner's dry-run flag, surfaced so handlers
     can short-circuit the LLM-driven paths in tests.
+    ``repo_config`` carries the per-repo onboarding config (ADR-0050)
+    including git author + trailer overrides (ADR-0076); ``None`` when
+    the repo was not onboarded or the fetch failed.
     """
 
     ctx: WorkerContext
@@ -45,3 +49,4 @@ class DispositionContext:
     branch: str
     settings: Settings
     is_dry_run: bool
+    repo_config: RepoConfig | None = None

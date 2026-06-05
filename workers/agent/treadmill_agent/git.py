@@ -58,6 +58,13 @@ from pathlib import Path
 
 logger = logging.getLogger("treadmill.agent.git")
 
+# Default commit trailer appended to commit messages when no override is
+# configured. The three-valued semantics per ADR-0076:
+# - None (fetch default) → use this constant
+# - "" (empty string) → emit no trailer
+# - any other string → use verbatim
+_DEFAULT_COMMIT_TRAILER = "Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+
 
 @dataclass(frozen=True)
 class GitOpsResult:
@@ -166,15 +173,41 @@ def has_staged_changes(repo_dir: Path) -> bool:
     )
 
 
-def commit_all(repo_dir: Path, message: str) -> str:
+def commit_all(
+    repo_dir: Path,
+    message: str,
+    *,
+    author_name: str | None = None,
+    author_email: str | None = None,
+    trailer: str | None = None,
+) -> str:
     """Stage everything and commit; return the new commit SHA.
 
     Empty commits are rejected (no ``--allow-empty``). Callers that need
     to distinguish "no changes" from a deeper git fault should call
     ``stage_all`` + ``has_staged_changes`` first.
+
+    Per ADR-0076, optional overrides for author_name, author_email are
+    applied via git config. The ``trailer`` parameter follows three-valued
+    semantics:
+      - None → append the default Co-Authored-By trailer
+      - "" → emit no trailer
+      - any other string → append that trailer line(s) verbatim
     """
+    _configure_local_identity(repo_dir, author_name=author_name, author_email=author_email)
+
+    # Build the final commit message with trailer.
+    commit_msg = message
+    if trailer is None:
+        # Use default trailer.
+        commit_msg = f"{message}\n\n{_DEFAULT_COMMIT_TRAILER}"
+    elif trailer != "":
+        # Custom trailer (non-empty).
+        commit_msg = f"{message}\n\n{trailer}"
+    # else: trailer == "" means no trailer; use message as-is.
+
     stage_all(repo_dir)
-    _run(["git", "-C", str(repo_dir), "commit", "-m", message])
+    _run(["git", "-C", str(repo_dir), "commit", "-m", commit_msg])
     return _capture(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).strip()
 
 
@@ -261,16 +294,27 @@ def open_pr(
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
-def _configure_local_identity(repo_dir: Path) -> None:
+def _configure_local_identity(
+    repo_dir: Path,
+    *,
+    author_name: str | None = None,
+    author_email: str | None = None,
+) -> None:
     """Set a Treadmill identity so commits don't error on missing
-    user.email / user.name in fresh containers."""
+    user.email / user.name in fresh containers.
+
+    Per ADR-0076, optional overrides for author_name and author_email
+    take precedence; otherwise fall back to env vars or defaults.
+    """
+    email = author_email or os.environ.get("GIT_AUTHOR_EMAIL", "agent@treadmill.local")
+    name = author_name or os.environ.get("GIT_AUTHOR_NAME", "Treadmill Agent")
     _run([
         "git", "-C", str(repo_dir), "config", "user.email",
-        os.environ.get("GIT_AUTHOR_EMAIL", "agent@treadmill.local"),
+        email,
     ])
     _run([
         "git", "-C", str(repo_dir), "config", "user.name",
-        os.environ.get("GIT_AUTHOR_NAME", "Treadmill Agent"),
+        name,
     ])
 
 

@@ -82,7 +82,13 @@ def handle(ctx: DispositionContext) -> StepOutput:
 
     from treadmill_agent.runner import _commit_message, _is_analyzer_role  # local import to avoid cycle
 
-    commit_sha = git.commit_all(ctx.repo_dir, _commit_message(ctx.ctx))
+    commit_sha = git.commit_all(
+        ctx.repo_dir,
+        _commit_message(ctx.ctx),
+        author_name=ctx.repo_config.git_author_name if ctx.repo_config else None,
+        author_email=ctx.repo_config.git_author_email if ctx.repo_config else None,
+        trailer=ctx.repo_config.commit_trailer if ctx.repo_config else None,
+    )
 
     # Run validation checks before pushing (per 2026-05-14 learning).
     # Only deterministic checks are run at author time; LLM-judge checks

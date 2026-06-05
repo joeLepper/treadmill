@@ -119,7 +119,13 @@ def handle(ctx: DispositionContext) -> StepOutput:
             learning_path.relative_to(ctx.repo_dir),
         )
 
-    commit_sha = git.commit_all(ctx.repo_dir, _commit_message(ctx.ctx))
+    commit_sha = git.commit_all(
+        ctx.repo_dir,
+        _commit_message(ctx.ctx),
+        author_name=ctx.repo_config.git_author_name if ctx.repo_config else None,
+        author_email=ctx.repo_config.git_author_email if ctx.repo_config else None,
+        trailer=ctx.repo_config.commit_trailer if ctx.repo_config else None,
+    )
     git.push_branch(ctx.repo_dir, ctx.branch)
     pr_number, pr_url = git.open_pr(
         repo_dir=ctx.repo_dir,
