@@ -72,6 +72,41 @@ fi
 # foreground loop below notice and return control to systemd.
 tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL" Enter
 
+# Auto-dismiss the `--dangerously-load-development-channels` confirmation
+# prompt and the workspace-trust prompt. Both fire on every fresh `claude`
+# start (the dev-channels gate is per-launch, not per-session), so without
+# this an unattended restart wedges waiting for the operator to press
+# "1<Enter>". We poll the pane up to 60s for either prompt's distinctive
+# text and send the accept keystroke when we see it. Background process —
+# the foreground while-loop is what keeps the unit alive.
+(
+  sent_dev=0
+  sent_trust=0
+  for _ in $(seq 1 60); do
+    sleep 1
+    pane=$(tmux capture-pane -t "$LABEL" -p 2>/dev/null || true)
+    case "$pane" in
+      *"Loading development channels"*)
+        if [ "$sent_dev" -eq 0 ]; then
+          tmux send-keys -t "$LABEL" "1" Enter
+          sent_dev=1
+        fi
+        ;;
+      *"trust this folder"*)
+        if [ "$sent_trust" -eq 0 ]; then
+          tmux send-keys -t "$LABEL" "1" Enter
+          sent_trust=1
+        fi
+        ;;
+    esac
+    # Done once both prompts are past us — claude's TUI footer ("bypass
+    # permissions on" / "esc to interrupt") signals we're through.
+    case "$pane" in
+      *"bypass permissions on"*) break ;;
+    esac
+  done
+) &
+
 # Keep ourselves alive while the tmux session exists.
 while tmux has-session -t "$LABEL" 2>/dev/null; do
   sleep 30
