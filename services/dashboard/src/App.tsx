@@ -9,6 +9,7 @@
 
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Overview } from './pages/Overview';
+import { ReviewKind } from './pages/ReviewKind';
 import { TaskDetail } from './pages/TaskDetail';
 import { TriageLabeling } from './pages/TriageLabeling';
 
@@ -18,6 +19,10 @@ export function App() {
       <Route path="/" element={<Overview />} />
       <Route path="/tasks/:taskId" element={<TaskDetail />} />
       <Route path="/triage" element={<TriageLabeling />} />
+      {/* MUST come before the wildcard or unknown /review/* paths get
+          bounced to "/" instead of reaching ReviewKind's in-page
+          unknown-kind fallback. */}
+      <Route path="/review/:kind" element={<ReviewKind />} />
       {/* Fallback — bounce unknown routes back to the overview. */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
