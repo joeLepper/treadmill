@@ -118,6 +118,31 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+- **ADR-0070 substep 2 step 2 — register triage-finding viewer** — New
+  `src/review/viewers/triage-finding.tsx` default-export viewer component
+  for the triage-finding review queue. Viewer auto-discovered by the
+  kind-to-component registry via `import.meta.glob('./viewers/*.tsx',
+  { eager: true })`; substep 1's auto-discovery wire-up picks it up at
+  build time and registers it at kind='triage-finding'. The viewer follows
+  the legacy TriageLabeling.tsx two-column layout: left column shows the
+  evidence (screenshot, observation, evidence_pointer, proposed_resolution)
+  plus an LLM recommendation card (confidence + rationale); right column
+  shows the label form (is_real_bug Yes/No/Skip, severity high/medium/low/Skip,
+  category dropdown + Skip, fix_in_dsl Yes/No/Skip, notes textarea) and
+  submit button. The legacy `/triage` route in `src/App.tsx` now redirects
+  to `/review/triage-finding`, preserving existing bookmarks. Legacy
+  `pages/TriageLabeling.tsx` and `pages/TriageLabeling.test.tsx` deleted;
+  the viewer + substep 1's `FlipThroughLayout` chrome replace the page.
+  TODO comments added above `useUnlabeledFindings` and `useLabelFinding`
+  in `src/api/queries.ts` marking them for removal in substep 4 when the
+  legacy `/api/v1/triage/` endpoints are deprecated. Viewer test coverage
+  in `src/review/viewers/triage-finding.test.tsx` pins: evidence field
+  rendering, LLM card rendering, accept path (label='true'), reject path
+  (label='false'), skip path (label='null'), draft reset on row change,
+  and kind-specific fields (label_severity, label_category, label_fix_in_dsl).
+  App redirect test in `src/App.test.tsx` verifies `/triage` mounts the
+  new framework chrome (`FlipThroughLayout` title) not the legacy heading.
+
 - **ADR-0070 substep 4.3 — DSPy variant PR review queue** — new `/review/dspy-variant-pr` route backed by a default-export viewer at `src/review/dspy_variant_pr.tsx`. The viewer follows the TriageLabeling.tsx two-column layout: left column shows judge_role, PR link (source_pr_number → source_pr_url), created_at, score badges (current/variant/improvement), patch diff in `<pre>`, and corpus S3 URI; right column shows the LLM recommendation card (llm_label + llm_confidence badge, llm_rationale, llm_prompt_version + llm_model footer) and the label form (merge/revise/drop/skip verdict buttons, notes textarea, conditional override_reason field that becomes required and highlighted when the operator's verdict differs from llm_label). Submit is disabled until a verdict is chosen and any required override_reason is provided. New types in `src/api/types.ts`: `DspyVariantPrLabel`, `DspyVariantPrConfidence`, `DspyVariantPrRow`, `DspyVariantPrLabelInput`. New hooks in `src/api/queries.ts`: `useDspyVariantPrQueue(limit?)` (`GET /api/v1/review/dspy-variant-pr/next?limit=…`), `useDspyVariantPrStats()` (`GET /api/v1/review/dspy-variant-pr/stats`), `useLabelDspyVariantPr()` (`POST /api/v1/review/dspy-variant-pr/:id/label` with optimistic remove-on-mutate mirroring useLabelFinding). Route registered in `src/App.tsx` as a static path BEFORE the dynamic `/review/:kind` catch-all. Test coverage in `src/review/dspy_variant_pr.test.tsx` pins: render with data (judge_role + PR number visible), empty-state copy, submit-with-override_reason when disagreeing, and disabled-submit guard when override_reason absent.
 
 - **UI-fix — triage finding `300648e9`** — `src/pages/TriageLabeling.tsx`
