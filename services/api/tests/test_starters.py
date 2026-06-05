@@ -62,6 +62,8 @@ _EXPECTED_ROLE_IDS = {
     "role-prompt-optimizer",
     "role-ui-triage",  # ADR-0061
     "role-dspy-variant-reviewer",  # ADR-0070 substep 4
+    "role-architect-gold-proposer",  # ADR-0070 substep 3
+    "role-validator-gold-proposer",  # ADR-0070 substep 3
 }
 
 # Action-role ids that may appear as step 2 of a 2-step workflow. Per
@@ -250,6 +252,14 @@ def test_role_model_tier_invariant() -> None:
         "role-prompt-optimizer",
         "role-ui-triage",
         "role-dspy-variant-reviewer",  # ADR-0070 substep 4 — structured-output reasoner
+        # ADR-0070 substep 3 gold proposers — operator-triggered from the
+        # dashboard's review queue, structured-JSON envelope output. Same
+        # rationale as role-prompt-optimizer + role-ui-triage:
+        # rarely-dispatched (per labeling-session cadence, not per
+        # architect-decision throughput) + structured output reliability
+        # matters more than cost.
+        "role-architect-gold-proposer",
+        "role-validator-gold-proposer",
     }
     roles_by_id = {r["id"]: r for r in _all_roles()}
     assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
@@ -656,11 +666,18 @@ def test_every_role_is_referenced_by_at_least_one_workflow() -> None:
     }
     defined_role_ids = {role["id"] for role in _all_roles()}
     orphans = defined_role_ids - referenced_role_ids
-    # role-dspy-variant-reviewer is dispatched on-demand (no workflow);
-    # workflow registration lands in the ADR-0070 operations follow-up.
-    assert orphans == {"role-dspy-variant-reviewer"}, (
+    # On-demand roles dispatched directly from the dashboard (no
+    # workflow): role-dspy-variant-reviewer (ADR-0070 substep 4) and
+    # role-architect-gold-proposer / role-validator-gold-proposer
+    # (ADR-0070 substep 3 — proposer labels for the gold queues).
+    ON_DEMAND_ROLES = {
+        "role-dspy-variant-reviewer",
+        "role-architect-gold-proposer",
+        "role-validator-gold-proposer",
+    }
+    assert orphans == ON_DEMAND_ROLES, (
         f"unexpected orphan roles (defined but unused by any workflow): "
-        f"{sorted(orphans - {'role-dspy-variant-reviewer'})}"
+        f"{sorted(orphans - ON_DEMAND_ROLES)}"
     )
 
 
