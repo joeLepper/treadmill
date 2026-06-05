@@ -179,7 +179,22 @@ async def test_architect_gate_broken_verdict_emits_escalation_event() -> None:
     )
 
     # ── Assert: dispatcher fired exactly once with the right shape ───────
-    dispatcher.persist_and_publish.assert_awaited_once()
+    # The "exactly once" is also the **parking invariant** per ADR-0058
+    # Decision §3 / Sequence §4: a gate-broken verdict escalates and
+    # parks the task — NO successor ``workflow_run.registered`` (or any
+    # other downstream dispatch) fires. The single ``persist_and_publish``
+    # call asserted below is the escalation event itself; any second
+    # call would represent a follow-up dispatch that should not exist.
+    # If a future refactor adds a sibling dispatch from this seam, this
+    # assertion fails loudly rather than silently letting the parked
+    # task get a successor run.
+    assert dispatcher.persist_and_publish.await_count == 1, (
+        "ADR-0058 parking invariant violated: gate-broken verdict "
+        "produced "
+        f"{dispatcher.persist_and_publish.await_count} dispatcher "
+        "calls (expected 1). A successor workflow_run was likely "
+        "dispatched alongside the escalation."
+    )
     kwargs = dispatcher.persist_and_publish.await_args.kwargs
     assert kwargs["entity_type"] == "task"
     assert kwargs["action"] == "escalated_to_operator"

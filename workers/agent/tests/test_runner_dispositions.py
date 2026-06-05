@@ -1898,14 +1898,17 @@ _GATE_STDERR_EXAMPLE = (
 )
 
 
-def test_architecture_handler_gate_broken_verdict_routes_to_step_3_trigger(
+def test_architecture_handler_gate_broken_verdict_emits_parked_dispatch(
     tmp_path: Path,
 ) -> None:
-    """ADR-0058 Step 1: the disposition accepts ``gate-broken`` + a
-    non-empty ``gate_log_excerpt``, surfaces both at top-level on the
-    payload, and emits an inert dispatch payload
-    (``workflow_id=None`` + ``intent='gate-broken-await-step-3'``)
-    pending the Step 3 API-side trigger."""
+    """ADR-0058: the disposition accepts ``gate-broken`` + a non-empty
+    ``gate_log_excerpt``, surfaces both at top-level on the payload, and
+    emits a parked dispatch payload (``workflow_id=None`` so no successor
+    workflow_run is dispatched + ``intent='gate-broken-park'``). The
+    API-side ``maybe_dispatch_gate_broken_escalation`` trigger reads
+    the step's top-level ``payload.verdict`` + ``payload.gate_log_excerpt``
+    and emits the operator escalation; this disposition just signals
+    "no follow-up dispatch from the worker side."""
     summary = (
         '```json\n'
         '{"verdict": "gate-broken", "reasoning": "Trigger B (ralph-loop '
@@ -1919,7 +1922,7 @@ def test_architecture_handler_gate_broken_verdict_routes_to_step_3_trigger(
     out = handle_architecture(ctx)
     assert out.decision == "gate-broken"
     assert out.payload["dispatch"]["workflow_id"] is None
-    assert out.payload["dispatch"]["intent"] == "gate-broken-await-step-3"
+    assert out.payload["dispatch"]["intent"] == "gate-broken-park"
     assert "ModuleNotFoundError" in out.payload["gate_log_excerpt"]
 
 
