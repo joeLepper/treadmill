@@ -23,6 +23,7 @@ from treadmill_api.coordination.triggers import (
     _check_still_mergeable_for_auto_merge,
     _process_deadline_key,
     fire_elapsed_auto_merges,
+    maybe_auto_merge_on_github_event,
     maybe_auto_merge_on_mergeable,
 )
 
@@ -304,6 +305,107 @@ async def test_plan_auto_merge_true_is_not_opted_out() -> None:
 
     result = await maybe_auto_merge_on_mergeable(session, redis, step_id="step-1")
     assert result is True
+
+
+# ── maybe_auto_merge_on_github_event: arming-coverage gap (M2) ────────────────
+
+
+def _taskpr_row(task_id: uuid.UUID | None = None) -> MagicMock:
+    """task_prs (repo, pr_number) → task_id resolution row."""
+    row = MagicMock()
+    row.task_id = task_id or uuid.uuid4()
+    return row
+
+
+@pytest.mark.asyncio
+async def test_github_event_skip_when_redis_client_not_wired() -> None:
+    session = AsyncMock()
+    result = await maybe_auto_merge_on_github_event(
+        session, None, repo="acme/repo", pr_number=42,
+    )
+    assert result is False
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_event_skip_when_pr_number_none() -> None:
+    """check_run_completed may carry pr_number=None (check not tied to a PR)."""
+    session = AsyncMock()
+    redis = _make_redis()
+    result = await maybe_auto_merge_on_github_event(
+        session, redis, repo="acme/repo", pr_number=None,
+    )
+    assert result is False
+    session.execute.assert_not_awaited()
+    redis.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_event_skip_when_no_task_pr() -> None:
+    """No task_prs row for (repo, pr_number) → skip cleanly (e.g. an
+    operator-opened PR Treadmill doesn't own)."""
+    session = AsyncMock()
+    r1 = MagicMock()
+    r1.first.return_value = None
+    session.execute = AsyncMock(return_value=r1)
+    redis = _make_redis()
+    result = await maybe_auto_merge_on_github_event(
+        session, redis, repo="acme/repo", pr_number=42,
+    )
+    assert result is False
+    redis.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_event_sets_deadline_when_mergeable() -> None:
+    """The orphan fix: a github verb that lands on a fully-mergeable task
+    arms the cooling-off deadline (the step-based seam already fired or
+    never will)."""
+    task_id = uuid.uuid4()
+    session = _make_session(_taskpr_row(task_id), _merge_row())
+    redis = _make_redis()
+
+    result = await maybe_auto_merge_on_github_event(
+        session, redis, repo="acme/repo", pr_number=42,
+    )
+    assert result is True
+    redis.set.assert_awaited_once()
+    assert (
+        redis.set.await_args[0][0]
+        == AUTO_MERGE_DEADLINE_KEY_PREFIX + str(task_id)
+    )
+
+
+@pytest.mark.asyncio
+async def test_github_event_skip_when_not_mergeable() -> None:
+    """The strict-safety invariant: a github verb on a NOT-yet-mergeable
+    task never arms (e.g. CI still failing at HEAD)."""
+    session = _make_session(
+        _taskpr_row(), _merge_row(derived_mergeability="blocked-on-ci"),
+    )
+    redis = _make_redis()
+    result = await maybe_auto_merge_on_github_event(
+        session, redis, repo="acme/repo", pr_number=42,
+    )
+    assert result is False
+    redis.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_event_skip_when_already_fired() -> None:
+    """Idempotent with the step path: if auto-merge already fired for the
+    task, the github seam is a no-op."""
+    task_id = uuid.uuid4()
+    session = AsyncMock()
+    r1 = MagicMock()
+    r1.first.return_value = _taskpr_row(task_id)
+    session.execute = AsyncMock(return_value=r1)
+    redis = _make_redis(exists=1)  # fired key present
+    result = await maybe_auto_merge_on_github_event(
+        session, redis, repo="acme/repo", pr_number=42,
+    )
+    assert result is False
+    redis.set.assert_not_awaited()
 
 
 # ── fire_elapsed_auto_merges: poll-loop behavior ───────────────────────────────
@@ -629,6 +731,113 @@ async def test_consumer_skips_auto_merge_when_redis_not_wired() -> None:
     assert trigger_calls == [], (
         "maybe_auto_merge_on_mergeable must not be called when redis_client is None"
     )
+
+
+@pytest.mark.asyncio
+async def test_consumer_arms_auto_merge_on_check_run_completed() -> None:
+    """_handle_github_event must invoke the github-arming seam for a
+    mergeability-affecting verb (check_run_completed)."""
+    from contextlib import asynccontextmanager
+
+    from treadmill_api.coordination.consumer import CoordinationConsumer
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=MagicMock(
+        scalars=MagicMock(return_value=[]),
+        scalar_one_or_none=MagicMock(return_value=None),
+        first=MagicMock(return_value=None),
+        all=MagicMock(return_value=[]),
+    ))
+
+    @asynccontextmanager
+    async def _cm():
+        yield session
+
+    def _sm():
+        return _cm()
+
+    consumer = CoordinationConsumer(
+        sqs_client=None,
+        queue_url="unused",
+        sessionmaker=_sm,  # type: ignore[arg-type]
+        redis_client=AsyncMock(),
+    )
+    # dispatcher stays None → evaluate_triggers path skipped cleanly.
+
+    calls: list[dict] = []
+
+    async def _stub(sess, *, repo, pr_number):
+        calls.append({"repo": repo, "pr_number": pr_number})
+
+    consumer._maybe_fire_auto_merge_on_github = _stub  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "github",
+        "action": "check_run_completed",
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "repo": "acme/repo",
+            "pr_number": 42,
+            "check_name": "ci",
+            "conclusion": "success",
+            "head_sha": "abc123",
+        },
+    })
+
+    assert calls == [{"repo": "acme/repo", "pr_number": 42}], (
+        "consumer must arm auto-merge on check_run_completed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_does_not_arm_auto_merge_on_pr_merged() -> None:
+    """pr_merged is NOT a re-arming verb (it terminates the PR; the merge
+    already happened). It must not hit the github-arming seam."""
+    from contextlib import asynccontextmanager
+
+    from treadmill_api.coordination.consumer import CoordinationConsumer
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=MagicMock(
+        scalars=MagicMock(return_value=[]),
+        scalar_one_or_none=MagicMock(return_value=None),
+        first=MagicMock(return_value=None),
+        all=MagicMock(return_value=[]),
+    ))
+
+    @asynccontextmanager
+    async def _cm():
+        yield session
+
+    def _sm():
+        return _cm()
+
+    consumer = CoordinationConsumer(
+        sqs_client=None,
+        queue_url="unused",
+        sessionmaker=_sm,  # type: ignore[arg-type]
+        redis_client=AsyncMock(),
+    )
+
+    calls: list[dict] = []
+
+    async def _stub(sess, *, repo, pr_number):
+        calls.append({"repo": repo, "pr_number": pr_number})
+
+    consumer._maybe_fire_auto_merge_on_github = _stub  # type: ignore[method-assign]
+
+    await consumer.handle({
+        "entity_type": "github",
+        "action": "pr_merged",
+        "event_id": str(uuid.uuid4()),
+        "payload": {
+            "repo": "acme/repo",
+            "pr_number": 42,
+            "sender": "someone",
+        },
+    })
+
+    assert calls == [], "pr_merged must not re-arm auto-merge"
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────

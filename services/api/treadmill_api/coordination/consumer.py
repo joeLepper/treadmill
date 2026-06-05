@@ -748,6 +748,28 @@ class CoordinationConsumer:
                     # Continue to the pr_merged sweep regardless — the
                     # two side-effects are independent.
 
+            # ── Auto-merge arming on mergeability-affecting github verbs ──
+            # (ADR-0031 arming-coverage gap; see
+            # docs/plans/2026-06-05-accept-as-is-open-pr-not-terminal.md M2.)
+            # These verbs can flip the task into ``derived_mergeability=
+            # 'mergeable'`` *after* its last ``step.completed``, which is the
+            # only seam the step-based arming watches. Re-evaluate arming here
+            # so a green, approved PR that becomes mergeable via CI / a clean
+            # re-push / conflict-clear / late pr_opened doesn't strand. Safe:
+            # the arming body only sets the deadline when the VIEW already
+            # reads ``mergeable`` and the 5s poll re-verifies before merging.
+            if action in (
+                "pr_opened",
+                "pr_synchronize",
+                "check_run_completed",
+                "pr_conflict",
+            ):
+                await self._maybe_fire_auto_merge_on_github(
+                    session,
+                    repo=payload.get("repo") or "",
+                    pr_number=payload.get("pr_number"),
+                )
+
             # ── Conflict sweep (Week 3 B.3, pr_merged only) ──────────────
             if action == "pr_merged":
                 await self._sweep_after_pr_merged(session, typed)
@@ -2077,6 +2099,51 @@ class CoordinationConsumer:
                 "_maybe_fire_auto_merge: deadline update failed for step %s; "
                 "prior projection committed, will retry on redelivery",
                 step_id,
+            )
+
+    async def _maybe_fire_auto_merge_on_github(
+        self,
+        session: AsyncSession,
+        *,
+        repo: str,
+        pr_number: int | None,
+    ) -> None:
+        """Set/push the auto-merge cooling-off deadline after a github event
+        that can flip mergeability (ADR-0031 arming-coverage gap).
+
+        Sibling to ``_maybe_fire_auto_merge`` (the ``step.completed`` arming
+        seam). A task can cross into ``mergeable`` because CI finished green,
+        a clean re-push landed, a conflict cleared, or a late ``pr_opened``
+        arrived — none of which are ``step.completed`` events, so the
+        step-based arming never re-fires and a green, approved PR strands.
+        Delegates to ``maybe_auto_merge_on_github_event`` which resolves the
+        task via ``task_prs`` and checks the mergeability VIEW.
+
+        Skips cleanly when ``redis_client`` is not wired. Failures are logged
+        but do not propagate — the github audit row has already committed; the
+        next event delivery retries naturally.
+        """
+        if self.redis_client is None:
+            return
+        from treadmill_api.coordination.triggers import (
+            maybe_auto_merge_on_github_event,
+        )
+        try:
+            # Flush so the github event row this handler just persisted is
+            # visible to the ``task_mergeability`` VIEW read inside the arming
+            # body (same same-transaction-snapshot fix as the step path).
+            await session.flush()
+            await maybe_auto_merge_on_github_event(
+                session,
+                self.redis_client,
+                repo=repo,
+                pr_number=pr_number,
+            )
+        except Exception:
+            logger.exception(
+                "_maybe_fire_auto_merge_on_github: deadline update failed for "
+                "%s#%s; prior projection committed, will retry on redelivery",
+                repo, pr_number,
             )
 
     async def _auto_merge_loop(self) -> None:
