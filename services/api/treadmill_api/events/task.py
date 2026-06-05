@@ -39,6 +39,10 @@ class TaskEscalatedToOperator(EventPayload):
         accept-as-is verdict (``review.override`` / ``validate.override``)
         whose PR was never merged; see
         ``terminal_gate_sweep.run_terminal_gate_sweep``.
+      * ``step_starvation`` — per ADR-0075, the scheduled sweep detected
+        a step queued for dispatch (``step.ready``) that never reached
+        execution (``step.started``); see
+        ``step_starvation_sweep.run_step_starvation_sweep``.
 
     Surface via GET /api/v1/tasks?status=needs_operator and the
     dashboard's escalation bucket (``routers/dashboard/overview.py``).
@@ -63,6 +67,7 @@ class TaskEscalatedToOperator(EventPayload):
         "gate-broken",
         "terminal_step_failure",
         "terminal_gate_sweep",
+        "step_starvation",
     ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from

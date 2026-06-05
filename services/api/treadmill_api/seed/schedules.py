@@ -188,6 +188,22 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "jitter_seconds": 60,
         "created_by": "auto-seed",
     },
+    {
+        # ADR-0075 step-starvation detection — detects steps queued for
+        # dispatch (step.ready) that never reach execution (step.started).
+        # Tight ``* * * * *`` cadence (every 1 minute) because a stalled
+        # queue blocks the task immediately; operator visibility and
+        # recovery must be prompt. The sweep cost is a single
+        # (task, step_index) pair query + a handful of escalations,
+        # so frequent ticks are cost-effective.
+        "workflow_id": "wf-step-starvation-sweep",
+        "cron_expression": "* * * * *",  # every 1 minute
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {"trigger": "scheduled-sweep"},
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
 ]
 
 

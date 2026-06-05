@@ -1040,7 +1040,7 @@ async def _emit_operator_escalation(
     signal: str,
     repo: str | None = None,
     detail: str | None = None,
-    reason: Literal["architect_cap", "stuck_task_sweep", "gate-broken", "terminal_gate_sweep"] | None = None,
+    reason: Literal["architect_cap", "stuck_task_sweep", "gate-broken", "terminal_gate_sweep", "step_starvation"] | None = None,
 ) -> None:
     """Persist + publish ``task.escalated_to_operator`` for a non-architect
     terminal that has no productive next step (a cap or a give-up).
@@ -3117,6 +3117,17 @@ async def handle_scheduled_tick(
     )
     if schedule.workflow_id == TERMINAL_GATE_SWEEP_WORKFLOW_ID:
         await run_terminal_gate_sweep(session, dispatcher)
+        return None
+
+    # Same idiom for the step-starvation sweep (ADR-0075) — detects steps
+    # queued for dispatch (step.ready) that never reach execution
+    # (step.started); pure query, no role-step needed.
+    from treadmill_api.coordination.step_starvation_sweep import (
+        STEP_STARVATION_SWEEP_WORKFLOW_ID,
+        run_step_starvation_sweep,
+    )
+    if schedule.workflow_id == STEP_STARVATION_SWEEP_WORKFLOW_ID:
+        await run_step_starvation_sweep(session, dispatcher)
         return None
 
     repo = typed.rendered_payload.get("repo")
