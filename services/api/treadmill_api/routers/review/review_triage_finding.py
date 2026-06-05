@@ -14,47 +14,36 @@ This module mounts four endpoints under the review-package prefix:
   GET  /api/v1/review/triage-finding/{id}      — fetch one row (404 when missing)
   POST /api/v1/review/triage-finding/{id}/label — persist operator verdict
 
-Three legacy-shape adapters
----------------------------
+Legacy-shape adapter args
+-------------------------
 
 ADR-0061's ``TriageFindingRow`` predates ``ReviewQueueRowMixin``, so its
-column names don't match the names the factory hardcodes.  We bridge the gap
-without touching the model file:
+column names don't match the names the factory defaults to.  Instead of
+overlaying a second class (the original substep-2 design, which SQLAlchemy
+rejected because abstract classes can't be passed to ``select()``), we pass
+three legacy-shape adapter arguments to the factory:
 
 (a) ``confidence_attr="confidence"`` — the factory's confidence-ordering CASE
-    expression reads ``getattr(row_cls, confidence_attr)``.  ADR-0070-native
+    expression reads ``getattr(row_cls, confidence_attr)``.  ADR-0070 native
     kinds inherit ``ReviewQueueRowMixin.llm_confidence`` and leave this at
-    the default; ``TriageFindingRow`` uses ``confidence`` (ADR-0061-original)
-    so we pass the override.  New kinds should OMIT this argument.
+    the default; ``TriageFindingRow`` uses ``confidence`` (ADR-0061-original).
 
-(b) ``llm_label`` — the factory's stats math reads
-    ``getattr(row_cls, llm_label_attr)`` to compute operator/LLM agreement.
-    ``TriageFindingRow`` has no ``llm_label`` column today; the v1 stand-in
-    is ``confidence != 'low'`` (treat anything but low-confidence as the
-    LLM's "yes this is a real bug" recommendation).  Implemented as a
-    :class:`sqlalchemy.ext.hybrid.hybrid_property` on the overlay class
-    so the expression form composes inside ``select`` / ``where`` clauses
-    while the instance form works on loaded rows.
+(b) ``llm_label_attr=_triage_llm_label`` — the factory's stats math agrees
+    operator vs LLM by comparing two SQL expressions.  ``TriageFindingRow``
+    has no ``llm_label`` column today; the v1 stand-in is
+    ``confidence != 'low'`` (treat anything but low-confidence as the LLM's
+    "yes this is a real bug" recommendation).  Passing a callable lets the
+    factory derive the expression from existing columns instead of looking
+    up a non-existent attribute.
 
     TODO v2 (substep 3): substep 3 lands richer ``llm_label`` columns
-    alongside new kinds; at that point replace the ``confidence`` alias with
-    the typed ``llm_label`` column and remove this note.
+    alongside new kinds; at that point replace this lambda with the typed
+    ``llm_label`` column name and remove this note.
 
-(c) ``id`` — the factory's ``select(row_cls).where(row_cls.id == row_id)``
-    references an ``id`` attribute, but ``TriageFindingRow`` calls its
-    primary key ``finding_id`` (ADR-0061-original).  The overlay exposes
-    ``id`` as a hybrid_property aliasing ``finding_id`` so the factory
-    compiles its SQL against the correct column.
-
-Overlay class
--------------
-
-:class:`_TriageFindingReviewRow` subclasses :class:`TriageFindingRow` with
-``__abstract__ = True`` — no new mapper, no second mapped table; SQLAlchemy
-inherits the parent's mapper via MRO so ``select(_TriageFindingReviewRow)``
-returns ``TriageFindingRow`` instances over the same ``triage_findings``
-table.  All queries hit ``triage_findings`` directly; the overlay only
-provides the three attribute shims described above.
+(c) ``id_attr="finding_id"`` — the factory writes ``WHERE pk == row_id`` on
+    the per-id endpoints.  ``TriageFindingRow`` calls its primary key
+    ``finding_id`` (ADR-0061-original); pass the attribute name so the
+    factory targets the right column.
 
 Unlabeled predicate (v1 vs v2)
 ------------------------------
@@ -91,7 +80,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy import case
 
 from treadmill_api.models.triage_finding import TriageFindingRow
 from treadmill_api.routers.review.base import build_review_router
@@ -99,57 +88,23 @@ from treadmill_api.routers.triage.labels import LabelFindingRequest
 from treadmill_api.schemas.triage_finding import TriageFinding
 
 
-class _TriageFindingReviewRow(TriageFindingRow):
-    """Thin overlay adding ``llm_label`` + ``id`` aliases to ``TriageFindingRow``.
+def _triage_llm_label(cls: type) -> Any:
+    """SQL expression standing in for a missing ``llm_label`` column.
 
-    ``__abstract__ = True`` keeps SQLAlchemy from creating a second mapped
-    table — the overlay inherits the parent's mapper via MRO, so all
-    queries hit the same ``triage_findings`` table and return
-    ``TriageFindingRow`` instances.
+    Reads ``confidence`` from the row class and emits ``True`` for any
+    medium- or high-confidence row, ``False`` for low-confidence rows.
+    This matches the v1 stand-in described in the module docstring.
     """
-
-    __abstract__ = True
-
-    @hybrid_property
-    def llm_label(self) -> bool:
-        """Instance form: treat any non-low confidence as the LLM's
-        'yes this is a real bug' recommendation.
-        """
-        return self.confidence != "low"
-
-    @llm_label.expression  # type: ignore[no-redef]
-    @classmethod
-    def llm_label(cls) -> Any:  # noqa: F811
-        """Class form: the SQL expression compute_stats compares against
-        ``label_is_real_bug`` to count operator/LLM agreement.
-        """
-        return cls.confidence != "low"
-
-    @hybrid_property
-    def id(self) -> Any:
-        """Instance form: alias for ``finding_id`` (ADR-0061's PK name)."""
-        return self.finding_id
-
-    @id.expression  # type: ignore[no-redef]
-    @classmethod
-    def id(cls) -> Any:  # noqa: F811
-        """Class form: lets the factory write ``select(row_cls).where(row_cls.id == ...)``
-        even though the underlying column is named ``finding_id``.
-
-        The ``.label("id")`` is required so that subqueries built via
-        ``select(row_cls.id).subquery()`` expose a column named ``id``
-        (not ``finding_id``), matching the ``last_100_subq.c.id`` access
-        in ``review_stats.compute_stats``.
-        """
-        return cls.finding_id.label("id")
+    return case((cls.confidence == "low", False), else_=True)
 
 
 router = build_review_router(
     prefix="/triage-finding",
-    row_cls=_TriageFindingReviewRow,
+    row_cls=TriageFindingRow,
     verdict_attr="label_is_real_bug",
-    llm_label_attr="llm_label",
+    llm_label_attr=_triage_llm_label,
     confidence_attr="confidence",
+    id_attr="finding_id",
     label_input_model=LabelFindingRequest,
     output_model=TriageFinding,
 )
