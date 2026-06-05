@@ -173,7 +173,7 @@ def test_runner_publishes_started_then_completed_on_success(
         ],
         payload={"pr_number": 7},
     )
-    monkeypatch.setattr(runner, "_execute", lambda c, s: (envelope, None))
+    monkeypatch.setattr(runner, "_execute", lambda c, s, repo_config=None: (envelope, None))
     sqs = _FakeSqs([_claim(ctx.step_id, receipt="rh-1")])
     api = _FakeApi(ctx)
     pub = _FakePublisher()
@@ -299,7 +299,7 @@ def test_runner_exits_after_one_step_when_flag_true(
     pending. The autoscaler launches a fresh replica per message."""
     from treadmill_agent.events import Artifact, StepOutput
 
-    def _fake_execute(c, s):
+    def _fake_execute(c, s, repo_config=None):
         return StepOutput(
             summary="ok", decision="pushed", commit_sha="abc",
             artifacts=[Artifact(kind="branch", value="task/x")],
@@ -332,7 +332,7 @@ def test_runner_continues_polling_when_exit_after_step_false(
     """
     from treadmill_agent.events import Artifact, StepOutput
 
-    def _fake_execute(c, s):
+    def _fake_execute(c, s, repo_config=None):
         return StepOutput(
             summary="ok", decision="pushed", commit_sha="abc",
             artifacts=[Artifact(kind="branch", value="task/x")],
@@ -860,7 +860,7 @@ def test_runner_heartbeat_extends_visibility_during_long_work(
 
     sqs.change_message_visibility = _counting_change  # type: ignore[method-assign]
 
-    def _slow_execute(c, s):
+    def _slow_execute(c, s, repo_config=None):
         # Block until the heartbeat has fired at least minimum_fires
         # times, then return successfully. ``timeout`` is a backstop so
         # a regression (heartbeat never fires) fails fast rather than
@@ -1148,7 +1148,7 @@ def test_handle_step_mints_repo_scoped_token_before_execute_in_app_mode(
     def _fake_bootstrap(*, settings, repo=None):  # type: ignore[no-untyped-def]
         call_order.append(("bootstrap", {"repo": repo}))
 
-    def _fake_execute(c, s):
+    def _fake_execute(c, s, repo_config=None):
         call_order.append(("_execute", {"repo": c.repo}))
         return StepOutput(
             summary="ok", decision="pushed", commit_sha="abc",
@@ -1202,7 +1202,7 @@ def test_handle_step_skips_repo_scoped_mint_when_not_github_app_mode(
     )
     monkeypatch.setattr(
         runner, "_execute",
-        lambda c, s: (
+        lambda c, s, repo_config=None: (
             StepOutput(
                 summary="ok", decision="pushed", commit_sha="abc",
                 artifacts=[Artifact(kind="branch", value="task/x")],
@@ -1239,7 +1239,7 @@ def test_handle_step_publishes_failed_when_repo_scoped_mint_raises(
             f"installation not found for {repo}"
         )
 
-    def _track_execute(c, s):
+    def _track_execute(c, s, repo_config=None):
         execute_called.append(True)
         from treadmill_agent.events import StepOutput
         return StepOutput(summary="x", decision="pushed", commit_sha="a"), None
@@ -1359,7 +1359,7 @@ def test_handle_step_emits_worker_deps_failed_then_step_failed_on_materialize_er
             detail="pip install failed: No matching distribution for aws-cdk-lib==99.99.99",
         )
 
-    def _track_execute(c, s):
+    def _track_execute(c, s, repo_config=None):
         execute_called.append(True)
         from treadmill_agent.events import StepOutput
         return StepOutput(summary="x", decision="pushed", commit_sha="a"), None

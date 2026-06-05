@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Literal
 import boto3
 
 from treadmill_api.models.onboarding import WorkerDeps
+from treadmill_api.repo_config import RepoConfig
 
 if TYPE_CHECKING:
     from treadmill_agent.config import Settings
@@ -192,6 +193,70 @@ def fetch_repo_worker_deps(
             repo, exc,
         )
         return WorkerDeps()
+
+
+def fetch_repo_config(
+    settings: "Settings", repo: str,
+) -> RepoConfig | None:
+    """Resolve the repo's :class:`RepoConfig` via the onboarding API.
+
+    GETs ``/api/v1/onboarding/repos/{repo}`` and returns the parsed response
+    as a :class:`RepoConfig`. ADR-0076 per-repo git author + trailer overrides
+    piggy-back on the same fetch so we don't double-query.
+
+    Returns ``None`` on 404 (repo not onboarded), 503 (feature off), or any
+    network error. Absence of config must never crash the step; the deployment
+    defaults stay in effect so unmigrated repos continue to work.
+    """
+    url = (
+        settings.api_url.rstrip("/")
+        + f"/api/v1/onboarding/repos/{repo}"
+    )
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 503):
+            logger.info(
+                "repo_config fetch returned %d for repo=%s; using defaults",
+                exc.code, repo,
+            )
+            return None
+        logger.warning(
+            "repo_config fetch failed (HTTP %d) for repo=%s; using defaults",
+            exc.code, repo,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "repo_config fetch failed for repo=%s (%s); using defaults",
+            repo, exc,
+        )
+        return None
+
+    try:
+        # Build RepoConfig from the response. The endpoint returns
+        # RepoConfigResponse which has all the fields we need.
+        return RepoConfig(
+            repo=payload.get("repo", repo),
+            mode=payload.get("mode", "conform"),
+            auto_merge_blocked=payload.get("auto_merge_blocked", False),
+            test_command=payload.get("test_command"),
+            lint_command=payload.get("lint_command"),
+            claude_account=payload.get("claude_account"),
+            claude_account_fallback=None,  # Not in onboarding response
+            git_author_name=payload.get("git_author_name"),
+            git_author_email=payload.get("git_author_email"),
+            commit_trailer=payload.get("commit_trailer"),
+            worker_deps=payload.get("worker_deps"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "repo_config response malformed for repo=%s (%s); using defaults",
+            repo, exc,
+        )
+        return None
 
 
 def resolve_worker_aws_session(settings: "Settings") -> boto3.session.Session:
