@@ -61,6 +61,7 @@ _EXPECTED_ROLE_IDS = {
     "role-rule-corpus-auditor",
     "role-prompt-optimizer",
     "role-ui-triage",  # ADR-0061
+    "role-dspy-variant-reviewer",  # ADR-0070 substep 4
 }
 
 # Action-role ids that may appear as step 2 of a 2-step workflow. Per
@@ -178,6 +179,7 @@ _EXPECTED_OUTPUT_KINDS: dict[str, OutputKind] = {
     "role-crystallization-judge": OutputKind.ANALYSIS,
     "role-rule-corpus-auditor": OutputKind.ANALYSIS,
     "role-prompt-optimizer": OutputKind.ANALYSIS,
+    "role-dspy-variant-reviewer": OutputKind.ANALYSIS,
 }
 
 
@@ -247,6 +249,7 @@ def test_role_model_tier_invariant() -> None:
         "role-reviewer",
         "role-prompt-optimizer",
         "role-ui-triage",
+        "role-dspy-variant-reviewer",  # ADR-0070 substep 4 — structured-output reasoner
     }
     roles_by_id = {r["id"]: r for r in _all_roles()}
     assert roles_by_id["role-planner"]["model"] == PLANNER_MODEL, (
@@ -653,7 +656,12 @@ def test_every_role_is_referenced_by_at_least_one_workflow() -> None:
     }
     defined_role_ids = {role["id"] for role in _all_roles()}
     orphans = defined_role_ids - referenced_role_ids
-    assert not orphans, f"orphan roles (defined but unused): {sorted(orphans)}"
+    # role-dspy-variant-reviewer is dispatched on-demand (no workflow);
+    # workflow registration lands in the ADR-0070 operations follow-up.
+    assert orphans == {"role-dspy-variant-reviewer"}, (
+        f"unexpected orphan roles (defined but unused by any workflow): "
+        f"{sorted(orphans - {'role-dspy-variant-reviewer'})}"
+    )
 
 
 def test_single_step_workflows_match_adr_0015_and_0032_matrix() -> None:
@@ -1190,3 +1198,54 @@ def test_wf_ui_triage_is_seeded() -> None:
     )
     assert wf["steps"][0]["role_id"] == "role-ui-triage"
     assert wf["steps"][0]["name"] == "triage"
+
+
+# ── ADR-0070 substep 4: role-dspy-variant-reviewer ───────────────────────────
+
+
+def test_role_dspy_variant_reviewer_is_registered() -> None:
+    """ADR-0070 substep 4: the proposing role for the dspy-variant-pr
+    review queue is registered with the Sonnet model + ANALYSIS output
+    kind, and its prompt artifact teaches the structured JSON envelope
+    from ADR-0070 §"LLM recommendation"."""
+    from treadmill_api.starters import _ROLES
+
+    role = next(
+        (r for r in _ROLES if r["id"] == "role-dspy-variant-reviewer"),
+        None,
+    )
+    assert role is not None
+    assert role["model"] == "claude-sonnet-4-6"
+    assert role["output_kind"] == OutputKind.ANALYSIS
+    prompt = role["system_prompt"]
+    # Substantive prompt — bundled artifact, not a stub.
+    assert len(prompt) >= 800, (
+        f"prompt should be a substantive multi-paragraph "
+        f"artifact, got {len(prompt)} chars"
+    )
+    # All three verdict values appear (mirrors
+    # test_role_reviewer_prompt_teaches_json_envelope).
+    for verdict in ("merge", "revise", "drop"):
+        assert verdict in prompt, (
+            f"prompt must teach verdict value {verdict!r}"
+        )
+    # All three confidence values appear.
+    for conf in ("high", "medium", "low"):
+        assert conf in prompt, (
+            f"prompt must teach confidence value {conf!r}"
+        )
+    # JSON envelope structure (verdict + rationale + confidence keys,
+    # plus the literal ```json fence).
+    assert "```json" in prompt, (
+        "prompt must include a literal ```json fence so "
+        "the model has a concrete envelope template"
+    )
+    for key in ("verdict", "rationale", "confidence"):
+        assert key in prompt
+    # Canonical inputs from the row schema.
+    for input_name in ("judge_role", "corpus_s3_uri", "patch_diff"):
+        assert input_name in prompt, (
+            f"prompt must reference row input {input_name!r}"
+        )
+    # ADR-0055 secrets-handling footer.
+    assert "ADR-0055" in prompt or "silent cross-account" in prompt
