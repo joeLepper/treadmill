@@ -10,6 +10,14 @@
 # if you cloned somewhere other than $HOME/treadmill.
 set -euo pipefail
 
+# Record operator-initiated stop so a SIGTERM/SIGINT leaves the
+# script with exit 0 (systemd then leaves the unit stopped per
+# Restart=on-failure). An unexpected tmux-session end — claude
+# crash, tmux kill-session, OOM kill, panic — falls through to
+# exit 1 at the bottom so systemd restarts after RestartSec.
+STOPPED_BY_OPERATOR=0
+trap 'STOPPED_BY_OPERATOR=1' TERM INT
+
 LABEL="${1:?label required}"
 REPO_DIR="${TREADMILL_REPO_DIR:-$HOME/treadmill}"
 LAUNCHER="$REPO_DIR/tools/cc-channels/launch-session.sh"
@@ -43,3 +51,14 @@ tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL" Enter
 while tmux has-session -t "$LABEL" 2>/dev/null; do
   sleep 30
 done
+
+# Decide exit status. Operator-initiated stop (SIGTERM/SIGINT
+# delivered by `systemctl --user stop`) flipped the trap flag —
+# exit 0 so systemd's `Restart=on-failure` does not re-spawn.
+# Any other tmux-ended cause is a crash by our definition and
+# warrants restart.
+if [ "$STOPPED_BY_OPERATOR" -eq 1 ]; then
+  exit 0
+fi
+echo "treadmill-channel-launch: tmux session $LABEL ended unexpectedly; systemd will restart per Restart=on-failure" >&2
+exit 1

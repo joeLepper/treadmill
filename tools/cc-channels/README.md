@@ -50,3 +50,8 @@ cc-attach bert
 The wrapper and `launch-session.sh` both enforce the single-instance contract,
 so an operator who runs `launch-session.sh` directly cannot race the systemd-
 supervised instance.
+
+**Crash recovery.** Claude-process crashes, OOM kills, and externally-killed
+tmux sessions are recovered by systemd's `Restart=on-failure` after
+`RestartSec=5s`. Operator-initiated `systemctl --user stop` does NOT respawn —
+the wrapper traps SIGTERM/SIGINT and exits 0 so the unit stays stopped.
