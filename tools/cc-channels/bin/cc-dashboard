@@ -58,6 +58,10 @@ done
 # Even out all panes into a single row.
 tmux select-layout -t "$DASHBOARD:0" even-horizontal
 
+# Enable mouse: click to focus, scroll wheel to scroll, drag borders to resize.
+# Text selection: hold Shift while clicking/dragging to copy to clipboard.
+tmux set-option -t "$DASHBOARD" mouse on
+
 # Focus the leftmost pane.
 tmux select-pane -t "$DASHBOARD:0.0"
 
