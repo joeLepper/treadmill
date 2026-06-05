@@ -510,3 +510,53 @@ async def test_escalation_close_sweep_never_coalesces() -> None:
     mocked_coalesce.assert_not_awaited()
     assert session.added == []
     dispatcher.dispatch_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminal_gate_sweep_never_coalesces() -> None:
+    """Same shape as the other deterministic sweeps: ``wf-terminal-gate-sweep``
+    runs a pure query in-band, no synthetic Task, nothing to coalesce.
+    Short-circuit fires before the helper."""
+    from treadmill_api.coordination import (
+        terminal_gate_sweep as gate_sweep_mod,
+    )
+
+    schedule = MagicMock()
+    schedule.id = uuid.uuid4()
+    schedule.status = "active"
+    schedule.workflow_id = gate_sweep_mod.TERMINAL_GATE_SWEEP_WORKFLOW_ID
+
+    session = _StubAsyncSession(get_results=[schedule], execute_results=[])
+    dispatcher = MagicMock()
+    dispatcher.persist_and_publish = AsyncMock()
+    dispatcher.dispatch_task = AsyncMock()
+
+    typed = ScheduledTick(
+        schedule_id=schedule.id,
+        workflow_id=gate_sweep_mod.TERMINAL_GATE_SWEEP_WORKFLOW_ID,
+        rendered_payload={},
+    )
+
+    with (
+        patch.object(
+            gate_sweep_mod,
+            "run_terminal_gate_sweep",
+            new=AsyncMock(return_value=0),
+        ) as mocked_sweep,
+        patch.object(
+            triggers_mod,
+            "_coalesce_pending_ticks_for_schedule",
+            new=AsyncMock(),
+        ) as mocked_coalesce,
+    ):
+        run_id = await triggers_mod.handle_scheduled_tick(
+            session,  # type: ignore[arg-type]
+            dispatcher,
+            typed=typed,
+        )
+
+    assert run_id is None
+    mocked_sweep.assert_awaited_once()
+    mocked_coalesce.assert_not_awaited()
+    assert session.added == []
+    dispatcher.dispatch_task.assert_not_awaited()

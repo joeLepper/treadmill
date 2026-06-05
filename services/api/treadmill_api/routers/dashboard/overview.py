@@ -437,7 +437,7 @@ async def get_overview(
     account: Annotated[str | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
     reason: Annotated[
-        Literal["architect_cap", "stuck_task_sweep", "gate-broken"] | None,
+        Literal["architect_cap", "stuck_task_sweep", "gate-broken", "terminal_gate_sweep"] | None,
         Query(),
     ] = None,
     include_closed: Annotated[bool, Query()] = False,

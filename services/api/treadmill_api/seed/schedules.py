@@ -83,6 +83,24 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "created_by": "auto-seed",
     },
     {
+        # Terminal-gate orphan sweep — inverse of the stuck-task signal.
+        # Detects tasks where the architect issued an accept-as-is verdict
+        # (review.override / validate.override per ADR-0038 / ADR-0042) but
+        # the PR was never merged. Cancelled and superseded tasks are
+        # explicitly excluded — they legitimately leave a PR unmerged.
+        # The escalation-close sweep (ADR-0062) auto-closes the incident
+        # once github.pr_merged arrives. Frequent cadence mirrors the
+        # stuck-task sweep: a tick is cheap (pure query) and prompt
+        # operator visibility on accepted-but-unmerged PRs matters.
+        "workflow_id": "wf-terminal-gate-sweep",
+        "cron_expression": "*/10 * * * *",  # every 10 minutes
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {"trigger": "scheduled-sweep"},
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
+    {
         # Observability regression scan — consumes the ADR-0020 stack.
         # Short-circuits to a no-op until Grafana/Loki/Tempo queries
         # succeed (ADR-0020 phase 3+).
