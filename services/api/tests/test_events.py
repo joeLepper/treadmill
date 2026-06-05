@@ -79,8 +79,8 @@ def test_task_cancelled_with_no_reason():
 
 
 def test_task_escalated_to_operator_reason_literal_pins_known_values():
-    """ADR-0058 + ADR-0062 lock the ``reason`` Literal to four values
-    (plus the legacy ``None`` for pre-tagged emitters). Changing the
+    """ADR-0058 + ADR-0062 + ADR-0047 lock the ``reason`` Literal to five
+    values (plus the legacy ``None`` for pre-tagged emitters). Changing the
     set is a wire-shape change — pin it so the producer additions
     surface in CI."""
     valid_reasons = (
@@ -88,6 +88,7 @@ def test_task_escalated_to_operator_reason_literal_pins_known_values():
         "stuck_task_sweep",
         "gate-broken",
         "terminal_step_failure",
+        "terminal_gate_sweep",
     )
     for reason in valid_reasons:
         payload = TaskEscalatedToOperator(
