@@ -10,6 +10,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { FlipThroughLayout } from './FlipThroughLayout';
 import type { ReviewKindViewer, ReviewRow } from './types';
 
+// Triage finding c8da98a6 — `<FlipThroughLayout>` previously omitted the
+// `freshness` prop, so `/review/:kind` rendered without the
+// ConnectionAffordance chip mandated by DESIGN.md rule #8.
+vi.mock('../api/sim', () => ({
+  useLiveSim: () => ({ mode: 'ws', lastUpdated: new Date() }),
+}));
+
 const STUB_VIEWER: ReviewKindViewer = ({ row }) => (
   <div data-testid="viewer">row::{row.id}</div>
 );
@@ -123,5 +130,27 @@ describe('FlipThroughLayout', () => {
       ),
     );
     expect(screen.getByText('boom')).toBeInTheDocument();
+  });
+
+  // Regression for triage finding c8da98a6 — FlipThroughLayout used to call
+  // <PageLayout> without a `freshness` prop, so /review/:kind violated
+  // DESIGN.md rule #8 (ConnectionAffordance always visible). Pinning the
+  // "Live" chip's presence guards against the prop being dropped again.
+  it('renders the ConnectionAffordance freshness chip (triage c8da98a6)', () => {
+    render(
+      withRouter(
+        <FlipThroughLayout
+          title="review · architect-gold"
+          row={null}
+          onLabel={vi.fn()}
+          remaining={0}
+          viewer={STUB_VIEWER}
+          loading={false}
+          error={null}
+          stats={null}
+        />,
+      ),
+    );
+    expect(screen.getByText(/Live/i)).toBeInTheDocument();
   });
 });

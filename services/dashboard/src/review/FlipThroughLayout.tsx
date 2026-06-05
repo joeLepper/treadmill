@@ -23,6 +23,8 @@
 
 import { useCallback } from 'react';
 
+import { useLiveSim } from '../api/sim';
+import { ConnectionAffordance } from '../design/ConnectionAffordance';
 import { PageLayout } from '../design/PageLayout';
 
 import { ConfidenceStrip } from './ConfidenceStrip';
@@ -67,6 +69,8 @@ export function FlipThroughLayout({
   onSkip,
   onShowHelp,
 }: FlipThroughLayoutProps) {
+  const sim = useLiveSim();
+
   const onAccept = useCallback(() => {
     if (!row) return;
     onLabel({ label: row.llm.label, labeled_by: DEFAULT_LABELED_BY });
@@ -103,6 +107,7 @@ export function FlipThroughLayout({
       title={title}
       loading={loading}
       error={error}
+      freshness={<ConnectionAffordance mode={sim.mode} lastUpdated={sim.lastUpdated} />}
       breadcrumb={
         <span
           style={{
