@@ -36,6 +36,15 @@ Wire shape per target
     etc.) parse that shape directly; no Slack-specific wrapping leaks
     into the generic surface.
 
+  * ``TREADMILL_TELEGRAM_BOT_TOKEN`` + ``TREADMILL_TELEGRAM_CHAT_ID``
+    (ADR-0071) — when BOTH are set, every escalation open / close POSTs
+    ``{chat_id, text}`` to ``https://api.telegram.org/bot<token>/sendMessage``
+    where ``text`` is the same one-line summary as the Slack body without
+    Slack's emoji syntax (plain words, no ``:rotating_light:``). Telegram
+    is a sibling target alongside Slack — not a replacement; an operator
+    runs either or both. The bot token is a secret: read from settings,
+    never logged.
+
 Failure isolation invariant
 ---------------------------
 
@@ -71,6 +80,9 @@ _SLACK_EMOJI_CLOSED = ":white_check_mark:"
 
 _OPEN_ACTION = "escalated_to_operator"
 _CLOSE_ACTION = "escalation_closed"
+
+
+_TELEGRAM_API_BASE = "https://api.telegram.org"
 
 
 def _short_task_id(task_id: str | None) -> str:
@@ -124,6 +136,32 @@ def _format_slack_body(record: dict[str, Any]) -> dict[str, Any]:
     return {"text": text}
 
 
+def _format_telegram_text(record: dict[str, Any]) -> str:
+    """Render the plain one-line Telegram summary for an escalation record.
+
+    Same content as the Slack body, minus Slack's ``:emoji:`` syntax —
+    Telegram clients render the literal ``:rotating_light:`` rather than
+    a glyph, so we strip the emoji shortcodes and leave the words.
+    """
+    action = record.get("action")
+    short_id = _short_task_id(record.get("task_id"))
+    payload = record.get("payload") or {}
+
+    if action == _OPEN_ACTION:
+        reason = payload.get("reason") or "unknown"
+        return (
+            f"Task {short_id} escalated to operator — reason={reason}"
+        )
+    if action == _CLOSE_ACTION:
+        reason = payload.get("close_reason") or "unknown"
+        mttr = payload.get("mttr_seconds")
+        mttr_chunk = f" mttr={mttr}s" if mttr is not None else ""
+        return (
+            f"Task {short_id} escalation closed — reason={reason}{mttr_chunk}"
+        )
+    return f"Task {short_id} {action}"
+
+
 class NotificationFanout:
     """Background subscriber that POSTs escalation events to webhook targets.
 
@@ -143,6 +181,8 @@ class NotificationFanout:
         *,
         slack_webhook_url: str | None = None,
         raw_webhook_urls: list[str] | None = None,
+        telegram_bot_token: str | None = None,
+        telegram_chat_id: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
@@ -150,6 +190,10 @@ class NotificationFanout:
         # ``TREADMILL_SLACK_WEBHOOK_URL=""`` behaves the same as unset.
         self.slack_webhook_url = slack_webhook_url or None
         self.raw_webhook_urls = list(raw_webhook_urls or [])
+        # ADR-0071: Telegram target — both token + chat id are required.
+        # Either one unset = no Telegram hop.
+        self.telegram_bot_token = telegram_bot_token or None
+        self.telegram_chat_id = telegram_chat_id or None
         # An injected client (tests, shared with other subsystems) is
         # left alone on shutdown; an owned client is built lazily on
         # start and closed in ``stop``.
@@ -164,7 +208,16 @@ class NotificationFanout:
     def is_configured(self) -> bool:
         """True iff at least one target is configured. Lets the lifespan
         handler skip ``start()`` when there's nothing to fan out to."""
-        return bool(self.slack_webhook_url) or bool(self.raw_webhook_urls)
+        return (
+            bool(self.slack_webhook_url)
+            or bool(self.raw_webhook_urls)
+            or self._telegram_configured
+        )
+
+    @property
+    def _telegram_configured(self) -> bool:
+        """ADR-0071: Telegram requires BOTH the bot token and chat id."""
+        return bool(self.telegram_bot_token) and bool(self.telegram_chat_id)
 
     async def start(self) -> None:
         """Subscribe to the eventbus broadcaster and spin the fan-out loop.
@@ -176,7 +229,7 @@ class NotificationFanout:
         """
         if not self.is_configured:
             logger.info(
-                "notification fanout: no slack or webhook targets "
+                "notification fanout: no slack, webhook, or telegram targets "
                 "configured; skipping start"
             )
             return
@@ -189,10 +242,13 @@ class NotificationFanout:
         self._task = asyncio.create_task(
             self._run(), name="notification-fanout",
         )
+        # Telegram bot token is a secret — log only its configured/unconfigured
+        # state, never the value itself.
         logger.info(
-            "notification fanout started: slack=%s raw_webhooks=%d",
+            "notification fanout started: slack=%s raw_webhooks=%d telegram=%s",
             "configured" if self.slack_webhook_url else "unconfigured",
             len(self.raw_webhook_urls),
+            "configured" if self._telegram_configured else "unconfigured",
         )
 
     async def stop(self) -> None:
@@ -265,13 +321,15 @@ class NotificationFanout:
 
         # Slack first — it's the operator-facing channel and we want the
         # human signal landing as quickly as the generic webhook signal.
-        # Both arms are independent: a Slack failure does not skip the
-        # raw-webhook fan-out, and a raw-webhook failure does not retro-
-        # actively poison Slack.
+        # All arms are independent: a Slack failure does not skip the
+        # raw-webhook or Telegram fan-out, and a downstream failure does
+        # not retro-actively poison the earlier ones.
         if self.slack_webhook_url:
             await self._post_slack(record)
         for url in self.raw_webhook_urls:
             await self._post_raw(url, record)
+        if self._telegram_configured:
+            await self._post_telegram(record)
 
     async def _post_slack(self, record: dict[str, Any]) -> None:
         assert self._http_client is not None
@@ -302,6 +360,27 @@ class NotificationFanout:
                 record.get("action"),
             )
 
+    async def _post_telegram(self, record: dict[str, Any]) -> None:
+        assert self._http_client is not None
+        assert self.telegram_bot_token is not None
+        assert self.telegram_chat_id is not None
+        url = f"{_TELEGRAM_API_BASE}/bot{self.telegram_bot_token}/sendMessage"
+        body = {
+            "chat_id": self.telegram_chat_id,
+            "text": _format_telegram_text(record),
+        }
+        try:
+            await self._http_client.post(url, json=body)
+        except Exception:
+            # Token sits in the URL — log only the action + event_id so
+            # we never leak the secret through error paths.
+            logger.exception(
+                "notification fanout: telegram post failed for "
+                "event_id=%s (action=%s); continuing",
+                record.get("event_id"),
+                record.get("action"),
+            )
+
 
 def make_notification_fanout(settings: Any) -> NotificationFanout:
     """Build a ``NotificationFanout`` from a ``Settings`` instance.
@@ -312,4 +391,6 @@ def make_notification_fanout(settings: Any) -> NotificationFanout:
     return NotificationFanout(
         slack_webhook_url=settings.slack_webhook_url,
         raw_webhook_urls=settings.notification_webhook_urls,
+        telegram_bot_token=settings.telegram_bot_token,
+        telegram_chat_id=settings.telegram_chat_id,
     )
