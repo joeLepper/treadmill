@@ -95,13 +95,15 @@ wheel. `EXPOSE 3128` matches the autoscaler's spawn assumption.
 
 ## Recent changes
 
-- ADR-0065 Step 2: the `autoscaler_smoke` GitHub Actions workflow
-  (`.github/workflows/autoscaler_smoke.yml`) now covers this service
-  as part of the autoscaler-spawn surface path filter. Any change
-  under `services/egress-proxy/**` triggers the real-Docker smoke
-  gate, which boots the stack with `--proxy-enabled true`, asserts
-  the proxy allows `api.github.com` CONNECTs, and asserts it returns
-  403 for un-allowlisted hosts.
+- ADR-0065 Step 2 — `autoscaler_smoke.yml` removed 2026-06-05. The
+  workflow had never passed in its 4-run history (the CDK app returns
+  no stacks in fully-local mode and the runtime calls `cdk synth`
+  expecting stacks, so `treadmill-local up` always crashed in CI). The
+  on-host script (`scripts/smoke_boot.sh`) still exists; restoring the
+  gate requires reconciling app.py vs runtime.py on fully-local
+  provisioning. Until then, this service has no automated boot
+  coverage — assertions about CONNECT allow / 403 deny live only in
+  the manual smoke path.
 - ADR-0064 Step 2: `ensure_egress_proxy_container` multi-attaches
   the proxy container to `treadmill-local` immediately after the
   initial spawn on `treadmill-egress`. Without this the proxy could
