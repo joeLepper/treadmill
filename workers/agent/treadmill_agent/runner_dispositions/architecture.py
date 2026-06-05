@@ -422,19 +422,23 @@ def _build_dispatch_payload(
             "intent": "append-pitfall",
         }
     if verdict == "gate-broken":
-        # ADR-0058 Step 1 — schema-only landing. The architect prompt
-        # gains Trigger B classification in Step 2; the dispatch
-        # handler (operator escalation + amend-cap skip + run-parking)
-        # lands in Step 3 via an API-side trigger keyed on this
-        # disposition's emitted verdict. Until Step 3 ships, the
-        # routing is inert: ``workflow_id=None`` + ``intent`` tag so
-        # the verdict surfaces in events for telemetry without
-        # producing a downstream dispatch that doesn't yet exist.
+        # ADR-0058: the architect declares the deterministic gate is
+        # the failure (sandbox-availability, missing tooling, typo'd
+        # validation script — not an author defect). ``workflow_id=None``
+        # signals "API-side trigger handles dispatch" — same convention
+        # as the supersede + deadlock-override branches. The API-side
+        # ``maybe_dispatch_gate_broken_escalation`` trigger reads the
+        # step's top-level ``payload.verdict`` + ``payload.gate_log_excerpt``
+        # (not this dispatch sub-object) and emits
+        # ``task.escalated_to_operator`` with ``reason='gate-broken'``.
+        # No successor workflow_run is dispatched — the task is parked
+        # until the operator either repairs the gate (re-runs the loop)
+        # or supersedes the task.
         return {
             "workflow_id": None,
             "task_id": task_id,
             "target_artifact": target_artifact,
-            "intent": "gate-broken-await-step-3",
+            "intent": "gate-broken-park",
         }
     # Should be unreachable; _VALID_VERDICTS gates the parse.
     raise ArchitectVerdictParseError(f"unknown verdict: {verdict!r}")
