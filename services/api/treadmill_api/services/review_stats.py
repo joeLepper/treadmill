@@ -7,10 +7,14 @@ through the SQLAlchemy ORM — no raw SQL strings.
 
 from __future__ import annotations
 
+from typing import Any, Callable, Union
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
+
+LlmLabelArg = Union[str, Callable[[type], Any]]
 
 
 class StatsResponse(BaseModel):
@@ -28,7 +32,8 @@ async def compute_stats(
     *,
     row_cls: type,
     verdict_attr: str,
-    llm_label_attr: str = "llm_label",
+    llm_label_attr: LlmLabelArg = "llm_label",
+    id_attr: str = "id",
 ) -> StatsResponse:
     """Compute labeling statistics for one review-queue kind.
 
@@ -42,8 +47,15 @@ async def compute_stats(
         Name of the column holding the operator's verdict (nullable until
         labeled).
     llm_label_attr:
-        Name of the column holding the LLM's recommendation.  Used to
-        compute accuracy (how often the operator agreed with the LLM).
+        Either the name of the column holding the LLM's recommendation, OR a
+        callable taking ``row_cls`` and returning a SQL expression (used by
+        legacy tables that lack a native ``llm_label`` column — e.g. ADR-0061
+        ``TriageFindingRow`` derives it from ``confidence``).  Compared
+        against the operator verdict to compute agreement.
+    id_attr:
+        Name of the primary-key attribute on ``row_cls`` (default ``"id"``).
+        Used by the last-100 subquery; ADR-0061 ``TriageFindingRow`` passes
+        ``id_attr="finding_id"``.
 
     Notes
     -----
@@ -57,8 +69,12 @@ async def compute_stats(
       for both counts.
     """
     verdict_col = getattr(row_cls, verdict_attr)
-    llm_col = getattr(row_cls, llm_label_attr)
+    llm_col = (
+        llm_label_attr(row_cls) if callable(llm_label_attr)
+        else getattr(row_cls, llm_label_attr)
+    )
     labeled_at_col = getattr(row_cls, "labeled_at")
+    id_col = getattr(row_cls, id_attr)
 
     # ── Count total rows ──────────────────────────────────────────────────────
     total: int = await session.scalar(
@@ -86,20 +102,22 @@ async def compute_stats(
     # ── Last-100 accuracy ─────────────────────────────────────────────────────
     accuracy_last_100: float | None = None
     if labeled_total > 0:
-        # Subquery: the 100 most recently labeled rows by primary key.
-        last_100_subq = (
-            select(row_cls.id)
+        # Inner SELECT: 100 most recently labeled row IDs.  Passed as a Select
+        # directly to .in_() rather than wrapping in a named subquery to
+        # sidestep column-key mismatches when id_attr != "id" — SQLAlchemy 2.0
+        # accepts a Select in .in_() and generates a correlated IN clause.
+        last_100_ids = (
+            select(id_col)
             .where(verdict_col.isnot(None))
             .order_by(labeled_at_col.desc())
             .limit(100)
-            .subquery()
         )
 
         # Count how many of those 100 rows agree with the LLM label.
         last_100_match: int = await session.scalar(
             select(func.count())
             .select_from(row_cls)
-            .where(row_cls.id.in_(select(last_100_subq.c.id)))
+            .where(id_col.in_(last_100_ids))
             .where(verdict_col == llm_col)
         ) or 0
 

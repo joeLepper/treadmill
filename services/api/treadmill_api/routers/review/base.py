@@ -20,7 +20,7 @@ actual class rather than an unresolvable string.
 
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -30,6 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.services import review_stats
 
+# llm_label may be a column name OR a callable returning a SQL expression.
+# Legacy tables (e.g. ADR-0061 TriageFindingRow) have no llm_label column;
+# they pass a lambda that derives one from existing columns.
+LlmLabelArg = Union[str, Callable[[type], Any]]
+
 
 def build_review_router(
     *,
@@ -38,7 +43,9 @@ def build_review_router(
     label_input_model: type[BaseModel],
     output_model: type[BaseModel],
     verdict_attr: str,
-    llm_label_attr: str = "llm_label",
+    llm_label_attr: LlmLabelArg = "llm_label",
+    confidence_attr: str = "llm_confidence",
+    id_attr: str = "id",
 ) -> APIRouter:
     """Return an ``APIRouter`` with the four ADR-0070 review endpoints.
 
@@ -58,8 +65,22 @@ def build_review_router(
     verdict_attr:
         Name of the column the operator's verdict is written to.
     llm_label_attr:
-        Name of the column carrying the LLM recommendation (default
-        ``"llm_label"``), used for accuracy math in ``GET /stats``.
+        Either the name of the column carrying the LLM recommendation
+        (default ``"llm_label"``), OR a callable taking ``row_cls`` and
+        returning a SQL expression (for legacy tables with no native
+        ``llm_label`` column).  Used for accuracy math in ``GET /stats``.
+    confidence_attr:
+        Name of the column carrying the LLM's confidence tier (default
+        ``"llm_confidence"``).  ADR-0070 native kinds inherit the mixin's
+        ``llm_confidence`` column and should leave this at the default;
+        the ADR-0061-legacy ``TriageFindingRow`` uses ``confidence`` and
+        passes ``confidence_attr="confidence"``.
+    id_attr:
+        Name of the primary-key attribute on ``row_cls`` (default ``"id"``).
+        ADR-0070 native kinds use ``id``; the ADR-0061-legacy
+        ``TriageFindingRow`` passes ``id_attr="finding_id"``.  Used to build
+        ``WHERE pk == row_id`` clauses on ``GET /{id}`` and
+        ``POST /{id}/label``.
 
     Route registration order
     ------------------------
@@ -71,8 +92,9 @@ def build_review_router(
     router: APIRouter = APIRouter(prefix=prefix)
 
     verdict_col = getattr(row_cls, verdict_attr)
-    confidence_col = getattr(row_cls, "llm_confidence")
+    confidence_col = getattr(row_cls, confidence_attr)
     created_at_col = getattr(row_cls, "created_at")
+    id_col = getattr(row_cls, id_attr)
 
     # Confidence ordering: low < medium < high (deterministic CASE expression).
     _confidence_order = case(
@@ -114,6 +136,7 @@ def build_review_router(
             row_cls=row_cls,
             verdict_attr=verdict_attr,
             llm_label_attr=llm_label_attr,
+            id_attr=id_attr,
         )
 
     # ── GET /{id} ─────────────────────────────────────────────────────────────
@@ -125,7 +148,7 @@ def build_review_router(
     ) -> Any:
         """Return one row by primary key; 404 when missing."""
         result = await session.execute(
-            select(row_cls).where(row_cls.id == row_id)
+            select(row_cls).where(id_col == row_id)
         )
         row = result.scalars().one_or_none()
         if row is None:
@@ -150,7 +173,7 @@ def build_review_router(
         row so the UI always sees server-stamped ``labeled_at``.
         """
         result = await session.execute(
-            select(row_cls).where(row_cls.id == row_id)
+            select(row_cls).where(id_col == row_id)
         )
         row = result.scalars().one_or_none()
         if row is None:
