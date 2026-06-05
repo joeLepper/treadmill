@@ -2,12 +2,11 @@
 # cc-dashboard — one-row, four-column operator dashboard for all labelled sessions.
 #
 # Opens a tmux session named "cc-dashboard" with four panes side-by-side,
-# each attached to one orchestrator session. If the dashboard already exists,
+# each showing one orchestrator session. If the dashboard already exists,
 # reattaches to it.
 #
-# Scrolling: each pane scrolls independently.  In the outer (dashboard) tmux
-# session, press <prefix> [ to enter copy mode for the focused pane, use
-# arrow keys / PgUp/PgDn, then q to exit.
+# Mouse: click to focus a pane, scroll wheel to scroll.
+# Text selection: hold Shift while clicking/dragging (bypasses tmux mouse capture).
 #
 # Usage:
 #   cc-dashboard [--labels "alan bert carla donna"]
@@ -18,8 +17,6 @@ set -euo pipefail
 
 DASHBOARD="cc-dashboard"
 LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna)
-BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ATTACH="$BIN_DIR/cc-attach"
 
 # Parse optional --labels override
 while [[ $# -gt 0 ]]; do
@@ -45,21 +42,26 @@ if tmux has-session -t "$DASHBOARD" 2>/dev/null; then
     exec tmux attach-session -t "$DASHBOARD"
 fi
 
-# Create a new detached session and attach the first label in pane 0.
+# Attach to an inner session from inside a tmux pane.
+# env -u TMUX unsets the outer-session marker so tmux allows the nested attach.
+attach_cmd() {
+    echo "env -u TMUX tmux attach-session -t $1"
+}
+
+# Create a new detached session and start the first attach in pane 0.
 tmux new-session -d -s "$DASHBOARD"
-tmux send-keys -t "$DASHBOARD:0.0" "\"$ATTACH\" ${LABELS[0]}" Enter
+tmux send-keys -t "$DASHBOARD:0.0" "$(attach_cmd "${LABELS[0]}")" Enter
 
 # Add one pane per remaining label, splitting horizontally each time.
 for label in "${LABELS[@]:1}"; do
     tmux split-window -t "$DASHBOARD:0" -h
-    tmux send-keys -t "$DASHBOARD:0" "\"$ATTACH\" $label" Enter
+    tmux send-keys -t "$DASHBOARD:0" "$(attach_cmd "$label")" Enter
 done
 
 # Even out all panes into a single row.
 tmux select-layout -t "$DASHBOARD:0" even-horizontal
 
-# Enable mouse: click to focus, scroll wheel to scroll, drag borders to resize.
-# Text selection: hold Shift while clicking/dragging to copy to clipboard.
+# Mouse: click to focus, scroll wheel to scroll, drag borders to resize.
 tmux set-option -t "$DASHBOARD" mouse on
 
 # Focus the leftmost pane.
