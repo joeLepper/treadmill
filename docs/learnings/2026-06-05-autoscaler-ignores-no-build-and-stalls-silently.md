@@ -1,7 +1,7 @@
 # Autoscaler ignores `--no-build` and stalls silently on image build failures
 
 **Date:** 2026-06-05
-**Related:** ADR-0018 (autoscaler), `project_deploy_watcher_builds_from_stale_source`
+**Related:** ADR-0018 (autoscaler), `project_deploy_watcher_builds_from_stale_source`, ADR-0075
 
 ## What happened
 
