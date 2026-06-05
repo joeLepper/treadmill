@@ -36,6 +36,19 @@ terminal closes, and crashes.
 
 ## Recent changes
 
+- ADR-0073 Step 1 crash-survival fix — `systemd/treadmill-channel-launch` gains
+  a `STOPPED_BY_OPERATOR` flag flipped by a `trap '...' TERM INT` handler, and
+  the trailing `while tmux has-session …` loop is followed by an explicit
+  exit-status decision: SIGTERM/SIGINT (operator-initiated `systemctl stop`)
+  exits 0 and leaves the unit stopped; any other tmux-ended cause exits 1 and
+  systemd respawns per `Restart=on-failure` after `RestartSec=5s`. Empirical
+  evidence from the 2026-06-04 carla crash test: `kill -9` of the claude PID
+  closed the tmux pane (only one pane in the session), the wrapper's while-
+  loop saw the session gone and exited via clean fall-through with code 0,
+  and systemd did NOT restart — the substrate as shipped delivered reboot +
+  SSH-drop + logout survival but not claude-crash survival. The wrapper now
+  distinguishes the two exit causes. README's "Persistent sessions" section
+  gains a one-paragraph "Crash recovery" note.
 - ADR-0073 Step 1 — systemd-user + tmux + `cc-attach` substrate for persistent,
   attachable orchestrator sessions; launcher gained the `launcher.pid`
   single-instance guard. Adds `systemd/`, `bin/cc-attach`, and the singleton test.
