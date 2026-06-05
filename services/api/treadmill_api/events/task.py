@@ -83,6 +83,15 @@ class TaskEscalatedToOperator(EventPayload):
     # suffix on the escalation-open notification line when present.
     created_by: str | None = None
 
+    @pydantic.field_validator("created_by", mode="before")
+    @classmethod
+    def _coerce_created_by(cls, v: object) -> str | None:
+        """An escalation must NEVER fail to emit because ``created_by`` isn't a
+        clean ``str | None`` — it's best-effort triage metadata. Coerce any
+        non-string (a missing column, a stray value) to ``None`` so the
+        operator's safety-net event always fires."""
+        return v if isinstance(v, str) else None
+
 
 class TaskEscalationClosed(EventPayload):
     """Emitted when an open operator-escalation incident is closed (ADR-0062).
