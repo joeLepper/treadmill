@@ -890,6 +890,19 @@ class LocalRuntime:
         if claude_default:
             env["CLAUDE_DEFAULT_ACCOUNT"] = claude_default
 
+        # ADR-0071: server-side Telegram escalation fan-out. When the
+        # deployment YAML carries BOTH a bot token and a chat id under
+        # ``notifications.telegram_*``, forward them so the API's
+        # NotificationFanout posts escalations (failures / caps / stalls) to
+        # that Telegram chat alongside Slack. Absent → the fanout's Telegram
+        # target stays off (no behavior change).
+        notifications = cfg.get("notifications", {})
+        tg_token = notifications.get("telegram_bot_token")
+        tg_chat = notifications.get("telegram_chat_id")
+        if tg_token and tg_chat:
+            env["TREADMILL_TELEGRAM_BOT_TOKEN"] = str(tg_token)
+            env["TREADMILL_TELEGRAM_CHAT_ID"] = str(tg_chat)
+
         # ADR-0020: inject OTLP endpoint when the observability stack is
         # deployed. The OTel SDK no-ops silently when the var is unset
         # (fully-local mode). Value from the deployment YAML under
