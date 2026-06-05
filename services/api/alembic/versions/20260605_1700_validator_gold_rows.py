@@ -62,8 +62,8 @@ def upgrade() -> None:
         sa.Column(
             "source_step_id",
             postgresql.UUID(as_uuid=True),
-            nullable=False,
             sa.ForeignKey("workflow_run_steps.id", ondelete="SET NULL"),
+            nullable=False,
         ),
         sa.Column("verdict_emitted", sa.String(8), nullable=False),
         sa.Column("script_excerpt", sa.Text(), nullable=False),
