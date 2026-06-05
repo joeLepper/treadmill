@@ -61,9 +61,6 @@ export default function DspyVariantPrReview() {
 
   const overrideRequired = disagreesWithLlm && !draft.override_reason.trim();
 
-  const submitDisabled =
-    labelMutation.isPending || draft.label_verdict === null || overrideRequired;
-
   const onSubmit = () => {
     if (!current || !draft.label_verdict) return;
     const body: DspyVariantPrLabelInput = {
@@ -304,6 +301,9 @@ function LabelColumn({
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     onChange({ ...draft, [key]: value });
   };
+
+  const submitDisabled =
+    submitting || draft.label_verdict === null || overrideRequired;
 
   return (
     <aside
