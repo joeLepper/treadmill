@@ -1006,6 +1006,19 @@ class LocalRuntime:
         corpus_s3_uri = cfg.get("aws", {}).get("corpus_s3_uri")
         if corpus_s3_uri:
             env["TREADMILL_CORPUS_S3_URI"] = corpus_s3_uri
+        # Repos that need ``pulumi`` (Plan A GCP substrate, future GCP work)
+        # require the CLI to authenticate non-interactively against Pulumi
+        # Cloud. ``pulumi login`` is interactive by default; the
+        # ``PULUMI_ACCESS_TOKEN`` env var is the non-interactive path. Pass
+        # it through from the autoscaler's environment when present so the
+        # operator exports the token once at autoscaler launch instead of
+        # baking it into a per-repo onboarding flow. Absent is acceptable —
+        # workers without a token still run; only pulumi-touching success
+        # checks fail and the operator sees a clear "PULUMI_ACCESS_TOKEN
+        # must be set" message from pulumi itself.
+        pulumi_access_token = os.environ.get("PULUMI_ACCESS_TOKEN")
+        if pulumi_access_token:
+            env["PULUMI_ACCESS_TOKEN"] = pulumi_access_token
         return env
 
     def _report_up_dev_local(self, cfg: dict[str, Any]) -> None:
