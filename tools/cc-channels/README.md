@@ -20,6 +20,8 @@ label, paired with its own Telegram bot and `treadmill-events` channel.
 
 One-time setup:
 
+Prerequisite: `tmux` must be installed (Debian/Ubuntu: `sudo apt install -y tmux`).
+
 ```
 loginctl enable-linger $USER
 mkdir -p ~/.config/systemd/user
@@ -36,13 +38,13 @@ before enabling the unit.
 Per label:
 
 ```
-systemctl --user enable --now treadmill-channel@bert.service
-cc-attach bert
+systemctl --user enable --now treadmill-channel@treadmill-bert.service
+cc-attach treadmill-bert
 ```
 
 - **Detach without killing:** `Ctrl-b d`
 - **Stop the supervised session:**
-  `systemctl --user stop treadmill-channel@bert.service`
+  `systemctl --user stop treadmill-channel@treadmill-bert.service`
 - **Recover from a stale pidfile** (e.g. after a kernel panic): the launcher
   detects a dead PID via `kill -0` and cleans up automatically; manual `rm
   ~/.cc-channels/<label>/launcher.pid` is only needed in the rare PID-reuse case.

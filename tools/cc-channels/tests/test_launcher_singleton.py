@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 LAUNCHER = Path(__file__).resolve().parents[1] / "launch-session.sh"
+CHANNEL_LAUNCH = Path(__file__).resolve().parents[1] / "systemd" / "treadmill-channel-launch"
 
 
 def test_launcher_refuses_when_live_pid_in_file(tmp_path: Path) -> None:
@@ -49,3 +50,41 @@ def test_launcher_refuses_when_live_pid_in_file(tmp_path: Path) -> None:
     # The pidfile we seeded must NOT have been removed: the live-PID branch
     # exits without touching it. Stale-cleanup is a different code path.
     assert pidfile.read_text().strip() == str(sleeper.pid)
+
+
+def test_launch_wrapper_fails_loud_when_tmux_missing(tmp_path: Path) -> None:
+    """treadmill-channel-launch must exit non-zero with a clear error when tmux is absent."""
+    # Build a PATH that contains bash + env (needed to interpret the script)
+    # but not tmux. Pointing PATH at /dev/null would also hide bash and the
+    # shebang would fail with a confusing exit 126 before reaching our check.
+    fake_bin = tmp_path / "fake_bin"
+    fake_bin.mkdir()
+    import shutil
+
+    for tool in ("bash", "env"):
+        src = shutil.which(tool)
+        if src is None:
+            import pytest
+
+            pytest.skip(f"{tool} not on host PATH; cannot construct test env")
+        os.symlink(src, fake_bin / tool)
+
+    result = subprocess.run(
+        [str(CHANNEL_LAUNCH), "test-label"],
+        env={**os.environ, "PATH": str(fake_bin)},
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        timeout=10,
+    )
+    assert result.returncode != 0, (
+        f"expected non-zero exit when tmux missing, got {result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    assert "tmux not installed" in result.stderr, (
+        f"expected 'tmux not installed' on stderr, got: {result.stderr!r}"
+    )
+    install_hints = ["apt install", "pacman -S", "brew install"]
+    assert any(hint in result.stderr for hint in install_hints), (
+        f"expected at least one install hint on stderr, got: {result.stderr!r}"
+    )

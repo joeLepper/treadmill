@@ -10,6 +10,16 @@
 # if you cloned somewhere other than $HOME/treadmill.
 set -euo pipefail
 
+# Pre-check: tmux is mandatory. Fail loud rather than letting later
+# `tmux has-session` calls return non-zero with a confusing exit code.
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "tmux not installed — required by ADR-0073" >&2
+  echo "  Debian/Ubuntu: sudo apt install -y tmux" >&2
+  echo "  Arch:          sudo pacman -S tmux" >&2
+  echo "  macOS:         brew install tmux" >&2
+  exit 1
+fi
+
 # Record operator-initiated stop so a SIGTERM/SIGINT leaves the
 # script with exit 0 (systemd then leaves the unit stopped per
 # Restart=on-failure). An unexpected tmux-session end — claude
@@ -70,7 +80,9 @@ fi
 # Send the launcher into the tmux session. `exec` so the
 # tmux pane dies when the launcher exits, which lets the
 # foreground loop below notice and return control to systemd.
-tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL" Enter
+# Pass $WORKDIR explicitly so the launcher records the same value into
+# $STATE_ROOT/workdir on every supervised launch.
+tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL \"$WORKDIR\"" Enter
 
 # Auto-dismiss the `--dangerously-load-development-channels` confirmation
 # prompt and the workspace-trust prompt. Both fire on every fresh `claude`
