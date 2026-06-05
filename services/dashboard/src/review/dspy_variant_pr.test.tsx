@@ -15,6 +15,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DspyVariantPrReview from './dspy_variant_pr';
 import type { DspyVariantPrRow } from '../api/types';
 
+vi.mock('../api/sim', () => ({
+  useLiveSim: vi.fn(() => ({
+    mode: 'ws',
+    lastUpdated: new Date().toISOString(),
+    flashIds: new Set(),
+  })),
+}));
+
 function makeWrapper() {
   const qc = new QueryClient({
     defaultOptions: {
@@ -219,5 +227,24 @@ describe('DspyVariantPrReview', () => {
     // Submit button must be disabled (override_reason is required but empty).
     const submitBtn = screen.getByRole('button', { name: /submit/i });
     expect(submitBtn).toBeDisabled();
+  });
+
+  it('renders ConnectionAffordance with Live mode (triage finding 7022628a)', async () => {
+    // Verify that useLiveSim is mocked and provides the freshness affordance
+    // in the top bar, satisfying DESIGN.md mandatory rule #8:
+    // "connection-freshness affordance always visible on every live page".
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/next')) return Promise.resolve(jsonResponse([BASE_ROW]));
+      if (url.includes('/stats')) return Promise.resolve(jsonResponse(STATS_RESPONSE));
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+
+    const { Wrapper } = makeWrapper();
+    render(<DspyVariantPrReview />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Live/i)).toBeInTheDocument();
+    });
   });
 });
