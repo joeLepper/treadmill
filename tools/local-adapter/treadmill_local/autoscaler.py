@@ -136,6 +136,8 @@ class Autoscaler:
         reap_dead_workers_fn: Callable[[], int] | None = None,
         staleness_guard: Any = None,
         staleness_pid_file: Path | None = None,
+        heartbeat_fn: Callable[[dict[str, Any]], None] | None = None,
+        start_worker_no_build_fn: Callable[[], None] | None = None,
     ) -> None:
         if min_count < 0:
             raise ValueError(f"min_count must be >= 0, got {min_count}")
@@ -158,7 +160,13 @@ class Autoscaler:
         # fully-local path + tests that don't care about self-heal).
         self.staleness_guard = staleness_guard
         self.staleness_pid_file = staleness_pid_file
+        self.heartbeat_fn = heartbeat_fn or (lambda _: None)
+        self.start_worker_no_build_fn = start_worker_no_build_fn or (lambda: None)
         self._stop_event = threading.Event()
+        # Image build fallback tracking (K=12, F=3)
+        self._consecutive_build_failures = 0
+        self._fallback_ticks = 0
+        self._image_build_broken_reported = False
 
     def tick(self) -> AutoscalerTick:
         """Run one iteration of the control loop.
@@ -167,6 +175,10 @@ class Autoscaler:
         containers, which is unaffected by exited ones), then reap.
         Reap errors are swallowed by the closure itself so they never
         break the tick.
+
+        Image build fallback: when _ensure_images_built fails repeatedly,
+        after K=12 consecutive failures run ONE tick with build_images=False.
+        After F=3 fallback ticks, emit image_build_broken via heartbeat.
         """
         visible, in_flight = self.queue_depth_fn()
         total = visible + in_flight
@@ -174,8 +186,47 @@ class Autoscaler:
         desired = self._compute_desired(total)
         delta = desired - current
         started = max(0, delta)
+
+        # Check if we're in fallback mode (previous tick(s) hit K threshold)
+        in_fallback = self._fallback_ticks > 0
+
         for _ in range(started):
-            self.start_worker_fn()
+            try:
+                if in_fallback:
+                    # Fallback tick: call the no-build variant
+                    self.start_worker_no_build_fn()
+                else:
+                    # Normal tick: try to build images
+                    self.start_worker_fn()
+            except RuntimeError as exc:
+                # Only count docker build errors, not other RuntimeErrors
+                if "docker build" in str(exc).lower():
+                    if not in_fallback:
+                        # Increment counter during normal (non-fallback) ticks
+                        self._consecutive_build_failures += 1
+                        if self._consecutive_build_failures >= 12:
+                            # Hit K=12 threshold, trigger fallback for next iteration
+                            logger.error(
+                                "image build failed 12 times; "
+                                "will use fallback (last-known-good image)"
+                            )
+                            self._consecutive_build_failures = 0
+                            self._fallback_ticks = 1
+                    # Don't re-raise; error is logged by run()'s exception handler
+                else:
+                    # Not a build error, re-raise for normal error handling
+                    raise
+
+        # Update fallback state tracking
+        if in_fallback:
+            # We completed a fallback tick; increment counter and check escalation
+            self._fallback_ticks += 1
+            # After F=3 fallback ticks, emit image_build_broken escalation
+            if self._fallback_ticks > 3 and not self._image_build_broken_reported:
+                self._image_build_broken_reported = True
+                logger.error("image_build_broken: escalating after 3+ fallback ticks")
+                self.heartbeat_fn({"image_build_broken": True})
+
         reaped = self.reap_dead_workers_fn()
         return AutoscalerTick(
             visible=visible,
@@ -368,6 +419,12 @@ def main() -> int:
         ensure_egress_network(adapter)
         ensure_egress_proxy_container(adapter, egress_config_dir)
 
+    # Read the build_images flag from env; default to True.
+    build_images = (
+        os.environ.get("TREADMILL_AUTOSCALER_BUILD_IMAGES", "true").lower()
+        not in ("false", "0", "no")
+    )
+
     if deployment_id is not None:
         # Dev-local: build LocalRuntime with the deployment_config so
         # ``start_worker_once`` calls into the dev-local credential
@@ -375,9 +432,11 @@ def main() -> int:
         # parent's in-memory state doesn't cross the subprocess boundary).
         from treadmill_local.deployment_config import load_deployment_yaml
         cfg = load_deployment_yaml(deployment_id)
-        runtime = LocalRuntime(infra_dir=infra_dir, deployment_config=cfg)
+        runtime = LocalRuntime(
+            infra_dir=infra_dir, deployment_config=cfg, build_images=build_images
+        )
     else:
-        runtime = LocalRuntime(infra_dir=infra_dir)
+        runtime = LocalRuntime(infra_dir=infra_dir, build_images=build_images)
 
     def get_depth() -> tuple[int, int]:
         """Return (visible, in_flight) message counts in one SQS call.
@@ -415,6 +474,15 @@ def main() -> int:
 
     def start_worker() -> None:
         runtime.start_worker_once(family, docker_adapter=adapter)
+
+    def start_worker_no_build() -> None:
+        # Temporarily disable image builds for fallback ticks
+        old_build = runtime.build_images
+        try:
+            runtime.build_images = False
+            runtime.start_worker_once(family, docker_adapter=adapter)
+        finally:
+            runtime.build_images = old_build
 
     def reap_dead_workers() -> int:
         """Remove exited worker containers older than ``_REAP_AGE_SECONDS``.
@@ -465,6 +533,7 @@ def main() -> int:
         tick_seconds=tick,
         staleness_guard=staleness_guard,
         staleness_pid_file=AUTOSCALER_PID_FILE,
+        start_worker_no_build_fn=start_worker_no_build,
     )
 
     def _on_signal(_signum: int, _frame: Any) -> None:
