@@ -47,10 +47,16 @@ mkdir -p "$STATE_ROOT/telegram" "$STATE_ROOT/treadmill"
 # state so a `<defunct>` claude left over from a SIGKILL doesn't block the
 # next launch. See 2026-06-04 alan crash test (systemd wrapper failed to
 # recover for the same reason).
+#
+# The trailing `|| true` is load-bearing under `set -euo pipefail`: a dead
+# PID makes `ps -p` exit non-zero, pipefail propagates it, and the failing
+# command-substitution trips `set -e` — without `|| true`, the launcher
+# silently exits 1 on every stale-pidfile case. (Caught by the same alan
+# crash test that exposed the zombie-PID bug.)
 PIDFILE="$STATE_ROOT/launcher.pid"
 if [[ -f "$PIDFILE" ]]; then
   _pid=$(cat "$PIDFILE")
-  _state=$(ps -p "$_pid" -o state= 2>/dev/null | head -c 1)
+  _state=$(ps -p "$_pid" -o state= 2>/dev/null | head -c 1 || true)
   if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null && [[ "$_state" != "Z" ]]; then
     echo "[launch-session] launcher already alive for label $LABEL (pid $_pid); refusing to start" >&2
     exit 1

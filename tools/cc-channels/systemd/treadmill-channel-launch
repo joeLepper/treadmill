@@ -36,7 +36,12 @@ if [ -f "$PIDFILE" ]; then
   # all refused; systemd's Restart=on-failure looped without recovering. We
   # also check the process state via `ps`; a `Z` (zombie) is treated as dead
   # for our purposes so the singleton check doesn't block recovery.
-  STATE=$(ps -p "$PID" -o state= 2>/dev/null | head -c 1)
+  # `|| true` matters under `set -euo pipefail`: a dead PID makes `ps -p`
+  # exit non-zero, pipefail propagates it through the pipeline, and the
+  # command-substitution failure trips `set -e` — so without the `|| true`
+  # the wrapper silently exits 1 on every stale-pidfile case (no stderr,
+  # systemd Restart-loops forever). See the alan crash test after #186.
+  STATE=$(ps -p "$PID" -o state= 2>/dev/null | head -c 1 || true)
   if kill -0 "$PID" 2>/dev/null && [ "$STATE" != "Z" ]; then
     echo "launcher already alive for label $LABEL (pid $PID); refusing to start" >&2
     exit 1
