@@ -1221,6 +1221,16 @@ _ROLES: list[dict[str, Any]] = [
         "output_kind": OutputKind.ANALYSIS,
         "system_prompt": _load_prompt("role_ui_triage_v1.md"),
     },
+    {
+        # ADR-0070 substep 4. Sonnet-tier because the role reasons about
+        # prompt design (the meta-output of ADR-0053) and must emit a
+        # structured JSON envelope. Rarely dispatched (Wave 4 cadence);
+        # cost is not the relevant axis.
+        "id": "role-dspy-variant-reviewer",
+        "model": "claude-sonnet-4-6",
+        "output_kind": OutputKind.ANALYSIS,
+        "system_prompt": _load_prompt("role_dspy_variant_reviewer_v1.md"),
+    },
 ]
 
 
