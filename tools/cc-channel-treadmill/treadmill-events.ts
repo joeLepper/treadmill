@@ -33,6 +33,10 @@
  * Tested against Claude Code 2.1.161 (channels research preview — the
  * --channels / --dangerously-load-development-channels contract may drift).
  */
+import { watch } from 'node:fs'
+import { mkdir, readdir, readFile, unlink } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
@@ -254,11 +258,52 @@ function connect(): void {
   }
 }
 
+// ── relay inbox watcher ────────────────────────────────────────────────────────
+// Watches ~/.cc-channels/<label>/relay/ for files dropped by cc-relay.py and
+// injects them as channel notifications. Drains any files present on startup
+// so messages queued while the session was down are not lost.
+const RELAY_DIR = join(homedir(), '.cc-channels', LABEL, 'relay')
+
+async function processRelayFile(fpath: string): Promise<void> {
+  let content: string
+  try {
+    content = await readFile(fpath, 'utf-8')
+    await unlink(fpath)
+  } catch {
+    return // already consumed (duplicate fs.watch event) or unreadable
+  }
+  await mcp.notification({
+    method: 'notifications/claude/channel',
+    params: {
+      content,
+      meta: { source: 'relay' },
+    },
+  })
+}
+
+async function startRelayWatcher(): Promise<void> {
+  await mkdir(RELAY_DIR, { recursive: true })
+  // Drain messages that arrived while the session was down.
+  const pending = (await readdir(RELAY_DIR)).filter(f => f.endsWith('.md'))
+  for (const fname of pending) {
+    await processRelayFile(join(RELAY_DIR, fname))
+  }
+  watch(RELAY_DIR, (_event, filename) => {
+    if (!filename?.endsWith('.md')) return
+    processRelayFile(join(RELAY_DIR, filename)).catch(err =>
+      console.error(`treadmill-events: relay forward failed: ${err}`),
+    )
+  })
+}
+
 // Launch-time gate: only become an active channel when this session carries a
 // label (set by tools/cc-channels/launch-session.sh). Otherwise stay a
 // connected-but-inert MCP server.
 if (LABEL) {
   connect()
+  startRelayWatcher().catch(err =>
+    console.error(`treadmill-events: relay watcher setup failed: ${err}`),
+  )
 } else {
   console.error(
     'treadmill-events: TREADMILL_SESSION_LABEL unset — idle ' +
