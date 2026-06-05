@@ -1852,6 +1852,7 @@ class LocalRuntime:
             "TREADMILL_AUTOSCALER_MAX": str(max_count),
             "TREADMILL_AUTOSCALER_TICK_SECONDS": "2",
             "TREADMILL_AUTOSCALER_LOG_FILE": str(AUTOSCALER_LOG_FILE),
+            "TREADMILL_AUTOSCALER_BUILD_IMAGES": "true" if self.build_images else "false",
             "AWS_ENDPOINT_URL": self.state.moto_endpoint or "",
             "AWS_DEFAULT_REGION": "us-east-1",
             "AWS_ACCESS_KEY_ID": "test",
@@ -1929,6 +1930,7 @@ class LocalRuntime:
                 autoscaler_cfg["tick_seconds"]
             ),
             "TREADMILL_AUTOSCALER_LOG_FILE": str(AUTOSCALER_LOG_FILE),
+            "TREADMILL_AUTOSCALER_BUILD_IMAGES": "true" if self.build_images else "false",
             # The subprocess entrypoint branches on this env var: when set
             # it constructs ``LocalRuntime(deployment_config=cfg)`` so
             # ``start_worker_once`` runs the dev-local credential-injection
