@@ -12,6 +12,7 @@ import { Overview } from './pages/Overview';
 import { ReviewKind } from './pages/ReviewKind';
 import { TaskDetail } from './pages/TaskDetail';
 import { TriageLabeling } from './pages/TriageLabeling';
+import DspyVariantPrReview from './review/dspy_variant_pr';
 
 export function App() {
   return (
@@ -19,6 +20,9 @@ export function App() {
       <Route path="/" element={<Overview />} />
       <Route path="/tasks/:taskId" element={<TaskDetail />} />
       <Route path="/triage" element={<TriageLabeling />} />
+      {/* Static /review/* routes MUST come before the dynamic /review/:kind
+          so they are not swallowed by the param wildcard. */}
+      <Route path="/review/dspy-variant-pr" element={<DspyVariantPrReview />} />
       {/* MUST come before the wildcard or unknown /review/* paths get
           bounced to "/" instead of reaching ReviewKind's in-page
           unknown-kind fallback. */}

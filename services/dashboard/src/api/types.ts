@@ -271,3 +271,44 @@ export interface TriageLabelInput {
   label_notes: string | null;
   labeled_by: string;
 }
+
+/* ─── DSPy variant PR review (ADR-0070) ───────────────────────────── */
+
+export type DspyVariantPrLabel = 'merge' | 'revise' | 'drop';
+export type DspyVariantPrConfidence = 'high' | 'medium' | 'low';
+
+export interface DspyVariantPrRow {
+  id: string;
+  created_at: string;
+  source_run_id: string;
+  source_pr_number: number;
+  source_pr_url: string;
+  judge_role: string;
+  judge_prompt_path: string;
+  current_score: number;
+  variant_score: number;
+  improvement: number;
+  patch_diff: string;
+  corpus_s3_uri: string;
+  llm_label: DspyVariantPrLabel;
+  llm_confidence: DspyVariantPrConfidence;
+  llm_rationale: string;
+  llm_prompt_version: string;
+  llm_model: string;
+  label_verdict: DspyVariantPrLabel | null;
+  label_notes: string | null;
+  label_override_reason: string | null;
+  labeled_by: string | null;
+  labeled_at: string | null;
+  label_guidelines_version: string | null;
+  outcome_state: string | null;
+  outcome_merged_at: string | null;
+}
+
+/** Body posted to ``POST /api/v1/review/dspy-variant-pr/:id/label``. */
+export interface DspyVariantPrLabelInput {
+  label_verdict: DspyVariantPrLabel;
+  label_notes?: string | null;
+  label_override_reason?: string | null;
+  labeled_by: string;
+}
