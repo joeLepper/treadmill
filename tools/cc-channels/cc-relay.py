@@ -82,7 +82,8 @@ def main() -> None:
     relay_dir.mkdir(parents=True, exist_ok=True)
 
     from_suffix = f"-from-{args.from_label}" if args.from_label else ""
-    out_file = relay_dir / f"{int(time.time() * 1000)}{from_suffix}.md"
+    type_suffix = "-action" if args.msg_type == "action" else ""
+    out_file = relay_dir / f"{int(time.time() * 1000)}{type_suffix}{from_suffix}.md"
     out_file.write_text(body)
 
     print(f"relayed: {out_file}")
