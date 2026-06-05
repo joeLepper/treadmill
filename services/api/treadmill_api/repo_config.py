@@ -35,6 +35,18 @@ class RepoConfig:
     # Fallback Claude account when the primary hits a usage limit (ADR-0066).
     # ``None`` means no fallback; the worker stays on ``claude_account``.
     claude_account_fallback: str | None = None
+    # Per-repo git author name override (ADR-0076). ``None`` defers to the
+    # deployment default ``treadmill-agent``. Must be paired with
+    # ``git_author_email`` (both None or both not None).
+    git_author_name: str | None = None
+    # Per-repo git author email override (ADR-0076). ``None`` defers to the
+    # deployment default ``agent@treadmill``. Must be paired with
+    # ``git_author_name`` (both None or both not None).
+    git_author_email: str | None = None
+    # Per-repo commit trailer override (ADR-0076). Three-valued: ``None``
+    # uses the default trailer, empty string ``""`` suppresses it, any other
+    # value is used verbatim.
+    commit_trailer: str | None = None
     # Per-repo worker extras (ADR-0059). ``None`` is the wire shorthand for
     # "no extras"; ``OnboardingStore.get_repo_config`` always materializes it
     # as a non-None ``WorkerDeps`` (possibly with empty lists).
@@ -67,6 +79,9 @@ def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
         lint_command=data.get("lint_command"),
         claude_account=data.get("claude_account"),
         claude_account_fallback=data.get("claude_account_fallback"),
+        git_author_name=data.get("git_author_name"),
+        git_author_email=data.get("git_author_email"),
+        commit_trailer=data.get("commit_trailer"),
         worker_deps=worker_deps,
     )
 
@@ -80,6 +95,9 @@ def to_dict(config: RepoConfig) -> dict[str, Any]:
         "lint_command": config.lint_command,
         "claude_account": config.claude_account,
         "claude_account_fallback": config.claude_account_fallback,
+        "git_author_name": config.git_author_name,
+        "git_author_email": config.git_author_email,
+        "commit_trailer": config.commit_trailer,
         "worker_deps": (
             config.worker_deps.model_dump()
             if config.worker_deps is not None

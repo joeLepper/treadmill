@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import (
     ARRAY,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -132,6 +133,23 @@ class RepoConfigRow(Base):
     claude_account_fallback: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
+    # Per-repo git author name override (ADR-0076). ``NULL`` defers to the
+    # deployment default. Must be paired with ``git_author_email`` (both
+    # NULL or both NOT NULL) per the CHECK constraint.
+    git_author_name: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    # Per-repo git author email override (ADR-0076). ``NULL`` defers to the
+    # deployment default. Must be paired with ``git_author_name`` (both
+    # NULL or both NOT NULL) per the CHECK constraint.
+    git_author_email: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    # Per-repo commit trailer override (ADR-0076). Three-valued semantics:
+    # ``NULL`` keeps the default ``Co-Authored-By: Claude <noreply@anthropic.com>``
+    # trailer, empty-string ``""`` suppresses any trailer, any other string is
+    # used verbatim as the trailer line(s).
+    commit_trailer: Mapped[str | None] = mapped_column(String, nullable=True)
     # ADR-0059: per-repo Python / Node deps the worker installs before
     # task work. Binaries live in the ``repo_worker_binaries`` side table.
     worker_deps_python: Mapped[list[str]] = mapped_column(
@@ -157,6 +175,10 @@ class RepoConfigRow(Base):
 
     __table_args__ = (
         UniqueConstraint("repo", name="uq_repo_configs_repo"),
+        CheckConstraint(
+            "(git_author_name IS NULL) = (git_author_email IS NULL)",
+            name="ck_repo_configs_git_author_paired",
+        ),
     )
 
 

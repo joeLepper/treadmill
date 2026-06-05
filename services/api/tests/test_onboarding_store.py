@@ -402,3 +402,104 @@ async def test_record_context_doc_versions_monotonically(
     assert current.version == 2
     assert current.s3_key == "ctx/v2"
     assert current.content_sha == "b" * 64
+
+
+@integration
+@pytest.mark.asyncio
+async def test_repo_config_round_trips_git_author_override(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0076: git author override fields survive upsert/get."""
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    config = RepoConfig(
+        repo=repo,
+        git_author_name="Joe Lepper",
+        git_author_email="josephlepper@gmail.com",
+        commit_trailer="",
+    )
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, config)
+        await session.commit()
+
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None
+    assert fetched.git_author_name == "Joe Lepper"
+    assert fetched.git_author_email == "josephlepper@gmail.com"
+    assert fetched.commit_trailer == ""
+
+
+@integration
+@pytest.mark.asyncio
+async def test_repo_config_git_author_override_with_trailer_text(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0076: custom trailer text round-trips correctly."""
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    config = RepoConfig(
+        repo=repo,
+        git_author_name="Jane Doe",
+        git_author_email="jane@example.com",
+        commit_trailer="Custom-Trailer: value\nAnother: text",
+    )
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, config)
+        await session.commit()
+
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None
+    assert fetched.git_author_name == "Jane Doe"
+    assert fetched.git_author_email == "jane@example.com"
+    assert fetched.commit_trailer == "Custom-Trailer: value\nAnother: text"
+
+
+@integration
+@pytest.mark.asyncio
+async def test_repo_config_git_author_override_check_constraint_rejects_name_without_email(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0076: CHECK constraint rejects name without email."""
+    import sqlalchemy.exc
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    config = RepoConfig(
+        repo=repo,
+        git_author_name="Joe Lepper",
+        git_author_email=None,
+    )
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, config)
+        with pytest.raises(sqlalchemy.exc.IntegrityError):
+            await session.commit()
+
+
+@integration
+@pytest.mark.asyncio
+async def test_repo_config_git_author_override_defaults_to_none(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+) -> None:
+    """ADR-0076: git author override fields default to None."""
+    repo = f"acme/{uuid.uuid4().hex[:8]}"
+    store = OnboardingStore()
+
+    config = RepoConfig(repo=repo)
+    async with session_factory() as session:
+        await store.upsert_repo_config(session, config)
+        await session.commit()
+
+    async with session_factory() as session:
+        fetched = await store.get_repo_config(session, repo)
+    assert fetched is not None
+    assert fetched.git_author_name is None
+    assert fetched.git_author_email is None
+    assert fetched.commit_trailer is None

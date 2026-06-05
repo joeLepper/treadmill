@@ -128,6 +128,68 @@ def test_round_trip_claude_account_fallback():
         "lint_command": None,
         "claude_account": "primary",
         "claude_account_fallback": "backup",
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": None,
+        "worker_deps": None,
+    }
+    assert to_dict(parse_repo_config(source)) == source
+
+
+def test_parse_defaults_git_author_override_to_none():
+    """ADR-0076: omitting git author override fields defaults to None (use defaults)."""
+    cfg = parse_repo_config({"repo": "o/r"})
+    assert cfg.git_author_name is None
+    assert cfg.git_author_email is None
+    assert cfg.commit_trailer is None
+
+
+def test_parse_keeps_git_author_override():
+    """ADR-0076: git author override fields are parsed and stored correctly."""
+    cfg = parse_repo_config(
+        {
+            "repo": "o/r",
+            "git_author_name": "Joe Lepper",
+            "git_author_email": "josephlepper@gmail.com",
+            "commit_trailer": "",
+        }
+    )
+    assert cfg.git_author_name == "Joe Lepper"
+    assert cfg.git_author_email == "josephlepper@gmail.com"
+    assert cfg.commit_trailer == ""
+
+
+def test_round_trip_git_author_override():
+    """ADR-0076: git author override fields survive to_dict → parse_repo_config."""
+    source = {
+        "repo": "o/r",
+        "mode": "adapt",
+        "auto_merge_blocked": False,
+        "test_command": None,
+        "lint_command": None,
+        "claude_account": None,
+        "claude_account_fallback": None,
+        "git_author_name": "Joe Lepper",
+        "git_author_email": "josephlepper@gmail.com",
+        "commit_trailer": "",
+        "worker_deps": None,
+    }
+    assert to_dict(parse_repo_config(source)) == source
+
+
+def test_round_trip_with_commit_trailer_text():
+    """ADR-0076: non-empty commit trailer survives round-trip."""
+    source = {
+        "repo": "o/r",
+        "mode": "conform",
+        "auto_merge_blocked": False,
+        "test_command": None,
+        "lint_command": None,
+        "claude_account": None,
+        "claude_account_fallback": None,
+        "git_author_name": None,
+        "git_author_email": None,
+        "commit_trailer": "Custom-Trailer: value\nAnother-Trailer: other",
         "worker_deps": None,
     }
     assert to_dict(parse_repo_config(source)) == source
