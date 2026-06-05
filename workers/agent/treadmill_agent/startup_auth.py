@@ -232,6 +232,48 @@ def _apply_token_to_gh(token: str) -> None:
         )
 
 
+def _install_git_credential_helper() -> None:
+    """Install the on-demand credential helper for ``https://github.com``.
+
+    Sets a per-host ``credential.https://github.com.helper`` (``--replace-all``
+    so it supersedes the static-token helper that ``gh auth setup-git`` just
+    installed for github.com). The helper itself is the runnable module
+    :mod:`treadmill_agent.git_credential_helper` — it mints a fresh
+    installation token per git operation so long builds no longer outlive
+    their token. ``credential.useHttpPath=true`` ensures git fills the
+    ``path`` attribute on the credential request so the helper can scope
+    the mint to the right installation (``owner/name``).
+
+    Only github.com routes through the helper; ``gh``'s top-level
+    ``credential.helper`` for the gh CLI is left alone.
+    """
+    helper_value = "!python -m treadmill_agent.git_credential_helper"
+    result = subprocess.run(
+        [
+            "git", "config", "--global", "--replace-all",
+            "credential.https://github.com.helper", helper_value,
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise StartupAuthError(
+            f"`git config credential.https://github.com.helper` exited "
+            f"{result.returncode}: {result.stderr.decode(errors='replace')}"
+        )
+    result = subprocess.run(
+        [
+            "git", "config", "--global",
+            "credential.https://github.com.useHttpPath", "true",
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise StartupAuthError(
+            f"`git config credential.https://github.com.useHttpPath` exited "
+            f"{result.returncode}: {result.stderr.decode(errors='replace')}"
+        )
+
+
 def bootstrap_github_auth(
     *,
     settings: "Settings",
@@ -309,6 +351,10 @@ def bootstrap_github_auth_via_app(
         _apply_token_to_gh(token)
     finally:
         token = None  # noqa: F841 - intentional dereference
+    # Override gh's static-token helper for github.com so each subsequent
+    # git operation mints a fresh installation token rather than reusing the
+    # one we just handed to gh (which would expire mid-build).
+    _install_git_credential_helper()
     if repo:
         logger.info(
             "gh auth bootstrap complete (GitHub App installation token, repo=%s)",
