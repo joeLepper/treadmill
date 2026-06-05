@@ -658,11 +658,18 @@ def test_every_role_is_referenced_by_at_least_one_workflow() -> None:
     }
     defined_role_ids = {role["id"] for role in _all_roles()}
     orphans = defined_role_ids - referenced_role_ids
-    # role-dspy-variant-reviewer is dispatched on-demand (no workflow);
-    # workflow registration lands in the ADR-0070 operations follow-up.
-    assert orphans == {"role-dspy-variant-reviewer"}, (
+    # On-demand roles dispatched directly from the dashboard (no
+    # workflow): role-dspy-variant-reviewer (ADR-0070 substep 4) and
+    # role-architect-gold-proposer / role-validator-gold-proposer
+    # (ADR-0070 substep 3 — proposer labels for the gold queues).
+    ON_DEMAND_ROLES = {
+        "role-dspy-variant-reviewer",
+        "role-architect-gold-proposer",
+        "role-validator-gold-proposer",
+    }
+    assert orphans == ON_DEMAND_ROLES, (
         f"unexpected orphan roles (defined but unused by any workflow): "
-        f"{sorted(orphans - {'role-dspy-variant-reviewer'})}"
+        f"{sorted(orphans - ON_DEMAND_ROLES)}"
     )
 
 
