@@ -80,6 +80,10 @@ class _TaskBlock(BaseModel):
     repo: str
     title: str
     description: str | None
+    operator_note: str | None = None
+    """Per ADR-0081: operator-injected hint for the worker. Workers read this
+    and inject it into the system prompt when non-null and the repo's
+    worker_hints_enabled is true."""
 
 
 class _PlanBlock(BaseModel):
@@ -403,6 +407,7 @@ async def get_step_context(
         task=_TaskBlock(
             id=task.id, plan_id=task.plan_id, repo=task.repo,
             title=task.title, description=task.description,
+            operator_note=task.operator_note,
         ),
         plan=_PlanBlock(
             id=plan.id, repo=plan.repo, intent=plan.intent,
