@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# cc-dashboard-kitty — Kitty-based 1×N operator dashboard with true per-pane text selection.
+#
+# Unlike cc-dashboard (tmux), each column here is a real kitty terminal window.
+# Mouse text selection stays within the focused pane — drag without any modifier.
+# Mouse wheel scrolls the focused pane. Click to switch focus.
+#
+# Requires: kitty (sudo apt install kitty)
+#
+# Usage:
+#   cc-dashboard-kitty [--labels "label1 label2 label3 label4"]
+#
+# Detach from a session's tmux with Ctrl-b d. Stop a session via:
+#   systemctl --user stop treadmill-channel@<label>.service
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna)
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --labels)
+            read -ra LABELS <<< "$2"
+            shift 2
+            ;;
+        *)
+            echo "usage: cc-dashboard-kitty [--labels \"label1 label2 label3 label4\"]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if ! command -v kitty &>/dev/null; then
+    echo "cc-dashboard-kitty: kitty not found. Install: sudo apt install kitty" >&2
+    exit 1
+fi
+
+if [[ ${#LABELS[@]} -lt 2 ]]; then
+    echo "cc-dashboard-kitty: need at least 2 labels" >&2
+    exit 1
+fi
+
+ATTACH="$SCRIPT_DIR/cc-attach"
+
+# Write a kitty session file. 'layout horizontal' gives one row of equal-width columns.
+SESSION=$(mktemp /tmp/cc-dashboard-kitty-XXXXXX.conf)
+trap 'rm -f "$SESSION"' EXIT
+
+{
+    printf 'new_tab cc-dashboard\n'
+    printf 'layout horizontal\n'
+    for label in "${LABELS[@]}"; do
+        # env -u TMUX: unsets any outer-session marker so tmux allows the nested attach.
+        printf 'launch --title %s env -u TMUX %s %s\n' "$label" "$ATTACH" "$label"
+    done
+} > "$SESSION"
+
+# setsid detaches kitty from the calling terminal's process group so it
+# survives the terminal being closed. Brief sleep lets kitty read the
+# session file before the trap removes it.
+setsid kitty --title cc-dashboard --session "$SESSION" &>/dev/null &
+sleep 1
