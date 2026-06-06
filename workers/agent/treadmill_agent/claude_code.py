@@ -351,6 +351,8 @@ def run_claude_code(
     prior_steps: list[PriorStep] | None = None,
     timeout_seconds: int = 1800,
     log_context: dict[str, Any] | None = None,
+    operator_note: str | None = None,
+    worker_hints_enabled: bool = True,
 ) -> CodeAuthorResult:
     """Drive Claude Code in ``repo_dir`` and return the captured summary.
 
@@ -392,6 +394,11 @@ def run_claude_code(
         prior_steps=prior_steps or [],
     )
 
+    # ADR-0081: inject operator hint into system prompt if present + enabled
+    system_prompt = role.system_prompt
+    if operator_note is not None and worker_hints_enabled:
+        system_prompt = _inject_operator_hint(system_prompt, operator_note)
+
     cmd = [
         binary, "--print",
         # JSON output mode: claude emits a single JSON object on stdout
@@ -413,7 +420,7 @@ def run_claude_code(
         # Bash + non-edit tools still respect the role's broader
         # sandbox, which is enforced by the container boundary.
         "--permission-mode", "acceptEdits",
-        "--append-system-prompt", role.system_prompt,
+        "--append-system-prompt", system_prompt,
         prompt,
     ]
     base_extra: dict[str, Any] = dict(log_context or {})
@@ -558,6 +565,21 @@ def _try_parse_json_output(
         "cache_read_tokens": int(usage_raw.get("cache_read_input_tokens", 0)),
     }
     return result_text or text, usage
+
+
+def _inject_operator_hint(system_prompt: str, operator_note: str) -> str:
+    """Append the operator hint section to the system prompt.
+
+    Per ADR-0081 §1, the envelope is a clearly-tagged section with
+    the note text verbatim and a disclaimer that the operator added it.
+    """
+    hint_section = (
+        "\n\n## Operator hint\n\n"
+        f"{operator_note}\n\n"
+        "(End operator hint. The dispatching operator added this hint to "
+        "help focus your work. Take it seriously but verify before acting.)"
+    )
+    return system_prompt + hint_section
 
 
 def _find_binary() -> str:

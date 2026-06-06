@@ -31,6 +31,7 @@ from treadmill_api.models import (
     WorkflowRun,
     WorkflowVersion,
 )
+from treadmill_api.events.task import OperatorHintSet
 
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
@@ -60,6 +61,9 @@ class TaskResponse(BaseModel):
     task is created with the rewritten description and ``parent_task_id``
     pointing back to the original. ``None`` for tasks that did not
     originate from a supersede."""
+    operator_note: str | None = None
+    """Per ADR-0081: operator-injected hint for the worker. Nullable and
+    defaults to None."""
     derived_status: str | None = None
     mergeability: str | None = None
     """The ``derived_mergeability`` from the ``task_mergeability`` VIEW
@@ -107,6 +111,7 @@ def _row_to_response(row) -> TaskResponse:
         workflow_version_id=row.workflow_version_id,
         created_by=row.created_by, created_at=row.created_at,
         parent_task_id=row.parent_task_id,
+        operator_note=row.operator_note,
         derived_status=row.derived_status,
         mergeability=row.derived_mergeability,
     )
@@ -115,7 +120,7 @@ def _row_to_response(row) -> TaskResponse:
 _TASK_WITH_STATUS_SQL = """
     SELECT t.id, t.plan_id, t.repo, t.title, t.description,
            t.workflow_version_id, t.created_by, t.created_at,
-           t.parent_task_id,
+           t.parent_task_id, t.operator_note,
            ts.derived_status,
            tm.derived_mergeability
     FROM tasks t
@@ -203,7 +208,7 @@ async def create_task(
 _TASK_NEEDS_OPERATOR_SQL = """
     SELECT DISTINCT t.id, t.plan_id, t.repo, t.title, t.description,
            t.workflow_version_id, t.created_by, t.created_at,
-           t.parent_task_id,
+           t.parent_task_id, t.operator_note,
            ts.derived_status,
            tm.derived_mergeability
     FROM tasks t
@@ -429,3 +434,73 @@ async def retry_task(
 
     # 7. Return 201 with the new run id.
     return TaskRetryResponse(workflow_run_id=run_id)
+
+
+class OperatorNoteRequest(BaseModel):
+    note: str | None = None
+    """The operator hint text, or null to clear the note."""
+
+
+@router.post("/{task_id}/operator_note", status_code=status.HTTP_200_OK)
+async def set_operator_note(
+    task_id: uuid.UUID,
+    body: OperatorNoteRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+) -> TaskResponse:
+    """Set or clear the operator_note on a task (ADR-0081 §1).
+
+    The operator uses this endpoint to inject context hints for the worker
+    before the next step executes. Workers read this via the per-step context
+    fetch and inject it into the system prompt when non-null and the repo's
+    worker_hints_enabled is true.
+
+    Request: ``{note: str | null}``
+      - Provide a string to set the note.
+      - Pass null to clear it.
+
+    Response: The updated task record.
+
+    Events: Emits ``task.operator_hint_set`` with the note excerpt and
+    operator label for the audit trail.
+    """
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="task not found",
+        )
+
+    # Update the note
+    task.operator_note = body.note
+
+    # Prepare event payload
+    note_for_event = body.note
+    if note_for_event is None:
+        note_excerpt = "(cleared)"
+    else:
+        note_excerpt = note_for_event[:500]
+
+    # Emit the audit event
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="task",
+        action="operator_hint_set",
+        payload=OperatorHintSet(
+            note_excerpt=note_excerpt,
+            set_by="operator",  # TODO: extract from auth context when available
+        ),
+        plan_id=task.plan_id,
+        task_id=task_id,
+    )
+
+    await session.commit()
+    await session.refresh(task)
+
+    # Return the updated task
+    row = (
+        await session.execute(
+            text(_TASK_WITH_STATUS_SQL + " WHERE t.id = :id"),
+            {"id": task.id},
+        )
+    ).one()
+    return _row_to_response(row)

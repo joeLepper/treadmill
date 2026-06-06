@@ -137,6 +137,15 @@ class ApiClient:
             body["force_bypass_cap"] = True
         return self._request("POST", f"/api/v1/tasks/{task_id}/retry", json=body)
 
+    def set_operator_note(
+        self,
+        task_id: str,
+        note: str | None,
+    ) -> dict[str, Any]:
+        """Set or clear the operator_note on a task (ADR-0081 §1)."""
+        body: dict[str, Any] = {"note": note}
+        return self._request("POST", f"/api/v1/tasks/{task_id}/operator_note", json=body)
+
     # ── Workflows ─────────────────────────────────────────────────────────────
 
     def trigger_workflow(

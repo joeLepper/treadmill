@@ -125,18 +125,31 @@ def onboarding_update(
         "--clear-worker-deps",
         help="Empty all worker dependency lists (mutually exclusive with dep flags).",
     )] = False,
+    hints: Annotated[str | None, typer.Option(
+        "--hints",
+        help="Enable/disable worker hint channel (ADR-0081): 'on' or 'off'.",
+    )] = None,
 ) -> None:
-    """Update per-repo worker dependencies (ADR-0059 Step 5).
+    """Update per-repo worker dependencies and feature flags (ADR-0059, ADR-0081).
 
     Without ``--clear-worker-deps``, appends specs to the existing lists
     (additive, deduplicated by exact string). With ``--clear-worker-deps``,
     all three lists are replaced with empty lists.
+
+    Use ``--hints on|off`` to enable/disable the worker hint channel per
+    ADR-0081 (operator_note injection).
     """
     any_deps = bool(worker_deps_python or worker_deps_node or binary)
     if clear_worker_deps and any_deps:
         err_console.print(
             "[red]--clear-worker-deps cannot be combined with "
             "--worker-deps-python, --worker-deps-node, or --binary[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    if hints is not None and hints not in ("on", "off"):
+        err_console.print(
+            "[red]--hints must be 'on' or 'off'[/red]"
         )
         raise typer.Exit(code=1)
 
@@ -175,6 +188,8 @@ def onboarding_update(
                 "claude_account": current.get("claude_account"),
                 "worker_deps": merged,
             }
+            if hints is not None:
+                post_body["worker_hints_enabled"] = (hints == "on")
 
             try:
                 client.upsert_repo_config(post_body)
@@ -190,6 +205,9 @@ def onboarding_update(
     n_py = len(merged["python"])
     n_node = len(merged["node"])
     n_bin = len(merged["binaries"])
+    status_parts = [f"python={n_py} node={n_node} binaries={n_bin}"]
+    if hints is not None:
+        status_parts.append(f"hints={'on' if hints == 'on' else 'off'}")
     console.print(
-        f"updated worker_deps for {repo}: python={n_py} node={n_node} binaries={n_bin}"
+        f"updated {repo}: {' '.join(status_parts)}"
     )

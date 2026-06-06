@@ -502,6 +502,11 @@ def _execute(
                 # runs pass through with an empty list.
                 prior_steps=ctx.prior_steps,
                 log_context=log_context,
+                # ADR-0081: operator hint channel. Worker injects the
+                # operator_note into the system prompt when non-null and
+                # the repo's worker_hints_enabled is true.
+                operator_note=ctx.operator_note,
+                worker_hints_enabled=repo_config.worker_hints_enabled if repo_config else True,
             )
 
         # ADR-0020: surface the parsed per-step token usage to the
