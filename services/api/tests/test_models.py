@@ -207,12 +207,18 @@ def test_no_unexpected_jsonb_columns():
       is open-ended as the bug taxonomy expands per the v1 prompt's
       `other`-rate-as-signal contract, so a fixed-column shape would
       force a migration per taxonomy update.)
+    - repo_configs.sensitive_strings (ADR-0078 — operator-curated
+      list of additional substrings the secret-leak gate blocks on
+      vault writes; a list type is the natural shape, and a fixed-
+      column shape would force a migration each time the operator
+      added a new pattern.)
     """
     allowed = {
         ("events", "payload"),
         ("workflow_run_steps", "output"),
         ("schedules", "payload_template"),
         ("triage_findings", "evidence_summary"),
+        ("repo_configs", "sensitive_strings"),
     }
     found = {
         (table.name, col.name)

@@ -54,6 +54,8 @@ def test_round_trip_via_to_dict():
         "claude_account": "secondary",
         "claude_account_fallback": None,
         "worker_deps": None,
+        "is_public": False,
+        "sensitive_strings": None,
         "git_author_name": None,
         "git_author_email": None,
         "commit_trailer": None,
@@ -87,6 +89,8 @@ def test_round_trip_via_to_dict_with_worker_deps():
         "git_author_name": None,
         "git_author_email": None,
         "commit_trailer": None,
+        "is_public": False,
+        "sensitive_strings": None,
     }
 
     assert to_dict(parse_repo_config(source)) == source
@@ -138,6 +142,8 @@ def test_round_trip_claude_account_fallback():
         "git_author_email": None,
         "commit_trailer": None,
         "worker_deps": None,
+        "is_public": False,
+        "sensitive_strings": None,
     }
     assert to_dict(parse_repo_config(source)) == source
 
@@ -179,6 +185,8 @@ def test_round_trip_git_author_override():
         "git_author_email": "josephlepper@gmail.com",
         "commit_trailer": "",
         "worker_deps": None,
+        "is_public": False,
+        "sensitive_strings": None,
     }
     assert to_dict(parse_repo_config(source)) == source
 
@@ -197,5 +205,7 @@ def test_round_trip_with_commit_trailer_text():
         "git_author_email": None,
         "commit_trailer": "Custom-Trailer: value\nAnother-Trailer: other",
         "worker_deps": None,
+        "is_public": False,
+        "sensitive_strings": None,
     }
     assert to_dict(parse_repo_config(source)) == source
