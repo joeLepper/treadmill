@@ -128,10 +128,6 @@ class WorkerContext:
     repo: str
     title: str
     description: str | None
-    operator_note: str | None = None
-    """Per ADR-0081: operator-injected hint for the worker. When non-null
-    and the repo's worker_hints_enabled is true, the worker injects this
-    into the system prompt before invoking Claude Code."""
 
     plan_intent: str | None
     plan_doc_path: str | None
@@ -163,6 +159,12 @@ class WorkerContext:
     honors it verbatim instead of re-evaluating. ``None`` for paths
     that didn't plumb cross-run context (initial dispatch, webhook
     fan-out, etc.)."""
+    operator_note: str | None = None
+    """Per ADR-0081: operator-injected hint for the worker. When non-null
+    and the repo's worker_hints_enabled is true, the worker injects this
+    into the system prompt before invoking Claude Code. Last in the
+    field order so it can default-None without breaking earlier
+    non-default fields."""
 
 
 class ApiClient:
@@ -218,7 +220,6 @@ def _decode_context(body: dict[str, Any]) -> WorkerContext:
         repo=body["task"]["repo"],
         title=body["task"]["title"],
         description=body["task"]["description"],
-        operator_note=body["task"].get("operator_note"),
         plan_intent=body["plan"]["intent"],
         plan_doc_path=body["plan"]["doc_path"],
         workflow_id=body["run"]["workflow_id"],
@@ -274,4 +275,5 @@ def _decode_context(body: dict[str, Any]) -> WorkerContext:
             for v in body.get("task_validations", [])
         ],
         source_step=source_step,
+        operator_note=body["task"].get("operator_note"),
     )
