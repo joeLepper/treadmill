@@ -51,6 +51,17 @@ class RepoConfig:
     # "no extras"; ``OnboardingStore.get_repo_config`` always materializes it
     # as a non-None ``WorkerDeps`` (possibly with empty lists).
     worker_deps: WorkerDeps | None = None
+    # Marks a repo as publicly visible on GitHub (ADR-0078). Drives the
+    # secret-leak gate on vault writes — for public repos the gate
+    # refuses content matching known-sensitive strings, for private
+    # repos it is a no-op. Default ``False`` so existing rows are
+    # behavior-neutral.
+    is_public: bool = False
+    # Per-repo extra sensitive-string blocklist (ADR-0078). The gate
+    # always checks the hardcoded baseline (medicoder slug variants +
+    # the public-repo account-id) plus any substrings declared here.
+    # ``None`` means "baseline only". Stored as JSONB list of strings.
+    sensitive_strings: list[str] | None = None
 
 
 def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
@@ -71,6 +82,19 @@ def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
         else None
     )
 
+    sensitive_strings_data = data.get("sensitive_strings")
+    if sensitive_strings_data is not None and not isinstance(
+        sensitive_strings_data, list
+    ):
+        raise ValueError(
+            "repo_config 'sensitive_strings' must be a list of strings or null"
+        )
+    if sensitive_strings_data is not None:
+        if not all(isinstance(s, str) for s in sensitive_strings_data):
+            raise ValueError(
+                "repo_config 'sensitive_strings' entries must all be strings"
+            )
+
     return RepoConfig(
         repo=repo,
         mode=mode,
@@ -83,6 +107,8 @@ def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
         git_author_email=data.get("git_author_email"),
         commit_trailer=data.get("commit_trailer"),
         worker_deps=worker_deps,
+        is_public=bool(data.get("is_public", False)),
+        sensitive_strings=sensitive_strings_data,
     )
 
 
@@ -103,4 +129,6 @@ def to_dict(config: RepoConfig) -> dict[str, Any]:
             if config.worker_deps is not None
             else None
         ),
+        "is_public": config.is_public,
+        "sensitive_strings": config.sensitive_strings,
     }
