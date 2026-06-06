@@ -59,6 +59,10 @@ class OnboardRepoRequest(BaseModel):
     """ADR-0059 per-repo worker extras. ``None`` (omitted) is treated as
     an empty :class:`WorkerDeps`; clients that want "no extras" can omit
     the field rather than serializing an empty object."""
+    worker_hints_enabled: bool | None = None
+    """Per ADR-0081: control whether the worker's operator_note hint channel
+    is enabled for this repo. ``None`` (omitted) defers to the default (true);
+    pass ``true`` or ``false`` explicitly to set the flag."""
 
     @model_validator(mode="after")
     def _validate_git_author_paired(self) -> OnboardRepoRequest:
@@ -81,6 +85,7 @@ class OnboardRepoResponse(BaseModel):
     git_author_email: str | None = None
     commit_trailer: str | None = None
     worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
+    worker_hints_enabled: bool = True
 
 
 @router.post(
@@ -115,6 +120,7 @@ async def onboard_repo(
         git_author_email=body.git_author_email,
         commit_trailer=body.commit_trailer,
         worker_deps=worker_deps,
+        worker_hints_enabled=body.worker_hints_enabled if body.worker_hints_enabled is not None else True,
     )
 
     store = OnboardingStore()
@@ -131,6 +137,7 @@ async def onboard_repo(
         git_author_email=body.git_author_email,
         commit_trailer=body.commit_trailer,
         worker_deps=worker_deps,
+        worker_hints_enabled=config.worker_hints_enabled,
     )
 
 
@@ -145,6 +152,7 @@ class RepoConfigResponse(BaseModel):
     git_author_email: str | None = None
     commit_trailer: str | None = None
     worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
+    worker_hints_enabled: bool = True
 
 
 @router.get(
@@ -178,4 +186,5 @@ async def get_repo(
         git_author_email=config.git_author_email,
         commit_trailer=config.commit_trailer,
         worker_deps=config.worker_deps or WorkerDeps(),
+        worker_hints_enabled=config.worker_hints_enabled,
     )

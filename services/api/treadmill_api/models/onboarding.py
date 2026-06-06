@@ -175,6 +175,14 @@ class RepoConfigRow(Base):
         nullable=False,
         server_default=text("'{}'"),
     )
+    worker_hints_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    """Per ADR-0081: control whether the worker's operator_note hint channel
+    is enabled for this repo. Default true; flip to false to disable
+    hint injection and request_hint tool registration."""
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
