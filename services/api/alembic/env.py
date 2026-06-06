@@ -37,9 +37,22 @@ target_metadata = Base.metadata
 
 def _resolve_sync_url() -> str:
     """Convert the application's async DATABASE_URL into a sync form for
-    alembic. Raise if no URL is configured — alembic always needs one."""
+    alembic. Raise if no URL is configured AND we're running online —
+    alembic always needs one to actually run migrations.
+
+    In offline / ``--sql`` mode alembic only generates DDL (no DB
+    connection), so a placeholder URL is acceptable. This lets the
+    ADR-0080 alembic-migration-runnable rule-check run
+    ``alembic upgrade --sql head`` in the worker sandbox without a
+    live database — the DDL output is the gate's input, not a DB
+    connection.
+    """
     settings = get_settings()
     if not settings.database_url:
+        if context.is_offline_mode():
+            # Offline / --sql mode: dialect URL is enough to drive the
+            # generator. No connection is opened.
+            return "postgresql+psycopg://placeholder:placeholder@localhost/placeholder"
         raise RuntimeError(
             "DATABASE_URL is not set. Alembic requires a database URL; "
             "set DATABASE_URL in the environment before invoking alembic."

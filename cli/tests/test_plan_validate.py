@@ -129,6 +129,24 @@ def test_alembic_db_commands_flagged_as_sandbox_unsafe(script: str) -> None:
 @pytest.mark.parametrize(
     "script",
     [
+        "alembic upgrade --sql head",
+        "cd services/api && uv run alembic upgrade --sql head",
+        "uv run alembic upgrade --sql base:head",
+    ],
+)
+def test_alembic_sql_offline_mode_not_flagged(script: str) -> None:
+    """ADR-0080: ``alembic upgrade --sql`` runs offline (no DB), so it's
+    the load-bearing primitive for the alembic-migration-runnable
+    rule-check. The sandbox-unsafe pattern carves it out via negative
+    lookahead — verify here so a future tightening doesn't silently
+    re-flag the offline form."""
+    violations = validate_plan_doc(_make_plan(script=script))
+    assert "sandbox-unsafe-tool" not in _rules(violations)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "cdk synth",
         "cdk deploy MyStack",
         "cdk diff",
