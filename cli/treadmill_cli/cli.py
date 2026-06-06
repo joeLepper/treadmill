@@ -28,6 +28,7 @@ from rich.console import Console
 from rich.table import Table
 
 from treadmill_cli.api_client import ApiClient, ApiError
+from treadmill_cli.commands.corpus import corpus_app
 from treadmill_cli.commands.escalations import escalations_app
 from treadmill_cli.commands.learnings import learnings_app
 from treadmill_cli.commands.onboarding import onboarding_app
@@ -62,6 +63,7 @@ app.add_typer(observe_app)
 app.add_typer(schedules_app)
 app.add_typer(onboarding_app)
 app.add_typer(escalations_app)
+app.add_typer(corpus_app)
 
 console = Console()
 err_console = Console(stderr=True)
