@@ -35,6 +35,7 @@ from treadmill_api.events import (
     StepFailed,
     StepOutput,
     StepReady,
+    StepSkipped,
     StepStarted,
     TaskCancelled,
     TaskEscalatedToOperator,
@@ -260,6 +261,15 @@ def test_step_cancelled_round_trip():
     original = StepCancelled(reason="task cancelled")
     parsed = _round_trip(original)
     assert parsed == original
+
+
+def test_step_skipped_round_trip():
+    original = StepSkipped(reason="task_terminal", terminal_status="pr_merged")
+    parsed = _round_trip(original)
+    assert parsed == original
+    assert isinstance(parsed, StepSkipped)
+    assert parsed.reason == "task_terminal"
+    assert parsed.terminal_status == "pr_merged"
 
 
 def test_github_pr_opened_round_trip():

@@ -44,6 +44,7 @@ from treadmill_api.events.step import (
     StepCompleted,
     StepFailed,
     StepReady,
+    StepSkipped,
     StepStarted,
 )
 from treadmill_api.events.step_output import (
@@ -99,6 +100,7 @@ __all__ = [
     "StepCompleted",
     "StepFailed",
     "StepCancelled",
+    "StepSkipped",
     # GitHub events
     "GithubPrOpened",
     "GithubPrSynchronize",

@@ -121,3 +121,19 @@ class StepCancelled(EventPayload):
     ACTION: ClassVar[str] = "cancelled"
 
     reason: str | None = None
+
+
+class StepSkipped(EventPayload):
+    """A step was skipped due to the task reaching a terminal status before
+    the step could be dispatched.
+
+    Per ADR-0079, when a task terminates (pr_merged, cancelled, superseded,
+    or escalation_closed) and an action-class workflow (wf-author, wf-feedback,
+    wf-architecture-resolve) has a pending step, the dispatcher short-circuits
+    the step.ready and emits step.skipped instead."""
+
+    ENTITY_TYPE: ClassVar[str] = "step"
+    ACTION: ClassVar[str] = "skipped"
+
+    reason: str  # e.g., "task_terminal"
+    terminal_status: str  # e.g., "pr_merged", "cancelled", etc.

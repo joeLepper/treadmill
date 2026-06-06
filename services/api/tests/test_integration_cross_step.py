@@ -604,3 +604,195 @@ async def test_single_step_wf_author_run_dispatches_no_next_step(
     assert count == 0
     assert publisher.calls == []
     assert sqs.sent == []
+
+
+# ── ADR-0079: Short-circuit on terminal task status ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_short_circuits_on_pr_merged_for_action_class_workflow(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0079: when a task reaches a terminal status (pr_merged) and an
+    action-class workflow (wf-author) has a pending step, the dispatcher
+    emits step.skipped instead of step.ready and skips SQS work-queue
+    assignment."""
+    seed = _seed_multistep_run(engine, n_steps=2, workflow_slug="wf-author")
+
+    # Add a terminal event (pr_merged) to the task
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO events "
+            "(entity_type, action, task_id, plan_id, payload) "
+            "VALUES ('github', 'pr_merged', :t, :p, '{}'::jsonb)"
+        ), {"t": seed.task_id, "p": seed.plan_id})
+
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer_with_dispatcher(session_factory, publisher, sqs)
+
+    # Complete step 1, which should trigger step 2 but get short-circuited
+    await consumer.handle(_step_completed_event(
+        step_id=seed.step_ids[0],
+        task_id=seed.task_id,
+        run_id=seed.run_id,
+    ))
+
+    # Verify step 2 is skipped (not pending)
+    with engine.connect() as conn:
+        step_status = conn.execute(sa.text(
+            "SELECT status FROM workflow_run_steps WHERE id = :sid"
+        ), {"sid": seed.step_ids[1]}).scalar()
+    assert step_status == "skipped"
+
+    # Verify step.skipped event was emitted
+    with engine.connect() as conn:
+        skipped_rows = conn.execute(sa.text(
+            "SELECT id, payload FROM events "
+            "WHERE entity_type = 'step' AND action = 'skipped' "
+            "AND step_id = :sid"
+        ), {"sid": seed.step_ids[1]}).all()
+    assert len(skipped_rows) == 1
+    payload = skipped_rows[0].payload
+    assert payload["reason"] == "task_terminal"
+    assert payload["terminal_status"] == "pr_merged"
+
+    # Verify no step.ready was emitted
+    with engine.connect() as conn:
+        ready_count = conn.execute(sa.text(
+            "SELECT COUNT(*) FROM events "
+            "WHERE entity_type = 'step' AND action = 'ready' "
+            "AND step_id = :sid"
+        ), {"sid": seed.step_ids[1]}).scalar()
+    assert ready_count == 0
+
+    # Verify no SQS message was sent
+    assert sqs.sent == []
+
+
+@pytest.mark.asyncio
+async def test_short_circuits_on_cancelled_for_action_class_workflow(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0079: short-circuit on cancelled task status."""
+    seed = _seed_multistep_run(engine, n_steps=2, workflow_slug="wf-feedback")
+
+    # Add a terminal event (task cancelled) to the task
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO events "
+            "(entity_type, action, task_id, plan_id, payload) "
+            "VALUES ('task', 'cancelled', :t, :p, '{}'::jsonb)"
+        ), {"t": seed.task_id, "p": seed.plan_id})
+
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer_with_dispatcher(session_factory, publisher, sqs)
+
+    await consumer.handle(_step_completed_event(
+        step_id=seed.step_ids[0],
+        task_id=seed.task_id,
+        run_id=seed.run_id,
+    ))
+
+    # Verify step 2 is skipped
+    with engine.connect() as conn:
+        step_status = conn.execute(sa.text(
+            "SELECT status FROM workflow_run_steps WHERE id = :sid"
+        ), {"sid": seed.step_ids[1]}).scalar()
+    assert step_status == "skipped"
+
+    # Verify SQS was not called
+    assert sqs.sent == []
+
+
+@pytest.mark.asyncio
+async def test_does_not_short_circuit_when_task_still_running(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0079: short-circuit does NOT fire when task is still running
+    (no terminal events). Normal dispatch path proceeds."""
+    seed = _seed_multistep_run(engine, n_steps=2, workflow_slug="wf-author")
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer_with_dispatcher(session_factory, publisher, sqs)
+
+    await consumer.handle(_step_completed_event(
+        step_id=seed.step_ids[0],
+        task_id=seed.task_id,
+        run_id=seed.run_id,
+    ))
+
+    # Verify step 2 is still pending (not skipped)
+    with engine.connect() as conn:
+        step_status = conn.execute(sa.text(
+            "SELECT status FROM workflow_run_steps WHERE id = :sid"
+        ), {"sid": seed.step_ids[1]}).scalar()
+    assert step_status == "pending"
+
+    # Verify step.ready was emitted (not step.skipped)
+    with engine.connect() as conn:
+        ready_rows = conn.execute(sa.text(
+            "SELECT COUNT(*) FROM events "
+            "WHERE entity_type = 'step' AND action = 'ready' "
+            "AND step_id = :sid"
+        ), {"sid": seed.step_ids[1]}).scalar()
+    assert ready_rows == 1
+
+    # Verify SQS message WAS sent
+    assert len(sqs.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_does_not_short_circuit_read_only_workflow_on_terminal_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    truncate: None,
+    engine: Engine,
+) -> None:
+    """ADR-0079: short-circuit only applies to action-class workflows.
+    Read-only workflows (e.g. wf-validate) proceed normally even when
+    task reaches terminal status."""
+    seed = _seed_multistep_run(engine, n_steps=2, workflow_slug="wf-validate")
+
+    # Add a terminal event to the task
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO events "
+            "(entity_type, action, task_id, plan_id, payload) "
+            "VALUES ('github', 'pr_merged', :t, :p, '{}'::jsonb)"
+        ), {"t": seed.task_id, "p": seed.plan_id})
+
+    publisher = _RecordingPublisher()
+    sqs = _RecordingSqs()
+    consumer = _make_consumer_with_dispatcher(session_factory, publisher, sqs)
+
+    await consumer.handle(_step_completed_event(
+        step_id=seed.step_ids[0],
+        task_id=seed.task_id,
+        run_id=seed.run_id,
+    ))
+
+    # Verify step 2 is still pending (not skipped) — read-only workflow
+    with engine.connect() as conn:
+        step_status = conn.execute(sa.text(
+            "SELECT status FROM workflow_run_steps WHERE id = :sid"
+        ), {"sid": seed.step_ids[1]}).scalar()
+    assert step_status == "pending"
+
+    # Verify step.ready was emitted
+    with engine.connect() as conn:
+        ready_count = conn.execute(sa.text(
+            "SELECT COUNT(*) FROM events "
+            "WHERE entity_type = 'step' AND action = 'ready' "
+            "AND step_id = :sid"
+        ), {"sid": seed.step_ids[1]}).scalar()
+    assert ready_count == 1
+
+    # Verify SQS message WAS sent (normal dispatch)
+    assert len(sqs.sent) == 1

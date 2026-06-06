@@ -47,7 +47,7 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from treadmill_api.events.step import StepReady
+from treadmill_api.events.step import StepReady, StepSkipped
 from treadmill_api.observability import inject_trace_context
 from treadmill_api.models import (
     Event,
@@ -58,6 +58,48 @@ from treadmill_api.models import (
 )
 
 logger = logging.getLogger("treadmill.coordination.cross_step")
+
+# Workflow IDs for action-class workflows that should short-circuit on
+# terminal task status (ADR-0079). When a task reaches a terminal status
+# and an action-class workflow has a pending step, the dispatcher emits
+# step.skipped instead of step.ready.
+ACTION_CLASS_WORKFLOW_IDS = frozenset({
+    "wf-author",
+    "wf-feedback",
+    "wf-architecture-resolve",
+})
+
+
+async def _get_task_terminal_status(
+    session: AsyncSession, task_id: uuid.UUID,
+) -> str | None:
+    """Check if the task has reached a terminal status by examining its
+    events. Returns the terminal status (e.g., 'pr_merged', 'cancelled') or
+    None if the task is still running.
+
+    Per ADR-0079, terminal statuses are: pr_merged, cancelled, superseded,
+    escalation_closed_terminal.
+    """
+    terminal_events = {
+        ("github", "pr_merged"): "pr_merged",
+        ("task", "cancelled"): "cancelled",
+        ("task", "superseded"): "superseded",
+        ("task", "escalation_closed"): "escalation_closed_terminal",
+    }
+
+    for (entity_type, action), status_name in terminal_events.items():
+        result = await session.execute(
+            sa.text(
+                "SELECT 1 FROM events "
+                "WHERE task_id = :task_id AND entity_type = :et AND action = :act "
+                "LIMIT 1"
+            ),
+            {"task_id": task_id, "et": entity_type, "act": action},
+        )
+        if result.first() is not None:
+            return status_name
+
+    return None
 
 
 async def _resolve_prior_commit_sha(
@@ -195,6 +237,76 @@ async def dispatch_next_step(
     plan_id = row.plan_id
     repo = row.repo
     workflow_slug = row.workflow_id
+
+    # ADR-0079: short-circuit on terminal task status for action-class workflows.
+    # If the task has reached a terminal status (pr_merged, cancelled, superseded,
+    # escalation_closed) and the workflow is action-class, emit step.skipped
+    # instead of step.ready and skip SQS work-queue assignment.
+    terminal_status = await _get_task_terminal_status(session, task_id)
+    if terminal_status is not None and workflow_slug in ACTION_CLASS_WORKFLOW_IDS:
+        logger.warning(
+            "cross_step: task %s has terminal status %s; skipping step %s "
+            "for action-class workflow %s",
+            task_id, terminal_status, next_step.id, workflow_slug,
+            extra={
+                "task_id": str(task_id),
+                "step_id": str(next_step.id),
+                "terminal_status": terminal_status,
+                "workflow_id": workflow_slug,
+            },
+        )
+
+        # Update the step status to 'skipped' and emit step.skipped event.
+        await session.execute(
+            sa.text(
+                "UPDATE workflow_run_steps SET status = 'skipped' "
+                "WHERE id = :step_id"
+            ),
+            {"step_id": next_step.id},
+        )
+
+        skipped_payload = StepSkipped(
+            reason="task_terminal",
+            terminal_status=terminal_status,
+        )
+
+        skipped_event = await dispatcher._persist_event(
+            session,
+            entity_type="step",
+            action="skipped",
+            payload=skipped_payload,
+            plan_id=plan_id,
+            task_id=task_id,
+            run_id=run_id,
+            step_id=next_step.id,
+            commit_sha=None,
+        )
+
+        try:
+            await dispatcher.publisher.publish(skipped_event, skipped_payload)
+        except Exception as exc:
+            logger.exception(
+                "cross_step: failed to publish step.skipped to events bus; "
+                "Event row %s persisted, replay loop will retry",
+                skipped_event.id,
+            )
+            await dispatcher._record_publish_failed(
+                session,
+                original_event_id=skipped_event.id,
+                target="sns",
+                error=exc,
+                plan_id=plan_id,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=next_step.id,
+            )
+
+        logger.info(
+            "cross_step: skipped step %s (index=%d, role=%s) for run %s "
+            "due to terminal task status",
+            next_step.id, next_step.step_index, next_step.role_id, run_id,
+        )
+        return next_step.id
 
     commit_sha = await _resolve_prior_commit_sha(
         session, run_id, completed_step_index,

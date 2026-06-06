@@ -83,6 +83,7 @@ from treadmill_api.events.step import (
     StepCancelled,
     StepCompleted,
     StepFailed,
+    StepSkipped,
     StepStarted,
 )
 from treadmill_api.models import Event, Task, TaskPR, WorkflowRun, WorkflowRunStep
@@ -1328,6 +1329,17 @@ class CoordinationConsumer:
                     WorkflowRunStep.status == "pending",
                 )
                 .values(status="cancelled")
+            )
+            return True
+        if action == "skipped":
+            assert isinstance(typed, StepSkipped)
+            await session.execute(
+                update(WorkflowRunStep)
+                .where(
+                    WorkflowRunStep.id == step_id,
+                    WorkflowRunStep.status == "pending",
+                )
+                .values(status="skipped")
             )
             return True
         logger.debug("coordination ignoring step.%s", action)
