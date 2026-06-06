@@ -58,6 +58,8 @@ class OnboardingStore:
                 git_author_name=config.git_author_name,
                 git_author_email=config.git_author_email,
                 commit_trailer=config.commit_trailer,
+                is_public=config.is_public,
+                sensitive_strings=config.sensitive_strings,
                 worker_deps_python=list(deps.python),
                 worker_deps_node=list(deps.node),
             )
@@ -73,6 +75,8 @@ class OnboardingStore:
             existing.git_author_name = config.git_author_name
             existing.git_author_email = config.git_author_email
             existing.commit_trailer = config.commit_trailer
+            existing.is_public = config.is_public
+            existing.sensitive_strings = config.sensitive_strings
             existing.worker_deps_python = list(deps.python)
             existing.worker_deps_node = list(deps.node)
             existing.updated_at = sa.func.now()
@@ -136,6 +140,8 @@ class OnboardingStore:
             git_author_email=row.git_author_email,
             commit_trailer=row.commit_trailer,
             worker_deps=worker_deps,
+            is_public=row.is_public,
+            sensitive_strings=row.sensitive_strings,
         )
 
     async def upsert_repo_profile(

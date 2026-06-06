@@ -39,7 +39,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from treadmill_api.database import Base
@@ -150,6 +150,19 @@ class RepoConfigRow(Base):
     # trailer, empty-string ``""`` suppresses any trailer, any other string is
     # used verbatim as the trailer line(s).
     commit_trailer: Mapped[str | None] = mapped_column(String, nullable=True)
+    # ADR-0078: marks a repo as publicly visible on GitHub. Drives the
+    # secret-leak gate on vault writes — public repos get the gate;
+    # private repos no-op. Default False so existing rows are
+    # behavior-neutral.
+    is_public: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    # ADR-0078: per-repo extra sensitive-string blocklist. The gate
+    # combines this with a hardcoded baseline. NULL means
+    # "baseline only".
+    sensitive_strings: Mapped[list[str] | None] = mapped_column(
+        JSONB, nullable=True,
+    )
     # ADR-0059: per-repo Python / Node deps the worker installs before
     # task work. Binaries live in the ``repo_worker_binaries`` side table.
     worker_deps_python: Mapped[list[str]] = mapped_column(
