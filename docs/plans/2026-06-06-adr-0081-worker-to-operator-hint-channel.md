@@ -32,8 +32,18 @@ operator's cc-channels inbox (PR #2). Both feed the same
 - The worker's per-step context fetch (the GET path) returns the
   current `operator_note` value alongside the existing fields. The
   worker's system prompt assembler injects the note as a tagged
-  section if non-null, with the verbatim "Operator hint ... verify
-  before acting" envelope from ADR-0081 §1.
+  section if non-null AND the repo's `worker_hints_enabled` flag is
+  true, with the verbatim "Operator hint ... verify before acting"
+  envelope from ADR-0081 §1.
+- `RepoConfig.worker_hints_enabled` (BOOLEAN NOT NULL DEFAULT
+  true). Set per-repo; the worker tool registry checks it before
+  registering `request_hint` and the prompt assembler checks it
+  before injecting `operator_note`. CLI surface:
+  `treadmill onboarding update --repo <repo> --hints on|off`.
+- `TREADMILL_OPERATOR_RELAY_HINTS=on|off` env var read by the
+  operator session at launch (sibling to `TREADMILL_RELAY_LEVEL`).
+  Defaults `on`. Documented in `launch-session.sh` and the
+  per-session relay docs.
 - (PR #2) A `request_hint` tool the worker can invoke from inside a
   role-step Claude call. The tool writes
   `~/.cc-channels/<created_by>/relay/<ts>-from-worker-<task-id>.md`
@@ -207,20 +217,26 @@ sequence_of_work:
           per-step context fetch + system prompt assembly seam.
 
       BUILD:
-        - Alembic migration adding `operator_note TEXT NULL` to
-          `tasks`.
-        - ORM Task column + any to_dict surfaces that mirror
-          model fields.
+        - Alembic migration adding two columns:
+          * `tasks.operator_note TEXT NULL`
+          * `repo_configs.worker_hints_enabled BOOLEAN NOT NULL
+            DEFAULT true`
+        - ORM Task column + RepoConfig.worker_hints_enabled +
+          parser/to_dict surfaces.
         - `POST /api/v1/tasks/<task_id>/operator_note` accepting
           `{note: str | null}`. Persists to the column + emits
           `task.operator_hint_set` (payload: `note_excerpt: str,
           set_by: str`).
-        - Worker per-step GET path exposes the field.
+        - Worker per-step GET path exposes `operator_note`.
         - Worker prompt assembler injects the verbatim §1
-          envelope when `operator_note` is non-null.
-        - CLI: register `note_app = typer.Typer(...)` (or extend
-          `task_app`) with `note <task_id> "..."` set + `--clear`
-          unset. Use existing `_client()` + `ApiClient._request`.
+          envelope when `operator_note` is non-null AND the
+          repo's `worker_hints_enabled` is true.
+        - CLI: register `note <task_id> "..."` set + `--clear`
+          unset (lives under the existing `task_app` group).
+          Use existing `_client()` + `ApiClient._request`.
+        - CLI: extend `treadmill onboarding update` to accept
+          `--hints on|off` which flips
+          `worker_hints_enabled` for the named repo.
 
       Tests:
         - alembic head stays single after migration.
@@ -299,7 +315,8 @@ sequence_of_work:
       BUILD:
         - Worker tool `request_hint(reason: str, context: str) ->
           {acknowledged: bool}` registered in the worker tool
-          registry. The tool:
+          registry ONLY when the repo's `worker_hints_enabled`
+          flag is true. The tool:
           * resolves `created_by` from the task's context
             already passed in;
           * writes
@@ -311,6 +328,14 @@ sequence_of_work:
             with `{reason, context_excerpt, worker_step_id}`
             which emits `task.worker_hint_requested`;
           * returns `{acknowledged: true}` (non-blocking).
+        - Operator-side relay consumer reads
+          `TREADMILL_OPERATOR_RELAY_HINTS` env var (sibling to
+          `TREADMILL_RELAY_LEVEL`); when set to `off`, suppresses
+          forwarding of `task.worker_hint_requested` events and
+          `[from: worker-...]` cc-channels relay messages to the
+          operator's bot. The events table still records every
+          request (per ADR-0081 §5: events always fire so the
+          counterfactual is auditable).
         - New event class `TaskWorkerHintRequested` with the
           payload above + registry registration.
         - Tests:

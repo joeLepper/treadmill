@@ -147,6 +147,54 @@ events provide:
   for "high hint request rate" (a system-level
   workers-keep-getting-stuck symptom).
 
+### 5. Both sides are independently configurable for easy rollback
+
+The hint channel is experimental. If the data shows it doesn't
+help — token economics inverted, hint quality poor, false-fix rate
+high — we want to be able to turn it off without reverting code.
+Two independent feature flags govern the two halves:
+
+- **Worker side: `RepoConfig.worker_hints_enabled` (BOOLEAN
+  NOT NULL DEFAULT true).** Set per-repo (sibling to
+  `is_public` from ADR-0078). Controls whether the worker's
+  `request_hint` tool is registered for any role-step running
+  against this repo. Default `true` so the feature ships on by
+  default; flip to `false` to disable phone-home for a specific
+  repo without touching code. The worker also skips
+  `operator_note` injection when this flag is false, so a single
+  toggle silences both directions.
+
+- **Operator side: `TREADMILL_OPERATOR_RELAY_HINTS=on|off`
+  environment variable read by the operator session at launch
+  (sibling to `TREADMILL_RELAY_LEVEL` from ADR-0071).** Defaults
+  to `on`. When `off`, the session ignores
+  `task.worker_hint_requested` events from
+  `treadmill-events` and `[from: worker-...]` cc-channels relay
+  messages. The operator still sets `operator_note` manually if
+  they want; only the automatic notification path is silenced.
+
+Both flags can be flipped independently. Combinations:
+
+| worker_hints_enabled | OPERATOR_RELAY_HINTS | Effect |
+|----------------------|----------------------|--------|
+| true  | on  | Full feature (default). |
+| true  | off | Workers can request hints but the operator session ignores them. Useful when the operator is human-only or away. |
+| false | on  | Workers don't request hints, but operators can still set `operator_note` manually. Useful for repos where we want operator-pushed hints only. |
+| false | off | Feature fully disabled for this repo. |
+
+The CLI surfaces a per-repo toggle:
+
+- `treadmill onboarding update --repo <repo> --hints on|off`
+
+And the operator-side relay level interaction is documented in
+the launch-session.sh docs alongside `TREADMILL_RELAY_LEVEL`.
+
+Events still fire when flags are flipped (we want auditable record
+that a request was suppressed or a note was set) — they just don't
+trigger the downstream injection. The events table thus serves as
+the "would have helped" counterfactual data for deciding whether
+to keep the feature.
+
 ## Alternatives considered
 
 - **Synchronous worker-blocking phone-home.** Rejected for v1.
@@ -260,28 +308,28 @@ events provide:
 
 ```mermaid
 sequenceDiagram
-    actor Worker as Worker (Claude in container)
+    actor Worker as Worker Claude
     participant API as Treadmill API
-    participant Inbox as ~/.cc-channels/&lt;created_by&gt;/relay/
+    participant Inbox as cc-channels relay inbox
     actor Operator as Operator session
     participant Events as events bus
 
-    Note over Worker,API: PR #1 (operator_note MVP)
-    Worker->>API: GET /tasks/&lt;id&gt; (per-step context)
-    API-->>Worker: {operator_note: "test count needs bumping", ...}
-    Worker->>Worker: injects note into system prompt
-    Worker->>Worker: produces work informed by hint
+    Note over Worker,API: PR 1 — operator_note MVP
+    Worker->>API: GET /tasks/[id] per-step context
+    API-->>Worker: operator_note value
+    Worker->>Worker: inject note into system prompt
+    Worker->>Worker: produce work informed by hint
 
-    Note over Worker,API: PR #2 (request_hint tool)
-    Worker->>Inbox: write relay file (reason + context)
-    Inbox-->>Operator: cc-channels notification (source=relay)
-    Operator->>Operator: diagnoses from CI logs + PR diff
-    Operator->>API: POST /tasks/&lt;id&gt;/operator_note
+    Note over Worker,API: PR 2 — request_hint tool
+    Worker->>Inbox: write relay file with reason and context
+    Inbox-->>Operator: cc-channels notification
+    Operator->>Operator: diagnose via CI logs and PR diff
+    Operator->>API: POST /tasks/[id]/operator_note
     API->>Events: task.operator_hint_set
     Events-->>Operator: confirmation
-    Worker->>API: GET /tasks/&lt;id&gt; (next step)
-    API-->>Worker: {operator_note: "fix is to extend SONNET_ROLES", ...}
-    Worker->>Worker: injects + acts on operator's hint
+    Worker->>API: GET /tasks/[id] next step
+    API-->>Worker: operator_note value updated
+    Worker->>Worker: inject and act on the new hint
 ```
 
 ## References
