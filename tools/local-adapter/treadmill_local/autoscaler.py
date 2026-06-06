@@ -167,6 +167,10 @@ class Autoscaler:
         self._consecutive_build_failures = 0
         self._fallback_ticks = 0
         self._image_build_broken_reported = False
+        # Spawn state tracking for heartbeat (task 3)
+        self._last_spawn_at: datetime | None = None
+        self._last_spawn_error: str | None = None
+        self._consecutive_spawn_failures = 0
 
     def tick(self) -> AutoscalerTick:
         """Run one iteration of the control loop.
@@ -190,6 +194,8 @@ class Autoscaler:
         # Check if we're in fallback mode (previous tick(s) hit K threshold)
         in_fallback = self._fallback_ticks > 0
 
+        spawn_error: str | None = None
+        spawn_succeeded = False
         for _ in range(started):
             try:
                 if in_fallback:
@@ -200,6 +206,7 @@ class Autoscaler:
                     self.start_worker_fn()
                 # Build succeeded; reset consecutive failure counter
                 self._consecutive_build_failures = 0
+                spawn_succeeded = True
             except RuntimeError as exc:
                 # Only count docker build errors, not other RuntimeErrors
                 if "docker build" in str(exc).lower():
@@ -214,6 +221,8 @@ class Autoscaler:
                             )
                             self._consecutive_build_failures = 0
                             self._fallback_ticks = 1
+                    # Track error for heartbeat (truncate to 1000 chars)
+                    spawn_error = str(exc)[:1000]
                     # Don't re-raise; error is logged by run()'s exception handler
                 else:
                     # Not a build error, re-raise for normal error handling
@@ -230,6 +239,31 @@ class Autoscaler:
                 self.heartbeat_fn({"image_build_broken": True})
 
         reaped = self.reap_dead_workers_fn()
+
+        # Update spawn state tracking and send heartbeat (task 3)
+        if started > 0:
+            if spawn_succeeded:
+                # Success path: reset failures, update last_spawn_at, clear error
+                self._last_spawn_at = datetime.now(timezone.utc)
+                self._consecutive_spawn_failures = 0
+                self._last_spawn_error = None
+            elif spawn_error:
+                # Failure path: increment counter, record error
+                self._consecutive_spawn_failures += 1
+                self._last_spawn_error = spawn_error
+
+        # Send heartbeat on every tick (success or failure)
+        try:
+            self.heartbeat_fn({
+                "family": "worker-default",
+                "worker_count": current,
+                "last_spawn_at": self._last_spawn_at.isoformat() if self._last_spawn_at else None,
+                "last_spawn_error": self._last_spawn_error,
+                "consecutive_spawn_failures": self._consecutive_spawn_failures,
+            })
+        except Exception as e:
+            logger.warning("heartbeat write failed: %s", e)
+
         return AutoscalerTick(
             visible=visible,
             in_flight=in_flight,
@@ -525,6 +559,27 @@ def main() -> int:
     # ``main()`` rather than the package root.
     staleness_guard = StalenessGuard(module="treadmill_local.autoscaler")
 
+    # Heartbeat function for system_status updates (task 3).
+    # Constructs the httpx client here so it's available for all ticks.
+    import httpx
+
+    api_base_url = os.environ.get("TREADMILL_API_BASE_URL", "http://localhost:8000")
+
+    def heartbeat_fn_impl(state: dict[str, Any]) -> None:
+        """POST autoscaler state to the API heartbeat endpoint.
+
+        Errors are logged as warnings and don't break the tick — the
+        heartbeat is informational (detectors consume it, but a missed
+        heartbeat just means they read stale state briefly).
+        """
+        try:
+            endpoint = f"{api_base_url}/api/v1/system_status/heartbeat"
+            with httpx.Client(timeout=5.0) as client:
+                response = client.post(endpoint, json=state)
+                response.raise_for_status()
+        except Exception as e:
+            logger.warning("heartbeat write to %s failed: %s", endpoint, e)
+
     autoscaler = Autoscaler(
         queue_depth_fn=get_depth,
         worker_count_fn=count_workers,
@@ -536,6 +591,7 @@ def main() -> int:
         staleness_guard=staleness_guard,
         staleness_pid_file=AUTOSCALER_PID_FILE,
         start_worker_no_build_fn=start_worker_no_build,
+        heartbeat_fn=heartbeat_fn_impl,
     )
 
     def _on_signal(_signum: int, _frame: Any) -> None:
