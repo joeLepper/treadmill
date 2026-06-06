@@ -205,6 +205,21 @@ SEED_SCHEDULES: list[dict[str, Any]] = [
         "created_by": "auto-seed",
     },
     {
+        # Fleet-wedge sweep (ADR-0075 §3, v1 zero-workers sub-signal
+        # only). Reads system_status heartbeats and emits
+        # ``system.fleet_wedged`` when a family has held worker_count=0
+        # for FLEET_WEDGE_ZERO_WORKERS_THRESHOLD while a recent spawn
+        # intent exists. Would have caught the 2026-06-05 autoscaler-
+        # wedge incident in minutes instead of an hour-plus.
+        "workflow_id": "wf-fleet-wedge-sweep",
+        "cron_expression": "* * * * *",  # every 1 minute
+        "quiet_hours": None,
+        "quiet_tz": "America/Los_Angeles",
+        "payload_template": {"trigger": "scheduled-sweep"},
+        "jitter_seconds": 60,
+        "created_by": "auto-seed",
+    },
+    {
         # Weekly unreferenced-close report — sweeps the past 7 days of
         # escalation_closed events with expected_followup null/empty, groups
         # by repo, and emits one system.unreferenced_closes_report event per

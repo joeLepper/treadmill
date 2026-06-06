@@ -3130,6 +3130,18 @@ async def handle_scheduled_tick(
         await run_step_starvation_sweep(session, dispatcher)
         return None
 
+    # Same idiom for the fleet-wedge sweep (ADR-0075 §3) — detects
+    # families wedged at worker_count=0 per the autoscaler's
+    # system_status heartbeats; emits ``system.fleet_wedged``. v1 ships
+    # only the zero-workers sub-signal.
+    from treadmill_api.coordination.fleet_wedge_sweep import (
+        FLEET_WEDGE_SWEEP_WORKFLOW_ID,
+        run_fleet_wedge_sweep,
+    )
+    if schedule.workflow_id == FLEET_WEDGE_SWEEP_WORKFLOW_ID:
+        await run_fleet_wedge_sweep(session, dispatcher)
+        return None
+
     # Same idiom for the unreferenced-close-report sweep — sweeps past 7 days
     # of escalation closes with null/empty expected_followup, groups by repo,
     # and emits one report per repo for NotificationFanout consumption.
