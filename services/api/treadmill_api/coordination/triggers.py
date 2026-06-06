@@ -122,7 +122,18 @@ CI_FIX_MAX_ATTEMPTS = 3
 CONFLICT_RESOLVE_MAX_ATTEMPTS = 3
 FEEDBACK_MAX_ATTEMPTS = 5
 DOC_AMEND_MAX_ATTEMPTS = 5
-ARCHITECTURE_RESOLVE_MAX_ATTEMPTS = 5
+# ADR-0029 introduced the architect-amend cap at 5. Reduced to 3 on
+# 2026-06-06 after ADR-0074 (deterministic nothing-to-do short-circuit)
+# and ADR-0081 (worker→operator hint channel) shipped — the high cap
+# was insulating against failure classes those now address cheaper.
+# Per the 2026-06-05 audit: 17/32 tasks/week hit the 4-5 bucket
+# (8 merged, 7 cancelled, 2 open). With ADR-0074 catching empty-amend
+# loops AND ADR-0081 letting the operator inject hints mid-loop, the
+# remaining true "needs > 3 cycles" cases drop to a handful — and
+# those rescue via operator-merge or hand-author per the 2026-06-05
+# night-session pattern. Lower cap shrinks session-limit blast radius
+# (alan+donna hit personal-Anthropic limits on the high-cycle tasks).
+ARCHITECTURE_RESOLVE_MAX_ATTEMPTS = 3
 
 # The check_id that routes wf-validate failures to wf-doc-amend instead
 # of wf-feedback. Any other check failure still dispatches wf-feedback.
