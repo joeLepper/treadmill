@@ -21,6 +21,8 @@ All four sweeps:
 
 ## Recent changes
 
+- **ADR-0079** — Dispatcher short-circuits `step.ready` on terminal task status. When a task reaches a terminal status (`pr_merged`, `cancelled`, `superseded`, `escalation_closed`) and an action-class workflow (`wf-author`, `wf-feedback`, `wf-architecture-resolve`) has a pending step, `dispatch_next_step()` in `cross_step.py` emits `StepSkipped` event instead of `StepReady` and skips SQS work-queue assignment. New event payload `StepSkipped` (events/step.py) carries `reason` and `terminal_status` fields. Consumer projection in `_dispatch_step()` updates step status to `'skipped'`.
+
 - **PR #???** — Added `expected_followup` field to `TaskEscalationClosed` event and `CloseRequest`/`CloseResponse` models. Auto-closes from the escalation-close sweep write `transient:auto_progress`; operator closes can optionally specify `learning:<slug>`, `pr:<number>`, `adr:<NNNN>`, or `transient:<cause>` to document intended followup. Null/empty values are counted as unreferenced.
 
 - **PR #???** — Added `unreferenced_close_report.py` sweep that fires weekly (Mondays 09:00 UTC). Sweeps past 7 days of `escalation_closed` events with null/empty `expected_followup`, groups by repo, and emits one `system.unreferenced_closes_report` event per repo for NotificationFanout (ADR-0062) to consume and alert operators.
