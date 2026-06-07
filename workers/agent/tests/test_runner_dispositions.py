@@ -34,9 +34,6 @@ from treadmill_agent.runner_dispositions import (
     handle_review,
     handle_validation,
 )
-from treadmill_agent.runner_dispositions.architecture import (
-    ArchitectVerdictParseError,
-)
 from treadmill_agent.runner_dispositions._context import DispositionContext
 from treadmill_agent.runner_dispositions.plan_doc import PlanDocScopeError
 from treadmill_agent.runner_dispositions.review import (
@@ -107,6 +104,7 @@ def _disp_ctx(
     repo_dir: Path,
     output_kind: str = "code",
     summary: str = "did it",
+    structured_output: dict | None = None,
     pr_number: int | None = None,
     role_id: str = "role-test",
     workflow_id: str = "wf-test",
@@ -124,7 +122,9 @@ def _disp_ctx(
             task_validations=task_validations,
             trigger=trigger,
         ),
-        claude_result=CodeAuthorResult(summary=summary),
+        claude_result=CodeAuthorResult(
+            summary=summary, structured_output=structured_output,
+        ),
         repo_dir=repo_dir,
         branch="task/x-add-thing",
         settings=_settings(repo_mode=repo_mode),
@@ -1480,8 +1480,9 @@ def test_documentation_handler_raises_on_empty_diff(tmp_path: Path) -> None:
 
 def _arch_ctx(
     tmp_path: Path,
-    summary: str,
+    summary: str = "",
     *,
+    structured_output: dict | None = None,
     role_id: str = "role-architect",
     trigger: str = "registered",
     empty_branch: bool = False,
@@ -1513,6 +1514,7 @@ def _arch_ctx(
         role_id=role_id,
         workflow_id="wf-architecture-resolve",
         summary=summary,
+        structured_output=structured_output,
         trigger=trigger,
     )
     return ctx
@@ -1522,17 +1524,15 @@ def test_architecture_handler_amend_verdict_routes_to_wf_plan(
     tmp_path: Path,
 ) -> None:
     """``amend`` verdict → payload.dispatch.workflow_id == 'wf-plan'."""
-    summary = (
-        "I reviewed the gap.\n\n"
-        '```json\n'
-        '{"verdict": "amend", "reasoning": "Code violates async '
-        'idempotency standard; ADR intent is right.", '
-        '"target_artifact": "services/api/treadmill_api/coordination/'
-        'consumer.py", "remediation_summary": "Wrap _handle_step in an '
-        'idempotency guard keyed on event_id."}\n'
-        '```'
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "amend",
+            "reasoning": "Code violates async idempotency standard; ADR intent is right.",
+            "target_artifact": "services/api/treadmill_api/coordination/consumer.py",
+            "remediation_summary": "Wrap _handle_step in an idempotency guard keyed on event_id.",
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
     assert out.decision == "amend"
     assert out.commit_sha is None
@@ -1551,16 +1551,18 @@ def test_architecture_handler_supersede_verdict_routes_to_api_trigger(
     the close-PR + create-child-task + dispatch-fresh-wf-author
     sequence — the disposition just surfaces the architect's rewritten
     text."""
-    summary = (
-        '```json\n'
-        '{"verdict": "supersede", "reasoning": "Plan named the wrong '
-        'file paths.", '
-        '"target_artifact": "docs/plans/0010-branch-conventions.md", '
-        '"rewritten_description": "Write services/api/treadmill_api/'
-        'foo.py with function bar() that returns the new shape."}\n'
-        '```'
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "supersede",
+            "reasoning": "Plan named the wrong file paths.",
+            "target_artifact": "docs/plans/0010-branch-conventions.md",
+            "rewritten_description": (
+                "Write services/api/treadmill_api/foo.py with function "
+                "bar() that returns the new shape."
+            ),
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
     assert out.decision == "supersede"
     assert out.payload["dispatch"]["workflow_id"] is None
@@ -1570,38 +1572,40 @@ def test_architecture_handler_supersede_verdict_routes_to_api_trigger(
     assert "services/api" in out.payload["rewritten_description"]
 
 
-def test_architecture_handler_supersede_without_rewrite_raises(
+def test_architecture_handler_supersede_without_rewrite_returns_emit_failure(
     tmp_path: Path,
 ) -> None:
-    """Per ADR-0048, ``verdict='supersede'`` without a non-empty
-    ``rewritten_description`` is a parse failure. The disposition
-    forbids the worker from emitting an empty-rewrite supersede so the
-    step fails fast rather than silently dispatching an empty child
-    task description."""
-    summary = (
-        '```json\n'
-        '{"verdict": "supersede", "reasoning": "Plan is wrong", '
-        '"target_artifact": "docs/plans/x.md"}\n'
-        '```'
+    """Per ADR-0083, ``verdict='supersede'`` without a non-empty
+    ``rewritten_description`` is caught by the worker's post-emit
+    validation and returns an emit-failure synthetic envelope rather
+    than raising. The escalation routes via cc-relay to the dispatching
+    orchestrator session, NOT via step.failure to the cap-counter."""
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "supersede",
+            "reasoning": "Plan is wrong",
+            "target_artifact": "docs/plans/x.md",
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
-    with pytest.raises(ArchitectVerdictParseError) as exc_info:
-        handle_architecture(ctx)
-    assert "rewritten_description" in str(exc_info.value)
+    out = handle_architecture(ctx)
+    assert out.decision == "emit-failure"
+    assert out.payload["parse_failure_reason"] == "supersede-missing-rewrite"
+    assert "dispatch" not in out.payload
 
 
 def test_architecture_handler_accept_as_is_emits_pr_comment(
     tmp_path: Path,
 ) -> None:
     """``accept-as-is`` → wf-doc-amend (Pitfalls) + pr_comment payload."""
-    summary = (
-        '```json\n'
-        '{"verdict": "accept-as-is", "reasoning": "Tradeoff is acceptable '
-        'for v1; capture in Pitfalls.", '
-        '"target_artifact": "workers/agent/AGENT.md"}\n'
-        '```'
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "accept-as-is",
+            "reasoning": "Tradeoff is acceptable for v1; capture in Pitfalls.",
+            "target_artifact": "workers/agent/AGENT.md",
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
     assert out.decision == "accept-as-is"
     assert out.payload["dispatch"]["workflow_id"] == "wf-doc-amend"
@@ -1620,15 +1624,15 @@ def test_architecture_handler_accept_as_is_on_deadlock_emits_review_override(
     no-dispatch + review_override marker. The consumer projects this
     marker to a ``review.override`` Event row that the mergeability VIEW
     reads as ``review_decision='approved'``."""
-    summary = (
-        '```json\n'
-        '{"verdict": "accept-as-is", "reasoning": "Reviewer was wrong; '
-        'work is fine.", '
-        '"target_artifact": "services/api/treadmill_api/coordination/'
-        'consumer.py"}\n'
-        '```'
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "accept-as-is",
+            "reasoning": "Reviewer was wrong; work is fine.",
+            "target_artifact": "services/api/treadmill_api/coordination/consumer.py",
+        },
+        trigger="self:wf-feedback-deadlock",
     )
-    ctx = _arch_ctx(tmp_path, summary, trigger="self:wf-feedback-deadlock")
     out = handle_architecture(ctx)
     assert out.decision == "accept-as-is"
     # No wf-doc-amend dispatch — the deadlock variant has no pitfall to
@@ -1639,81 +1643,38 @@ def test_architecture_handler_accept_as_is_on_deadlock_emits_review_override(
     assert out.payload["dispatch"]["task_id"] == ctx.ctx.task_id
 
 
-def test_architecture_handler_raises_on_empty_summary(
+def test_architecture_handler_returns_emit_failure_no_structured_output(
     tmp_path: Path,
 ) -> None:
-    """Empty / blank summary raises ``ArchitectVerdictParseError`` — no
-    signal at all to parse. Surfaces as a step.failure that wf-feedback
-    can re-run with an envelope reminder."""
-    ctx = _arch_ctx(tmp_path, "")
-    with pytest.raises(ArchitectVerdictParseError):
-        handle_architecture(ctx)
-
-
-def test_architecture_handler_raises_on_unrecognized_prose(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    """Post-ADR-0048, prose with no recognized verdict cue is a hard
-    failure — the prior ``uncertain`` catch-all is gone. The retry
-    helper is monkeypatched to a no-op so the cue path is exercised
-    cleanly without making a real Claude call."""
-    from treadmill_agent.runner_dispositions import architecture
-    monkeypatch.setattr(architecture, "_try_structured_retry", lambda *a, **kw: None)
-    ctx = _arch_ctx(tmp_path, "I thought about this for a while but didn't decide.")
-    with pytest.raises(ArchitectVerdictParseError):
-        handle_architecture(ctx)
-
-
-def test_architecture_handler_structured_retry_yields_clean_verdict(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    """The structured-output retry is the highest-fidelity fallback when
-    strict JSON parsing fails. Mock the retry helper to return a valid
-    envelope and confirm the disposition uses that verdict instead of
-    falling through to the prose-cue path or the hard-fail at the end."""
-    from treadmill_agent.runner_dispositions import architecture
-
-    def _fake_retry(summary: str, model: str, log_context: Any = None) -> dict[str, Any]:
-        return {
-            "verdict": "amend",
-            "reasoning": "extracted via structured-output retry",
-            "target_artifact": "services/api/X.py",
-            "remediation_summary": "wire X to Y",
-            "parsed_via_retry": True,
-        }
-
-    monkeypatch.setattr(architecture, "_try_structured_retry", _fake_retry)
-    # Prose that has no cue match — proves the retry path is what
-    # produces the verdict.
-    ctx = _arch_ctx(tmp_path, "Some prose without any specific verdict cue.")
+    """ADR-0083: structured_output absent → emit-failure synthetic
+    envelope, NOT a step-failing raise. The model produced prose only;
+    the wedge is now to escalate via cc-relay, not loop with retries."""
+    ctx = _arch_ctx(tmp_path, summary="I thought about it but didn't emit JSON.")
     out = handle_architecture(ctx)
-    assert out.decision == "amend"
-    assert out.payload.get("parsed_via_retry") is True
-    assert out.payload.get("parsed_from_prose") is None
+    assert out.decision == "emit-failure"
+    assert out.payload["parse_failure_reason"] == "no-structured-output"
+    assert "dispatch" not in out.payload
+    # Excerpt carries the original prose so the operator triage has context.
+    assert "I thought about it" in out.payload["model_output_excerpt"]
 
 
-def test_architecture_handler_prose_fallback_extracts_accept_as_is(
+def test_architecture_handler_returns_emit_failure_invalid_verdict_literal(
     tmp_path: Path,
 ) -> None:
-    """When the architect produces a clear prose verdict but omits the
-    JSON envelope (observed 2026-05-15 on sonnet — see PR for the
-    productivity-bug context), the disposition falls back to scanning
-    prose for verdict cues. ``accept-as-is`` cues include phrases like
-    'implementation is already complete' / 'no issues found' / 'all task
-    requirements are implemented'. Task progresses with the synthesized
-    verdict rather than dead-ending."""
-    summary = (
-        "I reviewed the diff carefully against the task spec.\n\n"
-        "The implementation is already complete. The recent commit "
-        "907b9c2 has delivered everything the task requires."
+    """ADR-0083 defensive post-check: structured_output present but
+    verdict not in the four-value enum. The CLI's schema layer should
+    catch this, but the worker validates again for paranoia."""
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "uncertain",  # the ADR-0048 removed value
+            "reasoning": "I wasn't sure",
+            "target_artifact": "x",
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
-    assert out.decision == "accept-as-is"
-    assert out.payload["verdict"] == "accept-as-is"
-    assert out.payload.get("parsed_from_prose") is True
+    assert out.decision == "emit-failure"
+    assert out.payload["parse_failure_reason"] == "invalid-verdict-literal"
 
 
 def test_architecture_handler_forces_amend_on_empty_diff_branch(
@@ -1726,12 +1687,16 @@ def test_architecture_handler_forces_amend_on_empty_diff_branch(
     fires ``review.override`` which is meaningless if no PR exists.
     The amend verdict re-engages wf-feedback (per PR #113) to author
     the missing work."""
-    summary = (
-        '```json\n{"verdict": "accept-as-is", "reasoning": "looks fine to '
-        'me", "target_artifact": "services/api/X.py"}\n```'
-    )
     # empty_branch=True so the disposition's empty-diff check fires.
-    ctx = _arch_ctx(tmp_path, summary, empty_branch=True)
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "accept-as-is",
+            "reasoning": "looks fine to me",
+            "target_artifact": "services/api/X.py",
+        },
+        empty_branch=True,
+    )
     out = handle_architecture(ctx)
     assert out.decision == "amend"
     assert out.payload.get("empty_diff_forced_amend") is True
@@ -1739,76 +1704,6 @@ def test_architecture_handler_forces_amend_on_empty_diff_branch(
     assert "no commits against origin/main" in out.payload.get(
         "remediation_summary", ""
     )
-
-
-def test_architecture_handler_prose_fallback_catches_all_changes_in_place(
-    tmp_path: Path,
-) -> None:
-    """Observed 2026-05-16 on 472e3ddc: the architect opened with 'All
-    changes are in place. Here's a summary of what was changed across
-    6 files:' and enumerated each file. The cue list was extended to
-    catch this phrasing; the verdict resolves to accept-as-is."""
-    summary = (
-        "All changes are in place. Here's a summary of what was "
-        "changed across 6 files:\n\n"
-        "- services/api/treadmill_api/eventbus.py: added otel propagate"
-    )
-    ctx = _arch_ctx(tmp_path, summary)
-    out = handle_architecture(ctx)
-    assert out.decision == "accept-as-is"
-    assert out.payload.get("parsed_from_prose") is True
-
-
-def test_architecture_handler_prose_fallback_extracts_amend(
-    tmp_path: Path,
-) -> None:
-    """Prose-fallback for ``amend`` — model says 'the implementation is
-    incomplete' or 'needs amendment' without a JSON envelope."""
-    summary = (
-        "Looking at the diff against the spec, the implementation is "
-        "incomplete. The cli.py wiring and custom spans are missing."
-    )
-    ctx = _arch_ctx(tmp_path, summary)
-    out = handle_architecture(ctx)
-    assert out.decision == "amend"
-    assert out.payload.get("parsed_from_prose") is True
-
-
-def test_architecture_handler_prose_fallback_yields_to_json_when_present(
-    tmp_path: Path,
-) -> None:
-    """When BOTH a JSON envelope AND prose cues are present, the JSON
-    envelope wins (strict path remains primary). The fallback is only
-    consulted when no valid JSON block exists."""
-    summary = (
-        "The implementation is already complete on this branch.\n\n"
-        '```json\n{"verdict": "amend", "reasoning": "but on closer '
-        'inspection a piece is missing", "target_artifact": "X.py", '
-        '"remediation_summary": "wire it up"}\n```'
-    )
-    ctx = _arch_ctx(tmp_path, summary)
-    out = handle_architecture(ctx)
-    # JSON envelope's ``amend`` wins over the prose's accept-as-is cue.
-    assert out.decision == "amend"
-    assert out.payload.get("parsed_from_prose") is None
-
-
-def test_architecture_handler_takes_last_verdict_block(
-    tmp_path: Path,
-) -> None:
-    """Mirroring ADR-0027: when multiple JSON blocks carry verdicts, the
-    last one wins (the architect explored alternatives + converged)."""
-    summary = (
-        "First I considered:\n"
-        '```json\n{"verdict": "amend", "reasoning": "first thought", '
-        '"target_artifact": "x"}\n```\n'
-        "On reflection:\n"
-        '```json\n{"verdict": "accept-as-is", "reasoning": "actually fine", '
-        '"target_artifact": "x"}\n```'
-    )
-    ctx = _arch_ctx(tmp_path, summary)
-    out = handle_architecture(ctx)
-    assert out.decision == "accept-as-is"
 
 
 def test_architecture_handler_valid_validator_tuning_surfaces_in_payload(
@@ -1824,14 +1719,16 @@ def test_architecture_handler_valid_validator_tuning_surfaces_in_payload(
         "evidence": "The diff implements the contract; the rule false-positived.",
         "proposed_patch": {"from": "blocking", "to": "warning"},
     }
-    envelope = {
-        "verdict": "accept-as-is",
-        "reasoning": "Reviewer was wrong; work is fine.",
-        "target_artifact": "services/api/treadmill_api/coordination/consumer.py",
-        "validator_tuning": tuning,
-    }
-    summary = f"```json\n{json.dumps(envelope)}\n```"
-    ctx = _arch_ctx(tmp_path, summary, trigger="self:wf-feedback-deadlock")
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "accept-as-is",
+            "reasoning": "Reviewer was wrong; work is fine.",
+            "target_artifact": "services/api/treadmill_api/coordination/consumer.py",
+            "validator_tuning": tuning,
+        },
+        trigger="self:wf-feedback-deadlock",
+    )
     out = handle_architecture(ctx)
     assert out.decision == "accept-as-is"
     assert "validator_tuning" in out.payload
@@ -1846,13 +1743,14 @@ def test_architecture_handler_no_validator_tuning_omits_key(
 ) -> None:
     """When the envelope has no ``validator_tuning`` field, the payload
     must not carry the key at all."""
-    summary = (
-        '```json\n'
-        '{"verdict": "accept-as-is", "reasoning": "gap is acceptable.", '
-        '"target_artifact": "workers/agent/AGENT.md"}\n'
-        '```'
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "accept-as-is",
+            "reasoning": "gap is acceptable.",
+            "target_artifact": "workers/agent/AGENT.md",
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
     assert out.decision == "accept-as-is"
     assert "validator_tuning" not in out.payload
@@ -1868,17 +1766,18 @@ def test_architecture_handler_malformed_validator_tuning_drops_with_warn(
     log is emitted. The routing payload (verdict + dispatch) still lands."""
     import logging
 
-    envelope = {
-        "verdict": "accept-as-is",
-        "reasoning": "gap accepted",
-        "target_artifact": "workers/agent/AGENT.md",
-        "validator_tuning": {
-            "rule_slug": "some-rule",
-            # missing: check_id, action, evidence, proposed_patch
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "accept-as-is",
+            "reasoning": "gap accepted",
+            "target_artifact": "workers/agent/AGENT.md",
+            "validator_tuning": {
+                "rule_slug": "some-rule",
+                # missing: check_id, action, evidence, proposed_patch
+            },
         },
-    }
-    summary = f"```json\n{json.dumps(envelope)}\n```"
-    ctx = _arch_ctx(tmp_path, summary)
+    )
     with caplog.at_level(logging.WARNING, logger="treadmill.agent.architecture"):
         out = handle_architecture(ctx)
     assert out.decision == "accept-as-is"
@@ -1909,16 +1808,19 @@ def test_architecture_handler_gate_broken_verdict_emits_parked_dispatch(
     the step's top-level ``payload.verdict`` + ``payload.gate_log_excerpt``
     and emits the operator escalation; this disposition just signals
     "no follow-up dispatch from the worker side."""
-    summary = (
-        '```json\n'
-        '{"verdict": "gate-broken", "reasoning": "Trigger B (ralph-loop '
-        'deadlock): cdk synth fails because aws_cdk is not in the worker '
-        'sandbox. Code is logically complete; gate is unsatisfiable.", '
-        '"target_artifact": "tasks/<id>/validation", '
-        f'"gate_log_excerpt": {json.dumps(_GATE_STDERR_EXAMPLE)}}}\n'
-        '```'
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "gate-broken",
+            "reasoning": (
+                "Trigger B (ralph-loop deadlock): cdk synth fails because "
+                "aws_cdk is not in the worker sandbox. Code is logically "
+                "complete; gate is unsatisfiable."
+            ),
+            "target_artifact": "tasks/<id>/validation",
+            "gate_log_excerpt": _GATE_STDERR_EXAMPLE,
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
     assert out.decision == "gate-broken"
     assert out.payload["dispatch"]["workflow_id"] is None
@@ -1926,45 +1828,26 @@ def test_architecture_handler_gate_broken_verdict_emits_parked_dispatch(
     assert "ModuleNotFoundError" in out.payload["gate_log_excerpt"]
 
 
-def test_architecture_handler_gate_broken_without_excerpt_raises(
+def test_architecture_handler_gate_broken_without_excerpt_returns_emit_failure(
     tmp_path: Path,
 ) -> None:
-    """Per ADR-0058, ``verdict='gate-broken'`` without a non-empty
-    ``gate_log_excerpt`` is a parse failure. The disposition forbids
-    the worker from emitting an excerpt-less gate-broken so the step
-    fails fast rather than dispatching an empty-evidence escalation."""
-    summary = (
-        '```json\n'
-        '{"verdict": "gate-broken", "reasoning": "The gate is broken", '
-        '"target_artifact": "tasks/<id>/validation"}\n'
-        '```'
+    """Per ADR-0083, ``verdict='gate-broken'`` without a non-empty
+    ``gate_log_excerpt`` is caught by the worker's post-emit validation
+    and returns an emit-failure synthetic envelope rather than raising.
+    Same escalation surface as the other parse-failures: cc-relay to
+    the dispatching orchestrator."""
+    ctx = _arch_ctx(
+        tmp_path,
+        structured_output={
+            "verdict": "gate-broken",
+            "reasoning": "The gate is broken",
+            "target_artifact": "tasks/<id>/validation",
+        },
     )
-    ctx = _arch_ctx(tmp_path, summary)
-    with pytest.raises(ArchitectVerdictParseError) as exc_info:
-        handle_architecture(ctx)
-    assert "gate_log_excerpt" in str(exc_info.value)
-
-
-def test_architecture_handler_prose_fallback_extracts_gate_broken(
-    tmp_path: Path,
-) -> None:
-    """Prose-fallback parser recognizes ``trigger b (ralph-loop deadlock)``
-    and ``the gate is broken`` style cues. Since prose can't recover
-    the original gate stderr, the fallback synthesizes a placeholder
-    excerpt that satisfies the gate_log_excerpt requirement; the
-    disposition still emits gate-broken with the prose reasoning."""
-    summary = (
-        "After reviewing the loop, this is Trigger B (ralph-loop "
-        "deadlock). The author has produced logically-complete code "
-        "but the deterministic gate cannot be satisfied. The gate is "
-        "broken — the worker sandbox is missing the tooling the gate "
-        "requires."
-    )
-    ctx = _arch_ctx(tmp_path, summary)
     out = handle_architecture(ctx)
-    assert out.decision == "gate-broken"
-    assert "prose-parsed" in out.payload["gate_log_excerpt"]
-    assert out.payload.get("parsed_from_prose") is True
+    assert out.decision == "emit-failure"
+    assert out.payload["parse_failure_reason"] == "gate-broken-missing-excerpt"
+    assert "dispatch" not in out.payload
 
 
 # ── crystallization handler (wf-crystallize-learning) ─────────────────────────

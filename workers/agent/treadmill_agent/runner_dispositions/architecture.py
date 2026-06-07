@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import subprocess
 from typing import Any
 
@@ -53,8 +52,6 @@ from treadmill_agent.runner_dispositions._context import DispositionContext
 from treadmill_api.events.validator_tuning import ValidatorTuning
 
 logger = logging.getLogger("treadmill.agent.architecture")
-
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
 # ADR-0032 §Decision four-verdict contract (post-ADR-0048 + ADR-0058).
 # Kept in sync with ``ArchitectVerdict.verdict`` Literal in
@@ -69,292 +66,148 @@ class ArchitectVerdictParseError(RuntimeError):
     with an explicit reminder to emit the envelope."""
 
 
-# Prose-fallback verdict cues. Ordered by precedence: the disposition
-# scans the model's summary for these phrases (lowercased) and assigns
-# the matching verdict. ``accept-as-is`` listed last so phrases like
-# "the work is complete; no amendment needed" don't fire ``amend``
-# before the "accept" check has a chance.
-#
-# Observed 2026-05-15: sonnet on the role-architect prompt frequently
-# produces a thorough prose verdict (e.g. "The implementation is
-# already complete. The recent commit X delivered everything the task
-# requires.") but omits the JSON envelope at the close — even after the
-# prompt's closing imperative. The strict parser raised
-# ``ArchitectVerdictParseError`` and the step.failed, burning attempts.
-# This fallback extracts the model's intended verdict from prose so the
-# system can act on it; the strict JSON path remains primary.
-#
-# Per ADR-0048, ``uncertain`` was removed from the verdict surface.
-# Per ADR-0058, ``gate-broken`` was added — it is listed FIRST so the
-# deadlock cues fire before the "the work is complete" accept-as-is
-# cues (a gate-broken task often reads as "work complete + gate red",
-# which would otherwise be misclassified as accept-as-is).
-_PROSE_VERDICT_CUES: list[tuple[str, tuple[str, ...]]] = [
-    ("gate-broken", (
-        "verdict: gate-broken",
-        "gate-broken",
-        "ralph-loop deadlock",
-        "ralph loop deadlock",
-        "trigger b",
-        "trigger b (ralph-loop deadlock)",
-        "the gate is broken",
-        "the deterministic gate is broken",
-        "the deterministic gate cannot be satisfied",
-        "gate is failing for reasons outside the author",
-        "gate is failing for reasons outside of the author",
-        "tooling required by the gate is unavailable",
-        "the worker sandbox cannot satisfy",
-        "sandbox cannot run the gate",
-        "missing tooling in the worker",
-    )),
-    ("amend", (
-        "verdict: amend",
-        "amend the implementation",
-        "needs amendment",
-        "remediation plan",
-        "implementation is incomplete",
-        "the code needs fixing",
-        "the work is incomplete",
-    )),
-    ("supersede", (
-        "verdict: supersede",
-        "supersede the adr",
-        "supersede the plan",
-        "intent is no longer right",
-        "intent has shifted",
-    )),
-    ("accept-as-is", (
-        "verdict: accept-as-is",
-        "accept as is",
-        "accept-as-is",
-        "implementation is already complete",
-        "implementation is complete",
-        "the work is already complete",
-        "the work is complete",
-        "no issues found",
-        "no amendment needed",
-        "no changes required",
-        "all task requirements are implemented",
-        "all changes are in place",
-        "changes are in place",
-        "the implementation matches",
-        "implementation matches the spec",
-        "everything the task requires",
-        "everything the spec requires",
-        "everything required by the spec",
-        "the work satisfies the spec",
-        "the diff covers everything",
-    )),
-]
+# ADR-0083: the verdict JSON Schema passed to ``claude --json-schema``
+# when the role is role-architect (see runner.py for the call-site
+# hookup, claude_code.py for the argv threading). Flat shape — the
+# Anthropic tool-schema validator (which backs ``--json-schema``)
+# rejects JSON Schema's ``allOf`` / ``oneOf`` / ``if-then-else``
+# (verified 2026-06-07 smoke; CLI returned ``400 input_schema does not
+# support oneOf``), so conditional-required fields for ``supersede``
+# (``rewritten_description``) and ``gate-broken`` (``gate_log_excerpt``)
+# are validated in ``_extract_verdict_envelope`` as a post-emit check
+# instead of being enforced by the schema.
+_VERDICT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["amend", "supersede", "accept-as-is", "gate-broken"],
+        },
+        "reasoning": {"type": "string"},
+        "target_artifact": {"type": "string"},
+        "remediation_summary": {"type": "string"},
+        "rewritten_description": {"type": "string"},
+        "gate_log_excerpt": {"type": "string"},
+    },
+    "required": ["verdict", "reasoning", "target_artifact"],
+}
 
 
-def _parse_verdict_from_prose(summary: str) -> dict[str, Any] | None:
-    """Fallback verdict parser. Scans prose for phrase cues and
-    synthesizes a verdict envelope.
-
-    Ordered fallback chain (post-ADR-0048):
-      1. Try the cue table (amend → supersede → accept-as-is).
-      2. If nothing matches, return ``None`` so the caller raises
-         ``ArchitectVerdictParseError`` and the step.failure surfaces.
-         Without ``uncertain`` as a catch-all, an unrecognized prose
-         pattern is a hard failure rather than a silent rework-loop.
-
-    The synthesized envelope marks ``parsed_from_prose: true`` so the
-    dispatched downstream knows this verdict came from the lossy path
-    and the upstream prompt or model should be tightened — but the
-    system makes forward progress instead of dead-ending the task.
-    """
-    lower = summary.lower()
-    for verdict, cues in _PROSE_VERDICT_CUES:
-        for cue in cues:
-            if cue in lower:
-                envelope: dict[str, Any] = {
-                    "verdict": verdict,
-                    "reasoning": (
-                        "Extracted from architect prose (no JSON envelope "
-                        f"emitted). Matched cue: {cue!r}."
-                    ),
-                    "target_artifact": "",
-                    "parsed_from_prose": True,
-                }
-                if verdict == "gate-broken":
-                    # ADR-0058: the strict validator on ArchitectVerdict
-                    # rejects gate-broken without a non-empty
-                    # ``gate_log_excerpt``. Prose-fallback can't recover
-                    # the original gate stderr (the architect's prose
-                    # only references it indirectly), so we synthesize a
-                    # placeholder that satisfies the validator and
-                    # signals provenance. The operator gets the prose
-                    # reasoning in ``reasoning``; the architect-prompt
-                    # tightening in Step 2 should eliminate this path.
-                    envelope["gate_log_excerpt"] = (
-                        "[prose-parsed: original gate stderr unavailable; "
-                        "see ``reasoning`` for the architect's prose "
-                        "summary of the deadlock]"
-                    )
-                return envelope
-    return None
-
-
-_RETRY_PROMPT = (
-    "Below is your previous analysis as the Treadmill architect. "
-    "Reformat your verdict as a single fenced JSON block — nothing "
-    "else, no surrounding prose, no commentary. Use exactly these "
-    "fields:\n"
-    "```json\n"
-    "{\n"
-    '  "verdict": "amend" | "supersede" | "accept-as-is" | "gate-broken",\n'
-    '  "reasoning": "<one paragraph distilling your prior analysis>",\n'
-    '  "target_artifact": "<path to the implicated artifact>",\n'
-    '  "remediation_summary": "<required for amend/supersede; omit for accept-as-is and gate-broken>",\n'
-    '  "gate_log_excerpt": "<required for gate-broken: the deterministic gate\'s stderr you are citing; omit for the other verdicts>"\n'
-    "}\n"
-    "```\n\n"
-    "Reply with ONLY the fenced ```json block. No other text.\n\n"
-    "Previous analysis:\n"
-    "```\n"
-    "{prose}\n"
-    "```\n"
-)
-
-
-def _try_structured_retry(
-    summary: str, model: str, log_context: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Re-prompt claude with a focused JSON-only extraction prompt.
-
-    Observed 2026-05-15→16: sonnet's architect often emits a usable
-    prose verdict but skips the JSON envelope at the close. Rather
-    than guess phrasings (the prose-cue path) or dead-end (the
-    pre-fallback behavior), we make one short follow-up Claude call
-    that ONLY asks for the structured envelope. This is higher
-    fidelity than cue-matching: the model gets to choose the verdict
-    explicitly instead of being guessed from prose.
-
-    Returns the parsed envelope on success, ``None`` on any failure
-    (claude unavailable, output un-parseable, model still produces
-    prose). Failures fall through to the prose-cue path, then the
-    hard-fail ``ArchitectVerdictParseError`` if no cue matches.
-
-    Cost: one Claude call (~$0.05–0.10 on sonnet, ~5–30s). Only
-    fires when the strict JSON path failed.
-    """
-    binary = _find_claude_binary()
-    if binary is None:
-        return None
-    prompt = _RETRY_PROMPT.replace("{prose}", summary)
-    try:
-        result = subprocess.run(
-            [
-                binary, "--print",
-                "--output-format", "json",
-                "--model", model,
-                "--permission-mode", "acceptEdits",
-                prompt,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,  # 3 min cap — focused call, should be fast
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        logger.warning(
-            "structured-output retry: claude invocation failed: %s; "
-            "falling through to prose cues",
-            exc,
-        )
-        return None
-    if result.returncode != 0:
-        logger.warning(
-            "structured-output retry: claude exited %d; stderr=%r",
-            result.returncode, result.stderr[:200],
-        )
-        return None
-    # claude --output-format json emits {"type":"result", ..., "result": "<text>"}
-    try:
-        cli_payload = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        logger.warning(
-            "structured-output retry: claude stdout was not JSON: %r",
-            result.stdout[:200],
-        )
-        return None
-    retry_summary = cli_payload.get("result", "")
-    if not retry_summary:
-        return None
-    # Scan retry_summary for the JSON envelope using the same strict
-    # path as the primary parser.
-    for m in _JSON_BLOCK_RE.finditer(retry_summary):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and data.get("verdict") in _VALID_VERDICTS:
-            data["parsed_via_retry"] = True
-            logger.info(
-                "structured-output retry: extracted verdict %r",
-                data.get("verdict"),
-            )
-            return data
-    logger.warning(
-        "structured-output retry: claude returned prose again "
-        "(%d chars); falling through to prose cues",
-        len(retry_summary),
-    )
-    return None
-
-
-def _find_claude_binary() -> str | None:
-    """Locate the ``claude`` CLI. Mirrors ``claude_code._find_binary``
-    but without raising — we want graceful fallback if the worker
-    image somehow lacks it."""
-    import shutil
-    return shutil.which("claude")
+# Discriminators for ``task.architect_emit_failure`` events the worker
+# POSTs when the architect's structured emit either didn't happen or
+# failed a worker-side post-validate. Matched on the API-side
+# pydantic Literal in ``services/api/treadmill_api/events/task.py``.
+_PARSE_FAILURE_NO_STRUCTURED = "no-structured-output"
+_PARSE_FAILURE_INVALID_VERDICT = "invalid-verdict-literal"
+_PARSE_FAILURE_SUPERSEDE_NO_REWRITE = "supersede-missing-rewrite"
+_PARSE_FAILURE_GATE_BROKEN_NO_EXCERPT = "gate-broken-missing-excerpt"
 
 
 def _extract_verdict_envelope(
-    summary: str, *, retry_model: str | None = None,
+    structured_output: dict[str, Any] | None,
+    fallback_summary: str,
 ) -> dict[str, Any]:
-    """Return the last JSON block whose parsed object contains
-    ``"verdict"`` keyed at one of the three valid literals.
+    """Read the architect's verdict from the CLI's structured_output
+    field (ADR-0083). Returns either a valid envelope or a synthetic
+    ``{"verdict": "emit-failure", ...}`` envelope that ``handle()``
+    recognizes as a no-dispatch escalation case.
 
-    Ordered chain (highest fidelity first, post-ADR-0048):
-      1. Strict JSON parse from the original summary.
-      2. Structured-output retry — ask claude to reformat its prose
-         as a JSON envelope (when ``retry_model`` is supplied).
-      3. Prose-cue parsing — pattern-match the summary for verdict
-         phrasings.
-      4. Hard fail — no cue matched (or summary is empty). Raises
-         ``ArchitectVerdictParseError`` so wf-feedback can re-run the
-         architect with an envelope reminder.
+    Four failure paths, all routed through the same synthetic emit-failure
+    envelope:
+      - structured_output absent → ``no-structured-output``
+      - verdict literal not in the enum → ``invalid-verdict-literal``
+        (defensive — the CLI enforces enum at the schema layer, but the
+        worker stays paranoid)
+      - verdict=supersede with empty rewritten_description →
+        ``supersede-missing-rewrite``
+      - verdict=gate-broken with empty gate_log_excerpt →
+        ``gate-broken-missing-excerpt``
 
-    Each step has lower fidelity but keeps things moving. The retry
-    closes the most common gap (sonnet skipping the JSON close)
-    without guessing phrasings.
+    No prose-fallback chain — that machinery (``_try_structured_retry``,
+    ``_PROSE_VERDICT_CUES``, ``_parse_verdict_from_prose``) was deleted
+    when ADR-0083 landed. The wedge is the schema constraint at the
+    CLI; the residual misses route via emit-failure → cc-relay to the
+    dispatching orchestrator session (NOT to the human).
     """
-    envelope: dict[str, Any] | None = None
-    for m in _JSON_BLOCK_RE.finditer(summary):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and data.get("verdict") in _VALID_VERDICTS:
-            envelope = data
-    if envelope is not None:
-        return envelope
-    # Structured retry before prose-cue fallback.
-    if retry_model:
-        retry_envelope = _try_structured_retry(summary, retry_model)
-        if retry_envelope is not None:
-            return retry_envelope
-    fallback = _parse_verdict_from_prose(summary)
-    if fallback is not None:
-        return fallback
-    raise ArchitectVerdictParseError(
-        "architect summary contained no JSON block with a valid "
-        "``verdict`` field AND no prose cue matched; expected one of: "
-        + ", ".join(sorted(_VALID_VERDICTS))
-    )
+    if structured_output is None:
+        return _emit_failure_envelope(
+            reason=_PARSE_FAILURE_NO_STRUCTURED,
+            model_output_excerpt=fallback_summary[:2048],
+        )
+    verdict = structured_output.get("verdict")
+    if verdict not in _VALID_VERDICTS:
+        return _emit_failure_envelope(
+            reason=_PARSE_FAILURE_INVALID_VERDICT,
+            model_output_excerpt=json.dumps(structured_output)[:2048],
+        )
+    if verdict == "supersede":
+        rewritten = structured_output.get("rewritten_description") or ""
+        if not rewritten.strip():
+            return _emit_failure_envelope(
+                reason=_PARSE_FAILURE_SUPERSEDE_NO_REWRITE,
+                model_output_excerpt=json.dumps(structured_output)[:2048],
+            )
+    if verdict == "gate-broken":
+        excerpt = structured_output.get("gate_log_excerpt") or ""
+        if not excerpt.strip():
+            return _emit_failure_envelope(
+                reason=_PARSE_FAILURE_GATE_BROKEN_NO_EXCERPT,
+                model_output_excerpt=json.dumps(structured_output)[:2048],
+            )
+    return structured_output
+
+
+def _emit_failure_envelope(
+    *, reason: str, model_output_excerpt: str,
+) -> dict[str, Any]:
+    """Synthetic envelope returned by ``_extract_verdict_envelope`` for
+    each of the four parse-failure paths. ``handle()`` recognizes
+    ``verdict='emit-failure'`` and routes the failure via cc-relay
+    (POST in handle()) instead of dispatching a downstream workflow."""
+    return {
+        "verdict": "emit-failure",
+        "parse_failure_reason": reason,
+        "model_output_excerpt": model_output_excerpt,
+    }
+
+
+def _post_architect_emit_failure(
+    *,
+    api_base_url: str,
+    api_timeout: float,
+    task_id: str,
+    failing_run_id: str,
+    created_by: str,
+    parse_failure_reason: str,
+    model_output_excerpt: str,
+) -> None:
+    """POST a ``task.architect_emit_failure`` event to the API per
+    ADR-0083. Hits the dedicated endpoint Task B (PR #243) defined —
+    same operator_hint_set + worker_hint_request convention.
+
+    Side-effect-only: failures are logged but not raised so a flaky
+    POST does not turn into a step failure on top of an already-failed
+    architect emit. The relay drop (Task B's trigger) is the durable
+    escalation; this POST is the trigger source."""
+    import httpx
+
+    # Body shape mirrors ArchitectEmitFailureRequest in
+    # services/api/treadmill_api/routers/tasks.py (Task B).
+    body = {
+        "parse_failure_reason": parse_failure_reason,
+        "model_output_excerpt": model_output_excerpt[:4096],
+        "created_by": created_by,
+        "failing_run_id": failing_run_id,
+    }
+    url = f"{api_base_url}/api/v1/tasks/{task_id}/architect_emit_failure"
+    try:
+        with httpx.Client(timeout=api_timeout) as client:
+            response = client.post(url, json=body)
+            response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — side-effect best-effort
+        logger.warning(
+            "architect_emit_failure POST failed (non-fatal): %s", exc,
+        )
 
 
 _DEADLOCK_TRIGGER = "self:wf-feedback-deadlock"
@@ -651,14 +504,55 @@ def handle(ctx: DispositionContext) -> StepOutput:
         )
 
     summary = ctx.claude_result.summary or ""
-    # Pass the role's model so the structured-output retry can use the
-    # same model that produced the prose. Sonnet's prose is sonnet's to
-    # convert; haiku's is haiku's.
+    # ADR-0083: read the architect's verdict from the CLI's structured
+    # output (forced via --json-schema in runner.py). The prose
+    # fallback chain (prose cues + structured-output retry) is gone;
+    # parse-failure now routes via emit-failure → cc-relay to the
+    # dispatching orchestrator instead of decrementing the cap.
     envelope = _extract_verdict_envelope(
-        summary, retry_model=ctx.ctx.role.model,
+        ctx.claude_result.structured_output,
+        fallback_summary=summary,
     )
 
     verdict: str = envelope["verdict"]
+
+    # ADR-0083: emit-failure synthetic envelope → POST the event to
+    # the API (which the trigger converts into a cc-relay drop), then
+    # return StepOutput with decision='emit-failure' and no dispatch
+    # payload. No downstream wf-feedback / wf-author / wf-doc-amend
+    # fires; the orchestrator session sees the relay and decides
+    # whether to hand-author, re-dispatch with adjusted scope, or
+    # escalate to Joe.
+    if verdict == "emit-failure":
+        _post_architect_emit_failure(
+            api_base_url=ctx.settings.api_url,
+            api_timeout=10.0,
+            task_id=ctx.ctx.task_id,
+            failing_run_id=ctx.ctx.run_id,
+            created_by=ctx.ctx.created_by or "",
+            parse_failure_reason=envelope["parse_failure_reason"],
+            model_output_excerpt=envelope["model_output_excerpt"],
+        )
+        logger.warning(
+            "architect emit-failure: reason=%s; routed to cc-relay via "
+            "task.architect_emit_failure event",
+            envelope["parse_failure_reason"],
+        )
+        return StepOutput(
+            summary=(
+                f"architect emit-failure ({envelope['parse_failure_reason']}); "
+                "routed to dispatching orchestrator via cc-relay"
+            ),
+            decision="emit-failure",
+            commit_sha=None,
+            artifacts=[],
+            payload={
+                "verdict": "emit-failure",
+                "parse_failure_reason": envelope["parse_failure_reason"],
+                "model_output_excerpt": envelope["model_output_excerpt"],
+            },
+            metadata=Metadata(),
+        )
 
     # Empty-diff safety: only ``amend`` makes sense on a branch with no
     # commits against origin/main. ``accept-as-is`` is meaningless
@@ -693,42 +587,9 @@ def handle(ctx: DispositionContext) -> StepOutput:
     remediation_summary: str | None = envelope.get("remediation_summary")
     rewritten_description: str | None = envelope.get("rewritten_description")
     gate_log_excerpt: str | None = envelope.get("gate_log_excerpt")
-
-    # ADR-0048: supersede repurposed. The architect must include a
-    # non-empty ``rewritten_description`` so the API-side trigger has
-    # text to write onto the child task row. A supersede with no
-    # rewritten text is a parse failure — wf-feedback can re-run the
-    # architect with an envelope reminder. Mirrors the Pydantic
-    # validator on ``ArchitectVerdict`` itself (API-side), enforced
-    # here at the worker-side parse so the step fails fast rather than
-    # silently dispatching an empty-rewrite supersede.
-    if verdict == "supersede" and not (
-        rewritten_description and rewritten_description.strip()
-    ):
-        raise ArchitectVerdictParseError(
-            "architect verdict=supersede requires a non-empty "
-            "``rewritten_description`` field (the corrected task text "
-            "that becomes the child task's description). Per ADR-0048, "
-            "supersede creates a new task row carrying this field's "
-            "value; an empty rewrite has no child-task content."
-        )
-
-    # ADR-0058: gate-broken requires a non-empty ``gate_log_excerpt`` —
-    # the failing tooling's stderr that the architect cites as evidence.
-    # Mirrors the Pydantic validator API-side. The prose-fallback path
-    # synthesizes a placeholder excerpt (see ``_parse_verdict_from_prose``)
-    # so a prose-only gate-broken still satisfies this gate; an
-    # explicit JSON envelope without the field is a parse failure.
-    if verdict == "gate-broken" and not (
-        gate_log_excerpt and gate_log_excerpt.strip()
-    ):
-        raise ArchitectVerdictParseError(
-            "architect verdict=gate-broken requires a non-empty "
-            "``gate_log_excerpt`` field (the failing tooling stderr "
-            "the architect is citing). Per ADR-0058, the operator "
-            "needs the excerpt to repair the gate without re-running "
-            "the loop."
-        )
+    # ADR-0083: supersede-missing-rewrite and gate-broken-missing-excerpt
+    # subfailures were folded into _extract_verdict_envelope's post-emit
+    # validation. They no longer raise here.
 
     dispatch_payload = _build_dispatch_payload(
         verdict=verdict,

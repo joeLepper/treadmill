@@ -469,7 +469,7 @@ def test_run_claude_code_accepts_no_log_context(
 
 
 def test_try_parse_json_output_extracts_result_and_usage() -> None:
-    """Happy path: valid Claude Code JSON envelope yields (result, usage)."""
+    """Happy path: valid Claude Code JSON envelope yields (result, usage, structured_output)."""
     payload = {
         "type": "result",
         "subtype": "success",
@@ -485,7 +485,7 @@ def test_try_parse_json_output_extracts_result_and_usage() -> None:
     }
     import json as _json
     text = _json.dumps(payload)
-    summary, usage = claude_code._try_parse_json_output(text)
+    summary, usage, structured = claude_code._try_parse_json_output(text)
     assert summary == "I made the change."
     assert usage == {
         "input_tokens": 120,
@@ -493,28 +493,62 @@ def test_try_parse_json_output_extracts_result_and_usage() -> None:
         "cache_creation_tokens": 5,
         "cache_read_tokens": 10,
     }
+    assert structured is None
+
+
+def test_try_parse_json_output_extracts_structured_output_when_present() -> None:
+    """ADR-0083: when claude --json-schema is set, the CLI emits a
+    ``structured_output`` field on the result payload and ``result``
+    is often empty (the model emitted via the structured channel)."""
+    import json as _json
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "result": "",  # model used the structured channel exclusively
+        "structured_output": {
+            "verdict": "amend",
+            "reasoning": "needs fixing",
+            "target_artifact": "x.py",
+            "remediation_summary": "fix",
+        },
+        "usage": {
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        },
+    }
+    summary, usage, structured = claude_code._try_parse_json_output(_json.dumps(payload))
+    assert structured == {
+        "verdict": "amend",
+        "reasoning": "needs fixing",
+        "target_artifact": "x.py",
+        "remediation_summary": "fix",
+    }
+    assert usage is not None
 
 
 def test_try_parse_json_output_falls_back_for_plain_text() -> None:
-    """Non-JSON stdout (stub binaries, dry-run) returns (raw, None)."""
+    """Non-JSON stdout (stub binaries, dry-run) returns (raw, None, None)."""
     raw = "did the thing\n"
-    summary, usage = claude_code._try_parse_json_output(raw)
+    summary, usage, structured = claude_code._try_parse_json_output(raw)
     assert summary == raw
     assert usage is None
+    assert structured is None
 
 
 def test_try_parse_json_output_falls_back_for_empty() -> None:
-    summary, usage = claude_code._try_parse_json_output("")
+    summary, usage, structured = claude_code._try_parse_json_output("")
     assert usage is None
+    assert structured is None
 
 
 def test_try_parse_json_output_missing_usage_block() -> None:
-    """JSON without a ``usage`` key yields (result, None)."""
+    """JSON without a ``usage`` key yields (result, None, None)."""
     import json as _json
     text = _json.dumps({"type": "result", "result": "ok"})
-    summary, usage = claude_code._try_parse_json_output(text)
+    summary, usage, structured = claude_code._try_parse_json_output(text)
     assert summary == "ok"
     assert usage is None
+    assert structured is None
 
 
 def test_try_parse_json_output_zero_cache_tokens() -> None:
@@ -529,7 +563,7 @@ def test_try_parse_json_output_zero_cache_tokens() -> None:
             "cache_read_input_tokens": 0,
         },
     }
-    _, usage = claude_code._try_parse_json_output(_json.dumps(payload))
+    _, usage, _structured = claude_code._try_parse_json_output(_json.dumps(payload))
     assert usage is not None
     assert usage["cache_creation_tokens"] == 0
     assert usage["cache_read_tokens"] == 0
