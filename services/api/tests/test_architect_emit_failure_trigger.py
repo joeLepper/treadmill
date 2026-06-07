@@ -46,7 +46,7 @@ def test_trigger_filename_carries_failing_run_id(tmp_path):
 
 
 def test_trigger_idempotent_on_replay(tmp_path):
-    """Two calls with the same failing_run_id produce the same filename (overwrite, no cascade)."""
+    """Two calls with the same failing_run_id produce exactly one file (overwrite, not append)."""
     payload = _payload(failing_run_id="aaaabbbb-cccc-dddd-eeee-ffffffffffff")
     r1 = maybe_drop_relay_on_architect_emit_failure(
         payload, "task-1", relay_base=tmp_path
@@ -55,13 +55,12 @@ def test_trigger_idempotent_on_replay(tmp_path):
         payload, "task-1", relay_base=tmp_path
     )
     assert r1 is not None and r2 is not None
+    # Filename is keyed on failing_run_id only — both calls produce the same path.
+    assert r1 == r2
     relay_dir = tmp_path / "treadmill-bert" / "relay"
     files = list(relay_dir.iterdir())
-    # Both calls write to the same filename (timestamps may differ by ms, so
-    # there may be two files — but the run_id uniqueness guarantee holds:
-    # at most one unique run_id per file name suffix).
-    run_id_files = [f for f in files if payload.failing_run_id in f.name]
-    assert len(run_id_files) >= 1
+    assert len(files) == 1
+    assert payload.failing_run_id in files[0].name
 
 
 def test_trigger_unwritable_dir_returns_none(tmp_path):

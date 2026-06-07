@@ -72,8 +72,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from sqlalchemy import func, select, text
@@ -3994,10 +3997,6 @@ async def _check_still_mergeable_for_auto_merge(
 
 # ── ADR-0083: architect emit-failure relay drop ──────────────────────────────
 
-import os
-import time
-from pathlib import Path
-
 
 def maybe_drop_relay_on_architect_emit_failure(
     payload: ArchitectEmitFailure,
@@ -4009,12 +4008,12 @@ def maybe_drop_relay_on_architect_emit_failure(
     structured verdict (ADR-0083).
 
     Drops a markdown file into ``~/.cc-channels/<created_by>/relay/`` named
-    ``<ts>-architect-emit-failure-<failing_run_id>.md`` so the dispatching
+    ``architect-emit-failure-<failing_run_id>.md`` so the dispatching
     orchestrator session's treadmill-events server picks it up via inotify.
 
-    The filename carries ``failing_run_id`` for idempotency: a duplicate
-    event produces an overwrite of the same file rather than a relay-spam
-    cascade.
+    The filename is keyed solely on ``failing_run_id`` for idempotency: SQS
+    redelivery of the same event overwrites the same file rather than
+    producing a relay-spam cascade.
 
     ``relay_base`` overrides the base directory for tests. In production
     it falls back to the ``TREADMILL_CC_CHANNELS_DIR`` env var, then
@@ -4042,8 +4041,7 @@ def maybe_drop_relay_on_architect_emit_failure(
         )
         return None
 
-    ts = int(time.time() * 1000)
-    filename = f"{ts}-architect-emit-failure-{payload.failing_run_id}.md"
+    filename = f"architect-emit-failure-{payload.failing_run_id}.md"
     relay_path = relay_dir / filename
 
     body = (
@@ -4055,8 +4053,8 @@ def maybe_drop_relay_on_architect_emit_failure(
         f"```\n{payload.model_output_excerpt[:4096]}\n```\n\n"
         f"---\n\n"
         f"The architect's `--json-schema` call did not produce a structured verdict.\n"
-        f"Check the run in the Treadmill dashboard or via:\n\n"
-        f"```\ntreadmill run show {payload.failing_run_id}\n```\n"
+        f"Check the run in the Treadmill dashboard or query the DB:\n\n"
+        f"```sql\nSELECT * FROM workflow_runs WHERE id = '{payload.failing_run_id}';\n```\n"
     )
     relay_path.write_text(body)
     logger.info(
