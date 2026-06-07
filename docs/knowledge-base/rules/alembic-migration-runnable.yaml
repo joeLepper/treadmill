@@ -1,0 +1,53 @@
+name: alembic-migration-runnable
+description: >
+  Alembic migrations under services/api/alembic/versions/ must produce DDL
+  when run through ``alembic upgrade --sql head``, and the migration tree
+  must have exactly one head. Catches two classes of bug invisible to
+  schema-shape tests: (1) TypeError-shaped misuse of op.* calls inside the
+  upgrade() body, where the function raises during DDL generation but a
+  sandbox without a live database can't tell anything went wrong; (2)
+  multi-head collisions where two migrations chain off the same parent.
+
+status: active
+created: 2026-06-05
+
+crystallized_from:
+  - adr-0076-pr-a-create-check-constraint-arg-order-shipped
+  - adr-0076-pr-a-multi-head-collision-when-mid-flight
+
+applies_to:
+  - 'services/api/alembic/versions/**/*.py'
+
+checks:
+  - id: alembic-migration-runnable
+    type: deterministic
+    description: >
+      Run ``alembic heads --resolve-dependencies`` and assert exactly one
+      (head) line; then run ``alembic upgrade --sql head`` and assert
+      non-zero exit OR the output contains at least one of CREATE / ALTER /
+      INSERT / DROP. Either gate failing means a migration can be merged in
+      its current form but will crash or stall when alembic actually runs.
+    script: tools/rule-checks/alembic-migration-runnable/check.sh
+    severity: blocking
+
+remediations:
+  - "on": alembic-migration-runnable:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      Alembic migration gate failed. Run
+      ``bash tools/rule-checks/alembic-migration-runnable/check.sh``
+      locally — stderr names which gate (single-head or DDL-generation)
+      tripped. The most common upgrade-time failure is wrong argument order
+      on ``op.create_check_constraint`` — the alembic signature is
+      ``(constraint_name, table_name, condition)``, NOT
+      ``(constraint_name, condition, table_name=...)``. Multi-head failure
+      means a sibling migration chained off the same parent — re-chain
+      your migration's down_revision off the latest head, or add a merge
+      revision. Per rule:alembic-migration-runnable, alembic migrations
+      that don't produce DDL or collide on head cannot merge.
+
+references:
+  - ADR-0030  # rule-check pattern this extends
+  - ADR-0080  # the decision authorizing this gate
+  - ADR-0076  # the failure modes observed on PR A

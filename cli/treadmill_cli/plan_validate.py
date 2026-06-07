@@ -91,11 +91,16 @@ _SANDBOX_UNSAFE_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "sandbox-unsafe-tool",
         "`psql` requires a live DB the worker sandbox doesn't provide",
     ),
-    # Live DB-bound alembic.
+    # Live DB-bound alembic. The `--sql` variant runs in offline mode (no
+    # DB connection) and is the load-bearing primitive for the
+    # alembic-migration-runnable rule-check (ADR-0080) — exclude it from
+    # the sandbox-unsafe pattern via negative lookahead.
     (
-        re.compile(r"\balembic\s+(upgrade|downgrade|stamp|history|current)\b"),
+        re.compile(
+            r"\balembic\s+(upgrade|downgrade|stamp|history|current)\b(?![^\n]*\s--sql\b)"
+        ),
         "sandbox-unsafe-tool",
-        "`alembic upgrade/downgrade/stamp/history/current` needs DATABASE_URL not set in worker sandbox; gate the migration via pytest fixtures instead",
+        "`alembic upgrade/downgrade/stamp/history/current` needs DATABASE_URL not set in worker sandbox; gate the migration via pytest fixtures instead, or use `alembic upgrade --sql head` (offline mode, sandbox-safe)",
     ),
     # Package-registry installs (egress).
     (
