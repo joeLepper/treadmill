@@ -1,0 +1,96 @@
+name: architect-empty-diff-short-circuit
+description: >
+  When a task branch has zero commits ahead of origin/main, the most recent
+  validator verdict is green, and the most recent author step emitted accept-as-is,
+  the architect disposition must return a synthetic accept-as-is WITHOUT invoking
+  Claude and WITHOUT incrementing the amend-cap counter (ADR-0029 Q29.e cap = 5).
+  Re-dispatching a task whose spec is already satisfied must never burn the cap —
+  without this guard every requeue cycle consumes one of the five attempts with no
+  author defect to find.
+
+status: active
+created: 2026-06-07
+
+crystallized_from:
+  - 2026-06-05-architect-cap-on-empty-amend-loop-when-work-already-done
+
+applies_to:
+  - 'coordination/**/*.py'
+
+checks:
+  - id: architect-empty-diff-short-circuits
+    type: llm-judge
+    description: >
+      The architect disposition entry point must include a deterministic
+      short-circuit that detects: (1) zero commits ahead of origin/main, (2) most
+      recent validator verdict green, (3) most recent author envelope accept-as-is.
+      When all three hold, the code must return a synthetic accept-as-is without
+      making a Claude API call and without incrementing the amend-cap counter.
+    severity: blocking
+    prompt: |
+      You are evaluating whether a change to the architect disposition conforms to
+      the rule "architect-empty-diff-short-circuit": the architect disposition must
+      short-circuit (without calling Claude and without incrementing the amend-cap)
+      when the task branch is empty, the validator is green, and the prior author
+      step was accept-as-is.
+
+      Inputs you receive:
+        DIFF — the unified diff of the change.
+
+      This rule applies ONLY if the diff modifies `handle_architecture` or the
+      architect disposition entry-point. If the diff does not touch that path,
+      return pass immediately.
+
+      When the diff does touch the architect path, check for:
+        REQUIRED: a pre-Claude guard evaluating all three conditions:
+          (a) task branch has zero commits ahead of origin/main (git state),
+          (b) most recent validator step verdict is green/pass,
+          (c) most recent author step envelope is accept-as-is.
+        REQUIRED: when all three hold, the code returns a synthetic accept-as-is
+          envelope WITHOUT making a Claude API call.
+        REQUIRED: the synthetic accept-as-is does NOT increment the amend-cap counter
+          (this is a distinct code path from a Claude-generated accept-as-is).
+        NICE-TO-HAVE: the synthetic envelope carries provenance fields such as
+          `short_circuit_reason: "nothing-to-do"` and `parsed_from_prose: false`.
+
+      Decide:
+        pass — the short-circuit guard is present, or the diff does not touch the
+               architect dispatch path.
+        fail — the architect path was modified and the short-circuit is absent,
+               OR the short-circuit still increments the amend-cap,
+               OR the short-circuit calls Claude despite the empty-diff signal.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"verdict": "pass" | "fail",
+         "rationale": "<one to two sentences citing the specific guard clause
+                       or explaining its absence>"}
+
+remediations:
+  - "on": architect-empty-diff-short-circuits:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR modifies the architect disposition but is missing the empty-diff
+      short-circuit required by rule:architect-empty-diff-short-circuit
+      (crystallized from
+      docs/learnings/2026-06-05-architect-cap-on-empty-amend-loop-when-work-already-done.md).
+
+      Add a pre-Claude guard in `handle_architecture` that evaluates all three:
+        (1) zero commits ahead of origin/main on the task branch
+        (2) most recent validator verdict = green
+        (3) most recent author envelope = accept-as-is
+
+      When all three hold, return a synthetic accept-as-is envelope with
+      `short_circuit_reason: "nothing-to-do"` WITHOUT calling the architect Claude
+      and WITHOUT incrementing the amend-cap counter.
+
+      Background: without this guard, re-dispatching a completed task (e.g. an
+      operator idempotence requeue) burns the 5-amend cap (ADR-0029 Q29.e) on five
+      pointless accept-as-is cycles before escalating to the operator. The cap exists
+      to bound legitimate amend loops — not to penalize no-op requeues.
+
+references:
+  - ADR-0029   # ralph-loop + 5-amend cap (Q29.e)
+  - ADR-0074   # architect disposition implementation
+  - ADR-0006   # rules + remediations primitive
+  - 2026-06-05-architect-cap-on-empty-amend-loop-when-work-already-done   # source learning

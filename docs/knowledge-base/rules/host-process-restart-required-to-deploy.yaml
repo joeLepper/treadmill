@@ -1,0 +1,98 @@
+name: host-process-restart-required-to-deploy
+description: >
+  After merging a change to code that a long-lived host process serves (autoscaler,
+  deploy-watcher, egress-proxy, API), the merge is not complete until that process
+  is restarted and the fix is verified via process-produced evidence — never via
+  source-tree inspection. In an editable venv, `cat file.py` and a fresh `import`
+  both show new code immediately; the resident process that started before the merge
+  never re-imports and keeps serving stale in-memory state until restarted.
+
+status: active
+created: 2026-06-07
+
+crystallized_from:
+  - 2026-06-04-host-processes-pin-code-at-import-time
+
+applies_to:
+  - 'docs/plans/**/*.md'
+  - 'tools/**/*.md'
+
+checks:
+  - id: host-process-restart-in-plan
+    type: llm-judge
+    description: >
+      Plans that touch long-lived host-process code (autoscaler, deploy-watcher,
+      egress-proxy, treadmill-local, or any persistent background process) must
+      include an explicit process-restart step after merge and specify
+      process-produced verification evidence. Source-tree inspection (reading the
+      source file or running a fresh import) is insufficient verification because
+      the running process predates the merge.
+    severity: warning
+    prompt: |
+      You are evaluating whether a plan document conforms to the rule
+      "host-process-restart-required-to-deploy": plans that modify long-lived host
+      processes must include an explicit restart step after merge and require
+      process-produced (not source-tree) verification evidence.
+
+      Inputs you receive:
+        PLAN_CONTENT — the full content of the plan or document being reviewed.
+
+      This rule applies ONLY when the plan mentions modifying or deploying changes to
+      long-lived host processes: autoscaler, deploy-watcher, egress-proxy,
+      treadmill-local, or any component described as a persistent background process.
+      If the plan does not touch host processes, return pass immediately.
+
+      When the plan does touch host processes, check for:
+        REQUIRED: an explicit restart step for the affected process after merge
+          (e.g. "restart the autoscaler", "kill and relaunch the deploy-watcher").
+        REQUIRED: verification step citing process-produced evidence — examples of
+          GOOD evidence: newest per-worker allowlist JSON, process stdout/logs,
+          a metric the process emits, a database row the process writes.
+        FORBIDDEN: plans that verify a host-process fix only by reading the source
+          file (`cat path/to/file.py`, `git show HEAD:path`) or running a fresh
+          import in a new Python session — both are misleading when the running
+          process predates the merge.
+
+      Decide:
+        pass — the plan includes restart + process-produced verification steps, OR
+               the plan does not touch long-lived host processes.
+        fail — the plan touches host-process code but lacks a restart step, OR
+               verifies the fix only via source-tree / fresh-import inspection.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"verdict": "pass" | "fail",
+         "rationale": "<one to two sentences citing the specific step that satisfies
+                       or violates the rule, or confirming no host processes are
+                       involved>"}
+
+remediations:
+  - "on": host-process-restart-in-plan:fail
+    action: comment-on-pr
+    target: pr-author
+    message: >
+      This plan touches long-lived host-process code but is missing a required
+      process-restart step and/or process-produced verification. Per
+      rule:host-process-restart-required-to-deploy (crystallized from
+      docs/learnings/2026-06-04-host-processes-pin-code-at-import-time.md):
+
+        1. After merge, explicitly restart the affected process (autoscaler,
+           deploy-watcher, treadmill-local, egress-proxy, etc.).
+        2. Verify the fix via process-produced evidence — e.g. inspect the newest
+           per-worker JSON artifact, read process stdout — NOT by reading the source
+           file or importing the module in a new Python session.
+
+      Why: in an editable venv install, `cat file.py` and `python -c "import module"`
+      both show the new code immediately. The running process that started before the
+      merge never re-imports — its in-memory state is frozen at the import-time
+      snapshot. Source-tree inspection lies about what the running process serves.
+
+      Observed incident (2026-06-04): PR #129 merged the egress-proxy allowlist fix;
+      the fix was verified against the source file and fresh import — both showed new
+      code. The autoscaler started before the merge kept writing stale allowlists from
+      its frozen in-memory `_ALWAYS_ALLOWED_STATIC`. `git clone` kept failing with 403
+      until the autoscaler was restarted.
+
+references:
+  - ADR-0060   # egress-proxy + adapter context
+  - ADR-0006   # rules + remediations primitive
+  - 2026-06-04-host-processes-pin-code-at-import-time   # source learning

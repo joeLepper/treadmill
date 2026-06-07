@@ -1,7 +1,9 @@
 ---
 date: 2026-06-04
 trigger: surprise
-status: captured
+status: crystallized
+crystallized_into: docs/knowledge-base/rules/architect-accept-as-is-awaits-merge-if-pr-open.yaml
+crystallized_date: 2026-06-07
 related: ADR-0031, ADR-0048, plan-2026-06-02-claude-usage-limit-fallback
 ---
 
