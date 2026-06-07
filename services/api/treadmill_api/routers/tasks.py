@@ -22,7 +22,7 @@ from treadmill_api.coordination.triggers import (
 )
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.dispatch import Dispatcher, DispatchError, get_dispatcher
-from treadmill_api.events.task import TaskRegistered, TaskRetry
+from treadmill_api.events.task import TaskRegistered, TaskRetry, TaskWorkerHintRequested
 from treadmill_api.models import (
     Plan,
     Task,
@@ -504,3 +504,58 @@ async def set_operator_note(
         )
     ).one()
     return _row_to_response(row)
+
+
+class WorkerHintRequest(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=100)
+    """Short slug naming the class of help wanted."""
+    context_excerpt: str = Field(..., min_length=1, max_length=500)
+    """Brief excerpt of context (first 500 chars)."""
+    worker_step_id: str = Field(..., min_length=1)
+    """The step ID of the worker step making the request."""
+
+
+@router.post("/{task_id}/worker_hint_request", status_code=status.HTTP_200_OK)
+async def worker_hint_request(
+    task_id: uuid.UUID,
+    body: WorkerHintRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+) -> None:
+    """Worker requests operator context (ADR-0081 §2).
+
+    The worker invokes this endpoint when stuck and needs operator context.
+    The endpoint emits a ``task.worker_hint_requested`` event that surfaces
+    the request to the operator session via cc-channels.
+
+    Request: ``{reason: str, context_excerpt: str, worker_step_id: str}``
+      - reason: Short slug (e.g. 'tests_need_scope')
+      - context_excerpt: Brief description of the problem (max 500 chars)
+      - worker_step_id: The step ID making the request
+
+    Response: 200 OK (no body)
+
+    Events: Emits ``task.worker_hint_requested`` with the reason, context,
+    and worker_step_id for the audit trail.
+    """
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="task not found",
+        )
+
+    # Emit the audit event
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="task",
+        action="worker_hint_requested",
+        payload=TaskWorkerHintRequested(
+            reason=body.reason,
+            context_excerpt=body.context_excerpt,
+            worker_step_id=body.worker_step_id,
+        ),
+        plan_id=task.plan_id,
+        task_id=task_id,
+    )
+
+    await session.commit()
