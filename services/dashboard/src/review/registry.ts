@@ -18,9 +18,12 @@ interface ViewerModule {
   default: ReviewKindViewer;
 }
 
-const modules = import.meta.glob<ViewerModule>('./viewers/*.tsx', {
-  eager: true,
-});
+const modules = import.meta.glob<ViewerModule>(
+  ['./viewers/*.tsx', '!./viewers/*.test.tsx'],
+  {
+    eager: true,
+  }
+);
 
 function stemOf(path: string): string {
   // `./viewers/architect-gold.tsx` → `architect-gold`

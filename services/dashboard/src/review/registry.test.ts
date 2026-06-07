@@ -25,4 +25,13 @@ describe('review registry', () => {
   it('listKinds() returns an empty list until viewers are registered', () => {
     expect(listKinds()).toEqual([]);
   });
+
+  it('listKinds() excludes test files bundled by glob', () => {
+    // c5bba331: ensure glob pattern excludes .test.tsx files so vi.mock
+    // calls in test files do not reach the browser bundle
+    const kinds = listKinds();
+    for (const kind of kinds) {
+      expect(kind).not.toContain('.test');
+    }
+  });
 });
