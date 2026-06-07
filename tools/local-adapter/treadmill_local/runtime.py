@@ -1398,6 +1398,21 @@ class LocalRuntime:
                 "bind": "/var/treadmill/repos", "mode": "rw",
             }
 
+        # API-only: cc-channels host mount so the ADR-0083
+        # architect_emit_failure relay-drop trigger writes into the
+        # orchestrator session's inbox on the host. Without this mount the
+        # trigger silently no-ops (Path.home() inside the container is
+        # /root, which the host's treadmill-events server never watches).
+        # The API process is the only writer here; the orchestrator sessions
+        # are the readers via their per-session bun inotify watchers on the
+        # host. RW because file creation needs write.
+        if spec.family == API_FAMILY:
+            cc_channels = Path.home() / ".cc-channels"
+            cc_channels.mkdir(parents=True, exist_ok=True)
+            mounts[str(cc_channels)] = {
+                "bind": "/root/.cc-channels", "mode": "rw",
+            }
+
         # Postgres: named volume for state persistence across cycles.
         if spec.family == POSTGRES_FAMILY:
             deployment_id = (

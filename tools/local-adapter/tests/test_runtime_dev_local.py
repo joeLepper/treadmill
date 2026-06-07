@@ -864,7 +864,11 @@ def test_volumes_for_api_in_fully_local_has_no_aws_mount(
 ) -> None:
     """Fully-local mode (no deployment_config) never had the ``~/.aws``
     mount — moto uses fake credentials. This test stays as a regression
-    guard so fully-local mode doesn't accidentally pick up the mount."""
+    guard so fully-local mode doesn't accidentally pick up the mount.
+
+    Per ADR-0083, the API family DOES carry a ``~/.cc-channels`` mount
+    for the architect_emit_failure relay drop; assert that and ONLY
+    that is present."""
     rt = _make_runtime_with_aws_dir(
         tmp_path, monkeypatch, deployment_config=None,
     )
@@ -873,8 +877,12 @@ def test_volumes_for_api_in_fully_local_has_no_aws_mount(
     api_spec = ContainerSpec(family=API_FAMILY, name="api", image="treadmill-api:dev")
     mounts = rt._volumes_for(api_spec)
 
-    # Empty: no AWS mount, no Claude creds (not an agent family).
-    assert mounts == {}
+    # No AWS mount, no Claude creds (not an agent family) — but cc-channels
+    # IS expected (ADR-0083).
+    cc_host_path = str(Path.home() / ".cc-channels")
+    assert mounts == {
+        cc_host_path: {"bind": "/root/.cc-channels", "mode": "rw"},
+    }
 
 
 def test_volumes_for_postgres_in_dev_local_mounts_deployment_scoped_named_volume(
