@@ -3,8 +3,10 @@ date: 2026-06-05
 trigger: incident
 status: captured
 related: ADR-0029, ADR-0074
+last_crystallization_check: 2026-06-07
+next_crystallization_check: 2026-06-08
+crystallization_check_count: 1
 ---
-
 # Learning: architect cap fires on empty-amend loop when work is already done
 
 ## Trigger
@@ -68,3 +70,4 @@ already has the task's commits is a common scenario. The short-circuit catches
 these cases. The amend-cap (Q29.e) **remains the bound for the legitimate-amend case
 where work still needs doing** — this short-circuit does not raise it; it simply
 avoids burning cap budget on the case where no work remains.
+- 2026-06-07 not-ready: This learning documents a single incident from 2026-06-05 that was immediately addressed by ADR-0074, which has already been implemented in code (commit efd5cc8). The proposed short-circuit check is now a built-in architectural feature of the `handle_architecture` disposition, not a cross-cutting concern requiring external enforcement. While the underlying pattern (deterministic pre-Claude checks) is sound, there is insufficient evidence of recurrence to warrant a formal rule. The incident was a one-time edge case (re-dispatch with no new work) rather than a repeated violation. Crystallizing this would create redundancy with existing code-level enforcement. Re-evaluate if similar amend-cap deadlock incidents recur.
