@@ -85,6 +85,8 @@ class OnboardRepoResponse(BaseModel):
     git_author_email: str | None = None
     commit_trailer: str | None = None
     worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
+    is_public: bool = False
+    sensitive_strings: list[str] | None = None
     worker_hints_enabled: bool = True
 
 
@@ -137,6 +139,8 @@ async def onboard_repo(
         git_author_email=body.git_author_email,
         commit_trailer=body.commit_trailer,
         worker_deps=worker_deps,
+        is_public=config.is_public,
+        sensitive_strings=config.sensitive_strings,
         worker_hints_enabled=config.worker_hints_enabled,
     )
 
@@ -152,6 +156,8 @@ class RepoConfigResponse(BaseModel):
     git_author_email: str | None = None
     commit_trailer: str | None = None
     worker_deps: WorkerDeps = Field(default_factory=WorkerDeps)
+    is_public: bool = False
+    sensitive_strings: list[str] | None = None
     worker_hints_enabled: bool = True
 
 
@@ -186,5 +192,7 @@ async def get_repo(
         git_author_email=config.git_author_email,
         commit_trailer=config.commit_trailer,
         worker_deps=config.worker_deps or WorkerDeps(),
+        is_public=config.is_public,
+        sensitive_strings=config.sensitive_strings,
         worker_hints_enabled=config.worker_hints_enabled,
     )
