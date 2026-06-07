@@ -453,6 +453,47 @@ def task_retry(
     console.print(f"retry dispatched: workflow_run={result['workflow_run_id']}")
 
 
+@task_app.command("note")
+def task_note(
+    task_id: Annotated[str, typer.Argument(help="Task ID.")],
+    note: Annotated[str | None, typer.Argument(help="Note text to set.")] = None,
+    clear: Annotated[bool, typer.Option(
+        "--clear", help="Clear the note (set to null).",
+    )] = False,
+) -> None:
+    """Set or clear the operator_note on a task (ADR-0081 §1).
+
+    Usage:
+      treadmill task note <task-id> "hint text here"
+      treadmill task note <task-id> --clear
+    """
+    if clear:
+        note_to_set = None
+    elif note is None:
+        err_console.print("[red]error: provide note text or pass --clear[/red]")
+        raise typer.Exit(code=2)
+    else:
+        note_to_set = note
+
+    try:
+        with _client() as client:
+            result = client.set_operator_note(task_id, note_to_set)
+    except ApiError as exc:
+        if exc.status_code == 404:
+            err_console.print("[red]task not found[/red]")
+            raise typer.Exit(code=2)
+        _handle_api_error(exc)
+
+    if note_to_set is None:
+        console.print(f"[green]note cleared[/green] task={task_id}")
+    else:
+        console.print(
+            f"[green]note set[/green] task={task_id}\n"
+            f"excerpt: {note_to_set[:100]}"
+            + ("..." if len(note_to_set) > 100 else "")
+        )
+
+
 # ── status ───────────────────────────────────────────────────────────────────
 
 

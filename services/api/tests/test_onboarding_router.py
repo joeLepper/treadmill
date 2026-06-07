@@ -118,6 +118,9 @@ def test_onboard_repo_explicit_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         "git_author_name": None,
         "git_author_email": None,
         "commit_trailer": None,
+        "is_public": False,
+        "sensitive_strings": None,
+        "worker_hints_enabled": True,
     }
     assert session.committed
     assert len(store.profiles) == 1
@@ -272,6 +275,9 @@ def test_get_repo_returns_config(monkeypatch: pytest.MonkeyPatch) -> None:
         "git_author_name": None,
         "git_author_email": None,
         "commit_trailer": None,
+        "is_public": False,
+        "sensitive_strings": None,
+        "worker_hints_enabled": True,
     }
 
 

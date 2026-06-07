@@ -262,3 +262,24 @@ class TaskWorkerDepsFailed(EventPayload):
     # ``compute_deps_hash(worker_deps)`` for cache-correlation: an
     # operator can see whether two failures share a registration shape.
     worker_deps_hash: str = pydantic.Field(min_length=1)
+
+
+class OperatorHintSet(EventPayload):
+    """Emitted when the operator sets or clears an operator_note on a task.
+
+    Per ADR-0081 §1: the operator uses this hint channel to inject context
+    into the worker's next step prompt. This event provides an audit trail
+    of what hints were set, by whom, and when. Used to measure hint-channel
+    usage patterns and feed ADR-0075's fleet-wedge detector (high hint
+    request rate = workers getting stuck).
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "operator_hint_set"
+
+    note_excerpt: str = pydantic.Field(min_length=1, max_length=500)
+    """First 500 chars of the operator_note for the audit log. When the note
+    is null/cleared, this is a marker like '(cleared)' so the event always
+    carries a human-readable payload."""
+    set_by: str = pydantic.Field(min_length=1)
+    """Who set the hint (operator label, CLI user, etc.)."""

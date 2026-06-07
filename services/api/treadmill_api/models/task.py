@@ -64,6 +64,11 @@ class Task(Base):
         nullable=False,
         server_default=text("now()"),
     )
+    operator_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """Per ADR-0081: operator-injected hint for the worker. Workers read this
+    via the per-step context fetch and inject it into the system prompt when
+    non-null and the repo's worker_hints_enabled is true. The operator sets this
+    via POST /api/v1/tasks/{id}/operator_note or the CLI wrapper."""
 
     parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

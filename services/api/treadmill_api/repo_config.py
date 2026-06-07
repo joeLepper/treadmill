@@ -62,6 +62,10 @@ class RepoConfig:
     # the public-repo account-id) plus any substrings declared here.
     # ``None`` means "baseline only". Stored as JSONB list of strings.
     sensitive_strings: list[str] | None = None
+    # Per-repo worker hint channel enable (ADR-0081). Controls whether the
+    # worker's request_hint tool is registered and operator_note is injected.
+    # Defaults to true; flip to false to disable the hint channel.
+    worker_hints_enabled: bool = True
 
 
 def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
@@ -109,6 +113,7 @@ def parse_repo_config(data: dict[str, Any]) -> RepoConfig:
         worker_deps=worker_deps,
         is_public=bool(data.get("is_public", False)),
         sensitive_strings=sensitive_strings_data,
+        worker_hints_enabled=bool(data.get("worker_hints_enabled", True)),
     )
 
 
@@ -131,4 +136,5 @@ def to_dict(config: RepoConfig) -> dict[str, Any]:
         ),
         "is_public": config.is_public,
         "sensitive_strings": config.sensitive_strings,
+        "worker_hints_enabled": config.worker_hints_enabled,
     }
