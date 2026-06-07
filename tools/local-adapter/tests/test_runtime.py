@@ -84,7 +84,35 @@ def test_volumes_for_postgres_mounts_named_volume_for_persistence(
     }
 
     api = ContainerSpec(family="treadmill-api", name="api", image="treadmill-api:dev")
-    assert rt._volumes_for(api) == {}
+    api_mounts = rt._volumes_for(api)
+    # ADR-0083: API container gets ~/.cc-channels host mount so the
+    # architect_emit_failure relay-drop trigger writes into the
+    # orchestrator session's inbox on the host.
+    cc_channels_host = str(Path.home() / ".cc-channels")
+    assert cc_channels_host in api_mounts
+    assert api_mounts[cc_channels_host] == {
+        "bind": "/root/.cc-channels", "mode": "rw",
+    }
+
+
+def test_volumes_for_api_family_mounts_cc_channels_rw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0083: API container mounts the host's ~/.cc-channels so the
+    architect_emit_failure relay-drop trigger writes into the dispatching
+    orchestrator's inbox. Without the mount, Path.home() inside the
+    container points at /root which the host's treadmill-events server
+    never watches and the trigger silently no-ops."""
+    fake_home = tmp_path / "home-with-cc-channels"
+    (fake_home / ".cc-channels").mkdir(parents=True)
+    monkeypatch.setattr(runtime.Path, "home", classmethod(lambda cls: fake_home))
+
+    rt = _make_runtime(tmp_path, monkeypatch)
+    api = ContainerSpec(family="treadmill-api", name="api", image="treadmill-api:dev")
+    mounts = rt._volumes_for(api)
+    cc_host = str(fake_home / ".cc-channels")
+    assert mounts[cc_host] == {"bind": "/root/.cc-channels", "mode": "rw"}
 
 
 def test_volumes_for_agent_family_skips_credentials_when_absent(
