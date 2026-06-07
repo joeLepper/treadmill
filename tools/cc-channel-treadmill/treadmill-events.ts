@@ -211,9 +211,11 @@ function connect(): void {
 
   ws.onopen = () => {
     backoffMs = 1_000
-    reconcile('connect').catch(err =>
-      console.error(`treadmill-events: reconcile failed: ${err}`),
-    )
+    if (Date.now() - lastReconcileMs >= RECONCILE_MIN_INTERVAL_MS) {
+      reconcile('connect').catch(err =>
+        console.error(`treadmill-events: reconcile failed: ${err}`),
+      )
+    }
   }
 
   ws.onmessage = ev => {
