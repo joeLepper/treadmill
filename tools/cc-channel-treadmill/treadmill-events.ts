@@ -119,8 +119,12 @@ const ownedTasks = new Set<string>()
 let lastReconcileMs = 0
 const RECONCILE_MIN_INTERVAL_MS = 30_000
 
-// terminal derived statuses — used only to keep the catch-up summary short
-const TERMINAL = new Set(['done', 'cancelled', 'superseded'])
+// terminal derived statuses — used only to keep the catch-up summary short.
+// pr_merged has variants like "pr_merged (wf-feedback: failed)" so check by prefix.
+const TERMINAL_EXACT = new Set(['done', 'cancelled', 'superseded'])
+const TERMINAL_PREFIXES = ['pr_merged', 'failed']
+const isTerminal = (s: string) =>
+  TERMINAL_EXACT.has(s) || TERMINAL_PREFIXES.some(p => s === p || s.startsWith(p + ' '))
 
 const authHeaders: Record<string, string> = KEY ? { Authorization: `Bearer ${KEY}` } : {}
 
@@ -143,7 +147,7 @@ async function reconcile(reason: string, emit = true): Promise<void> {
     if (t['plan_id']) ownedPlans.add(String(t['plan_id']))
   }
   if (!emit) return
-  const active = mine.filter(t => !TERMINAL.has(String(t['derived_status'] ?? '')))
+  const active = mine.filter(t => !isTerminal(String(t['derived_status'] ?? '')))
   // One synthetic catch-up event per (re)connect: a restarted session must
   // not trust silence (ADR-0068 — reconcile-on-connect).
   await mcp.notification({
