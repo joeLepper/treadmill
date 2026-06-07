@@ -77,10 +77,13 @@ def _disp_ctx(
     repo_dir: Path,
     prior_steps: list[PriorStep] | None = None,
     claude_summary: str = "unused",
+    structured_output: dict | None = None,
 ) -> DispositionContext:
     return DispositionContext(
         ctx=_ctx(prior_steps=prior_steps),
-        claude_result=CodeAuthorResult(summary=claude_summary),
+        claude_result=CodeAuthorResult(
+            summary=claude_summary, structured_output=structured_output,
+        ),
         repo_dir=repo_dir,
         branch="task/x-add-thing",
         settings=_settings(),
@@ -147,20 +150,16 @@ def test_nothing_to_do_short_circuit_all_clauses_hold(tmp_path: Path) -> None:
 
     ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
 
-    # Patch only the Claude binary lookup so any architect Claude call would
-    # surface explicitly; the git rev-list call (clause 1) still runs for
-    # real because we only patch the Claude-invocation seam, not subprocess
-    # as a whole (which would break the `except (TimeoutExpired, ...)` clauses).
-    with patch(
-        "treadmill_agent.runner_dispositions.architecture._find_claude_binary",
-        side_effect=RuntimeError("Claude was called; short-circuit failed"),
-    ):
-        out = handle_architecture(ctx)
+    # No Claude tripwire needed post-ADR-0083: if the short-circuit
+    # fails, the handler reaches _extract_verdict_envelope with
+    # structured_output=None and emits decision='emit-failure', NOT
+    # 'accept-as-is' — so the assert below catches a short-circuit
+    # regression cleanly.
+    out = handle_architecture(ctx)
 
     # Verify the short-circuit verdict was returned
     assert out.decision == "accept-as-is"
     assert out.payload["short_circuit_reason"] == "nothing-to-do"
-    assert out.payload["parsed_from_prose"] is False
     assert out.payload["dispatch"]["workflow_id"] == "wf-doc-amend"
 
 
@@ -195,14 +194,16 @@ def test_nothing_to_do_clause_1_fails_commits_exist(tmp_path: Path) -> None:
         ),
     ]
 
-    normal_verdict = (
-        '```json\n'
-        '{"verdict": "amend", "reasoning": "Work needs fixing", '
-        '"target_artifact": "docs/x.md", '
-        '"remediation_summary": "Fix it."}\n'
-        '```'
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        prior_steps=prior_steps,
+        structured_output={
+            "verdict": "amend",
+            "reasoning": "Work needs fixing",
+            "target_artifact": "docs/x.md",
+            "remediation_summary": "Fix it.",
+        },
     )
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
     out = handle_architecture(ctx)
 
     # Architect ran and returned amend (not short-circuited)
@@ -231,14 +232,16 @@ def test_nothing_to_do_clause_2_fails_validator_not_pass(tmp_path: Path) -> None
         ),
     ]
 
-    normal_verdict = (
-        '```json\n'
-        '{"verdict": "amend", "reasoning": "Validation failed", '
-        '"target_artifact": "docs/x.md", '
-        '"remediation_summary": "Fix it."}\n'
-        '```'
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        prior_steps=prior_steps,
+        structured_output={
+            "verdict": "amend",
+            "reasoning": "Validation failed",
+            "target_artifact": "docs/x.md",
+            "remediation_summary": "Fix it.",
+        },
     )
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
     out = handle_architecture(ctx)
 
     # Architect ran (not short-circuited)
@@ -270,14 +273,16 @@ def test_nothing_to_do_clause_3_fails_author_no_signal(tmp_path: Path) -> None:
         ),
     ]
 
-    normal_verdict = (
-        '```json\n'
-        '{"verdict": "amend", "reasoning": "Work incomplete", '
-        '"target_artifact": "docs/x.md", '
-        '"remediation_summary": "Fix it."}\n'
-        '```'
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        prior_steps=prior_steps,
+        structured_output={
+            "verdict": "amend",
+            "reasoning": "Work incomplete",
+            "target_artifact": "docs/x.md",
+            "remediation_summary": "Fix it.",
+        },
     )
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
     out = handle_architecture(ctx)
 
     # Architect ran (not short-circuited)
@@ -312,11 +317,7 @@ def test_nothing_to_do_author_prose_cue_accept_as_is(tmp_path: Path) -> None:
 
     ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps)
 
-    with patch(
-        "treadmill_agent.runner_dispositions.architecture._find_claude_binary",
-        side_effect=RuntimeError("Claude was called"),
-    ):
-        out = handle_architecture(ctx)
+    out = handle_architecture(ctx)
 
     assert out.decision == "accept-as-is"
     assert out.payload["short_circuit_reason"] == "nothing-to-do"
@@ -347,13 +348,15 @@ def test_nothing_to_do_git_command_fails_falls_back_to_architect(
     ]
 
     # Mock subprocess.run to fail on the git rev-list call
-    normal_verdict = (
-        '```json\n'
-        '{"verdict": "accept-as-is", "reasoning": "All done", '
-        '"target_artifact": ""}\n'
-        '```'
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        prior_steps=prior_steps,
+        structured_output={
+            "verdict": "accept-as-is",
+            "reasoning": "All done",
+            "target_artifact": "",
+        },
     )
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
 
     def mock_subprocess_run(cmd, **kwargs):
         if isinstance(cmd, list) and "rev-list" in cmd:
@@ -390,14 +393,16 @@ def test_nothing_to_do_no_validator_step_falls_back(tmp_path: Path) -> None:
         ),
     ]
 
-    normal_verdict = (
-        '```json\n'
-        '{"verdict": "amend", "reasoning": "No validator run", '
-        '"target_artifact": "docs/x.md", '
-        '"remediation_summary": "Fix it."}\n'
-        '```'
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        prior_steps=prior_steps,
+        structured_output={
+            "verdict": "amend",
+            "reasoning": "No validator run",
+            "target_artifact": "docs/x.md",
+            "remediation_summary": "Fix it.",
+        },
     )
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
     out = handle_architecture(ctx)
 
     assert out.decision == "amend"
@@ -419,14 +424,16 @@ def test_nothing_to_do_no_author_step_falls_back(tmp_path: Path) -> None:
         ),
     ]
 
-    normal_verdict = (
-        '```json\n'
-        '{"verdict": "amend", "reasoning": "No author run", '
-        '"target_artifact": "docs/x.md", '
-        '"remediation_summary": "Fix it."}\n'
-        '```'
+    ctx = _disp_ctx(
+        repo_dir=clone,
+        prior_steps=prior_steps,
+        structured_output={
+            "verdict": "amend",
+            "reasoning": "No author run",
+            "target_artifact": "docs/x.md",
+            "remediation_summary": "Fix it.",
+        },
     )
-    ctx = _disp_ctx(repo_dir=clone, prior_steps=prior_steps, claude_summary=normal_verdict)
     out = handle_architecture(ctx)
 
     assert out.decision == "amend"

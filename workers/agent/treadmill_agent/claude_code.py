@@ -81,6 +81,14 @@ class CodeAuthorResult:
     against. Paired with ``token_usage`` so the API can attribute usage
     rows to a specific model; ``None`` when ``token_usage`` is ``None``."""
 
+    structured_output: dict[str, Any] | None = None
+    """Per ADR-0083, populated when the role was invoked with
+    ``--json-schema`` and the CLI emitted a schema-conforming object on
+    the ``structured_output`` field of the result payload. ``None`` for
+    roles called without the flag (every role except role-architect at
+    time of writing) or when the model didn't emit through the
+    structured channel."""
+
 
 class CodeAuthorError(RuntimeError):
     """Surface non-zero exit codes from the Claude Code CLI."""
@@ -356,6 +364,7 @@ def run_claude_code(
     task_id: str | None = None,
     worker_step_id: str | None = None,
     created_by: str | None = None,
+    json_schema: dict[str, Any] | None = None,
 ) -> CodeAuthorResult:
     """Drive Claude Code in ``repo_dir`` and return the captured summary.
 
@@ -435,6 +444,12 @@ def run_claude_code(
         "--append-system-prompt", system_prompt,
         prompt,
     ]
+    # ADR-0083: force structured output for roles that supply a schema
+    # (currently role-architect via the runner — see runner.py). Schema is
+    # JSON-encoded as a single CLI argument; the CLI emits a conforming
+    # object on the result payload's ``structured_output`` field.
+    if json_schema is not None:
+        cmd.extend(["--json-schema", json.dumps(json_schema)])
     base_extra: dict[str, Any] = dict(log_context or {})
     logger.info(
         "running claude code: model=%s cwd=%s", role.model, repo_dir,
@@ -460,7 +475,7 @@ def run_claude_code(
             f"stdout:\n{stdout_text}\nstderr:\n{stderr_text}"
         )
 
-    summary, usage = _try_parse_json_output(stdout_text)
+    summary, usage, structured_output = _try_parse_json_output(stdout_text)
     if usage is not None:
         ctx = log_context or {}
         try:
@@ -490,6 +505,7 @@ def run_claude_code(
         # ``usage`` is None (no LLM call observed) the model is also
         # None — the API persists NULLs for both.
         model=role.model if usage is not None else None,
+        structured_output=structured_output,
     )
 
 
@@ -525,49 +541,48 @@ def _pump_stream(
 
 def _try_parse_json_output(
     text: str,
-) -> tuple[str, dict[str, int] | None]:
+) -> tuple[str, dict[str, int] | None, dict[str, Any] | None]:
     """Parse claude's JSON output (``--output-format json``) and extract
-    the result text plus token usage counters.
+    the result text, token usage counters, and (per ADR-0083) the
+    ``structured_output`` envelope when ``--json-schema`` was set.
 
-    Returns ``(summary, usage)`` where ``usage`` is a dict with keys
-    ``input_tokens``, ``output_tokens``, ``cache_creation_tokens``,
-    ``cache_read_tokens`` (all ``int``), or ``None`` when the stdout is
-    not JSON (e.g. stub binaries in unit tests) or lacks a ``usage``
-    block.
+    Returns ``(summary, usage, structured_output)``. ``usage`` is None
+    when stdout isn't JSON or lacks a ``usage`` block; ``structured_output``
+    is None when the CLI didn't emit through the structured channel
+    (either ``--json-schema`` wasn't set, or the model emitted prose only).
 
     The expected JSON shape from Claude Code 2.x is::
 
         {
           "type": "result",
           "subtype": "success",
-          "result": "<text the role produced>",
-          "usage": {
-            "input_tokens": 100,
-            "output_tokens": 50,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0
-          },
-          ...
+          "result": "<text the role produced>",  // empty when structured_output is used
+          "usage": { ... },
+          "structured_output": { ... }  // ADR-0083, present only when --json-schema set
         }
     """
     stripped = text.strip()
     if not stripped:
-        return text, None
+        return text, None, None
     try:
         data = json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
-        return text, None
+        return text, None, None
 
     if not isinstance(data, dict):
-        return text, None
+        return text, None, None
 
     result_text = data.get("result", "")
     if not isinstance(result_text, str):
         result_text = str(result_text)
 
+    structured = data.get("structured_output")
+    if not isinstance(structured, dict):
+        structured = None
+
     usage_raw = data.get("usage")
     if not isinstance(usage_raw, dict):
-        return result_text or text, None
+        return result_text or text, None, structured
 
     usage = {
         "input_tokens": int(usage_raw.get("input_tokens", 0)),
@@ -576,7 +591,7 @@ def _try_parse_json_output(
         "cache_creation_tokens": int(usage_raw.get("cache_creation_input_tokens", 0)),
         "cache_read_tokens": int(usage_raw.get("cache_read_input_tokens", 0)),
     }
-    return result_text or text, usage
+    return result_text or text, usage, structured
 
 
 def _inject_operator_hint(system_prompt: str, operator_note: str) -> str:

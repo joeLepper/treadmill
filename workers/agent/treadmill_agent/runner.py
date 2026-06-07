@@ -488,6 +488,17 @@ def _execute(
                 "model": ctx.role.model,
                 "workflow": ctx.workflow_id,
             }
+            # ADR-0083: when the role is role-architect, pass the verdict
+            # JSON Schema so the CLI emits via the structured channel and
+            # the disposition reads ``claude_result.structured_output``
+            # instead of regexing prose.
+            json_schema_for_call = None
+            if ctx.role.id == "role-architect":
+                from treadmill_agent.runner_dispositions.architecture import (
+                    _VERDICT_SCHEMA,
+                )
+                json_schema_for_call = _VERDICT_SCHEMA
+
             claude_result = claude_code.run_claude_code(
                 repo_dir=repo_dir,
                 role=ctx.role,
@@ -512,6 +523,7 @@ def _execute(
                 task_id=ctx.task_id,
                 worker_step_id=ctx.step_id,
                 created_by=ctx.created_by,
+                json_schema=json_schema_for_call,
             )
 
         # ADR-0020: surface the parsed per-step token usage to the
