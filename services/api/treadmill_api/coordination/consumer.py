@@ -349,6 +349,13 @@ class CoordinationConsumer:
             )
             return
 
+        # ADR-0083 — relay drop when the architect fails to emit a structured verdict.
+        if et == "task" and action == "architect_emit_failure":
+            await self._handle_architect_emit_failure(
+                record, payload=record.get("payload") or {},
+            )
+            return
+
         # ADR-0061 — project task-terminal verbs onto any triage_findings
         # row whose dispatched_plan_id matches the task's plan. Other task
         # verbs fall through to the catch-all "ignoring" log below.
@@ -1080,6 +1087,37 @@ class CoordinationConsumer:
                 "triage outcome projected: plan_id=%s pr=%d (rows=%d)",
                 plan_id, typed.pr_number, rowcount,
             )
+
+    async def _handle_architect_emit_failure(
+        self,
+        record: dict[str, Any],
+        *,
+        payload: dict[str, Any],
+    ) -> None:
+        """Drop a cc-relay notification when the architect fails to emit a
+        structured verdict (ADR-0083).
+
+        The event is already persisted by the router before the consumer sees
+        it; this handler fires the relay-drop side-effect so the dispatching
+        orchestrator session learns about the failure without polling.
+        """
+        from treadmill_api.coordination.triggers import (
+            maybe_drop_relay_on_architect_emit_failure,
+        )
+        from treadmill_api.events.task import ArchitectEmitFailure
+        from pydantic import ValidationError
+
+        try:
+            typed = ArchitectEmitFailure.model_validate(payload)
+        except ValidationError as exc:
+            logger.warning(
+                "coordination dropping malformed task.architect_emit_failure payload: %s",
+                exc,
+            )
+            return
+
+        task_id_str = str(record.get("task_id") or "")
+        maybe_drop_relay_on_architect_emit_failure(typed, task_id_str)
 
     async def _handle_task_terminal_for_triage(
         self,

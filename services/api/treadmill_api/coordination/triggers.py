@@ -86,6 +86,7 @@ from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
 from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.events.task import (
+    ArchitectEmitFailure,
     TaskCancelled,
     TaskEscalatedToOperator,
     TaskRegistered,
@@ -3989,3 +3990,80 @@ async def _check_still_mergeable_for_auto_merge(
     if await _repo_auto_merge_blocked(session, row.repo):
         return False
     return row.derived_mergeability == "mergeable"
+
+
+# ── ADR-0083: architect emit-failure relay drop ──────────────────────────────
+
+import os
+import time
+from pathlib import Path
+
+
+def maybe_drop_relay_on_architect_emit_failure(
+    payload: ArchitectEmitFailure,
+    task_id: str,
+    *,
+    relay_base: Path | None = None,
+) -> Path | None:
+    """Write a cc-relay notification file when the architect fails to emit a
+    structured verdict (ADR-0083).
+
+    Drops a markdown file into ``~/.cc-channels/<created_by>/relay/`` named
+    ``<ts>-architect-emit-failure-<failing_run_id>.md`` so the dispatching
+    orchestrator session's treadmill-events server picks it up via inotify.
+
+    The filename carries ``failing_run_id`` for idempotency: a duplicate
+    event produces an overwrite of the same file rather than a relay-spam
+    cascade.
+
+    ``relay_base`` overrides the base directory for tests. In production
+    it falls back to the ``TREADMILL_CC_CHANNELS_DIR`` env var, then
+    ``Path.home() / ".cc-channels"``.
+
+    **Dev-local deployment note:** the API service runs in Docker with no
+    ``~/.cc-channels/`` volume mount, so this write is a no-op in the
+    container environment. A volume mount (e.g.
+    ``~/.cc-channels:/root/.cc-channels``) or the ``TREADMILL_CC_CHANNELS_DIR``
+    env var pointing at a writable path is required. Production-split
+    deployments need a remote-drop mechanism (SQS to orchestrator host);
+    out of v1 scope — flagged in AGENT.md.
+    """
+    if relay_base is None:
+        env_base = os.environ.get("TREADMILL_CC_CHANNELS_DIR")
+        relay_base = Path(env_base) if env_base else Path.home() / ".cc-channels"
+
+    relay_dir = relay_base / payload.created_by / "relay"
+    try:
+        relay_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning(
+            "architect-emit-failure relay: cannot create relay dir %s; skipping drop",
+            relay_dir,
+        )
+        return None
+
+    ts = int(time.time() * 1000)
+    filename = f"{ts}-architect-emit-failure-{payload.failing_run_id}.md"
+    relay_path = relay_dir / filename
+
+    body = (
+        f"# Architect emit-failure\n\n"
+        f"**Task:** {task_id}  \n"
+        f"**Run:** {payload.failing_run_id}  \n"
+        f"**Reason:** `{payload.parse_failure_reason}`  \n\n"
+        f"## Model output excerpt\n\n"
+        f"```\n{payload.model_output_excerpt[:4096]}\n```\n\n"
+        f"---\n\n"
+        f"The architect's `--json-schema` call did not produce a structured verdict.\n"
+        f"Check the run in the Treadmill dashboard or via:\n\n"
+        f"```\ntreadmill run show {payload.failing_run_id}\n```\n"
+    )
+    relay_path.write_text(body)
+    logger.info(
+        "architect-emit-failure relay: dropped %s for label %s run %s reason %s",
+        relay_path,
+        payload.created_by,
+        payload.failing_run_id,
+        payload.parse_failure_reason,
+    )
+    return relay_path
