@@ -44,8 +44,13 @@ fi
 
 # Attach to an inner session from inside a tmux pane.
 # env -u TMUX unsets the outer-session marker so tmux allows the nested attach.
+# Wrapped in a re-attach loop so when the inner session dies (e.g. systemd
+# restart of the launcher after a `tmux kill-session` for MCP-channel recovery),
+# the pane reconnects to the respawned session instead of stranding at a bash
+# prompt with [exited]. The 1s sleep keeps the loop from spinning if the
+# session can never be attached (typo'd label, killed tmux server).
 attach_cmd() {
-    echo "env -u TMUX tmux attach-session -t $1"
+    echo "while :; do env -u TMUX tmux attach-session -t $1 2>/dev/null; sleep 1; done"
 }
 
 # Create a new detached session and start the first attach in pane 0.
