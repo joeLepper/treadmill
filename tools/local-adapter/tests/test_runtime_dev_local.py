@@ -819,8 +819,13 @@ def test_no_aws_mount_in_dev_local_for_api(
     expected_aws_host = str(tmp_path / "home" / ".aws")
     assert expected_aws_host not in mounts
     assert not any(m["bind"] == "/root/.aws" for m in mounts.values())
-    # API has no other dev-local volumes, so mounts is empty.
-    assert mounts == {}
+    # Per ADR-0083, the API container DOES carry a ~/.cc-channels mount
+    # for the architect_emit_failure relay drop. Assert that is the only
+    # mount present (no AWS, no others).
+    cc_host_path = str(Path.home() / ".cc-channels")
+    assert mounts == {
+        cc_host_path: {"bind": "/root/.cc-channels", "mode": "rw"},
+    }
 
 
 def test_no_aws_mount_in_dev_local_for_agent_only_claude(
