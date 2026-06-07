@@ -1,7 +1,9 @@
 ---
 date: 2026-06-04
 trigger: pattern
-status: captured
+status: crystallized
+crystallized_into: docs/knowledge-base/rules/host-process-restart-required-to-deploy.yaml
+crystallized_date: 2026-06-07
 related: ADR-0060, learning-2026-05-26 (deploy-watcher stale source)
 ---
 

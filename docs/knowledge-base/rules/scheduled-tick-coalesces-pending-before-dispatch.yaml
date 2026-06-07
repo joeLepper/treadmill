@@ -1,0 +1,92 @@
+name: scheduled-tick-coalesces-pending-before-dispatch
+description: >
+  Scheduled-tick dispatch must coalesce (cancel) any prior pending synthetic Tasks
+  for the same schedule before creating a new Task. When role start-to-first-step
+  latency exceeds the cron interval, each new tick adds another pending Task while
+  the prior is still queued, silently amplifying a latency spike into a surface
+  backlog proportional to spike_duration ÷ fire_interval. The intent (one-bot,
+  one-job) and the materialization (N pending Tasks) drift apart on every fire.
+
+status: active
+created: 2026-06-07
+
+crystallized_from:
+  - 2026-06-03-scheduler-should-dedupe-pending-ticks
+
+applies_to:
+  - 'coordination/triggers.py'
+  - 'coordination/**/*.py'
+
+checks:
+  - id: scheduler-coalesces-pending-ticks
+    type: llm-judge
+    description: >
+      The scheduled-tick dispatch path must cancel any prior pending synthetic Tasks
+      for the same schedule (keyed by workflow_version_id) before creating the new
+      Task. Pending = the prior tick's first workflow_run_steps row has started_at
+      IS NULL and no terminal task event exists. In-flight ticks (started_at set)
+      must NOT be cancelled — parallel running ticks are allowed by design.
+    severity: blocking
+    prompt: |
+      You are evaluating whether a change to the scheduled-tick dispatch path
+      conforms to the rule "scheduled-tick-coalesces-pending-before-dispatch":
+      before creating a new synthetic Task for a cron fire, the dispatcher must
+      coalesce (cancel) any prior pending Tasks for the same schedule.
+
+      Inputs you receive:
+        DIFF — the unified diff of the change.
+
+      This rule applies ONLY if the diff modifies `handle_scheduled_tick` or any
+      helper it calls in the scheduler dispatch path. If the diff does not touch
+      the scheduler dispatch path, return pass immediately.
+
+      When the diff does touch the dispatch path, check for:
+        REQUIRED: a coalesce/dedupe step that, BEFORE `_dispatch_via_synthetic_task`,
+          queries for prior pending Tasks keyed by workflow_version_id (or equivalent
+          schedule identity) and emits a terminal event (e.g. task.cancelled with
+          reason='superseded_by_newer_tick') for each match.
+        FORBIDDEN: cancellation of in-flight tasks — those whose workflow_run_steps
+          started_at is already set. Parallel in-flight runs are allowed by design.
+        EXEMPT: deterministic-detector dispatches (wf-stuck-task-sweep,
+          wf-escalation-close-sweep) that short-circuit before any Task creation.
+
+      Decide:
+        pass — the dispatch path includes coalesce logic keyed on schedule identity,
+               OR the diff does not touch the scheduler dispatch path.
+        fail — the dispatch path was modified but no coalesce step is present,
+               OR the coalesce logic cancels in-flight tasks (violating the non-goal).
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"verdict": "pass" | "fail",
+         "rationale": "<one to two sentences citing the specific function or block
+                       that satisfies or violates the rule>"}
+
+remediations:
+  - "on": scheduler-coalesces-pending-ticks:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR modifies the scheduled-tick dispatch path but does not implement
+      pending-tick coalescing. Per
+      rule:scheduled-tick-coalesces-pending-before-dispatch (crystallized from
+      docs/learnings/2026-06-03-scheduler-should-dedupe-pending-ticks.md),
+      `handle_scheduled_tick` must cancel any prior pending synthetic Tasks for the
+      same schedule before creating the new Task.
+
+      Implement `_coalesce_pending_ticks_for_schedule(session, dispatcher, *,
+      schedule_id, workflow_version_id)` in `coordination/triggers.py` and call it
+      from `handle_scheduled_tick` after the deterministic short-circuits and before
+      `_dispatch_via_synthetic_task`. Query: Tasks WHERE plan_id=SYSTEM_PLAN_ID AND
+      created_by='scheduler' AND workflow_version_id=:wv AND NOT EXISTS (started_at
+      on first step) AND NOT EXISTS (terminal task event). For each match emit
+      `task.cancelled` with reason='superseded_by_newer_tick' via `persist_and_publish`.
+
+      Do NOT cancel in-flight ticks (started_at set) — only the unstarted queue is
+      collapsed. The cron schedule itself is unchanged; the fix collapses the pending
+      queue at dispatch time rather than suppressing fires.
+
+references:
+  - ADR-0035   # task lifecycle
+  - ADR-0057   # scheduler-spawned synthetic tasks
+  - ADR-0006   # rules + remediations primitive
+  - 2026-06-03-scheduler-should-dedupe-pending-ticks   # source learning

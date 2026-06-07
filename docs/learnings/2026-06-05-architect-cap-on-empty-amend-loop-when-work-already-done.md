@@ -1,7 +1,9 @@
 ---
 date: 2026-06-05
 trigger: incident
-status: captured
+status: crystallized
+crystallized_into: docs/knowledge-base/rules/architect-empty-diff-short-circuit.yaml
+crystallized_date: 2026-06-07
 related: ADR-0029, ADR-0074
 last_crystallization_check: 2026-06-07
 next_crystallization_check: 2026-06-08

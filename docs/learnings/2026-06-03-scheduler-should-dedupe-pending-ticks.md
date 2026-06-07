@@ -1,7 +1,9 @@
 ---
 date: 2026-06-03
 trigger: surprise
-status: captured
+status: crystallized
+crystallized_into: docs/knowledge-base/rules/scheduled-tick-coalesces-pending-before-dispatch.yaml
+crystallized_date: 2026-06-07
 related: ADR-0035, ADR-0057
 ---
 

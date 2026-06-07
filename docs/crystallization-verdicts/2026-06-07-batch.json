@@ -1,0 +1,188 @@
+{
+  "batch_date": "2026-06-07",
+  "evaluated_count": 28,
+  "ready_count": 4,
+  "not_ready_count": 21,
+  "defer_count": 2,
+  "note": "28 un-crystallized learnings evaluated. 4 meet frequency x remediation-ease threshold. 21 have single-instance frequency — awaiting second pattern emergence. 2 deferred (June 5-6, too recent for signal assessment).",
+  "verdicts": [
+    {
+      "learning_slug": "2026-06-03-scheduler-should-dedupe-pending-ticks",
+      "verdict": "ready",
+      "rule_slug": "scheduled-tick-coalesces-pending-before-dispatch",
+      "rule_file": "docs/knowledge-base/rules/scheduled-tick-coalesces-pending-before-dispatch.yaml",
+      "reasoning": "Production-scale incident (6 stacked pending Tasks for wf-ui-triage); full coalesce spec with query, cancel event, and scoping constraints in learning doc. Remediation is fully implementable from the learning's proposed helper."
+    },
+    {
+      "learning_slug": "2026-06-05-architect-cap-on-empty-amend-loop-when-work-already-done",
+      "verdict": "ready",
+      "rule_slug": "architect-empty-diff-short-circuit",
+      "rule_file": "docs/knowledge-base/rules/architect-empty-diff-short-circuit.yaml",
+      "reasoning": "Direct cap-burn consequence confirmed in production (operator escalated after 5 wasted cycles). Short-circuit logic is fully specified with three deterministic preconditions and a concrete implementation target (handle_architecture entry-point). Core safety property for the ralph-loop architecture."
+    },
+    {
+      "learning_slug": "2026-06-04-host-processes-pin-code-at-import-time",
+      "verdict": "ready",
+      "rule_slug": "host-process-restart-required-to-deploy",
+      "rule_file": "docs/knowledge-base/rules/host-process-restart-required-to-deploy.yaml",
+      "reasoning": "Third confirmed member of the stale-code family (deploy-watcher 2026-05-26, subprocess logs 2026-05-21, autoscaler/egress-proxy 2026-06-04). Family pattern established; generalized rule prevents future source-tree-only verification. Remediation is a plan-authoring pattern, not a code change."
+    },
+    {
+      "learning_slug": "2026-06-04-accept-as-is-terminalizes-task-before-merge",
+      "verdict": "ready",
+      "rule_slug": "architect-accept-as-is-awaits-merge-if-pr-open",
+      "rule_file": "docs/knowledge-base/rules/architect-accept-as-is-awaits-merge-if-pr-open.yaml",
+      "reasoning": "Confirmed deadlock incident (task 57598e7a, PR #133, downstream task 4300e935 indefinitely blocked). Core lifecycle invariant with two-part remediation: PR-state guard in accept-as-is path + stuck-task sweep check. High-impact: downstream dependency chains deadlock silently when this fires."
+    },
+    {
+      "learning_slug": "2026-05-08-fabricated-supporting-evidence",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; overlaps with existing wf-author pr-body-leaks learning. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-08-commodity-vs-architectural-decision-weight",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; judgment-call pattern without clear deterministic check surface."
+    },
+    {
+      "learning_slug": "2026-05-08-per-role-images-collapse-attempt",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; architectural context has evolved (ADR-0060+). Premature to crystallize."
+    },
+    {
+      "learning_slug": "2026-05-08-test-client-is-not-running",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; environment-specific. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-11-plans-go-in-durable-places-not-context",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; related to existing plan-authoring rules. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-11-review-driven-phase-closure",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; workflow-specific pattern. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-11-uniform-output-shape-over-per-workflow-typing",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; architectural principle captured but no enforcement surface identified."
+    },
+    {
+      "learning_slug": "2026-05-12-precedent-history-not-just-current-state",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; meta-pattern without clear check surface."
+    },
+    {
+      "learning_slug": "2026-05-14-author-side-fail-no-remediation",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; Trigger C handling improved separately (ADR-0048 follow-on). Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-14-dispositions-should-be-composable-role-side-effects",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; architectural principle without concrete check surface yet."
+    },
+    {
+      "learning_slug": "2026-05-14-dual-ingress-paths-need-a-shared-facade",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; code-structure pattern. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-14-validation-targets-task-intent-not-generic-correctness",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; judge-prompt calibration concern. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-15-identify-deployment-mode-before-diagnosing",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; diagnostic heuristic without enforcement surface."
+    },
+    {
+      "learning_slug": "2026-05-15-silent-wf-author-failures-hidden-by-view-clause-6d",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; implementation-specific. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-17-analyzer-summary-fabricates-artifact-creation",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; overlaps with existing analyzer-skips-actual-logs learning. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-17-auto-merge-trigger-loses-race-with-validate-override",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; race condition fix is implementation-level. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-17-autoscaler-silently-died-without-alarm",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; monitoring gap. Awaiting second emergence before alarm-rule crystallization."
+    },
+    {
+      "learning_slug": "2026-05-18-auto-merge-misses-architect-override-completion",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; implementation gap. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-18-heartbeat-reinvented-logging",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; design-pattern observation without enforcement surface."
+    },
+    {
+      "learning_slug": "2026-05-18-wf-author-pr-body-leaks-session-narration",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; pr-description rule (pr-description-conforms.yaml) partially covers this. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-18-wf-ci-fix-analyzer-skips-actual-logs",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; role-specific. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-20-ci-workspace-env-masks-missing-container-deps",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; env-masking pattern. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-20-design-diagrams-can-lag-merged-code",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; diagram-currency concern covered partially by adr-and-plan-has-diagram.yaml. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-22-docker-restart-reuses-old-image-silent-noop-deploy",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; sibling of stale-code family but container-specific. Awaiting second emergence for container-restart sub-rule."
+    },
+    {
+      "learning_slug": "2026-05-29-parent-write-drains-pending-children-no-poller",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; scheduler plumbing pattern. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-27-sqlalchemy-uow-misses-fk-order-with-explicit-pk",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; ORM-specific. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-05-27-stub-session-tests-hide-fk-violations",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; testing antipattern. Awaiting second emergence."
+    },
+    {
+      "learning_slug": "2026-06-04-plan-validation-gates-must-pin-runtime-deps",
+      "verdict": "not-ready",
+      "reasoning": "Single instance; closely related to deterministic-gates-must-use-sandbox-safe-tools. Monitor for second instance before spawning sibling rule."
+    },
+    {
+      "learning_slug": "2026-06-05-architect-output-malformed-recurring-on-large-prompt-tasks",
+      "verdict": "defer",
+      "reasoning": "Very recent (2026-06-05); signal unclear. Defer until recurring pattern or second instance."
+    },
+    {
+      "learning_slug": "2026-06-05-cc-channels-telegram-plugin-failed-silently-on-launch",
+      "verdict": "defer",
+      "reasoning": "Very recent (2026-06-05); component-specific. Defer until second instance."
+    }
+  ]
+}

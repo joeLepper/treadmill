@@ -1,0 +1,98 @@
+name: architect-accept-as-is-awaits-merge-if-pr-open
+description: >
+  An architect accept-as-is verdict on a task whose PR is still OPEN must route the
+  task to awaiting_review / merge-eligible — never to a terminal status. Only
+  pr_merged (or cancel/supersede) may terminalize a task that owns an open PR.
+  Terminalizing before merge strands the PR: nothing remains alive to dispatch
+  wf-review, arm the ADR-0031 cooling-off, or trigger the auto-merge deadline key
+  in Redis. Downstream tasks blocked on `task.<id>.pr_merged` deadlock indefinitely.
+
+status: active
+created: 2026-06-07
+
+crystallized_from:
+  - 2026-06-04-accept-as-is-terminalizes-task-before-merge
+
+applies_to:
+  - 'coordination/**/*.py'
+
+checks:
+  - id: accept-as-is-awaits-merge-if-pr-open
+    type: llm-judge
+    description: >
+      The architect disposition's accept-as-is handling must check PR state before
+      setting terminal status. If the task has an OPEN PR, the task must transition
+      to awaiting_review / merge-eligible — not to done or any terminal status.
+      Terminal status is only reachable via pr_merged, cancel, or supersede events.
+    severity: blocking
+    prompt: |
+      You are evaluating whether a change to the architect disposition's accept-as-is
+      handling conforms to the rule "architect-accept-as-is-awaits-merge-if-pr-open":
+      when the architect emits accept-as-is and the task has an OPEN PR, the task
+      must NOT be set to a terminal status; it must be routed to awaiting_review /
+      merge-eligible instead.
+
+      Inputs you receive:
+        DIFF — the unified diff of the change.
+
+      This rule applies ONLY if the diff modifies accept-as-is verdict routing in the
+      architect disposition, the task-status projection, or the disposition router.
+      If the diff does not touch accept-as-is routing, return pass immediately.
+
+      When the diff does touch accept-as-is routing, check for:
+        REQUIRED: a guard that inspects PR state (OPEN vs. MERGED/CLOSED) before
+          setting terminal status on a task receiving an accept-as-is verdict.
+        REQUIRED: when PR is OPEN, the task transitions to awaiting_review or
+          merge-eligible — NOT to done, terminal, or any status that prevents further
+          workflow dispatch (wf-review, auto-merge timer arming).
+        REQUIRED: terminal status (done) is only reachable via the pr_merged event
+          path, or explicit cancel/supersede.
+        FORBIDDEN: setting terminal/done status on a task that still has an OPEN PR,
+          even if the architect verdict is accept-as-is.
+
+      Also check for the stuck-task sweep invariant (bonus — not blocking):
+        PREFERRED: the stuck-task sweep (ADR-0062) includes a check for tasks in
+          terminal status that own OPEN PRs and emits an escalation incident.
+
+      Decide:
+        pass — the accept-as-is path guards on PR state before setting terminal
+               status, OR the diff does not touch accept-as-is routing.
+        fail — the accept-as-is path sets terminal status without checking PR state,
+               OR routes an open-PR task to done/terminal.
+
+      Return JSON exactly matching this shape, no prose around it:
+        {"verdict": "pass" | "fail",
+         "rationale": "<one to two sentences citing the specific status transition
+                       or guard clause that satisfies or violates the rule>"}
+
+remediations:
+  - "on": accept-as-is-awaits-merge-if-pr-open:fail
+    action: block-merge
+    target: pr-author
+    message: >
+      This PR modifies accept-as-is routing but is missing the PR-state guard
+      required by rule:architect-accept-as-is-awaits-merge-if-pr-open (crystallized
+      from docs/learnings/2026-06-04-accept-as-is-terminalizes-task-before-merge.md).
+
+      Fix: in `handle_architecture` (or wherever accept-as-is verdict handling lives),
+      add a check — if the task has an OPEN PR, route to awaiting_review /
+      merge-eligible rather than terminal/done. Only a `pr_merged` event (or
+      cancel/supersede) should terminalize a task that owns an open PR.
+
+      Additionally, consider adding to the stuck-task sweep (ADR-0062): flag any task
+      in terminal status that owns an OPEN PR and emit a `stuck.terminal_with_open_pr`
+      incident — this is cheap (join task status × PR state) and catches race
+      conditions that bypass the guard.
+
+      Background: task 57598e7a was stranded by this exact pattern on 2026-06-04. PR
+      #133 remained open with zero reviews and no auto-merge deadline key after
+      accept-as-is terminalized the task. Downstream task 4300e935 blocked on
+      `task.57598e7a.pr_merged` — a dependency that could never fire — sat
+      indefinitely until an operator manually squash-merged the PR via REST.
+
+references:
+  - ADR-0031   # pr cooling-off + review dispatch
+  - ADR-0048   # accept-as-is verdict handling
+  - ADR-0062   # stuck-task sweep + escalation incidents
+  - ADR-0006   # rules + remediations primitive
+  - 2026-06-04-accept-as-is-terminalizes-task-before-merge   # source learning
