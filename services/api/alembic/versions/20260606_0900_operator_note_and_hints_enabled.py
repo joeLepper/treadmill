@@ -5,7 +5,7 @@ workers read via the per-step context fetch and inject into the system
 prompt. worker_hints_enabled gates the feature per-repo (defaults true).
 
 Revision ID: 20260606_0900
-Revises: 20260605_1900
+Revises: 20260606_0000
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from alembic import op
 
 
 revision: str = "20260606_0900"
-down_revision: Union[str, Sequence[str], None] = "20260605_1900"
+down_revision: Union[str, Sequence[str], None] = "20260606_0000"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

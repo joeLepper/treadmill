@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -28,14 +29,18 @@ from treadmill_api.routers.tasks import router as tasks_router
 
 class _StubResult:
     def __init__(self, row: dict[str, Any] | None = None) -> None:
-        self._row = row
+        # Wrap the row dict in a SimpleNamespace so endpoint code that
+        # accesses fields via attribute syntax (row.id, row.repo, ...)
+        # works against the stub. The real SQLAlchemy Row object exposes
+        # attribute access too.
+        self._row = SimpleNamespace(**row) if row is not None else None
 
-    async def one(self) -> dict[str, Any]:
+    def one(self) -> Any:
         if self._row is None:
             raise Exception("No row")
         return self._row
 
-    async def one_or_none(self) -> dict[str, Any] | None:
+    def one_or_none(self) -> Any | None:
         return self._row
 
 
@@ -108,6 +113,10 @@ def _valid_task(**overrides) -> dict[str, Any]:
         "workflow_version_id": _WF_VERSION_ID,
         "created_by": "test-operator",
         "operator_note": None,
+        "created_at": datetime.now(timezone.utc),
+        "parent_task_id": None,
+        "derived_status": "pr_open",
+        "derived_mergeability": "unknown",
     }
     base.update(overrides)
     return base
