@@ -72,31 +72,42 @@ sequence_of_work:
 
       BUILD:
         1. Define the verdict JSON Schema inline in architecture.py
-           as a module-level constant _VERDICT_SCHEMA. Required
-           top-level fields: verdict (enum), reasoning, target_artifact.
-           Conditional-required via JSON Schema if-then-else:
-             - if verdict == 'supersede', required: [rewritten_description]
-             - if verdict == 'gate-broken', required: [gate_log_excerpt]
-             - if verdict in {'amend','supersede'}, required: [remediation_summary]
-           Pin the schema to a known JSON Schema draft version that
-           Claude Code accepts (verify against the CLI smoke before
-           submission).
+           as a module-level constant _VERDICT_SCHEMA. Flat shape —
+           the Anthropic tool-schema validator rejects JSON Schema's
+           allOf / oneOf / if-then-else (verified 2026-06-07: the
+           CLI returns 400 input_schema does not support oneOf when
+           the schema uses if-then). Required top-level fields:
+           verdict (enum), reasoning, target_artifact,
+           remediation_summary. Optional: rewritten_description,
+           gate_log_excerpt. Conditional-required validation moves
+           into worker code as a post-emit check (step 3).
         2. claude_code.py::run_claude_code: when ctx.role.id ==
            'role-architect', append --json-schema <inline-schema-json>
            to the claude --print argv. Other roles unchanged.
         3. architecture.py::_extract_verdict_envelope: new shape.
              - Read ctx.claude_result.structured_output (a dict or
-               None). If present and verdict in _VALID_VERDICTS,
-               return it.
-             - If absent or invalid, emit a task.architect_emit_failure
-               event (via the worker's existing api_client +
-               treadmill_api hint-channel POST pattern; see
-               worker_hints.py for the canonical shape). Return a
-               synthetic envelope {"verdict": "emit-failure",
-               "model_output_excerpt": <first 2KB of result + summary>}.
+               None). If absent, emit task.architect_emit_failure
+               (path below) and return a synthetic envelope
+               {"verdict": "emit-failure", "model_output_excerpt":
+               <first 2KB of result + summary>}.
+             - If present, post-emit-validate in worker code:
+                 * verdict in _VALID_VERDICTS (defensive)
+                 * if verdict == 'supersede', rewritten_description
+                   non-empty
+                 * if verdict == 'gate-broken', gate_log_excerpt
+                   non-empty
+               Any check fails → emit task.architect_emit_failure
+               with a parse_failure_reason discriminator
+               (no-structured-output | supersede-missing-rewrite |
+               gate-broken-missing-excerpt | invalid-verdict-literal),
+               return the synthetic emit-failure envelope.
+             - On success, return structured_output verbatim.
+           Emit path uses the worker's existing api_client +
+           treadmill_api hint-channel POST pattern; see
+           worker_hints.py for the canonical shape.
            ArchitectVerdictParseError keeps the line-444 raise (for
-           unknown verdict literals on a real model emit), but is
-           never raised from this new path.
+           unknown verdict literals from non-architect call sites),
+           but is never raised from _extract_verdict_envelope.
         4. handle() branch: before the existing accept-as-is / amend
            / supersede / gate-broken switch, recognize verdict ==
            'emit-failure'. Emit StepOutput with decision='emit-failure',
@@ -205,7 +216,7 @@ sequence_of_work:
 
 ## Risks / unknowns
 
-- **Conditional-required schema fields** for `supersede.rewritten_description` and `gate-broken.gate_log_excerpt` may need iteration. The first cut requires only the always-mandatory `verdict + reasoning + target_artifact`; the conditional fields ride on `if-then-else` JSON Schema syntax — verify against the CLI smoke before committing the schema text. If the CLI's schema engine doesn't fully support `if-then-else` in the deployed version, drop conditional-required and validate in-code instead (less safe but functionally equivalent).
+- **Conditional-required schema fields RESOLVED 2026-06-07 smoke.** The Anthropic tool-schema validator rejects `allOf` / `oneOf` / `if-then-else` with a 400 error. Conditional-required validation lives in worker code as a post-emit check, NOT in the schema text. This is functionally equivalent but slightly less safe — the model can emit a malformed envelope; the worker catches it immediately and routes to emit-failure. Same recovery path, same orchestrator-via-cc-relay escalation surface.
 - **`structured_output` shape across CLI versions** is unspecified for our purposes. If the CLI deprecates the field or moves it, the architect's verdict path breaks silently. Mitigation: the worker fails the step loudly when `structured_output` is the wrong shape, surfacing the regression. Schema validation in-code is the second line.
 - **cc-relay drop on production split deployments.** In `dev_local` the worker and orchestrator are colocated on the same host, so a file-drop is enough. On a production split, the trigger needs a remote-drop mechanism (SQS message to the orchestrator host?). Flagged in AGENT.md; out of v1 scope but documented so the gap is visible.
 - **The architect agent loop is unchanged by this PR.** Tokens are still ~25K average per architect run. Path B (sibling ADR) is the optimization; surfacing here so the cost line is honest.
