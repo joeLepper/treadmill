@@ -55,6 +55,7 @@ from treadmill_api.events.task import (
     TaskRegistered,
     TaskRetry,
     TaskWorkerDepsFailed,
+    TaskWorkerHintRequested,
 )
 from treadmill_api.events.system import UnreferencedClosesReport
 from treadmill_api.events.validate import ValidateOverride
@@ -75,6 +76,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     TaskRetry,
     TaskWorkerDepsFailed,
     OperatorHintSet,
+    TaskWorkerHintRequested,
     # Plan events
     PlanRegistered,
     PlanPlanningStarted,

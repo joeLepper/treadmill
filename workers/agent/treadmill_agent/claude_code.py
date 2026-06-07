@@ -353,6 +353,9 @@ def run_claude_code(
     log_context: dict[str, Any] | None = None,
     operator_note: str | None = None,
     worker_hints_enabled: bool = True,
+    task_id: str | None = None,
+    worker_step_id: str | None = None,
+    created_by: str | None = None,
 ) -> CodeAuthorResult:
     """Drive Claude Code in ``repo_dir`` and return the captured summary.
 
@@ -394,10 +397,19 @@ def run_claude_code(
         prior_steps=prior_steps or [],
     )
 
-    # ADR-0081: inject operator hint into system prompt if present + enabled
+    # ADR-0081: build system prompt extensions for hint channel
     system_prompt = role.system_prompt
-    if operator_note is not None and worker_hints_enabled:
-        system_prompt = _inject_operator_hint(system_prompt, operator_note)
+    if worker_hints_enabled:
+        # Add worker hints tool information if enabled and we have the context
+        if task_id and worker_step_id and created_by:
+            system_prompt += _build_worker_hints_section(
+                task_id=task_id,
+                worker_step_id=worker_step_id,
+                created_by=created_by,
+            )
+        # Inject operator hint if present
+        if operator_note is not None:
+            system_prompt = _inject_operator_hint(system_prompt, operator_note)
 
     cmd = [
         binary, "--print",
@@ -580,6 +592,52 @@ def _inject_operator_hint(system_prompt: str, operator_note: str) -> str:
         "help focus your work. Take it seriously but verify before acting.)"
     )
     return system_prompt + hint_section
+
+
+def _build_worker_hints_section(
+    task_id: str,
+    worker_step_id: str,
+    created_by: str,
+) -> str:
+    """Build the worker hints tool documentation for the system prompt.
+
+    Per ADR-0081 §2, when worker_hints_enabled is true, the worker has
+    access to a request_hint tool it can use to ask the operator for
+    context when stuck.
+    """
+    section = (
+        "\n\n## Worker tools — request operator context\n\n"
+        "You have access to a `request_hint(reason: str, context: str)` tool\n"
+        "that allows you to request context from the dispatching operator.\n"
+        "Use this when you are stuck and need operator insight.\n\n"
+        "**Tool: `request_hint(reason, context)`**\n\n"
+        "- `reason` (str): Short slug naming the class of help wanted "
+        "(e.g. `tests_need_scope`, `alembic_heads_unclear`). Max 100 chars.\n"
+        "- `context` (str): Brief description of what you tried and what's stuck. "
+        "Max 2000 chars.\n"
+        "- Returns: `{acknowledged: true}` (non-blocking)\n\n"
+        "**Usage example:**\n\n"
+        "```python\n"
+        "from treadmill_agent.worker_hints import RequestHintTool\n"
+        "import os\n\n"
+        "tool = RequestHintTool(\n"
+        "    api_base_url=os.environ['TREADMILL_API_URL'],\n"
+        f"    task_id='{task_id}',\n"
+        f"    worker_step_id='{worker_step_id}',\n"
+        f"    created_by='{created_by}',\n"
+        ")\n"
+        "result = tool.request_hint(\n"
+        "    reason='tests_need_scope',\n"
+        "    context='The test count is wrong. Created 50 tests but need 100 total.'\n"
+        ")\n"
+        "assert result.acknowledged is True\n"
+        "```\n\n"
+        "The tool writes a relay file to the operator's inbox and POSTs an event "
+        "to the API. It returns immediately (non-blocking) — the worker does not "
+        "wait for the operator to respond. The next step will re-read "
+        "`operator_note` to see if the operator left a hint."
+    )
+    return section
 
 
 def _find_binary() -> str:

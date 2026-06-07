@@ -504,9 +504,14 @@ def _execute(
                 log_context=log_context,
                 # ADR-0081: operator hint channel. Worker injects the
                 # operator_note into the system prompt when non-null and
-                # the repo's worker_hints_enabled is true.
+                # the repo's worker_hints_enabled is true. Also passes
+                # task_id, worker_step_id, and created_by so the worker
+                # can invoke the request_hint tool (§2).
                 operator_note=ctx.operator_note,
                 worker_hints_enabled=repo_config.worker_hints_enabled if repo_config else True,
+                task_id=ctx.task_id,
+                worker_step_id=ctx.step_id,
+                created_by=ctx.created_by,
             )
 
         # ADR-0020: surface the parsed per-step token usage to the

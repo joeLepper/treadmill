@@ -283,3 +283,25 @@ class OperatorHintSet(EventPayload):
     carries a human-readable payload."""
     set_by: str = pydantic.Field(min_length=1)
     """Who set the hint (operator label, CLI user, etc.)."""
+
+
+class TaskWorkerHintRequested(EventPayload):
+    """Emitted when a worker invokes the request_hint tool.
+
+    Per ADR-0081 §2: the worker uses this tool to request operator context
+    when stuck. This event provides an audit trail of what hints were
+    requested, why, and when. Used to measure hint-channel usage patterns
+    and feed ADR-0075's fleet-wedge detector (high hint request rate =
+    workers getting stuck).
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "worker_hint_requested"
+
+    reason: str = pydantic.Field(min_length=1, max_length=100)
+    """Short slug naming the class of help wanted
+    (e.g. tests_need_scope, alembic_heads_unclear)."""
+    context_excerpt: str = pydantic.Field(min_length=1, max_length=500)
+    """First 500 chars of the context for the audit log."""
+    worker_step_id: str = pydantic.Field(min_length=1)
+    """The step ID of the worker step that made the request."""

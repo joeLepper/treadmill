@@ -159,6 +159,10 @@ class WorkerContext:
     honors it verbatim instead of re-evaluating. ``None`` for paths
     that didn't plumb cross-run context (initial dispatch, webhook
     fan-out, etc.)."""
+    created_by: str | None = None
+    """Per ADR-0081: the operator label that created this task (task.created_by).
+    Used by worker_hints to route hint requests back to the operator's cc-channels
+    inbox. Nullable — older tasks may not have this set."""
     operator_note: str | None = None
     """Per ADR-0081: operator-injected hint for the worker. When non-null
     and the repo's worker_hints_enabled is true, the worker injects this
@@ -275,5 +279,6 @@ def _decode_context(body: dict[str, Any]) -> WorkerContext:
             for v in body.get("task_validations", [])
         ],
         source_step=source_step,
+        created_by=body["task"].get("created_by"),
         operator_note=body["task"].get("operator_note"),
     )
