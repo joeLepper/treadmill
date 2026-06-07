@@ -305,3 +305,35 @@ class TaskWorkerHintRequested(EventPayload):
     """First 500 chars of the context for the audit log."""
     worker_step_id: str = pydantic.Field(min_length=1)
     """The step ID of the worker step that made the request."""
+
+
+class ArchitectEmitFailure(EventPayload):
+    """Emitted when the architect role cannot produce a parseable verdict.
+
+    Per ADR-0083: the architect call uses ``--json-schema`` to constrain
+    output. When the CLI's ``structured_output`` field is absent or the
+    envelope fails post-emit validation, the worker emits this event and
+    returns a synthetic ``emit-failure`` verdict to ``handle()``.
+
+    The API trigger ``maybe_drop_relay_on_architect_emit_failure`` converts
+    this event into a cc-relay file drop in the dispatching orchestrator's
+    inbox so the operator can triage without polling.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "architect_emit_failure"
+
+    parse_failure_reason: Literal[
+        "no-structured-output",
+        "supersede-missing-rewrite",
+        "gate-broken-missing-excerpt",
+        "invalid-verdict-literal",
+    ]
+    """Discriminator identifying which post-emit validation check failed."""
+    model_output_excerpt: str = pydantic.Field(min_length=0, max_length=4096)
+    """First 2 KB of the raw model output + summary, truncated for the relay."""
+    created_by: str = pydantic.Field(min_length=1)
+    """The dispatching session label (task.created_by). Routes the relay
+    drop to ``~/.cc-channels/<created_by>/relay/``."""
+    failing_run_id: str = pydantic.Field(min_length=1)
+    """UUID of the wf-architecture-resolve run that produced the failure."""

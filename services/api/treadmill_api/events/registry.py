@@ -47,6 +47,7 @@ from treadmill_api.events.schedule import ScheduledTick
 from treadmill_api.events.task import (
     OperatorHintSet,
     TaskAutoMerged,
+    ArchitectEmitFailure,
     TaskCancelled,
     TaskEscalatedToOperator,
     TaskEscalationAcknowledged,
@@ -77,6 +78,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     TaskWorkerDepsFailed,
     OperatorHintSet,
     TaskWorkerHintRequested,
+    ArchitectEmitFailure,
     # Plan events
     PlanRegistered,
     PlanPlanningStarted,

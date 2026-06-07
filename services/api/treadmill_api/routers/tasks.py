@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -22,7 +22,7 @@ from treadmill_api.coordination.triggers import (
 )
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.dispatch import Dispatcher, DispatchError, get_dispatcher
-from treadmill_api.events.task import TaskRegistered, TaskRetry, TaskWorkerHintRequested
+from treadmill_api.events.task import ArchitectEmitFailure, TaskRegistered, TaskRetry, TaskWorkerHintRequested
 from treadmill_api.models import (
     Plan,
     Task,
@@ -553,6 +553,61 @@ async def worker_hint_request(
             reason=body.reason,
             context_excerpt=body.context_excerpt,
             worker_step_id=body.worker_step_id,
+        ),
+        plan_id=task.plan_id,
+        task_id=task_id,
+    )
+
+    await session.commit()
+
+
+class ArchitectEmitFailureRequest(BaseModel):
+    parse_failure_reason: Literal[
+        "no-structured-output",
+        "supersede-missing-rewrite",
+        "gate-broken-missing-excerpt",
+        "invalid-verdict-literal",
+    ]
+    model_output_excerpt: str = Field(..., max_length=4096)
+    created_by: str = Field(..., min_length=1)
+    failing_run_id: str = Field(..., min_length=1)
+
+
+@router.post("/{task_id}/architect_emit_failure", status_code=status.HTTP_200_OK)
+async def architect_emit_failure(
+    task_id: uuid.UUID,
+    body: ArchitectEmitFailureRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+) -> None:
+    """Worker reports that the architect role failed to emit a parseable verdict (ADR-0083).
+
+    The worker calls this when ``--json-schema`` structured output is absent or
+    fails post-emit validation. The endpoint persists the event and the
+    coordination trigger drops a relay file into the dispatching orchestrator's
+    cc-channels inbox.
+
+    Request: ``{parse_failure_reason, model_output_excerpt, created_by, failing_run_id}``
+
+    Response: 200 OK (no body)
+
+    Events: Emits ``task.architect_emit_failure`` for the audit trail and relay trigger.
+    """
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="task not found",
+        )
+
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="task",
+        action="architect_emit_failure",
+        payload=ArchitectEmitFailure(
+            parse_failure_reason=body.parse_failure_reason,
+            model_output_excerpt=body.model_output_excerpt,
+            created_by=body.created_by,
+            failing_run_id=body.failing_run_id,
         ),
         plan_id=task.plan_id,
         task_id=task_id,
