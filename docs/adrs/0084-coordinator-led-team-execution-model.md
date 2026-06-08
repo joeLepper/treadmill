@@ -248,7 +248,7 @@ The architect renders one verdict: `accept-as-is | amend | supersede | gate-brok
 
 **Supersede tie-break:** Coordinator cannot override a `supersede` verdict. Coordinator-architect disagreement → operator escalation. Supersede direction is not coordinator-overridable.
 
-**Ramp-up allowance:** Until coordinator briefing quality is proven, a 2-amend allowance is in effect with a required log note on the second attempt justifying convergence. **Termination criterion:** rolling 50-architect-call window per coordinator; when the amend rate in that window falls below 20% for two consecutive evaluation windows, the 2-amend allowance retires to 1-amend. Numbers are the measurement shape; calibration belongs in the implementation plan.
+**Ramp-up allowance:** Until coordinator briefing quality is proven, a 2-amend allowance is in effect with a required log note on the second attempt justifying convergence. **Termination criterion:** the rolling 50-architect-call window is re-evaluated at each plan close. When two consecutive plan-close evaluations both show an amend rate below 20%, the 2-amend allowance retires to 1-amend. Anchoring evaluation to plan boundaries gives the window a chance to compound across complete plans rather than reacting to per-call noise. Numbers (50, 20%, two) are the measurement shape; calibration belongs in the implementation plan.
 
 The attempt cap on architect calls is retired; the ramp-up allowance and coordinator judgment replace it.
 
