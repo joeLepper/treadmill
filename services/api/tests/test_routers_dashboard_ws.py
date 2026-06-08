@@ -359,3 +359,156 @@ def test_lookup_exception_drops_event_socket_survives(monkeypatch) -> None:
 
     assert frame["type"] == "event"
     assert frame["plan_id"] == plan_good
+
+
+# ── ADR-0084: coordinator plan_ids subscription ────────────────────────────────
+
+
+def test_plan_ids_filter_forwards_matching_plan_id(monkeypatch) -> None:
+    """``?plan_ids=<uuid>`` forwards events whose plan_id is in the set
+    without consulting ``_lookup_created_by`` — the coordinator path bypasses
+    the per-event DB lookup that the created_by filter requires.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_in = str(uuid.uuid4())
+    plan_out = str(uuid.uuid4())
+
+    async def stub_lookup(plan_id, task_id, session_factory=None):
+        raise AssertionError("plan_ids path must not hit _lookup_created_by")
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_lookup)
+
+    app = _build_app()
+    rec_in = _make_record(plan_id=plan_in)
+    rec_out = _make_record(plan_id=plan_out)
+    rec_in_sentinel = _make_record(plan_id=plan_in)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            f"/api/v1/dashboard/ws/events?plan_ids={plan_in}"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec_in)
+            _broadcast_local(rec_out)
+            _broadcast_local(rec_in_sentinel)
+
+            frame1 = ws.receive_json()
+            frame2 = ws.receive_json()
+
+    assert frame1["plan_id"] == plan_in
+    assert frame2["plan_id"] == plan_in
+
+
+def test_plan_ids_composes_with_created_by_by_or(monkeypatch) -> None:
+    """When both ``created_by`` and ``plan_ids`` are set, the filters
+    compose by OR: a frame is forwarded if EITHER matches.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_coord = str(uuid.uuid4())  # subscribed via plan_ids
+    plan_label = str(uuid.uuid4())  # subscribed via created_by
+    plan_neither = str(uuid.uuid4())  # neither — drop
+
+    async def stub_lookup(plan_id, task_id, session_factory=None):
+        if plan_id == plan_label:
+            return "lbl-a"
+        return "other-label"
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_lookup)
+
+    app = _build_app()
+    rec_coord = _make_record(plan_id=plan_coord)
+    rec_label = _make_record(plan_id=plan_label)
+    rec_neither = _make_record(plan_id=plan_neither)
+    rec_sentinel = _make_record(plan_id=plan_label)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            f"/api/v1/dashboard/ws/events?created_by=lbl-a&plan_ids={plan_coord}"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec_coord)
+            _broadcast_local(rec_label)
+            _broadcast_local(rec_neither)
+            _broadcast_local(rec_sentinel)
+
+            frame1 = ws.receive_json()
+            frame2 = ws.receive_json()
+            frame3 = ws.receive_json()
+
+    plan_ids_received = {frame1["plan_id"], frame2["plan_id"], frame3["plan_id"]}
+    assert plan_ids_received == {plan_coord, plan_label}
+
+
+def test_plan_ids_filter_drops_non_matching_plan_id() -> None:
+    """A non-matching plan_id with no ``created_by`` set drops silently.
+
+    Sentinel pattern: publish a matching event last so we observe exactly
+    one frame and infer the non-matching one was dropped.
+    """
+    plan_in = str(uuid.uuid4())
+    plan_out = str(uuid.uuid4())
+
+    app = _build_app()
+    rec_out = _make_record(plan_id=plan_out)
+    rec_in_sentinel = _make_record(plan_id=plan_in)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            f"/api/v1/dashboard/ws/events?plan_ids={plan_in}"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec_out)
+            _broadcast_local(rec_in_sentinel)
+
+            frame = ws.receive_json()
+
+    assert frame["plan_id"] == plan_in
+
+
+def test_plan_ids_filter_normalises_case_and_skips_malformed() -> None:
+    """Mixed-case UUIDs match canonical lower-case event plan_ids, and a
+    malformed entry in the list is silently skipped without breaking the
+    rest of the subscription.
+    """
+    plan_real = str(uuid.uuid4())  # canonical lowercase
+    plan_real_upper = plan_real.upper()  # operator passes uppercase
+
+    app = _build_app()
+    rec_real = _make_record(plan_id=plan_real)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            f"/api/v1/dashboard/ws/events?plan_ids=not-a-uuid,{plan_real_upper}"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec_real)
+            frame = ws.receive_json()
+
+    assert frame["plan_id"] == plan_real
+
+
+def test_plan_ids_filter_drops_ownerless_events() -> None:
+    """Ownerless events (no plan_id, no task_id) drop on any filtered
+    connection — same behaviour as the created_by filter.
+    """
+    plan_in = str(uuid.uuid4())
+
+    app = _build_app()
+    rec_ownerless = _make_record()  # no plan_id, no task_id
+    rec_sentinel = _make_record(plan_id=plan_in)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            f"/api/v1/dashboard/ws/events?plan_ids={plan_in}"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec_ownerless)
+            _broadcast_local(rec_sentinel)
+            frame = ws.receive_json()
+
+    assert frame["plan_id"] == plan_in
