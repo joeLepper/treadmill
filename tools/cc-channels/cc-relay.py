@@ -22,11 +22,12 @@ Message types (per docs/plans/2026-06-05-cc-relay-trust-gates.md):
 from __future__ import annotations
 
 import argparse
+import secrets
 import sys
 import time
 from pathlib import Path
 
-MAX_LEN = 4096
+MAX_LEN = 32768
 ACTION_HEADER = "[ACTION REQUEST]"
 ALLOWED_TYPES = ("context", "action")
 
@@ -83,7 +84,7 @@ def main() -> None:
 
     from_suffix = f"-from-{args.from_label}" if args.from_label else ""
     type_suffix = "-action" if args.msg_type == "action" else ""
-    out_file = relay_dir / f"{int(time.time() * 1000)}{type_suffix}{from_suffix}.md"
+    out_file = relay_dir / f"{time.time_ns()}-{secrets.token_hex(2)}{type_suffix}{from_suffix}.md"
     out_file.write_text(body)
 
     print(f"relayed: {out_file}")

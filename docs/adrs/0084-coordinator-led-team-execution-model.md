@@ -90,7 +90,7 @@ Rationale:
 
 The cc-channels infrastructure (one bot per session, ADR-0067) is unchanged for sessions whose Claude account has channel permissions — it rides on the same named sessions. Workers on accounts without channel permissions run without a channel server; the coordinator communicates with them via `tmux send-keys` (see §4).
 
-**Wake-up requirement for idle sessions:** For messages that must wake an idle session, always use `cc-relay.py --type action`. Context-only relay drops (`--type context`, the default) land in the inbox but do not trigger a wake-up. For non-channel workers, the tmux fallback is required regardless.
+**Wake-up requirement for idle sessions:** Use `cc-relay.py --type action` for messages that require the receiving session to act. The `[ACTION REQUEST]` header is a convention the receiver honors — the channel server itself treats action and context files identically. Whether a relay message wakes an idle session is determined by Claude Code's channel-notification behavior, not the channel server. For non-channel workers, the tmux fallback is required regardless.
 
 ### 4. Worker communication: cc-relay primary, tmux fallback
 
