@@ -19,6 +19,7 @@ from treadmill_api.models.review_queue import ReviewQueueRowMixin
 from treadmill_api.models.review_dspy_variant_pr import ReviewDspyVariantPrRow
 from treadmill_api.models.run import WorkflowRun, WorkflowRunStep
 from treadmill_api.models.task import Task, TaskDependency, TaskPR, TaskValidation
+from treadmill_api.models.task_board import TASK_BOARD_STATUSES, TaskBoard
 from treadmill_api.models.triage_finding import TriageFindingRow
 from treadmill_api.models.workflow import (
     EventTrigger,
@@ -57,7 +58,9 @@ __all__ = [
     "Schedule",
     "Skill",
     "SystemStatus",
+    "TASK_BOARD_STATUSES",
     "Task",
+    "TaskBoard",
     "TaskDependency",
     "TaskPR",
     "TaskValidation",
