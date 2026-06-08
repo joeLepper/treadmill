@@ -162,6 +162,21 @@ async def events_socket(
             "owner are dropped on filtered connections."
         ),
     ),
+    plan_ids: str | None = Query(
+        None,
+        max_length=4096,
+        description=(
+            "Comma-separated list of plan UUIDs the subscriber owns "
+            "(ADR-0084 coordinator subscription). When set, events whose "
+            "``plan_id`` is in the list are forwarded, regardless of "
+            "``created_by``. Coordinators use this to receive plan-scoped "
+            "events for plans whose tasks were dispatched by other "
+            "workers. ``created_by`` and ``plan_ids`` compose by OR: an "
+            "event is forwarded if EITHER filter matches. Ownerless "
+            "events are still dropped on any filtered connection. "
+            "Malformed UUIDs are silently skipped."
+        ),
+    ),
 ) -> None:
     """Stream live event records to a dashboard client.
 
@@ -202,6 +217,28 @@ async def events_socket(
     # short-lived relative to plan/task lifetimes).
     _owner_cache: dict[str, str | None] = {}
 
+    # Coordinator plan-id subscription (ADR-0084). Parsed once at connect
+    # time; subsequent reconnects re-parse from the new query string.
+    # Malformed entries are dropped silently — the empty set means the
+    # plan-ids filter is inactive (created_by alone governs).
+    _plan_id_set: set[str] = set()
+    if plan_ids:
+        for raw in plan_ids.split(","):
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            try:
+                # Normalise to canonical lower-case hyphenated form so
+                # an event's ``plan_id`` (already a str on the wire)
+                # compares against the same canonical form regardless of
+                # how the operator wrote it on the query string.
+                _plan_id_set.add(str(uuid.UUID(candidate)))
+            except ValueError:
+                logger.warning(
+                    "plan_ids: dropping malformed UUID %r", candidate,
+                )
+    _filter_active = created_by is not None or bool(_plan_id_set)
+
     # ``receive`` doubles as a disconnect detector — the dashboard never
     # sends client→server frames, so any completion of this task is our
     # cue to tear down. Starlette returns the disconnect message as a
@@ -229,31 +266,45 @@ async def events_socket(
                 record = event_task.result()
                 event_task = asyncio.create_task(queue.get())
 
-                if created_by is not None:
+                if _filter_active:
                     plan_id = record.get("plan_id")
                     task_id = record.get("task_id")
-                    if plan_id:
-                        cache_key = f"plan:{plan_id}"
-                    elif task_id:
-                        cache_key = f"task:{task_id}"
-                    else:
+                    if not plan_id and not task_id:
                         # Ownerless event — drop on filtered connections.
                         continue
 
-                    if cache_key not in _owner_cache:
-                        try:
-                            _owner_cache[cache_key] = await _lookup_created_by(
-                                plan_id, task_id, _session_factory
-                            )
-                        except Exception:
-                            logger.exception(
-                                "created_by lookup failed for %s; dropping event",
-                                cache_key,
-                            )
-                            continue  # drop; socket stays alive
+                    # ADR-0084 coordinator filter takes precedence: if
+                    # the event's plan_id is in the subscribed set, the
+                    # event is forwarded without a created_by lookup.
+                    # Avoids a DB round-trip on the hot routing path.
+                    if _plan_id_set and plan_id and str(plan_id) in _plan_id_set:
+                        pass  # match — fall through to forward
+                    elif created_by is None:
+                        # Only the plan_ids filter is active and it
+                        # didn't match; drop.
+                        continue
+                    else:
+                        if plan_id:
+                            cache_key = f"plan:{plan_id}"
+                        elif task_id:
+                            cache_key = f"task:{task_id}"
+                        else:
+                            continue  # defensive — already guarded above
 
-                    if _owner_cache.get(cache_key) != created_by:
-                        continue  # label mismatch → drop
+                        if cache_key not in _owner_cache:
+                            try:
+                                _owner_cache[cache_key] = await _lookup_created_by(
+                                    plan_id, task_id, _session_factory
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "created_by lookup failed for %s; dropping event",
+                                    cache_key,
+                                )
+                                continue  # drop; socket stays alive
+
+                        if _owner_cache.get(cache_key) != created_by:
+                            continue  # label mismatch → drop
 
                 if not await _safe_send(websocket, _event_frame(record)):
                     break

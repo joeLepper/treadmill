@@ -47,6 +47,21 @@ const LABEL = process.env.TREADMILL_SESSION_LABEL ?? ''
 const API = (process.env.TREADMILL_API_URL ?? 'http://localhost:8088').replace(/\/$/, '')
 const KEY = process.env.TREADMILL_API_KEY ?? process.env.BUNKHOUSE_API_KEY ?? ''
 
+// ADR-0084 coordinator subscription. When TREADMILL_ROLE=coordinator, the
+// channel server widens its SQS subscription to include plan-scoped events
+// for every plan listed in TREADMILL_COORDINATOR_PLANS (comma-separated
+// UUIDs). The widening happens both server-side (ws.py ?plan_ids=...) and
+// client-side (isMine plan-id check), because either alone leaves the
+// coordinator looking at an already-filtered feed.
+const ROLE = (process.env.TREADMILL_ROLE ?? '').toLowerCase()
+const IS_COORDINATOR = ROLE === 'coordinator'
+const COORDINATOR_PLAN_IDS: ReadonlySet<string> = new Set(
+  (process.env.TREADMILL_COORDINATOR_PLANS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0),
+)
+
 // ADR-0071 per-session relay verbosity. The level governs WHICH events the
 // session relays to its Telegram operator chat; the event-class mapping is
 // pinned to the ADR-0062 escalation taxonomy (do not invent a new one).
@@ -171,6 +186,11 @@ async function isMine(frame: Record<string, unknown>): Promise<boolean> {
   if (frame['created_by'] === LABEL) return true // post-filter relay includes it
   const plan = frame['plan_id'] ? String(frame['plan_id']) : null
   const task = frame['task_id'] ? String(frame['task_id']) : null
+  // ADR-0084 coordinator subscription: any frame whose plan_id is in the
+  // coordinator's set is mine, regardless of created_by or ownedPlans state.
+  // Checked before ownedPlans/ownedTasks so a coordinator does not need to
+  // be the dispatcher of a task to receive its events.
+  if (IS_COORDINATOR && plan && COORDINATOR_PLAN_IDS.has(plan)) return true
   if (plan && ownedPlans.has(plan)) return true
   if (task && ownedTasks.has(task)) return true
   if ((plan || task) && Date.now() - lastReconcileMs > RECONCILE_MIN_INTERVAL_MS) {
@@ -202,7 +222,18 @@ const BACKOFF_CAP_MS = 30_000
 
 function wsUrl(): string {
   const base = API.replace(/^http/, 'ws')
-  return `${base}/api/v1/dashboard/ws/events?created_by=${encodeURIComponent(LABEL)}`
+  const params = new URLSearchParams({ created_by: LABEL })
+  // ADR-0084: coordinator labels widen the server-side filter by also
+  // sending ?plan_ids=<csv>. The two filters compose by OR on the server
+  // (events forwarded if EITHER matches), which is what we want — the
+  // coordinator still sees its own dispatched work AND every plan-scoped
+  // event for plans it owns. Empty COORDINATOR_PLAN_IDS leaves the URL
+  // shape identical to a worker's, which matters because TREADMILL_ROLE=
+  // coordinator before any plan is assigned is a valid bootstrap state.
+  if (IS_COORDINATOR && COORDINATOR_PLAN_IDS.size > 0) {
+    params.set('plan_ids', Array.from(COORDINATOR_PLAN_IDS).join(','))
+  }
+  return `${base}/api/v1/dashboard/ws/events?${params.toString()}`
 }
 
 function connect(): void {
@@ -270,7 +301,19 @@ function connect(): void {
 // so messages queued while the session was down are not lost.
 const RELAY_DIR = join(homedir(), '.cc-channels', LABEL, 'relay')
 
-async function processRelayFile(fpath: string): Promise<void> {
+// ADR-0084 §10 "coordinator-channel mode": role-prefixed subfolders so a
+// session that wears both worker and operator-instance hats can disambiguate
+// where each message belongs. Subfolders are watched alongside the base dir
+// when they exist; cc-relay.py writes to the chosen subdir via --subfolder.
+// The subfolder name is reported back on the notification's meta so the
+// receiving session can route attention.
+const RELAY_SUBFOLDERS = ['coord', 'worker'] as const
+type RelaySubfolder = (typeof RELAY_SUBFOLDERS)[number]
+
+async function processRelayFile(
+  fpath: string,
+  subfolder: RelaySubfolder | null,
+): Promise<void> {
   let content: string
   try {
     content = await readFile(fpath, 'utf-8')
@@ -278,28 +321,62 @@ async function processRelayFile(fpath: string): Promise<void> {
   } catch {
     return // already consumed (duplicate fs.watch event) or unreadable
   }
+  const meta: Record<string, string> = { source: 'relay' }
+  if (subfolder) meta.subfolder = subfolder
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
       content,
-      meta: { source: 'relay' },
+      meta,
     },
   })
 }
 
 async function startRelayWatcher(): Promise<void> {
   await mkdir(RELAY_DIR, { recursive: true })
-  // Drain messages that arrived while the session was down.
+  // Drain messages that arrived while the session was down — base dir first,
+  // then each subfolder. The drain order matters less than that every queued
+  // file gets surfaced before the watcher arms (a watch event firing during
+  // drain would double-deliver because both paths call processRelayFile,
+  // which is idempotent only by way of unlink-before-notify).
   const pending = (await readdir(RELAY_DIR)).filter(f => f.endsWith('.md'))
   for (const fname of pending) {
-    await processRelayFile(join(RELAY_DIR, fname))
+    await processRelayFile(join(RELAY_DIR, fname), null)
   }
   watch(RELAY_DIR, (_event, filename) => {
     if (!filename?.endsWith('.md')) return
-    processRelayFile(join(RELAY_DIR, filename)).catch(err =>
+    processRelayFile(join(RELAY_DIR, filename), null).catch(err =>
       console.error(`treadmill-events: relay forward failed: ${err}`),
     )
   })
+
+  for (const sub of RELAY_SUBFOLDERS) {
+    const subPath = join(RELAY_DIR, sub)
+    try {
+      await mkdir(subPath, { recursive: true })
+    } catch (err) {
+      console.error(`treadmill-events: subfolder mkdir failed for ${sub}: ${err}`)
+      continue
+    }
+    let subPending: string[] = []
+    try {
+      subPending = (await readdir(subPath)).filter(f => f.endsWith('.md'))
+    } catch {
+      // Directory was unreadable for a transient reason; skip the drain but
+      // still arm the watcher below so subsequent files do land.
+    }
+    for (const fname of subPending) {
+      await processRelayFile(join(subPath, fname), sub)
+    }
+    watch(subPath, (_event, filename) => {
+      if (!filename?.endsWith('.md')) return
+      processRelayFile(join(subPath, filename), sub).catch(err =>
+        console.error(
+          `treadmill-events: relay forward failed (${sub}): ${err}`,
+        ),
+      )
+    })
+  }
 }
 
 // Launch-time gate: only become an active channel when this session carries a
