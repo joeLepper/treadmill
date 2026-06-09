@@ -73,6 +73,35 @@ REPO = "acme/widget"  # domain-neutral, mirrors the scrub convention
 # changes_requested, gate-broken).
 N_TASKS = 5
 
+# ── Task 4e3cffc2 expansion: wf-feedback-loop + conflict-resolution paths ─────
+#
+# These two synthetic workflows exercise routing helpers the original
+# 56-event fixture did not reach:
+#
+#   * wf-feedback (2-step analyzer→action shape) drives
+#     ``_maybe_fire_feedback_validation_fail_arbitration`` +
+#     ``_maybe_fire_feedback_no_progress_arbitration`` when the action
+#     step completes with decision=validation_fail / no_progress.
+#   * wf-conflict (2-step analyzer→action shape) is the dispatched
+#     target of ``github.pr_dirty`` events; landing one in the fixture
+#     covers the conflict-resolution dispatch path the existing trace
+#     did not reach.
+WF_FEEDBACK_ID = "wf-feedback-synthetic"
+WF_FEEDBACK_VERSION_ID = _u("wfv-feedback-synthetic-v1")
+WF_FEEDBACK_STEP_NAMES = ("step-feedback-analyze", "step-feedback-action")
+WF_FEEDBACK_ROLES = ("role-feedback-analyzer", "role-code-author")
+WF_FEEDBACK_WFV_STEP_IDS = {
+    name: _u(f"wfv-step-feedback-{name}") for name in WF_FEEDBACK_STEP_NAMES
+}
+
+WF_CONFLICT_ID = "wf-conflict-synthetic"
+WF_CONFLICT_VERSION_ID = _u("wfv-conflict-synthetic-v1")
+WF_CONFLICT_STEP_NAMES = ("step-conflict-analyze", "step-conflict-action")
+WF_CONFLICT_ROLES = ("role-conflict-analyzer", "role-code-author")
+WF_CONFLICT_WFV_STEP_IDS = {
+    name: _u(f"wfv-step-conflict-{name}") for name in WF_CONFLICT_STEP_NAMES
+}
+
 # Output paths (relative to the repo root the script is invoked from).
 FIXTURES_DIR = Path("services/api/tests/fixtures")
 EVENTS_PATH = FIXTURES_DIR / "coordination_trace_synthetic_events.jsonl.gz"
@@ -349,6 +378,224 @@ def build_trace() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         minute=120,
     ))
 
+    # 4. wf-feedback-loop coverage (task 4e3cffc2).
+    #
+    # The original ti=2 task ends with a changes_requested decision —
+    # the consumer dispatches wf-feedback against that task. We model
+    # the dispatched feedback run here: analyzer step completes ``pass``
+    # to advance to the action step, then the action step terminates
+    # with ``validation_fail`` to drive
+    # ``_maybe_fire_feedback_validation_fail_arbitration`` (one of the
+    # routing helpers the original 56-event trace did not exercise).
+    feedback_task_id = _u("feedback-task-0")
+    feedback_run_id = _u("feedback-run-0")
+    feedback_minute_base = 130
+    tasks.append({
+        "id": feedback_task_id,
+        "plan_id": PLAN_ID,
+        "repo": REPO,
+        "title": "Synthetic feedback task (covers wf-feedback-loop)",
+        "description": "Dispatched by review changes_requested on task #2.",
+        "workflow_version_id": WF_FEEDBACK_VERSION_ID,
+        "created_by": "synthetic-generator",
+    })
+    workflow_runs.append({
+        "id": feedback_run_id,
+        "task_id": feedback_task_id,
+        "workflow_version_id": WF_FEEDBACK_VERSION_ID,
+        "trigger": "registered",
+    })
+    events.append(_event(
+        entity_type="task",
+        action="registered",
+        payload={
+            "repo": REPO,
+            "title": "Synthetic feedback task",
+            "plan_id": PLAN_ID,
+            "workflow_version_id": WF_FEEDBACK_VERSION_ID,
+        },
+        task_id=feedback_task_id,
+        minute=feedback_minute_base,
+    ))
+    for si, step_name in enumerate(WF_FEEDBACK_STEP_NAMES):
+        feedback_step_id = _u(f"feedback-run-step-{step_name}")
+        workflow_run_steps.append({
+            "id": feedback_step_id,
+            "run_id": feedback_run_id,
+            "step_index": si,
+            "step_name": step_name,
+            "role_id": WF_FEEDBACK_ROLES[si],
+            "status": "pending",
+        })
+        step_minute = feedback_minute_base + 1 + si * 2
+        events.append(_event(
+            entity_type="step",
+            action="ready",
+            payload={
+                "step_id": feedback_step_id,
+                "task_id": feedback_task_id,
+                "run_id": feedback_run_id,
+                "step_name": step_name,
+                "role_id": WF_FEEDBACK_ROLES[si],
+                "dispatched_at": _ts(step_minute),
+            },
+            task_id=feedback_task_id,
+            run_id=feedback_run_id,
+            step_id=feedback_step_id,
+            minute=step_minute,
+        ))
+        events.append(_event(
+            entity_type="step",
+            action="started",
+            payload={"started_at": _ts(step_minute)},
+            task_id=feedback_task_id,
+            run_id=feedback_run_id,
+            step_id=feedback_step_id,
+            minute=step_minute,
+        ))
+        # Analyzer step completes ``pass`` to advance; action step
+        # completes ``validation_fail`` (the arbitration-driving
+        # decision for wf-feedback's action role).
+        decision = "validation_fail" if si == len(WF_FEEDBACK_STEP_NAMES) - 1 else "pass"
+        events.append(_event(
+            entity_type="step",
+            action="completed",
+            payload={
+                "completed_at": _ts(step_minute),
+                "output": {
+                    "summary": f"Feedback {step_name} terminal",
+                    "decision": decision,
+                    "commit_sha": "feedbeefcafe",
+                    "artifacts": [],
+                    "payload": {},
+                    "metadata": {},
+                },
+            },
+            task_id=feedback_task_id,
+            run_id=feedback_run_id,
+            step_id=feedback_step_id,
+            minute=step_minute,
+        ))
+
+    # 5. conflict-resolution coverage (task 4e3cffc2).
+    #
+    # github.pr_dirty fires when an open PR's mergeability flips to
+    # dirty (substrate-rebase needed). The router's
+    # ``_handle_github_event`` dispatches wf-conflict against the
+    # task that authored the PR. We model the dispatched run here:
+    # analyzer step completes ``pass``, action step completes
+    # ``pass`` (clean rebase outcome) to demonstrate the happy-path
+    # exit of the conflict-resolution lifecycle. The branching cases
+    # (cap-reached after 3 attempts, no-progress arbitration) are
+    # follow-up scope.
+    conflict_task_id = _u("conflict-task-0")
+    conflict_run_id = _u("conflict-run-0")
+    conflict_minute_base = 150
+    tasks.append({
+        "id": conflict_task_id,
+        "plan_id": PLAN_ID,
+        "repo": REPO,
+        "title": "Synthetic conflict task (covers conflict-resolution)",
+        "description": "Dispatched by github.pr_dirty against task #0's PR.",
+        "workflow_version_id": WF_CONFLICT_VERSION_ID,
+        "created_by": "synthetic-generator",
+    })
+    workflow_runs.append({
+        "id": conflict_run_id,
+        "task_id": conflict_task_id,
+        "workflow_version_id": WF_CONFLICT_VERSION_ID,
+        "trigger": "registered",
+    })
+    # github.pr_dirty kicks the conflict dispatch.
+    events.append(_event(
+        entity_type="github",
+        action="pr_dirty",
+        payload={
+            "repo": REPO,
+            "pr_number": 1000,  # task-0's PR (from the per-task github events above)
+            "sender": "synthetic-bot",
+            "head_branch": "task/synthetic-0",
+            "mergeable_state": "dirty",
+        },
+        plan_id=None,
+        task_id=None,
+        minute=conflict_minute_base,
+    ))
+    events.append(_event(
+        entity_type="task",
+        action="registered",
+        payload={
+            "repo": REPO,
+            "title": "Synthetic conflict task",
+            "plan_id": PLAN_ID,
+            "workflow_version_id": WF_CONFLICT_VERSION_ID,
+        },
+        task_id=conflict_task_id,
+        minute=conflict_minute_base + 1,
+    ))
+    for si, step_name in enumerate(WF_CONFLICT_STEP_NAMES):
+        conflict_step_id = _u(f"conflict-run-step-{step_name}")
+        workflow_run_steps.append({
+            "id": conflict_step_id,
+            "run_id": conflict_run_id,
+            "step_index": si,
+            "step_name": step_name,
+            "role_id": WF_CONFLICT_ROLES[si],
+            "status": "pending",
+        })
+        step_minute = conflict_minute_base + 2 + si * 2
+        events.append(_event(
+            entity_type="step",
+            action="ready",
+            payload={
+                "step_id": conflict_step_id,
+                "task_id": conflict_task_id,
+                "run_id": conflict_run_id,
+                "step_name": step_name,
+                "role_id": WF_CONFLICT_ROLES[si],
+                "dispatched_at": _ts(step_minute),
+            },
+            task_id=conflict_task_id,
+            run_id=conflict_run_id,
+            step_id=conflict_step_id,
+            minute=step_minute,
+        ))
+        events.append(_event(
+            entity_type="step",
+            action="started",
+            payload={"started_at": _ts(step_minute)},
+            task_id=conflict_task_id,
+            run_id=conflict_run_id,
+            step_id=conflict_step_id,
+            minute=step_minute,
+        ))
+        events.append(_event(
+            entity_type="step",
+            action="completed",
+            payload={
+                "completed_at": _ts(step_minute),
+                "output": {
+                    "summary": f"Conflict {step_name} terminal",
+                    "decision": "pass",
+                    "commit_sha": "c0ffeecafe00",
+                    "artifacts": [],
+                    "payload": {},
+                    "metadata": {},
+                },
+            },
+            task_id=conflict_task_id,
+            run_id=conflict_run_id,
+            step_id=conflict_step_id,
+            minute=step_minute,
+        ))
+
+    # Union of role ids across all three synthetic workflows. ``role-code-author``
+    # is reused by wf-feedback's action step + wf-conflict's action step so
+    # we dedupe via dict insertion.
+    all_role_ids = {role_id: None for role_id in ROLES}
+    for role_id in WF_FEEDBACK_ROLES + WF_CONFLICT_ROLES:
+        all_role_ids[role_id] = None
+
     seed_manifest = {
         "plans": [{
             "id": PLAN_ID,
@@ -357,25 +604,57 @@ def build_trace() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             "created_by": "synthetic-generator",
             "repo": REPO,
         }],
-        "workflows": [{"id": WORKFLOW_ID, "description": "Synthetic workflow"}],
-        "workflow_versions": [{
-            "id": WORKFLOW_VERSION_ID,
-            "workflow_id": WORKFLOW_ID,
-            "version": 1,
-        }],
+        "workflows": [
+            {"id": WORKFLOW_ID, "description": "Synthetic workflow"},
+            {"id": WF_FEEDBACK_ID, "description": "Synthetic wf-feedback (analyzer→action)"},
+            {"id": WF_CONFLICT_ID, "description": "Synthetic wf-conflict (analyzer→action)"},
+        ],
+        "workflow_versions": [
+            {
+                "id": WORKFLOW_VERSION_ID,
+                "workflow_id": WORKFLOW_ID,
+                "version": 1,
+            },
+            {
+                "id": WF_FEEDBACK_VERSION_ID,
+                "workflow_id": WF_FEEDBACK_ID,
+                "version": 1,
+            },
+            {
+                "id": WF_CONFLICT_VERSION_ID,
+                "workflow_id": WF_CONFLICT_ID,
+                "version": 1,
+            },
+        ],
         "roles": [{
             "id": role_id,
             "model": "claude-sonnet-4-6",
             "system_prompt": "Synthetic role for trace-replay seeding.",
             "output_kind": "ANALYSIS",
-        } for role_id in ROLES],
-        "workflow_version_steps": [{
-            "id": WFV_STEP_IDS[name],
-            "workflow_version_id": WORKFLOW_VERSION_ID,
-            "step_index": i,
-            "step_name": name,
-            "role_id": ROLES[i],
-        } for i, name in enumerate(STEP_NAMES)],
+        } for role_id in all_role_ids],
+        "workflow_version_steps": (
+            [{
+                "id": WFV_STEP_IDS[name],
+                "workflow_version_id": WORKFLOW_VERSION_ID,
+                "step_index": i,
+                "step_name": name,
+                "role_id": ROLES[i],
+            } for i, name in enumerate(STEP_NAMES)]
+            + [{
+                "id": WF_FEEDBACK_WFV_STEP_IDS[name],
+                "workflow_version_id": WF_FEEDBACK_VERSION_ID,
+                "step_index": i,
+                "step_name": name,
+                "role_id": WF_FEEDBACK_ROLES[i],
+            } for i, name in enumerate(WF_FEEDBACK_STEP_NAMES)]
+            + [{
+                "id": WF_CONFLICT_WFV_STEP_IDS[name],
+                "workflow_version_id": WF_CONFLICT_VERSION_ID,
+                "step_index": i,
+                "step_name": name,
+                "role_id": WF_CONFLICT_ROLES[i],
+            } for i, name in enumerate(WF_CONFLICT_STEP_NAMES)]
+        ),
         # event_triggers — without these the github branch's
         # ``evaluate_triggers`` finds no candidate workflows + returns
         # without firing dispatcher.dispatch_task. Seeding the two

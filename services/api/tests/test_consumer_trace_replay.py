@@ -72,7 +72,12 @@ DEFAULT_DATABASE_URL = (
 # Schema version pinned in the sidecar — bumped to 2 when the fixture
 # changed from the malformed-21% RAMJAC capture to the synthetic-by-
 # construction generator. Stale sidecars refuse rather than mis-match.
-_EXPECTED_BASELINE_SCHEMA = 2
+# Bumped to 3 by task 4e3cffc2: fixture expanded from 56 → 71 events
+# adding wf-feedback-loop + conflict-resolution paths. Operator must
+# regenerate the baseline sidecar before this integration test runs
+# clean again (skipped-by-default; requires Docker + Postgres per the
+# module docstring above).
+_EXPECTED_BASELINE_SCHEMA = 3
 
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 _EVENTS_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_events.jsonl.gz"

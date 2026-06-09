@@ -44,6 +44,24 @@
       "model": "claude-sonnet-4-6",
       "output_kind": "ANALYSIS",
       "system_prompt": "Synthetic role for trace-replay seeding."
+    },
+    {
+      "id": "role-feedback-analyzer",
+      "model": "claude-sonnet-4-6",
+      "output_kind": "ANALYSIS",
+      "system_prompt": "Synthetic role for trace-replay seeding."
+    },
+    {
+      "id": "role-code-author",
+      "model": "claude-sonnet-4-6",
+      "output_kind": "ANALYSIS",
+      "system_prompt": "Synthetic role for trace-replay seeding."
+    },
+    {
+      "id": "role-conflict-analyzer",
+      "model": "claude-sonnet-4-6",
+      "output_kind": "ANALYSIS",
+      "system_prompt": "Synthetic role for trace-replay seeding."
     }
   ],
   "tasks": [
@@ -91,6 +109,24 @@
       "repo": "acme/widget",
       "title": "Synthetic task 4",
       "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "created_by": "synthetic-generator",
+      "description": "Dispatched by review changes_requested on task #2.",
+      "id": "7f562118-8529-5ac1-8fd4-2d9c502d0a9b",
+      "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic feedback task (covers wf-feedback-loop)",
+      "workflow_version_id": "dd66f0f3-8fd2-5ece-8339-97cfd9139fff"
+    },
+    {
+      "created_by": "synthetic-generator",
+      "description": "Dispatched by github.pr_dirty against task #0's PR.",
+      "id": "fa756e3e-b1bc-5510-a700-df6f0a848ebf",
+      "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic conflict task (covers conflict-resolution)",
+      "workflow_version_id": "45e74eb7-b4a3-5350-b820-a1a6f989fba6"
     }
   ],
   "workflow_run_steps": [
@@ -205,6 +241,38 @@
       "status": "pending",
       "step_index": 1,
       "step_name": "step-b-validate"
+    },
+    {
+      "id": "e9373a55-0f7b-5794-8fbe-63b3102653b4",
+      "role_id": "role-feedback-analyzer",
+      "run_id": "5757ffef-c5f7-5fcd-b0ba-b68cc91d1080",
+      "status": "pending",
+      "step_index": 0,
+      "step_name": "step-feedback-analyze"
+    },
+    {
+      "id": "f1af6681-e619-519a-84e5-fc56b54e1aaf",
+      "role_id": "role-code-author",
+      "run_id": "5757ffef-c5f7-5fcd-b0ba-b68cc91d1080",
+      "status": "pending",
+      "step_index": 1,
+      "step_name": "step-feedback-action"
+    },
+    {
+      "id": "ee141b18-612a-5a02-bd93-3637950dde6d",
+      "role_id": "role-conflict-analyzer",
+      "run_id": "81e12e3d-626b-55b2-85a4-ed459c1457f3",
+      "status": "pending",
+      "step_index": 0,
+      "step_name": "step-conflict-analyze"
+    },
+    {
+      "id": "244fbf40-5d7e-5785-b8be-700e4c06be56",
+      "role_id": "role-code-author",
+      "run_id": "81e12e3d-626b-55b2-85a4-ed459c1457f3",
+      "status": "pending",
+      "step_index": 1,
+      "step_name": "step-conflict-action"
     }
   ],
   "workflow_runs": [
@@ -237,6 +305,18 @@
       "task_id": "1c78c724-eb36-5a4c-8a9c-794edb965035",
       "trigger": "registered",
       "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "5757ffef-c5f7-5fcd-b0ba-b68cc91d1080",
+      "task_id": "7f562118-8529-5ac1-8fd4-2d9c502d0a9b",
+      "trigger": "registered",
+      "workflow_version_id": "dd66f0f3-8fd2-5ece-8339-97cfd9139fff"
+    },
+    {
+      "id": "81e12e3d-626b-55b2-85a4-ed459c1457f3",
+      "task_id": "fa756e3e-b1bc-5510-a700-df6f0a848ebf",
+      "trigger": "registered",
+      "workflow_version_id": "45e74eb7-b4a3-5350-b820-a1a6f989fba6"
     }
   ],
   "workflow_version_steps": [
@@ -260,6 +340,34 @@
       "step_index": 2,
       "step_name": "step-c-review",
       "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "4782cb79-687d-5bdc-9730-f952e8a68980",
+      "role_id": "role-feedback-analyzer",
+      "step_index": 0,
+      "step_name": "step-feedback-analyze",
+      "workflow_version_id": "dd66f0f3-8fd2-5ece-8339-97cfd9139fff"
+    },
+    {
+      "id": "3be33aaa-2503-5998-84ff-377dd0fd7598",
+      "role_id": "role-code-author",
+      "step_index": 1,
+      "step_name": "step-feedback-action",
+      "workflow_version_id": "dd66f0f3-8fd2-5ece-8339-97cfd9139fff"
+    },
+    {
+      "id": "5fbf93e7-401e-5a96-9f9c-b705c4f1605a",
+      "role_id": "role-conflict-analyzer",
+      "step_index": 0,
+      "step_name": "step-conflict-analyze",
+      "workflow_version_id": "45e74eb7-b4a3-5350-b820-a1a6f989fba6"
+    },
+    {
+      "id": "e18363f1-ca25-59a5-bd45-c07890e37327",
+      "role_id": "role-code-author",
+      "step_index": 1,
+      "step_name": "step-conflict-action",
+      "workflow_version_id": "45e74eb7-b4a3-5350-b820-a1a6f989fba6"
     }
   ],
   "workflow_versions": [
@@ -267,12 +375,30 @@
       "id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14",
       "version": 1,
       "workflow_id": "wf-author-synthetic"
+    },
+    {
+      "id": "dd66f0f3-8fd2-5ece-8339-97cfd9139fff",
+      "version": 1,
+      "workflow_id": "wf-feedback-synthetic"
+    },
+    {
+      "id": "45e74eb7-b4a3-5350-b820-a1a6f989fba6",
+      "version": 1,
+      "workflow_id": "wf-conflict-synthetic"
     }
   ],
   "workflows": [
     {
       "description": "Synthetic workflow",
       "id": "wf-author-synthetic"
+    },
+    {
+      "description": "Synthetic wf-feedback (analyzer\u2192action)",
+      "id": "wf-feedback-synthetic"
+    },
+    {
+      "description": "Synthetic wf-conflict (analyzer\u2192action)",
+      "id": "wf-conflict-synthetic"
     }
   ]
 }

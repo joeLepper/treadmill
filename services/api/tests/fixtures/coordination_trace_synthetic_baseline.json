@@ -1,4 +1,5 @@
 {
+  "_regen_pending": "fixture expanded to 71 events for task 4e3cffc2 (wf-feedback-loop + conflict-resolution coverage); event_count + publisher_calls + reevaluate_call_count + table_counts below are STALE \u2014 regenerate via scripts/capture_trace_baseline.py against a clean Postgres before the integration test runs clean",
   "captured_against_commit": "da453941b5884e8d87d4f6850cb72e009c87f23b",
   "event_count": 56,
   "events_by_kind": {
@@ -89,7 +90,7 @@
     }
   ],
   "reevaluate_call_count": 15,
-  "schema": 2,
+  "schema": 3,
   "table_counts": {
     "events": 49,
     "task_prs": 5,
