@@ -275,11 +275,34 @@ Each step is a small commit; total revert cost < 1 day.
 - **Learning**: `2026-06-09-envsubst-empty-substitution-silent-secret.md` (Bert) —
   SSO expiry mid-envsubst silently substitutes empty string; verify credentials before
   rendering secrets.
+- **Learning**: `2026-06-09-default-empty-escape-hatch-silent-failure-class.md` —
+  Bert named the structural class spanning envsubst + pubsub future + gh CLI: any API
+  with a "succeed with empty" escape hatch is a silent-failure surface; post-validate
+  at every consumption site. Candidate to crystallize into a rule/ADR next session.
+- **Learning**: `2026-06-09-equivalence-harness-zero-coverage-stub.md` — Bert's
+  dispatcher stub asserted 0==0 (both old and new code produced zero calls because the
+  mock intercepted upstream of the real boundary). Equivalence harnesses must assert
+  nontrivial counts derived from real pre-refactor execution.
 - **Rule candidate**: coordinator task briefs must include both repo name and directory
   path (never just a directory path that looks like a repo name). Covered by existing
   learning `2026-06-09-relay-briefs-need-exact-repo-paths.md`.
 - **ADR candidate**: named-session worktree provisioning for coordinator-routed repos
   (formalize the PR #1237 pattern into a systemd/launch convention).
+
+### Bert's brief (folded in)
+
+> "The trace-replay equivalence harness as a refactor-merge gate held up across four iterations.
+> Every cycle caught a real issue and ratcheted coverage forward. Designing it so each layer
+> was independently testable meant follow-ups didn't compound risk."
+
+> "HOLD signals were load-bearing. The pulumi-bundle question before running 86-change up.
+> The HOLD on pulumi up when Donna flagged the AWS-SSO-empty-IP scenario — would have
+> produced an exact-class silent-failure mirror of the pubsub double-prefix bug. Refusing
+> to advance on partial-information is cheap; debugging the consequence is hours."
+
+> "The coordinator-led model worked because BOTH directions were honored: coordinator
+> dispatched and brokered; operators escalated when judgment was needed. 0% amend rate
+> is downstream of that balance, not the prompt alone."
 
 ### What this teaches us about future plans
 
