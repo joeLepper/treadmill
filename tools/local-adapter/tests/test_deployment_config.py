@@ -648,6 +648,83 @@ def test_load_deployment_yaml_missing_deploy_events_dlq_url_raises_clear_error(
         load_deployment_yaml("test", path=target)
 
 
+# ── autoscaler.enabled (ADR-0084 Phase 4a) ────────────────────────────────────
+
+
+def _write_autoscaler_block(tmp_path: Path, synthetic_outputs, block: object) -> Path:
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=synthetic_outputs,
+    )
+    config["autoscaler"] = block  # type: ignore[assignment]
+    target = tmp_path / "test.yaml"
+    write_deployment_yaml("test", config, path=target)
+    return target
+
+
+def test_load_deployment_yaml_autoscaler_enabled_defaults_true(
+    synthetic_outputs, tmp_path: Path
+):
+    """When ``autoscaler:`` block omits ``enabled``, it defaults to True.
+    Preserves pre-ADR-0084 behavior for every deployment that hasn't
+    opted into the retirement path."""
+    target = _write_autoscaler_block(
+        tmp_path, synthetic_outputs,
+        {"min": 0, "max": 1, "tick_seconds": 5},
+    )
+    cfg = load_deployment_yaml("test", path=target)
+    assert cfg["autoscaler"]["enabled"] is True
+
+
+def test_load_deployment_yaml_autoscaler_block_absent_defaults_enabled_true(
+    synthetic_outputs, tmp_path: Path
+):
+    """When the autoscaler block is fully absent, the merged defaults
+    include ``enabled: True`` so callers can always read the field."""
+    config = build_deployment_config(
+        "test",
+        aws_profile="treadmill-test",
+        aws_region="us-east-1",
+        aws_account_id="111111111111",
+        outputs=synthetic_outputs,
+    )
+    del config["autoscaler"]
+    target = tmp_path / "test.yaml"
+    write_deployment_yaml("test", config, path=target)
+    cfg = load_deployment_yaml("test", path=target)
+    assert cfg["autoscaler"]["enabled"] is True
+
+
+def test_load_deployment_yaml_autoscaler_enabled_explicit_false_parses(
+    synthetic_outputs, tmp_path: Path
+):
+    """``enabled: false`` parses correctly — the retirement-path lever."""
+    target = _write_autoscaler_block(
+        tmp_path, synthetic_outputs,
+        {"enabled": False, "min": 0, "max": 4, "tick_seconds": 5},
+    )
+    cfg = load_deployment_yaml("test", path=target)
+    assert cfg["autoscaler"]["enabled"] is False
+    # Other fields preserved
+    assert cfg["autoscaler"]["max"] == 4
+
+
+def test_load_deployment_yaml_autoscaler_enabled_non_bool_rejected(
+    synthetic_outputs, tmp_path: Path
+):
+    """A non-bool ``enabled`` (e.g. the string ``"false"``) is rejected so
+    the operator notices the typo instead of silently getting truthy."""
+    target = _write_autoscaler_block(
+        tmp_path, synthetic_outputs,
+        {"enabled": "false", "min": 0, "max": 1, "tick_seconds": 5},
+    )
+    with pytest.raises(ValueError, match="autoscaler.enabled"):
+        load_deployment_yaml("test", path=target)
+
+
 # ── End-to-end CLI: ``treadmill-local init <deployment_id>`` ──────────────────
 
 
