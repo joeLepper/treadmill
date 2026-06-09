@@ -355,12 +355,8 @@ class LocalRuntime:
         self._wait_for_moto()
         self._ensure_provisioned()
         self._start_services()
-        if self.start_autoscaler:
+        if self._autoscaler_enabled():
             self._start_autoscaler()
-        else:
-            console.print(
-                "[yellow]• Autoscaler suppressed (--no-autoscaler).[/yellow]"
-            )
         self._report_up()
 
     # ── Dev-local mode (ADR-0016) ─────────────────────────────────────────────
@@ -411,12 +407,8 @@ class LocalRuntime:
         from treadmill_local.egress_proxy import ensure_egress_network
         ensure_egress_network(DockerClientAdapter(self.docker))
         self._start_services()
-        if self.start_autoscaler:
+        if self._autoscaler_enabled():
             self._start_autoscaler_dev_local()
-        else:
-            console.print(
-                "[yellow]• Autoscaler suppressed (--no-autoscaler).[/yellow]"
-            )
         if self.start_scheduler:
             self._start_scheduler_dev_local()
         else:
@@ -2038,6 +2030,37 @@ class LocalRuntime:
         except ValueError:
             return False
         return self._pid_alive(pid)
+
+    def _autoscaler_enabled(self) -> bool:
+        """Two-gate spawn decision for the autoscaler subprocess.
+
+        Both must hold:
+        - ``self.start_autoscaler`` (the runtime constructor / CLI flag —
+          ``--no-autoscaler`` sets this False; default True).
+        - ``deployment_config["autoscaler"]["enabled"]`` (the YAML config
+          — default True; ADR-0084 §11 Phase 4a flips this False in
+          personal.yaml to retire the autoscaler).
+
+        Prints a status reason when suppressed; returns True when the
+        autoscaler should spawn. Returns False (silent — no message)
+        when no deployment_config is loaded; the caller is expected to
+        only invoke this from a code path that has one.
+        """
+        if not self.start_autoscaler:
+            console.print(
+                "[yellow]• Autoscaler suppressed (--no-autoscaler).[/yellow]"
+            )
+            return False
+        cfg = self.deployment_config
+        if cfg is not None:
+            autoscaler_cfg = cfg.get("autoscaler") or {}
+            if autoscaler_cfg.get("enabled", True) is False:
+                console.print(
+                    "[yellow]• Autoscaler suppressed "
+                    "(autoscaler.enabled=false in deployment config).[/yellow]"
+                )
+                return False
+        return True
 
     def _autoscaler_pulse_status(self) -> str:
         """Return a rich-renderable status string for the autoscaler row.

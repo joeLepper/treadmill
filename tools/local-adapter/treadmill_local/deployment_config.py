@@ -144,7 +144,13 @@ _LOCAL_DEFAULTS: dict[str, str] = {
 # explicitly for parallelism), ``tick_seconds=5`` trades a little extra
 # latency vs fully-local's 2s for lower real-AWS SQS API call volume.
 
-_AUTOSCALER_DEFAULTS: dict[str, int] = {
+# ``enabled`` is the ADR-0084 §11 retirement-path lever. Phase 4a sets it
+# to ``False`` in personal.yaml so the autoscaler subprocess does not
+# start; the coordinator is then responsible for worker provisioning.
+# Default ``True`` preserves the pre-ADR-0084 behavior for every other
+# deployment.
+_AUTOSCALER_DEFAULTS: dict[str, int | bool] = {
+    "enabled": True,
     "min": 0,
     "max": 1,
     "tick_seconds": 5,
@@ -546,6 +552,14 @@ def load_deployment_yaml(
             )
         merged = dict(_AUTOSCALER_DEFAULTS)
         merged.update(autoscaler)
+        # Validate ``enabled`` explicitly (must be bool, not 0/1) before
+        # the int-only check below — which intentionally rejects bools.
+        enabled = merged["enabled"]
+        if not isinstance(enabled, bool):
+            raise ValueError(
+                f"deployment config at {path} has autoscaler.enabled = "
+                f"{enabled!r}; expected a bool."
+            )
         # Validate types + bounds. Booleans are ints in Python; reject
         # them explicitly so an operator who wrote ``min: true`` doesn't
         # silently get min=1.

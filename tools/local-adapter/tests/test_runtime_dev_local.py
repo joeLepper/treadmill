@@ -1414,6 +1414,122 @@ def test_up_dev_local_with_no_autoscaler_flag_skips_spawn(
     assert spawn_calls == [], "autoscaler must NOT spawn when --no-autoscaler is set"
 
 
+def test_up_dev_local_with_autoscaler_enabled_false_skips_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """When ``deployment_config["autoscaler"]["enabled"]`` is False
+    (ADR-0084 Phase 4a retirement lever), ``_up_dev_local`` does NOT
+    spawn the subprocess even though ``start_autoscaler`` is True
+    (the CLI flag's default)."""
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {
+        **cfg.get("autoscaler", {}),
+        "enabled": False,
+        "min": 0,
+        "max": 4,
+        "tick_seconds": 5,
+    }
+    rt = LocalRuntime(
+        tmp_path, deployment_config=cfg, start_autoscaler=True,
+    )
+
+    monkeypatch.setattr(rt, "_ensure_network", lambda: None)
+    monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    monkeypatch.setattr(rt, "_start_services", lambda: None)
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._github_token = "ghp_test_token_placeholder"
+
+    spawn_calls: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_start_autoscaler_dev_local",
+        lambda: spawn_calls.append(1),
+    )
+
+    rt.up()
+    assert spawn_calls == [], (
+        "autoscaler must NOT spawn when autoscaler.enabled=false in config"
+    )
+
+
+def test_up_dev_local_with_autoscaler_enabled_omitted_spawns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """``autoscaler.enabled`` omitted from config defaults True — the
+    pre-ADR-0084 behavior preserved. Autoscaler still spawns."""
+    rt = LocalRuntime(
+        tmp_path, deployment_config=_valid_yaml_dict(), start_autoscaler=True,
+    )
+
+    monkeypatch.setattr(rt, "_ensure_network", lambda: None)
+    monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    monkeypatch.setattr(rt, "_start_services", lambda: None)
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._github_token = "ghp_test_token_placeholder"
+
+    spawn_calls: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_start_autoscaler_dev_local",
+        lambda: spawn_calls.append(1),
+    )
+
+    rt.up()
+    assert spawn_calls == [1], (
+        "autoscaler must spawn when autoscaler.enabled is omitted (default true)"
+    )
+
+
+def test_no_autoscaler_cli_flag_wins_over_enabled_true_in_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """The ``--no-autoscaler`` CLI flag suppresses spawn even when the
+    deployment config explicitly sets ``enabled: true``. Both gates are
+    AND'd; either being False skips spawn."""
+    cfg = _valid_yaml_dict()
+    cfg["autoscaler"] = {
+        **cfg.get("autoscaler", {}),
+        "enabled": True,
+        "min": 0,
+        "max": 4,
+        "tick_seconds": 5,
+    }
+    rt = LocalRuntime(
+        tmp_path, deployment_config=cfg, start_autoscaler=False,
+    )
+
+    monkeypatch.setattr(rt, "_ensure_network", lambda: None)
+    monkeypatch.setattr(rt, "_ensure_images_built", lambda: None)
+    monkeypatch.setattr(rt, "_start_services", lambda: None)
+    monkeypatch.setattr(rt, "_start_scheduler_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_deploy_watcher_dev_local", lambda: None)
+    monkeypatch.setattr(rt, "_start_observability_dev_local", lambda: None)
+    rt._worker_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._api_aws_env = {"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+    rt._github_token = "ghp_test_token_placeholder"
+
+    spawn_calls: list[Any] = []
+    monkeypatch.setattr(
+        rt, "_start_autoscaler_dev_local",
+        lambda: spawn_calls.append(1),
+    )
+
+    rt.up()
+    assert spawn_calls == []
+
+
 def test_cli_up_no_autoscaler_flag_propagates_to_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1517,7 +1633,9 @@ def test_load_deployment_yaml_fills_autoscaler_defaults_when_absent(
     path.write_text(yaml.safe_dump(cfg))
 
     loaded = load_deployment_yaml("personal", path=path)
-    assert loaded["autoscaler"] == {"min": 0, "max": 1, "tick_seconds": 5}
+    assert loaded["autoscaler"] == {
+        "enabled": True, "min": 0, "max": 1, "tick_seconds": 5,
+    }
 
 
 def test_load_deployment_yaml_accepts_partial_autoscaler_block(
@@ -1530,7 +1648,9 @@ def test_load_deployment_yaml_accepts_partial_autoscaler_block(
     path.write_text(yaml.safe_dump(cfg))
 
     loaded = load_deployment_yaml("personal", path=path)
-    assert loaded["autoscaler"] == {"min": 0, "max": 4, "tick_seconds": 5}
+    assert loaded["autoscaler"] == {
+        "enabled": True, "min": 0, "max": 4, "tick_seconds": 5,
+    }
 
 
 def test_load_deployment_yaml_rejects_min_greater_than_max(
