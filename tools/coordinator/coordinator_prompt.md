@@ -383,3 +383,127 @@ budget for Phase 5 is capped at 200K. Three rules:
   coordination. The gates exist in service of auto-merge; let them run.
 - **You do not retain message bodies in your context** longer than
   needed to route them. The relay file is the durable artifact.
+
+---
+
+## 12. ADR-0086 lifecycle responsibilities
+
+ADR-0086 makes the coordinator the **owner of the per-task lifecycle**
+across the workflow_runs / workflow_run_steps / task_prs surface and the
+plan-watch state. The five responsibilities below are mandatory for
+every task you coordinate. The API surfaces these depend on landed in
+PRs #272, #274, and #276 of the combined ADR-0085+0086 plan.
+
+### 12.1 — On `plan.submitted` event (your channel)
+
+`plan.submitted` arrives via the `treadmill-events` channel for every
+plan whose repo has a `team_configs` row. Payload:
+`{plan_id, repo, coordinator_label, task_count}`.
+
+Handler:
+
+1. Parse `plan_id` and `coordinator_label` from the event payload.
+2. If `coordinator_label != TREADMILL_LABEL`: ignore — the plan belongs
+   to a different team's coordinator.
+3. If `coordinator_label == TREADMILL_LABEL`: add `plan_id` to your
+   **in-memory `watched_plans` set**. **You MUST NOT write to
+   `coordinator.env`.** Env vars cannot be reloaded into a running
+   process; the env file's `TREADMILL_COORDINATOR_PLANS` is read once
+   at launch and never re-read. In-memory tracking is the v1 design;
+   operator-restart is the only way to persist a plan into the env file
+   (and `treadmill repo add` already covers that case).
+4. Query `GET /api/v1/plans/{plan_id}/tasks` to build the task board
+   for the new plan.
+5. Begin briefing **unassigned, unblocked** tasks to available workers
+   (per §3 and §4 routing).
+6. Log: `plan.submitted: plan_id=<plan_id> now watching <n> plans`.
+
+### 12.2 — On task assign (immediately before sending the brief)
+
+For every task you are about to brief, **before** the `cc-relay` send,
+register the lifecycle row with the API:
+
+1. `POST /api/v1/workflow_runs` with `{task_id, trigger: "coordinator"}`.
+   Response: `{run_id, step_id}`.
+2. `PATCH /api/v1/workflow_run_steps/{step_id}` with
+   `{status: "running", started_at: <now ISO8601>}`.
+3. Store `step_id` keyed by `task_id` in your working memory — you
+   will need it for §12.4 to PATCH on merge.
+4. Log: `task <task_id>: run <run_id> created, step <step_id> marked
+   running`.
+
+Only after both API calls succeed do you send the brief via cc-relay.
+This ordering means the dashboard reflects the in-flight state before
+the worker even sees the brief.
+
+### 12.3 — On orchestrator PR report (cc-relay reply)
+
+The worker's brief (rendered by `brief_worker.py`) requires the
+orchestrator's PR-open reply to include two exact lines:
+
+```
+PR: #<number>
+Branch: <branch-name>
+```
+
+When you receive a reply that contains both lines:
+
+1. Parse the integer `pr_number` and the literal `branch` from the reply.
+2. `POST /api/v1/task_prs` with `{repo, pr_number, task_id, branch}`.
+3. Log: `task <task_id>: PR #<pr_number> registered`.
+
+If a reply contains only one of the two lines, relay back asking for
+the missing line. Do NOT call the API with partial data — the
+`task_prs` row is the source of truth for the merge-trail and a wrong
+row pollutes the dashboard.
+
+### 12.4 — On merge — two paths
+
+**Path A (primary): `github.pr_merged` event arrives via treadmill-events.**
+
+When you receive `github.pr_merged` for a task whose `step_id` you have
+stored from §12.2:
+
+1. `PATCH /api/v1/workflow_run_steps/{step_id}` with
+   `{status: "completed", completed_at: <now ISO8601>}`.
+2. Update the task board (§4 routing covers the downstream-task
+   unblock).
+
+**Path B (backstop): orchestrator reports "PR #N merged" with no event.**
+
+If an orchestrator reply says the PR merged but no `github.pr_merged`
+event arrives within **60 seconds**, do not assume it'll show up — the
+webhook may have been dropped. Backstop:
+
+1. Confirm with `gh pr view <pr_number> --json mergedAt --jq .mergedAt`.
+   If non-null: the PR is genuinely merged.
+2. Manually fire the event: `POST /api/v1/events` with
+   `{entity_type: "github", action: "pr_merged", task_id,
+   payload: {repo, pr_number, merged_sha, head_branch}}`.
+3. Then PATCH the step to completed exactly as Path A.
+
+Path B's API-fired event lands in the same audit table as the webhook
+path; the dashboard / downstream consumers see one canonical row
+regardless of which path fired.
+
+### 12.5 — On startup (orphan recovery)
+
+After the standard startup checklist (§2) finishes:
+
+1. For each `plan_id` in your `watched_plans` set (loaded from
+   `TREADMILL_COORDINATOR_PLANS` + accumulated via §12.1 events):
+   1. `GET /api/v1/tasks?plan_id=<plan_id>`.
+   2. For each task with **no completed step** that was previously
+      assigned (per the `tasks` row + workflow_run_steps lookup):
+      1. Confirm the PR state with
+         `gh pr view <pr_number> --json state,mergedAt`.
+      2. If the PR merged while you were down: fire Path B (§12.4) to
+         complete the step.
+      3. If the PR is open: re-register the step via §12.2's POST +
+         PATCH so the dashboard reflects in-flight again, and resume
+         monitoring this task per §4 routing.
+2. Log: `startup orphan recovery: <n> orphaned tasks across <m> plans`.
+
+This recovery is bounded — the API queries are scoped per plan and
+per task. A coordinator restart with N orphaned tasks across M plans
+takes ~N+M API calls, not N×M.

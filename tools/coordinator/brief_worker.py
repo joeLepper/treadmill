@@ -154,10 +154,34 @@ def build_brief(
         ]
     gates_section = "\n".join(f"- {item}" for item in gates)
 
-    ack_line = (
-        f"On receipt, reply with: `[from: <your-label>] Got it — working "
-        f"on {task_id}.`"
-    )
+    # ADR-0086 Task G: the coordinator's PR-registration handler
+    # (responsibility 3 in coordinator_prompt.md §12) parses the
+    # orchestrator's reply for two REQUIRED lines:
+    #
+    #     PR: #<number>
+    #     Branch: <branch-name>
+    #
+    # so it can call POST /api/v1/task_prs without round-tripping back
+    # to the worker for clarification. The lines must land verbatim,
+    # one per line, in the reply body — anywhere is fine but they MUST
+    # be present once the PR is open. Without both lines the
+    # coordinator falls back to a no-op + a relay back asking for the
+    # missing piece.
+    ack_block = f"""\
+On receipt, reply with: `[from: <your-label>] Got it — working on {task_id}.`
+
+When your PR is open, your reply MUST include these two lines exactly
+(one per line, anywhere in the body):
+
+```
+PR: #<number>
+Branch: <branch-name>
+```
+
+The coordinator's PR-registration handler (ADR-0086) parses both
+lines and calls `POST /api/v1/task_prs` against the API. Without
+both lines the task's PR is not registered + the coordinator will
+relay back asking for the missing piece — saves a round trip."""
 
     return f"""\
 # Task brief — `{task_id}`
@@ -187,7 +211,7 @@ def build_brief(
 
 ## Acknowledge
 
-{ack_line}
+{ack_block}
 """
 
 
