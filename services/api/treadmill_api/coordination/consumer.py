@@ -74,6 +74,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import func, select, String, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from treadmill_api.coordination.event_projector import (
+    EventProjector,
+    TaskPRWritten,
+)
 from treadmill_api.events.registry import (
     UnknownEventTypeError,
     parse_payload,
@@ -169,6 +173,12 @@ class CoordinationConsumer:
         self.dispatcher = dispatcher
         self.github_client = github_client
         self.settings = settings
+        # Phase-3C extraction (ADR-0011 single-writer split): the projector
+        # owns every audit-row INSERT + step.status UPDATE + task_prs write.
+        # Routing helpers (`_maybe_*`, github webhook hooks, `_reevaluate`)
+        # still live on this class in this phase — they extract into a
+        # dedicated PlanRouter class in a follow-up. See ADR-0084 §"Phase 3C".
+        self.projector = EventProjector()
         self._stopped = False
         self._task: asyncio.Task[None] | None = None
         self._auto_merge_task: asyncio.Task[None] | None = None
@@ -1240,39 +1250,14 @@ class CoordinationConsumer:
         record: dict[str, Any],
         payload: dict[str, Any],
     ) -> None:
-        """INSERT the Event row idempotently. Pre-existing (event_id)
-        rows — typically dispatcher-origin events — are left untouched."""
-        raw_id = record.get("event_id")
-        if not raw_id:
-            # No id supplied (older publishers) — skip persistence; the
-            # Event row will not be written but the status update still
-            # applies. Worker publishers should always supply event_id.
-            logger.debug(
-                "event without event_id; skipping audit INSERT (%s.%s)",
-                record.get("entity_type"), record.get("action"),
-            )
-            return
-        try:
-            event_id = uuid.UUID(str(raw_id))
-        except (ValueError, TypeError):
-            logger.warning("malformed event_id in record: %r", raw_id)
-            return
+        """Backwards-compatible delegation to ``EventProjector``.
 
-        stmt = (
-            pg_insert(Event)
-            .values(
-                id=event_id,
-                entity_type=record.get("entity_type"),
-                action=record.get("action"),
-                plan_id=_uuid_or_none(record.get("plan_id")),
-                task_id=_uuid_or_none(record.get("task_id")),
-                run_id=_uuid_or_none(record.get("run_id")),
-                step_id=_uuid_or_none(record.get("step_id")),
-                payload=payload,
-            )
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
-        await session.execute(stmt)
+        Phase-3C left this name on the consumer so existing tests + the
+        github webhook path continue to work unchanged. The body moved to
+        :class:`treadmill_api.coordination.event_projector.EventProjector`
+        per ADR-0011 single-writer invariant.
+        """
+        await self.projector.persist_audit_row(session, record, payload)
 
     async def _dispatch_step(
         self,
@@ -1282,106 +1267,10 @@ class CoordinationConsumer:
         typed: Any,
         payload: dict[str, Any],
     ) -> bool:
-        """Apply the validated typed step event to ``workflow_run_steps``.
-
-        ``typed`` is the validated payload object — use it for field
-        access in preference to ``payload`` raw-dict lookups. ``payload``
-        is retained as a parameter for symmetry with the prior union
-        shape and for the audit trail, though with the uniform envelope
-        (ADR-0012) every ``completed`` event's ``output`` is already a
-        fully-validated ``StepOutput``.
-
-        Each ``UPDATE`` is gated on the prior status — the WHERE clause
-        is the idempotency mechanism for re-delivery. See the module
-        docstring for the full transition table.
-        """
-        if action == "started":
-            assert isinstance(typed, StepStarted)
-            await session.execute(
-                update(WorkflowRunStep)
-                .where(
-                    WorkflowRunStep.id == step_id,
-                    WorkflowRunStep.status == "pending",
-                )
-                .values(status="running", started_at=typed.started_at)
-            )
-            return True
-        if action == "completed":
-            assert isinstance(typed, StepCompleted)
-            # ``typed.output`` is a validated ``StepOutput`` envelope
-            # (ADR-0012). The top-level ``parse_payload`` gate at the
-            # entry to ``handle()`` already rejected malformed envelopes,
-            # so we can dump the typed object directly. The JSONB column
-            # holds the parser-stable shape the future consumer round-
-            # trips through ``StepOutput.model_validate``.
-            output_to_store = typed.output.model_dump(mode="json")
-            # ADR-0020: per-step token counters land in five dedicated
-            # nullable columns in the same UPDATE — NULL when the worker
-            # omitted ``token_usage`` (dry-run, wf-validate, or any step
-            # that made no LLM call). All five fields move together
-            # because the worker pairs counters with the model id; the
-            # consumer never persists a partial usage row.
-            usage = typed.token_usage
-            values: dict[str, Any] = {
-                "status": "completed",
-                "completed_at": typed.completed_at,
-                "output": output_to_store,
-                "input_tokens": usage.input_tokens if usage else None,
-                "output_tokens": usage.output_tokens if usage else None,
-                "cache_creation_tokens": (
-                    usage.cache_creation_tokens if usage else None
-                ),
-                "cache_read_tokens": usage.cache_read_tokens if usage else None,
-                "model": usage.model if usage else None,
-            }
-            await session.execute(
-                update(WorkflowRunStep)
-                .where(
-                    WorkflowRunStep.id == step_id,
-                    WorkflowRunStep.status.in_(("pending", "running")),
-                )
-                .values(**values)
-            )
-            return True
-        if action == "failed":
-            assert isinstance(typed, StepFailed)
-            await session.execute(
-                update(WorkflowRunStep)
-                .where(
-                    WorkflowRunStep.id == step_id,
-                    WorkflowRunStep.status.in_(("pending", "running")),
-                )
-                .values(
-                    status="failed",
-                    completed_at=typed.failed_at,
-                    error=typed.error,
-                )
-            )
-            return True
-        if action == "cancelled":
-            assert isinstance(typed, StepCancelled)
-            await session.execute(
-                update(WorkflowRunStep)
-                .where(
-                    WorkflowRunStep.id == step_id,
-                    WorkflowRunStep.status == "pending",
-                )
-                .values(status="cancelled")
-            )
-            return True
-        if action == "skipped":
-            assert isinstance(typed, StepSkipped)
-            await session.execute(
-                update(WorkflowRunStep)
-                .where(
-                    WorkflowRunStep.id == step_id,
-                    WorkflowRunStep.status == "pending",
-                )
-                .values(status="skipped")
-            )
-            return True
-        logger.debug("coordination ignoring step.%s", action)
-        return False
+        """Backwards-compatible delegation to ``EventProjector``."""
+        return await self.projector.apply_step_status(
+            session, action, step_id, typed, payload,
+        )
 
     # ── task_prs writer + pending-events drain (B.8, D.8) ─────────────────────
 
@@ -1392,105 +1281,19 @@ class CoordinationConsumer:
         typed: Any,
         payload: dict[str, Any],
     ) -> None:
-        """Insert a ``task_prs`` row when a step completes with a PR.
+        """Insert a ``task_prs`` row when a step completes with a PR,
+        then drain any pending webhook events buffered against that PR.
 
-        Per the 2026-05-11 closure plan B.8 the coordination consumer is
-        the *only* writer of ``task_prs``. Per ADR-0012's convention map
-        for ``wf-author``, the envelope carries the PR reference across
-        three fields:
-
-        * ``payload["pr_number"]`` — the PR number (when the PR opened).
-        * ``artifacts[kind="branch"]`` — the branch name.
-        * top-level ``commit_sha`` — the commit anchor (not used here;
-          ADR-0013's mergeability VIEW joins on it).
-
-        We look up the owning task by joining ``workflow_run_steps →
-        workflow_runs → tasks`` and INSERT ``(repo, pr_number, task_id,
-        branch)`` with ``ON CONFLICT DO NOTHING`` for idempotency on
-        re-delivery.
-
-        Defense against payload spoofing: the ``repo`` we write is the
-        *task's* stored ``tasks.repo``, never the worker-reported value.
-        A compromised worker that fabricated an alien repo string would
-        otherwise plant a bogus bridge row.
-
-        After the INSERT lands, drain any pending GitHub webhook events
-        that were buffered against this (repo, pr_number) pair (D.8).
+        The INSERT itself is owned by :class:`EventProjector` (single-writer
+        per ADR-0011). The drain is a routing concern (it publishes new SQS
+        messages that re-enter ``handle()``) and stays on the consumer —
+        it'll move to ``PlanRouter`` in the Phase-3C follow-up.
         """
-        # ``typed.output`` is a validated ``StepOutput`` envelope after
-        # the top-level parse_payload gate. We read the per-workflow
-        # convention fields (ADR-0012 §"Convention map for wf-author's
-        # payload") from the envelope:
-        #   * pr_number  - payload["pr_number"]  (absent when no PR opened)
-        #   * branch     - first artifact of kind="branch" (worker always
-        #                  emits one for wf-author per ADR-0012)
-        # Workflows that do not author PRs (wf-review, wf-validate, etc.)
-        # simply omit ``pr_number`` from the envelope's payload — the
-        # short-circuit below returns without writing a task_prs row.
-        if not isinstance(typed, StepCompleted):
-            return
-        envelope = typed.output
-        pr_number_raw = envelope.payload.get("pr_number")
-        if pr_number_raw is None:
-            # Local-mode runs (no PR opened) or non-PR-authoring
-            # workflows fall here. No task_prs row to write; the drain
-            # has nothing to do because no webhook ever resolves against
-            # this pair.
-            return
-        if not isinstance(pr_number_raw, int) or isinstance(pr_number_raw, bool):
-            logger.warning(
-                "task_prs write: payload.pr_number not an int for step %s; "
-                "skipping (got %r)",
-                step_id, pr_number_raw,
-            )
-            return
-        pr_number = pr_number_raw
-
-        branch: str | None = None
-        for artifact in envelope.artifacts:
-            if artifact.kind == "branch":
-                branch = artifact.value
-                break
-        if branch is None:
-            logger.warning(
-                "task_prs write: no branch artifact for step %s (pr_number=%d); "
-                "skipping",
-                step_id, pr_number,
-            )
-            return
-
-        # Resolve the (task_id, repo) for this step. We trust the task's
-        # stored repo — never the payload's claim.
-        result = await session.execute(
-            select(WorkflowRun.task_id, Task.repo)
-            .join(WorkflowRunStep, WorkflowRunStep.run_id == WorkflowRun.id)
-            .join(Task, Task.id == WorkflowRun.task_id)
-            .where(WorkflowRunStep.id == step_id)
+        written = await self.projector.write_task_prs(
+            session, step_id, typed, payload,
         )
-        row = result.first()
-        if row is None:
-            logger.warning(
-                "task_prs write: no task found for step_id=%s; skipping", step_id,
-            )
+        if written is None:
             return
-        task_id = row.task_id
-        repo = row.repo
-
-        stmt = (
-            pg_insert(TaskPR)
-            .values(
-                repo=repo,
-                pr_number=pr_number,
-                task_id=task_id,
-                branch=branch,
-            )
-            .on_conflict_do_nothing(index_elements=["repo", "pr_number"])
-        )
-        await session.execute(stmt)
-        logger.info(
-            "task_prs row written: repo=%s pr_number=%d task_id=%s",
-            repo, pr_number, task_id,
-        )
 
         # D.8 — drain any pending webhook events buffered against this
         # PR. Skips cleanly if redis_client / publisher were not wired
@@ -1501,14 +1304,14 @@ class CoordinationConsumer:
                     self.redis_client,
                     session,
                     self.publisher,
-                    pr_pending_buffer_key(repo, pr_number),
-                    task_id,
+                    pr_pending_buffer_key(written.repo, written.pr_number),
+                    written.task_id,
                 )
             except Exception:
                 logger.exception(
                     "task_prs write: drain_pending_events failed for "
                     "repo=%s pr_number=%d task_id=%s; row still committed",
-                    repo, pr_number, task_id,
+                    written.repo, written.pr_number, written.task_id,
                 )
 
     # ── Self-trigger: wf-review changes_requested → wf-feedback (#108) ────────

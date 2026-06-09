@@ -47,9 +47,10 @@ _WRITE_PATTERNS = re.compile(
 # Add a new entry here only for legitimate non-webhook writers that existed
 # before ADR-0063 was enforced.  New webhook ingress paths are NOT eligible.
 _ALLOWLIST: dict[str, str] = {
-    # _persist_event: replays worker-origin events via ON CONFLICT DO NOTHING
-    "treadmill_api/coordination/consumer.py": (
-        "_persist_event: replay/worker-origin events via ON CONFLICT DO NOTHING"
+    # EventProjector.persist_audit_row: replays worker-origin events via
+    # ON CONFLICT DO NOTHING (lifted out of consumer.py per ADR-0084 Phase 3C).
+    "treadmill_api/coordination/event_projector.py": (
+        "persist_audit_row: replay/worker-origin events via ON CONFLICT DO NOTHING"
     ),
     # lifecycle event publisher: review.override + validate.override (ADR-0042)
     "treadmill_api/coordination/triggers.py": (
