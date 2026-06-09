@@ -47,6 +47,7 @@ _TEST_TABLES = (
     "workflow_runs",
     "task_prs",
     "task_dependencies",
+    "task_board",
     "tasks",
     "plans",
     "workflow_version_steps",
@@ -455,3 +456,162 @@ class TestTaskRetry:
         event = _get_retry_event(engine, task_id)
         assert event is not None
         assert event["workflow_id"] == "wf-ci-fix"
+
+    # ── ADR-0084 Task 2B — coordinator overlay on retry endpoint ──────────────
+
+    def test_409_when_blocked_by_coordinator_overlay(
+        self, client: httpx.Client, engine: Engine, truncate: None
+    ) -> None:
+        """``task_board.status = 'blocked_operator'`` on any task in the
+        plan (with a recent ``updated_at``) blocks manual retry with a
+        coordinator-specific 409 message — distinct from the
+        cap-reached 409 so operators can tell them apart."""
+        plan_id = _make_plan(engine)
+        task_id = _make_task(engine, plan_id)
+        _make_workflow_run(engine, task_id, "wf-feedback", step_status="failed")
+
+        # Plant a blocked_operator task_board row for the SAME plan,
+        # with a fresh updated_at so the coordinator counts as alive.
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO task_board "
+                    "(task_id, plan_id, status, updated_at, updated_by) "
+                    "VALUES (:task_id, :plan_id, 'blocked_operator', "
+                    "now(), 'test-coordinator')"
+                ),
+                {"task_id": str(task_id), "plan_id": str(plan_id)},
+            )
+
+        resp = client.post(
+            f"/api/v1/tasks/{task_id}/retry",
+            json={"workflow_id": "wf-feedback", "reason": "retry attempt"},
+        )
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert "coordinator-blocked state" in body["detail"]
+        assert "blocked_operator" in body["detail"]
+        # The cap-reached message is NOT what surfaced — the overlay
+        # short-circuited before _is_capped ran.
+        assert "cap reached" not in body["detail"]
+
+    def test_force_bypass_cap_overrides_coordinator_overlay(
+        self, client: httpx.Client, engine: Engine, truncate: None
+    ) -> None:
+        """The ``force_bypass_cap=true`` operator override covers BOTH
+        gates — the retry succeeds even when the overlay would
+        otherwise return BLOCK_BY_COORDINATOR. Single flag covers both
+        escapes so operator semantics stay predictable."""
+        plan_id = _make_plan(engine)
+        task_id = _make_task(engine, plan_id)
+        _make_workflow_run(engine, task_id, "wf-feedback", step_status="failed")
+
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO task_board "
+                    "(task_id, plan_id, status, updated_at, updated_by) "
+                    "VALUES (:task_id, :plan_id, 'blocked_operator', "
+                    "now(), 'test-coordinator')"
+                ),
+                {"task_id": str(task_id), "plan_id": str(plan_id)},
+            )
+
+        resp = client.post(
+            f"/api/v1/tasks/{task_id}/retry",
+            json={
+                "workflow_id": "wf-feedback",
+                "reason": "operator override — coordinator-blocked",
+                "force_bypass_cap": True,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert "workflow_run_id" in resp.json()
+
+    def test_stale_task_board_falls_through_to_cap(
+        self, client: httpx.Client, engine: Engine, truncate: None
+    ) -> None:
+        """When the most-recent task_board row is older than the
+        liveness threshold, the coordinator is considered absent and
+        the cap gate fires as before — preserving the safety net when
+        oversight is missing."""
+        plan_id = _make_plan(engine)
+        task_id = _make_task(engine, plan_id)
+        # Hit the wf-feedback cap so the cap gate would fire.
+        for _ in range(5):
+            _make_workflow_run(engine, task_id, "wf-feedback", step_status="failed")
+
+        # Plant a stale task_board row (older than the threshold).
+        # Status doesn't matter — even a stale blocked_operator counts
+        # as "coordinator absent" because we can't trust a stale gate.
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO task_board "
+                    "(task_id, plan_id, status, updated_at, updated_by) "
+                    "VALUES (:task_id, :plan_id, 'blocked_operator', "
+                    "now() - interval '20 minutes', 'test-coordinator')"
+                ),
+                {"task_id": str(task_id), "plan_id": str(plan_id)},
+            )
+
+        resp = client.post(
+            f"/api/v1/tasks/{task_id}/retry",
+            json={"workflow_id": "wf-feedback", "reason": "retry attempt"},
+        )
+        # The CAP message — not the coordinator-blocked one — because
+        # the overlay decided COORDINATOR_ABSENT and the cap fired.
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == "cap reached; pass force_bypass_cap=true"
+
+    def test_patch_task_board_invalidates_overlay_cache(
+        self, client: httpx.Client, engine: Engine, truncate: None
+    ) -> None:
+        """``PATCH /api/v1/task_board/{task_id}`` invalidates the
+        cached overlay decision for the plan. Without this, a freshly-
+        escalated blocked_operator status would be invisible to the
+        dispatch path for up to the cache TTL."""
+        plan_id = _make_plan(engine)
+        task_id = _make_task(engine, plan_id)
+        _make_workflow_run(engine, task_id, "wf-feedback", step_status="failed")
+
+        # Seed task_board with a non-blocking status so the first
+        # retry falls through to dispatch (or to the cap; depends on
+        # the run count). We want to populate the cache.
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO task_board "
+                    "(task_id, plan_id, status, updated_at, updated_by) "
+                    "VALUES (:task_id, :plan_id, 'in_flight', "
+                    "now(), 'test-coordinator')"
+                ),
+                {"task_id": str(task_id), "plan_id": str(plan_id)},
+            )
+
+        # Warm the cache: the first retry sees FALL_THROUGH from the
+        # overlay (no blocked rows) and then proceeds — the test plan
+        # has only 1 wf-feedback run so the cap doesn't fire yet.
+        resp1 = client.post(
+            f"/api/v1/tasks/{task_id}/retry",
+            json={"workflow_id": "wf-feedback", "reason": "first retry"},
+        )
+        assert resp1.status_code == 201, resp1.text
+
+        # PATCH the task to blocked_operator. The router-side
+        # invalidation must drop the cached FALL_THROUGH so the next
+        # retry sees the new BLOCK status immediately, not after the
+        # 30s TTL.
+        patch_resp = client.patch(
+            f"/api/v1/task_board/{task_id}",
+            json={"status": "blocked_operator", "updated_by": "test-coordinator"},
+        )
+        assert patch_resp.status_code == 200, patch_resp.text
+
+        # Second retry should now see BLOCK_BY_COORDINATOR.
+        resp2 = client.post(
+            f"/api/v1/tasks/{task_id}/retry",
+            json={"workflow_id": "wf-feedback", "reason": "second retry"},
+        )
+        assert resp2.status_code == 409, resp2.text
+        assert "coordinator-blocked state" in resp2.json()["detail"]

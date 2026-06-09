@@ -84,6 +84,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from treadmill_api.coordination.coordinator_overlay import (
+    CapOverlayDecision,
+    coordinator_overlay_decision,
+)
 from treadmill_api.coordination.dispatch_dedup import maybe_dispatch_with_dedup
 from treadmill_api.observability import inject_trace_context
 from treadmill_api.events.step import StepCompleted, StepReady
@@ -273,6 +277,23 @@ async def evaluate_triggers(
     # dispatch via the helper's None-key short-circuit.
     created_run_ids: list[uuid.UUID] = []
     for workflow_id in candidate_workflow_ids:
+        # ADR-0084 Task 2B — coordinator overlay runs BEFORE the cap
+        # check. When the plan has an active blocked_operator task
+        # (coordinator has escalated, is alive), we skip dispatch
+        # entirely; the coordinator will release when the operator
+        # decides. When the coordinator is absent (no rows or stale
+        # updated_at), the overlay short-circuits and the existing cap
+        # body fires as before. The cap is the hard backstop; the
+        # overlay never relaxes it.
+        overlay = await coordinator_overlay_decision(session, task.id)
+        if overlay is CapOverlayDecision.BLOCK_BY_COORDINATOR:
+            logger.info(
+                "trigger evaluator: %s blocked by coordinator for task %s "
+                "(plan has blocked_operator status); skipping dispatch for %s",
+                workflow_id, task.id, event_type,
+            )
+            continue
+
         # Cap policy gate. Capped workflows that hit the limit log a
         # warning + return None instead of dispatching.
         if await _is_capped(session, task.id, workflow_id):
