@@ -1,6 +1,6 @@
 # ADR-0086: Coordinator Owns Task Lifecycle Bookkeeping
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-06-09
 - **Supersedes:** nothing (fills a gap left by ADR-0084)
 - **Related:** ADR-0084 (coordinator-led execution model), ADR-0085 (automatic team provisioning), ADR-0018 (autoscaler — retired)

@@ -1,10 +1,35 @@
-# Coordinator (ADR-0084)
+# Coordinator (ADR-0084 + ADR-0086)
 
 A coordinator is a long-lived Claude Code session that holds plan-level
 context for a per-repo team. It briefs workers, routes SQS signals, and
 maintains the team's task board. See ADR-0084 for the full design and
 docs/plans/2026-06-08-adr-0084-coordinator-implementation.md for the
 phased implementation.
+
+The coordinator also owns the **per-task lifecycle** per
+[ADR-0086](../../docs/adrs/0086-coordinator-owns-task-lifecycle.md).
+Five mandatory responsibilities make the coordinator the canonical
+writer of workflow_runs / workflow_run_steps / task_prs state:
+
+1. **plan.submitted handler** — adds new plans to the in-memory
+   `watched_plans` set + queries the new task board. Strictly
+   in-memory: `coordinator.env` is read once at launch and never
+   re-read; mutating it would not affect the running process.
+2. **Pre-brief lifecycle registration** — POST /workflow_runs +
+   PATCH step status="running" BEFORE the cc-relay brief lands. The
+   dashboard reflects in-flight state before the worker sees the brief.
+3. **PR registration** — parses `PR: #<number>` + `Branch: <name>`
+   from the orchestrator's reply and POSTs /task_prs.
+4. **Merge — two paths** — primary `github.pr_merged` webhook (Path
+   A), 60s-timeout backstop via `gh pr view` + manual `POST /events`
+   (Path B). Both routes PATCH the step to `completed`.
+5. **Startup orphan recovery** — for every watched plan, query the
+   API + reconcile the dashboard state against any work in flight
+   while the coordinator was down.
+
+See `coordinator_prompt.md` §12 for the full handler contracts; the
+five lifecycle responsibilities are the bar for the lifecycle audit
+LLM judge.
 
 ## Launch convention
 
