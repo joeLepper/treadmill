@@ -42,3 +42,35 @@ class UnreferencedClosesReport(EventPayload):
 
     window_end: str
     """ISO datetime of the end of the reporting window (when the sweep ran)."""
+
+
+class SystemAutoSeededStarters(EventPayload):
+    """Emitted when ``POST /api/v1/plans`` discovers an empty workflows
+    table and auto-runs ``seed_starters_if_empty`` to populate it
+    before persisting the plan.
+
+    Post-mortem surprise A of the combined ADR-0085+0086 plan
+    (2026-06-09): a fresh DB has an empty ``workflows`` table; the
+    first ``treadmill plan submit`` 400s with "workflow 'wf-author'
+    not registered" until ``treadmill workflows seed-starters`` runs
+    manually. The plan-submit handler now auto-seeds on this branch
+    (idempotent — same ``SELECT FOR UPDATE`` on the
+    ``alembic_version`` sentinel that the startup-side
+    ``_auto_seed_starters`` uses), and emits one of these so the
+    dashboard + treadmill-events stream carries an audit trail of
+    when the cliff-edge case fired. Happy-path submits (starters
+    already present) emit nothing.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "system"
+    ACTION: ClassVar[str] = "auto_seeded_starters"
+
+    roles_seeded: int
+    """Count of roles inserted by the seed transaction. Always ``> 0``
+    when this event fires — the handler only emits on the seeded
+    branch."""
+
+    triggered_by: str
+    """Where the auto-seed branch ran. Pinned to ``"plan_submit"`` at
+    introduction; future entry points (CLI, MCP, etc.) get their own
+    string so dashboards can disambiguate."""
