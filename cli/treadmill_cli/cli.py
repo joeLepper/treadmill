@@ -305,6 +305,70 @@ def plan_validate(
     raise typer.Exit(code=1)
 
 
+# ── plan check-migration-chain ───────────────────────────────────────────────
+
+
+@plan_app.command("check-migration-chain")
+def plan_check_migration_chain(
+    versions_dir: Annotated[
+        Path,
+        typer.Option(
+            "--versions-dir",
+            help=(
+                "Alembic versions directory to lint. Defaults to "
+                "services/api/alembic/versions relative to the current "
+                "working directory."
+            ),
+        ),
+    ] = Path("services/api/alembic/versions"),
+) -> None:
+    """Lint the Alembic migration chain for branch collisions.
+
+    Post-mortem surprise C from the ADR-0085+0086 plan: parallel migrations
+    authored in the same dispatch window can both name the same
+    ``down_revision``, branching the chain. This subcommand parses every
+    migration file in the directory + builds the chain graph + reports
+    multi-head collisions, duplicate revision ids, and dangling
+    ``down_revision`` references. No DB connection required — runs in
+    the worker sandbox.
+
+    Exit codes: 0 clean; 1 violations found; 2 versions directory missing.
+    """
+    from treadmill_cli.migration_chain import find_chain_violations
+
+    try:
+        violations = find_chain_violations(versions_dir)
+    except FileNotFoundError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    if not violations:
+        console.print(
+            f"[green]chain clean:[/green] {versions_dir} "
+            f"({len([p for p in versions_dir.iterdir() if p.suffix == '.py']):d} files)"
+        )
+        raise typer.Exit(code=0)
+
+    table = Table(title=f"Alembic chain violations ({len(violations)})")
+    table.add_column("Kind", style="red")
+    table.add_column("Revision(s)")
+    table.add_column("File(s)", style="dim")
+    table.add_column("Detail")
+    for v in violations:
+        table.add_row(
+            v.kind,
+            ", ".join(v.revisions),
+            ", ".join(p.name for p in v.files),
+            v.detail,
+        )
+    console.print(table)
+    err_console.print(
+        "[red]migration chain has violations; fix the down_revision "
+        "of one of the conflicting migrations before merge[/red]"
+    )
+    raise typer.Exit(code=1)
+
+
 # ── submit (intent shorthand; auto-creates implicit one-task plan) ───────────
 
 
