@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: ADR-0085 + ADR-0086 Combined Implementation
 
-- **Status:** active
+- **Status:** completed
 - **Date:** 2026-06-09
 - **Related ADRs:** ADR-0085 (automatic team provisioning), ADR-0086 (coordinator owns task lifecycle)
 - **Supersedes:** 2026-06-09-adr-0085-automatic-team-provisioning
@@ -577,4 +577,19 @@ _(to be filled as work proceeds)_
 
 ## Post-mortem
 
-_(to be filled when plan completes or is abandoned)_
+**What worked.**
+Bootstrap-by-Alan model held: Alan handled all Treadmill lifecycle bookkeeping manually (direct DB inserts for task_prs, watching for github.pr_merged events) while the coordinator infra was being built. The Bert/Carla/Donna sprint completed all 7 tasks in a single session — A, C, E, F same-day; B, D, G by end of evening. Bert's amendment to add POST /api/v1/task_prs to Task B scope was caught and relayed cleanly mid-flight. Clause 3b in the task_status view (Task A) worked as designed — merged PRs showed pr_merged immediately rather than being masked by pending steps.
+
+**What surprised us.**
+- The postgres volume had 0 plans/tasks even though the API returned 201 for prior submissions — root cause: `treadmill workflows seed-starters` had never been run on the fresh DB, so the first plan submit succeeded to create the plan row but task creation failed silently (workflow not found). The 201 response was a plan-only create, not the full plan+tasks submission. Learning captured.
+- `POST /api/v1/task_prs` was missing from the API despite ADR-0086 referencing it — caught as a gap during Task B brief, added as an amendment. The plan's risks section flagged it correctly but didn't block dispatch.
+- Merge conflict on PR #272 (Carla's team_configs) was a migration chain issue: Carla's `down_revision` pointed at `20260608_2200` but Bert's Task A migration (`20260609_0900`) had already landed, so the chain broke. Resolved with a two-file fix in Carla's worktree.
+- The deploy-watcher had already applied Bert's migration to the live DB before PR #271 merged to main — benign but unexpected.
+
+**What should become an ADR, learning, or rule.**
+- Learning: `treadmill workflows seed-starters` required on any fresh DB → `docs/learnings/2026-06-09-workflow-starters-require-explicit-seed.md`
+- Rule candidate: Alembic migrations in parallel PRs must coordinate `down_revision` ordering before submit — Bert/Carla collision is the canonical example.
+- ADR-0085 and ADR-0086 are now `accepted`. Coordinator model is production-ready.
+
+**What this plan teaches us about future plans.**
+The bootstrap execution model (Alan as manual lifecycle bookkeeper) is viable and doesn't significantly slow the team — all 7 PRs landed in one session. The main cost was ~3 direct DB inserts per PR (task_prs registration) plus merge monitoring. Task G (coordinator prompt wiring) is the automation that eliminates this cost permanently; future plans submitted via `treadmill repo add` + a running coordinator will require no manual bookkeeping from Alan.
