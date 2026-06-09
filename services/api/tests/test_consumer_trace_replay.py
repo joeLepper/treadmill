@@ -1,31 +1,37 @@
-"""Trace-replay equivalence gate for the Task 2A Phase 2 PlanRouter extraction.
+"""Trace-replay equivalence gate for the PlanRouter extraction.
 
-The PlanRouter extraction in this PR moves 21 ``_maybe_*`` helpers + 5
+The Phase-2 extraction (PR #258) moved 21 ``_maybe_*`` helpers + 5
 entity-type handlers + ``_cross_step_dispatch`` + ``_reevaluate`` + the
-D.8 webhook drain out of ``CoordinationConsumer`` and into the new
+D.8 webhook drain out of ``CoordinationConsumer`` and into
 ``PlanRouter``. The two collaborate via direct method call: the
 consumer commits the projection transaction, then hands the same
 record + typed payload to the router, which opens its own session and
 runs routing decisions against the just-committed state.
 
 Existing unit + integration tests cover *individual* routing helpers
-in isolation. This test pins the COMPOSITION: replay a real 1453-event
-captured trace through the post-extraction pipeline and assert
-identical observable side effects against a frozen baseline sidecar
-captured from pre-extraction code (committed alongside this test).
+in isolation. This test pins the COMPOSITION: seed a synthetic plan
+into a clean DB, replay a 56-event synthetic trace through the
+post-extraction pipeline, and assert identical observable side
+effects against a frozen baseline sidecar.
 
-Skipped by default. To run:
+Fixture / seed / baseline are produced by
+``scripts/generate_synthetic_trace.py`` (events + seed) and
+``scripts/capture_trace_baseline.py`` (baseline). Synthetic by design
+— the prior RAMJAC capture had a 21% JSON-escaping defect at the
+capture-pipeline layer that this generator structurally avoids by
+serializing every record via ``json.dumps`` and validating round-trip
+parsing before exit.
 
-    treadmill-local up
+Skipped by default. To run::
+
+    docker run -d --rm --name treadmill-baseline-capture \\
+        -p 15433:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=treadmill \\
+        postgres:16
+    TREADMILL_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:15433/treadmill" \\
+        uv run alembic upgrade head
     TREADMILL_INTEGRATION=1 \\
+        TREADMILL_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:15433/treadmill" \\
         uv run pytest tests/test_consumer_trace_replay.py
-
-The baseline sidecar lives at
-``tests/fixtures/coordination_trace_b0cd81fc_baseline.json``. When the
-pre-extraction code legitimately changes (e.g. an upstream event-shape
-evolution forces a baseline refresh), regenerate it via
-``scripts/capture_trace_baseline.py``; the script docstring documents
-the procedure.
 """
 
 from __future__ import annotations
@@ -33,7 +39,6 @@ from __future__ import annotations
 import gzip
 import json
 import os
-import subprocess
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -55,71 +60,43 @@ from treadmill_api.coordination.consumer import CoordinationConsumer
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
 pytestmark = pytest.mark.skipif(
     not INTEGRATION,
-    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up`",
+    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up` "
+           "or an ephemeral Postgres (see module docstring)",
 )
 
 
 DEFAULT_DATABASE_URL = (
-    "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill"
+    "postgresql+psycopg://postgres:postgres@localhost:15433/treadmill"
 )
 
-# Schema version pinned in the sidecar. Bumped when the baseline shape
-# evolves so a stale sidecar refuses rather than silently mis-matches.
-_EXPECTED_BASELINE_SCHEMA = 1
+# Schema version pinned in the sidecar — bumped to 2 when the fixture
+# changed from the malformed-21% RAMJAC capture to the synthetic-by-
+# construction generator. Stale sidecars refuse rather than mis-match.
+_EXPECTED_BASELINE_SCHEMA = 2
 
-# Minimum events that must survive parse-and-replay before the harness
-# asserts equivalence. The fixture has a pre-existing 21% defect (307
-# malformed JSONL lines, unescaped ``\"`` inside patch payloads) tracked
-# in a follow-up task to fix the capture pipeline. If the next capture
-# regresses further, this assertion fails fast rather than silently
-# under-covering. Raise on the next clean recapture.
-_MIN_REPLAYED_EVENTS = 1000
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+_EVENTS_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_events.jsonl.gz"
+_SEED_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_seed.json"
+_BASELINE_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_baseline.json"
 
-_FIXTURE_PATH = (
-    Path(__file__).resolve().parent
-    / "fixtures"
-    / "coordination_trace_b0cd81fc_events.jsonl.gz"
+
+# Tables seeded BEFORE replay, in FK-respecting order. Must match the
+# order in scripts/capture_trace_baseline.py so the baseline and the
+# test exercise an identical pre-replay state.
+_SEED_TABLES = (
+    "workflows",
+    "workflow_versions",
+    "roles",
+    "workflow_version_steps",
+    "plans",
+    "tasks",
+    "workflow_runs",
+    "workflow_run_steps",
 )
-_BASELINE_PATH = (
-    Path(__file__).resolve().parent
-    / "fixtures"
-    / "coordination_trace_b0cd81fc_baseline.json"
-)
 
 
-# ── Fixtures (shared shape with test_integration_coordination_consumer.py) ─────
-
-
-@pytest.fixture(scope="module")
-def database_url() -> str:
-    return os.environ.get("TREADMILL_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
-
-
-@pytest.fixture(scope="module")
-def async_database_url(database_url: str) -> str:
-    return database_url.replace("+psycopg", "+asyncpg")
-
-
-@pytest.fixture(scope="module")
-def engine(database_url: str) -> Iterator[Engine]:
-    eng = sa.create_engine(database_url, pool_pre_ping=True)
-    yield eng
-    eng.dispose()
-
-
-@pytest.fixture(scope="module", autouse=True)
-def migrations_applied(database_url: str) -> None:
-    services_api_dir = Path(__file__).resolve().parent.parent
-    env = {**os.environ, "DATABASE_URL": database_url}
-    subprocess.run(
-        ["uv", "run", "alembic", "upgrade", "head"],
-        cwd=services_api_dir,
-        env=env,
-        check=True,
-    )
-
-
-_TEST_TABLES = (
+# Tables truncated between the fixture's per-test runs.
+_TRUNCATE_TABLES = (
     "events",
     "workflow_run_steps",
     "workflow_runs",
@@ -140,20 +117,61 @@ _TEST_TABLES = (
 )
 
 
+# ── Fixtures ────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def database_url() -> str:
+    return os.environ.get("TREADMILL_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+@pytest.fixture(scope="module")
+def async_database_url(database_url: str) -> str:
+    return database_url.replace("+psycopg", "+asyncpg")
+
+
+@pytest.fixture(scope="module")
+def engine(database_url: str) -> Iterator[Engine]:
+    eng = sa.create_engine(database_url, pool_pre_ping=True)
+    yield eng
+    eng.dispose()
+
+
 @pytest.fixture
-def truncate(engine: Engine) -> Iterator[None]:
-    def _do() -> None:
+def truncate_and_seed(engine: Engine) -> Iterator[None]:
+    """Truncate the test tables, seed the synthetic plan, yield."""
+    if not _SEED_PATH.exists():
+        pytest.fail(
+            f"seed manifest missing: {_SEED_PATH}. Regenerate via "
+            "scripts/generate_synthetic_trace.py."
+        )
+    with _SEED_PATH.open() as f:
+        manifest = json.load(f)
+
+    def _do_truncate() -> None:
         with engine.begin() as conn:
             conn.execute(
                 sa.text(
                     "TRUNCATE TABLE "
-                    + ", ".join(_TEST_TABLES)
+                    + ", ".join(_TRUNCATE_TABLES)
                     + " RESTART IDENTITY CASCADE"
                 )
             )
-    _do()
+
+    def _seed() -> None:
+        meta = sa.MetaData()
+        with engine.begin() as conn:
+            for table_name in _SEED_TABLES:
+                rows = manifest.get(table_name, [])
+                if not rows:
+                    continue
+                table = sa.Table(table_name, meta, autoload_with=conn)
+                conn.execute(table.insert(), rows)
+
+    _do_truncate()
+    _seed()
     yield
-    _do()
+    _do_truncate()
 
 
 @pytest_asyncio.fixture
@@ -170,11 +188,8 @@ async def async_session_maker(
 
 
 class _RecordingDispatcher:
-    """Mirror of the same stub in ``scripts/capture_trace_baseline.py``.
-
-    Records every dispatcher.publish call so the trace-replay assertion
-    can compare the routing sequence directly.
-    """
+    """Records every dispatcher.publish call so the assertion can
+    compare the routing sequence directly."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -209,16 +224,26 @@ def _serialise(value: Any) -> Any:
     return repr(value)
 
 
+# Wall-clock columns excluded from snapshots — server ``now()`` defaults
+# differ between baseline capture and test-time replay. The harness
+# asserts behavior equivalence, not wall-clock equivalence. Must match
+# the same set in ``scripts/capture_trace_baseline.py``.
+_VOLATILE_COLUMNS = frozenset({"created_at", "updated_at"})
+
+
 def _row_to_dict(row: sa.engine.Row) -> dict[str, Any]:
-    return {k: _serialise(v) for k, v in row._mapping.items()}
+    return {
+        k: _serialise(v)
+        for k, v in row._mapping.items()
+        if k not in _VOLATILE_COLUMNS
+    }
 
 
 def _load_baseline() -> dict[str, Any]:
     if not _BASELINE_PATH.exists():
         pytest.fail(
             f"baseline sidecar missing: {_BASELINE_PATH}. "
-            "Regenerate via scripts/capture_trace_baseline.py (see "
-            "the script's docstring for the procedure)."
+            "Regenerate via scripts/capture_trace_baseline.py."
         )
     with _BASELINE_PATH.open() as f:
         baseline = json.load(f)
@@ -226,8 +251,7 @@ def _load_baseline() -> dict[str, Any]:
         pytest.fail(
             f"baseline schema mismatch: file says "
             f"{baseline.get('schema')!r}, test expects "
-            f"{_EXPECTED_BASELINE_SCHEMA!r}. Regenerate the sidecar after "
-            "bumping the schema."
+            f"{_EXPECTED_BASELINE_SCHEMA!r}. Regenerate the sidecar."
         )
     return baseline
 
@@ -239,25 +263,25 @@ def _load_baseline() -> dict[str, Any]:
 async def test_trace_replay_matches_baseline(
     engine: Engine,
     async_session_maker: async_sessionmaker[AsyncSession],
-    truncate: None,
+    truncate_and_seed: None,
 ) -> None:
-    """Replay the captured trace through the post-extraction pipeline and
-    assert identical observable side effects vs the baseline sidecar.
+    """Replay the synthetic trace through the post-extraction pipeline
+    and assert identical observable side effects vs the baseline.
 
     Equality is checked on:
 
-    1. ``events`` table — every audit row, by id.
-    2. ``workflow_run_steps`` table — every step row, by id.
-    3. ``task_prs`` table — every PR-bridge row, by (task_id, repo, pr_number).
-    4. Dispatcher publish sequence — workflow_id × task_id × source_event_id,
-       in order, captured via the recording stub.
-    5. ``_reevaluate`` call count — total invocations across the replay.
+    1. ``events`` table snapshot
+    2. ``workflow_run_steps`` table snapshot
+    3. ``task_prs`` table snapshot
+    4. Dispatcher publish sequence (order-sensitive)
+    5. ``_reevaluate`` call count
 
-    Any deviation is a routing-behavior regression introduced by the
-    Phase 2 extraction.
+    The fixture is clean by construction (the generator validates
+    round-trip parsing). A ``JSONDecodeError`` during replay is a real
+    regression, not a skipped line.
     """
-    if not _FIXTURE_PATH.exists():
-        pytest.fail(f"trace fixture missing: {_FIXTURE_PATH}")
+    if not _EVENTS_PATH.exists():
+        pytest.fail(f"trace fixture missing: {_EVENTS_PATH}")
 
     baseline = _load_baseline()
 
@@ -280,31 +304,12 @@ async def test_trace_replay_matches_baseline(
     consumer._reevaluate = _wrapped_reevaluate  # type: ignore[assignment]
 
     event_count = 0
-    malformed_count = 0
-    with gzip.open(_FIXTURE_PATH, "rt") as f:
-        for line_no, line in enumerate(f):
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                malformed_count += 1
-                continue
+    with gzip.open(_EVENTS_PATH, "rt") as f:
+        for line in f:
+            record = json.loads(line)
             await consumer.handle(record)
             event_count += 1
 
-    if malformed_count:
-        logger = __import__("logging").getLogger(__name__)
-        logger.warning(
-            "%d/%d events skipped — malformed payload escaping in capture "
-            "pipeline; see scripts/capture_trace_baseline.py for regen notes",
-            malformed_count, malformed_count + event_count,
-        )
-
-    assert event_count >= _MIN_REPLAYED_EVENTS, (
-        f"replay processed only {event_count} events (minimum "
-        f"{_MIN_REPLAYED_EVENTS}); fixture coverage has degraded past "
-        f"the acceptable floor. Skipped {malformed_count} malformed "
-        "lines. Refresh the fixture via scripts/capture_trace_baseline.py."
-    )
     assert event_count == baseline["event_count"], (
         f"replay processed {event_count} events; baseline captured "
         f"{baseline['event_count']}. The fixture changed under the test "
@@ -327,9 +332,8 @@ async def test_trace_replay_matches_baseline(
         assert actual == expected, (
             f"{table}: post-extraction snapshot diverges from baseline. "
             f"Actual rows: {len(actual)}; baseline rows: {len(expected)}. "
-            "Either the extraction changed routing behavior (find the "
-            "diff via fixtures/coordination_trace_b0cd81fc_baseline.json) "
-            "or the baseline is stale (regenerate via "
+            "Either the extraction changed routing behavior or the "
+            "baseline is stale (regenerate via "
             "scripts/capture_trace_baseline.py)."
         )
 
@@ -337,9 +341,7 @@ async def test_trace_replay_matches_baseline(
     assert dispatcher.calls == baseline["dispatcher_calls"], (
         f"dispatcher publish sequence diverges: replay made "
         f"{len(dispatcher.calls)} calls; baseline recorded "
-        f"{len(baseline['dispatcher_calls'])} calls. Order matters — "
-        "this asserts the post-extraction routing fires workflows in "
-        "the same order as the pre-extraction code."
+        f"{len(baseline['dispatcher_calls'])} calls."
     )
 
     # 5. _reevaluate call count.

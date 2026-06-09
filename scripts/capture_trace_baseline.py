@@ -1,56 +1,37 @@
 """Capture a baseline DB-state sidecar for the trace-replay equivalence test.
 
-The trace-replay test in
-``services/api/tests/test_consumer_trace_replay.py`` asserts that the
-post-extraction ``CoordinationConsumer + EventProjector + PlanRouter``
-pipeline produces an identical observable side effect to the
-pre-extraction monolith, when replayed against the same 1453-event
-captured fixture.
+Replays the synthetic trace fixture through ``CoordinationConsumer.handle()``
+against a freshly-seeded database, snapshots the resulting state, and
+writes the baseline sidecar that ``tests/test_consumer_trace_replay.py``
+asserts against.
 
-The "identical" side is read from a baseline sidecar — a frozen JSON
-file containing the post-replay row contents for each table the
-consumer writes. This script generates that sidecar. Re-run it
-whenever the pre-extraction code legitimately changes (e.g. an
-upstream event-shape evolution forces a baseline refresh).
+The fixture + seed manifest are produced by
+``scripts/generate_synthetic_trace.py`` — regenerate them whenever the
+event schema evolves so the harness keeps covering every routing path.
 
-Usage:
+Usage::
 
-    # Check out the baseline commit (typically main HEAD pre-PR).
-    git checkout main
+    # Bring up a clean local Postgres (separate from the live dev-local
+    # DB so the capture doesn't clobber state other sessions are
+    # working against).
+    docker run -d --rm --name treadmill-baseline-capture \\
+        -p 15433:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=treadmill \\
+        postgres:16
+    cd services/api
+    DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:15433/treadmill" \\
+        uv run alembic upgrade head
 
-    # Bring up a clean local Postgres.
-    treadmill-local up
+    TREADMILL_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:15433/treadmill" \\
+        uv run python ../../scripts/capture_trace_baseline.py
 
-    # Run the capture against the scrubbed fixture.
-    TREADMILL_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:15432/treadmill" \\
-        uv run python scripts/capture_trace_baseline.py \\
-            services/api/tests/fixtures/coordination_trace_b0cd81fc_events.jsonl.gz \\
-            services/api/tests/fixtures/coordination_trace_b0cd81fc_baseline.json
+    docker rm -f treadmill-baseline-capture
 
-    # Commit the new baseline alongside any code change that justified it.
-    git add services/api/tests/fixtures/coordination_trace_b0cd81fc_baseline.json
-    git commit -m "test(trace-replay): refresh baseline against <hash>"
+The script reads the fixture + seed from
+``services/api/tests/fixtures/`` and writes the baseline sidecar to the
+same directory.
 
-The baseline file shape:
-
-    {
-      "schema": 1,
-      "captured_against_commit": "<git sha>",
-      "event_count": 1453,
-      "tables": {
-        "events": [ { ... row ... }, ... ],
-        "workflow_run_steps": [ ... ],
-        "task_prs": [ ... ]
-      },
-      "dispatcher_calls": [
-        { "workflow_id": "...", "task_id": "...", "source_event_id": "..." },
-        ...
-      ],
-      "reevaluate_call_count": <int>
-    }
-
-Schema versioning: bumping ``schema`` in the JSON header forces the
-trace-replay test to refuse a stale baseline rather than silently
+Schema versioning: bumping ``_SCHEMA_VERSION`` in the JSON header forces
+the trace-replay test to refuse a stale baseline rather than silently
 read it under an older invariant.
 """
 
@@ -59,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import os
 import subprocess
 import sys
 import uuid
@@ -68,7 +50,12 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2  # bumped from 1 — synthetic fixture replaces RAMJAC capture
+
+_FIXTURES_DIR = Path(__file__).resolve().parent.parent / "services" / "api" / "tests" / "fixtures"
+_EVENTS_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_events.jsonl.gz"
+_SEED_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_seed.json"
+_BASELINE_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_baseline.json"
 
 
 def _git_head_sha() -> str:
@@ -82,7 +69,6 @@ def _git_head_sha() -> str:
 
 
 def _serialise(value: Any) -> Any:
-    """Make a row value JSON-friendly. UUIDs → str; datetimes → ISO."""
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, uuid.UUID):
@@ -96,16 +82,23 @@ def _serialise(value: Any) -> Any:
     return repr(value)
 
 
+# Wall-clock columns excluded from snapshots — server ``now()`` defaults
+# differ between baseline capture and test-time replay. The harness asserts
+# behavior equivalence, not wall-clock equivalence.
+_VOLATILE_COLUMNS = frozenset({"created_at", "updated_at"})
+
+
 def _row_to_dict(row: sa.engine.Row) -> dict[str, Any]:
-    return {k: _serialise(v) for k, v in row._mapping.items()}
+    return {
+        k: _serialise(v)
+        for k, v in row._mapping.items()
+        if k not in _VOLATILE_COLUMNS
+    }
 
 
 class _RecordingDispatcher:
-    """Stub dispatcher that records every ``publish`` call in order.
-
-    The trace-replay assertion uses this to verify the post-extraction
-    routing produces the same dispatched-run sequence as the baseline.
-    """
+    """Stub dispatcher — records every ``publish`` call in order so the
+    equivalence assertion can compare routing-side effects directly."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -126,14 +119,63 @@ class _RecordingDispatcher:
         })
 
 
-async def _capture(fixture_path: Path, output_path: Path, database_url: str) -> None:
-    """Replay the fixture, snapshot the resulting DB state, and write
-    the baseline sidecar."""
+# Tables seeded BEFORE replay. Order matters — each row's FKs reference
+# rows in tables earlier in this list.
+_SEED_TABLES = (
+    "workflows",
+    "workflow_versions",
+    "roles",
+    "workflow_version_steps",
+    "plans",
+    "tasks",
+    "workflow_runs",
+    "workflow_run_steps",
+)
+
+
+def seed_database_sync(
+    engine: sa.engine.Engine,
+    manifest: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Insert the seed manifest rows in FK-respecting order.
+
+    Uses a sync engine + parameterised INSERTs against the public
+    information_schema columns — table shapes evolve and a too-specific
+    INSERT statement here would be a constant maintenance tax. Instead
+    we let SQLAlchemy reflect the table column names and pass only the
+    keys present on each row.
+    """
+    meta = sa.MetaData()
+    with engine.begin() as conn:
+        for table_name in _SEED_TABLES:
+            rows = manifest.get(table_name, [])
+            if not rows:
+                continue
+            table = sa.Table(table_name, meta, autoload_with=conn)
+            conn.execute(table.insert(), rows)
+
+
+async def _capture(database_url: str) -> None:
     from treadmill_api.coordination.consumer import CoordinationConsumer
 
     async_url = database_url.replace("+psycopg", "+asyncpg")
     engine = create_async_engine(async_url, pool_pre_ping=True)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+
+    # Seed the DB. We use a sync engine for SQLAlchemy reflection (the
+    # async path requires `engine.run_sync(meta.reflect)` which is more
+    # ceremony for the same result).
+    sync_engine = sa.create_engine(database_url, pool_pre_ping=True)
+    with _SEED_PATH.open() as f:
+        manifest = json.load(f)
+    seed_database_sync(sync_engine, manifest)
+    print(
+        f"seeded: "
+        f"{len(manifest.get('plans', []))} plans, "
+        f"{len(manifest.get('tasks', []))} tasks, "
+        f"{len(manifest.get('workflow_runs', []))} runs, "
+        f"{len(manifest.get('workflow_run_steps', []))} step rows."
+    )
 
     dispatcher = _RecordingDispatcher()
     reevaluate_call_count = 0
@@ -144,8 +186,6 @@ async def _capture(fixture_path: Path, output_path: Path, database_url: str) -> 
         dispatcher=dispatcher,
     )
 
-    # Intercept _reevaluate so we can count it without coupling the
-    # test to dispatcher internals.
     original_reevaluate = consumer._reevaluate
 
     async def _wrapped_reevaluate(*args: Any, **kwargs: Any) -> Any:
@@ -155,33 +195,20 @@ async def _capture(fixture_path: Path, output_path: Path, database_url: str) -> 
 
     consumer._reevaluate = _wrapped_reevaluate  # type: ignore[assignment]
 
-    # Replay every parseable event sequentially.
-    #
-    # The fixture has a pre-existing defect: ~21% of lines have malformed
-    # JSON (unescaped ``\"`` inside patch payloads — capture-pipeline bug,
-    # follow-up task tracks the fix). The replay test mirrors the same
-    # skip behavior so the event counts match. Logged here for visibility.
+    # Replay every event sequentially. The synthetic fixture is clean
+    # by construction (the generator validates round-trip parsing
+    # before exit) — a JSONDecodeError here is a real degradation, not
+    # an expected skip path. Fail loudly.
     event_count = 0
-    malformed_count = 0
-    with gzip.open(fixture_path, "rt") as f:
-        for line in f:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                malformed_count += 1
-                continue
+    with gzip.open(_EVENTS_PATH, "rt") as f:
+        for line_no, line in enumerate(f, start=1):
+            record = json.loads(line)
             await consumer.handle(record)
             event_count += 1
-    if malformed_count:
-        print(
-            f"WARNING: {malformed_count}/{malformed_count + event_count} "
-            "events skipped — malformed payload escaping in capture pipeline"
-        )
 
     # Snapshot the tables the consumer writes to.
     tables = ("events", "workflow_run_steps", "task_prs")
     table_rows: dict[str, list[dict[str, Any]]] = {}
-    sync_engine = sa.create_engine(database_url, pool_pre_ping=True)
     with sync_engine.begin() as conn:
         for table in tables:
             rows = conn.execute(
@@ -199,33 +226,29 @@ async def _capture(fixture_path: Path, output_path: Path, database_url: str) -> 
         "reevaluate_call_count": reevaluate_call_count,
     }
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w") as f:
+    with _BASELINE_PATH.open("w") as f:
         json.dump(baseline, f, indent=2, sort_keys=True)
     print(
         f"captured baseline: {event_count} events, "
         f"{len(dispatcher.calls)} dispatcher calls, "
-        f"{reevaluate_call_count} _reevaluate calls -> {output_path}"
+        f"{reevaluate_call_count} _reevaluate calls -> {_BASELINE_PATH}"
+    )
+    print(
+        f"snapshot row counts — "
+        f"events: {len(table_rows['events'])}, "
+        f"workflow_run_steps: {len(table_rows['workflow_run_steps'])}, "
+        f"task_prs: {len(table_rows['task_prs'])}"
     )
 
     await engine.dispose()
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        sys.stderr.write(__doc__ or "")
-        return 2
-
-    import os
-
-    fixture_path = Path(sys.argv[1])
-    output_path = Path(sys.argv[2])
     database_url = os.environ.get(
         "TREADMILL_TEST_DATABASE_URL",
-        "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill",
+        "postgresql+psycopg://postgres:postgres@localhost:15433/treadmill",
     )
-
-    asyncio.run(_capture(fixture_path, output_path, database_url))
+    asyncio.run(_capture(database_url))
     return 0
 
 
