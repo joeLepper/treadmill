@@ -218,8 +218,77 @@ Each step is a small commit; total revert cost < 1 day.
 
 ## Decisions captured during execution
 
-_Populated as work proceeds._
+- **2026-06-09**: Phase 5 testbed scoped to GCP observability + dashboards-as-code
+  (plan b3a8bd29). Scope estimate collapsed 10→7 tasks after discovering Grafana-on-GCP
+  was already deployed; coordinator dynamically grew back to 10 via new task creation
+  (direct API calls to `POST /api/v1/tasks`). This validates the coordinator's ability
+  to adapt scope mid-run without re-submitting the plan.
+
+- **2026-06-09**: Branch race in medicoder (shared working tree, no per-session worktrees)
+  caused a direct push to main on task 9c586a77. Decision: retrospective PR (#1236) +
+  per-sibling worktree setup script (PR #1237). Force-revert explicitly ruled out.
+
+- **2026-06-09**: Task `ad333cbe` (worktrees) was created by coordinator and completed
+  by Donna as PR #1237 without the task ID in the PR body. Counted as brokered task 10
+  on coordinator judgment (work done, work correct, routing gap is procedural not substantive).
 
 ## Post-mortem
 
-_Filled in when complete or abandoned._
+**Status: complete** (2026-06-09)
+
+### What worked
+
+- **0% amend rate on 10 tasks** — coordinator briefing with full plan-doc context + task
+  intent eliminated the architect-loop overhead entirely. Prior Docker-worker runs averaged
+  ~30% amend rate on medicoder tasks.
+- **Dynamic scope adaptation** — coordinator grew the plan from 7→10 tasks mid-run via
+  `POST /api/v1/tasks` API calls as new work surfaced. No plan re-submission needed.
+- **Parallel worker throughput** — Bert/Carla/Donna worked independently on non-conflicting
+  tasks; coordinator tracked state without blocking anyone. Three simultaneous PRs in flight
+  at peak.
+- **Availability broadcast** — the Stop hook (PR #264) meant returning workers announced
+  themselves; coordinator immediately re-assigned. Zero idle time between task completions.
+- **Heterogeneous task pool** — medicoder infrastructure (Pulumi/GCP) and treadmill
+  service tasks (trace-replay harness) in one plan, one worker pool. No friction.
+- **otel-collector pipeline** — OTLP → Cloud Trace verified end-to-end, multi-service
+  linked traces confirmed within minutes of the collector deploying.
+
+### What surprised us
+
+- **Branch races in medicoder (not treadmill)** — Treadmill workers have isolated git
+  worktrees; named sessions working medicoder share one tree. Two races hit on the same
+  day. Donna shipped the fix (PR #1237) in the same Phase 5 run.
+- **Grafana-on-GCP already existed** — the initial 10-task scope assumed Grafana needed
+  deploying. It was already live with all 4 datasources. Scope collapsed immediately on
+  the first Donna survey relay. The coordinator's "survey first" brief pattern surfaced
+  this before any code was written.
+- **otel-collector secret conflict** — the `pulumi import` requirement wasn't anticipated
+  in the task brief. Donna resolved it as a direct operator step, then signaled Bert.
+  The coordinator routed correctly but the prereq chain was longer than expected.
+- **Datadog 403** — the `@pulumi/datadog` module deployed cleanly but the exporter is
+  403 because `dd-api-key-dev` holds a placeholder. This is a Joe action item.
+
+### What should become an ADR / learning / rule
+
+- **Learning**: `2026-06-09-direct-push-to-main-from-shared-worktree-race.md` (Carla,
+  PR #1236) — origin HEAD anti-pattern + defensive push-by-explicit-branch convention.
+- **Learning**: `2026-06-09-envsubst-empty-substitution-silent-secret.md` (Bert) —
+  SSO expiry mid-envsubst silently substitutes empty string; verify credentials before
+  rendering secrets.
+- **Rule candidate**: coordinator task briefs must include both repo name and directory
+  path (never just a directory path that looks like a repo name). Covered by existing
+  learning `2026-06-09-relay-briefs-need-exact-repo-paths.md`.
+- **ADR candidate**: named-session worktree provisioning for coordinator-routed repos
+  (formalize the PR #1237 pattern into a systemd/launch convention).
+
+### What this teaches us about future plans
+
+- Brief quality is the amend-rate lever. Every task in Phase 5 included the exact file
+  paths, the exact intent, and the task ID for PR attribution. Zero tasks looped.
+- The coordinator's ability to add tasks mid-run (`POST /api/v1/tasks`) is as important
+  as the initial plan — real work surfaces opportunities the plan couldn't anticipate.
+- Per-session worktrees for coordinator-routed repos are non-optional for multi-sibling
+  concurrent work. The Treadmill side has them; apply the pattern to any repo the
+  coordinator routes more than one sibling to.
+- The 10-task/30%-amend Phase 5 quality gate was hit at 10/0% — well inside the
+  threshold. Phase 4b (autoscaler deletion) is unblocked.
