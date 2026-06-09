@@ -19,6 +19,7 @@ when ``submit-doc`` (or ``wf-plan``) attaches the doc.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -27,7 +28,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.config import DeploymentMode, Settings, get_settings
@@ -38,6 +39,7 @@ from treadmill_api.events.plan import (
     PlanRegistered,
     PlanSubmitted,
 )
+from treadmill_api.events.system import SystemAutoSeededStarters
 from treadmill_api.events.task import TaskRegistered
 from treadmill_api.models import (
     Plan,
@@ -471,6 +473,76 @@ async def _read_plan_derived_status(
     return row.derived_status
 
 
+async def _auto_seed_starters_on_submit(
+    session: AsyncSession,
+    settings: Settings,
+    dispatcher: Dispatcher,
+) -> None:
+    """Run the empty-workflows auto-seed branch (post-mortem surprise A).
+
+    Post-mortem of the combined ADR-0085+0086 plan (2026-06-09): a
+    fresh DB has no workflows registered; the first
+    ``treadmill plan submit`` would 400 with "workflow 'wf-author' not
+    registered" until ``treadmill workflows seed-starters`` ran
+    manually. This closes the cliff edge by running the same
+    ``seed_starters_if_empty`` transaction the startup-side
+    ``_auto_seed_starters`` uses when ``wf-author`` is absent.
+
+    Cheap on the happy path — one async EXISTS query against the
+    ``workflows`` table; nothing else fires when seeded. On the cold
+    branch we run the sync seed via ``asyncio.to_thread`` so the event
+    loop isn't blocked, then emit one ``system.auto_seeded_starters``
+    event so the dashboard + treadmill-events stream carry an audit
+    trail.
+
+    Failure modes:
+      * Seed transaction raises → ``HTTPException(500)`` naming
+        auto-seed as the cause. Never silently persist a plan against
+        an unseeded DB.
+      * Seed returns 0 (another replica won the ``SELECT FOR UPDATE``
+        race between our EXISTS check and the lock acquisition) → no
+        event, no log; the other replica's commit fired one already.
+    """
+    wf_author_present = await session.scalar(
+        select(exists().where(Workflow.id == "wf-author"))
+    )
+    if wf_author_present:
+        return
+
+    from treadmill_api.starters import run_auto_seed_starters_sync
+
+    try:
+        seeded_role_count = await asyncio.to_thread(
+            run_auto_seed_starters_sync, settings
+        )
+    except Exception as exc:
+        logger.error(
+            "plan submit: auto-seed of starter roles failed: %s", exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "plan rejected: auto-seed of starter roles failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+    if seeded_role_count > 0:
+        logger.info(
+            "plan submit: auto-seeded %d starter roles into fresh DB",
+            seeded_role_count,
+        )
+        await dispatcher.persist_and_publish(
+            session,
+            entity_type="system",
+            action="auto_seeded_starters",
+            payload=SystemAutoSeededStarters(
+                roles_seeded=seeded_role_count,
+                triggered_by="plan_submit",
+            ),
+        )
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -516,6 +588,8 @@ async def create_plan(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"plan-doc parse failed: {exc}",
             ) from exc
+
+    await _auto_seed_starters_on_submit(session, settings, dispatcher)
 
     # ADR-0085+0086 Task D — repo-scoped team_configs lookup.
     # When the repo has a team_configs row AND the request didn't

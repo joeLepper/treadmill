@@ -58,7 +58,10 @@ from treadmill_api.events.task import (
     TaskWorkerDepsFailed,
     TaskWorkerHintRequested,
 )
-from treadmill_api.events.system import UnreferencedClosesReport
+from treadmill_api.events.system import (
+    SystemAutoSeededStarters,
+    UnreferencedClosesReport,
+)
 from treadmill_api.events.validate import ValidateOverride
 from treadmill_api.events.validator_tuning import ValidatorTuning  # noqa: F401  re-exported
 
@@ -116,6 +119,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     ScheduledTick,
     # System-level coordination events
     UnreferencedClosesReport,
+    SystemAutoSeededStarters,
 ]
 
 

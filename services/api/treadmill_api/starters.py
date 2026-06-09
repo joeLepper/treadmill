@@ -1915,3 +1915,30 @@ def seed_starters_if_empty(session: Any) -> int:
         seeded_role_count, len(STARTERS), len(_DEFAULT_EVENT_TRIGGERS),
     )
     return seeded_role_count
+
+
+def run_auto_seed_starters_sync(settings: Any) -> int:
+    """Open a sync engine + session, run ``seed_starters_if_empty``, and
+    return the seeded count. Wraps the engine-lifecycle dance the API
+    startup path (``cli.py::_auto_seed_starters``) and the plan-submit
+    auto-seed branch (``routers/plans.py``) both need.
+
+    Sync by design — ``seed_starters_if_empty`` itself is sync because
+    the bulk INSERT pattern uses ``session.flush()`` checkpoints to
+    materialize PKs for downstream FKs (e.g. role-id → role-version
+    FK). The async-handler path calls this via ``asyncio.to_thread``
+    so the event loop isn't blocked.
+
+    Re-raises whatever ``seed_starters_if_empty`` raises — the caller
+    decides whether to convert to a 500, log + swallow, or fail-fast.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    sync_url = settings.database_url.replace("+asyncpg", "+psycopg")
+    engine = create_engine(sync_url)
+    try:
+        with Session(engine) as session:
+            return seed_starters_if_empty(session)
+    finally:
+        engine.dispose()
