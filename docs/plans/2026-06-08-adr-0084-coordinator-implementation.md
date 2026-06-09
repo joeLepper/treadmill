@@ -168,10 +168,11 @@ coordinator.env updated to include plan ID. Workers briefed via cc-relay.
 - Carla: consumer-subscription-validation (7877139d) ✓ MERGED PR #25 (medicoder-events), dashboard-generator-gcp (9c586a77) in flight, planrouter-fixture-expansion (4e3cffc2)
 - Alan: cloud-trace-verify (82179115) — blocked on otel-collector-deploy
 
-**Brokered count so far**: 3 merged
+**Brokered count so far**: 4 merged, 0 amends
 - 9959c49c / PR #1231 (datadog-dashboards-as-code) 2026-06-09T06:39Z
 - 7877139d / PR #25 medicoder-events (consumer-subscription-validation) 2026-06-09T06:46Z
 - 9bbda236 / PR #1233 + medicoder-events PR #26 (dedup-purge) 2026-06-09T06:49Z
+- 07ad049d / PR #1234 (medicoder-events pin >=0.1.8, 8 services) 2026-06-09T06:51Z
 
 Run a real plan on RAMJAC using coordinator-medicoder + 2 workers. Verify:
 - Coordinator provisions workers (not autoscaler)
