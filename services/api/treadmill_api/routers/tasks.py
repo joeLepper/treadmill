@@ -15,6 +15,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from treadmill_api.coordination.coordinator_overlay import (
+    CapOverlayDecision,
+    coordinator_overlay_decision,
+)
 from treadmill_api.coordination.triggers import (
     _create_and_publish_run,
     _is_capped,
@@ -372,7 +376,25 @@ async def retry_task(
     )
     previous_run_id = prev_result.scalar_one_or_none()
 
-    # 3. Check cap; 409 if at cap and force_bypass_cap not set.
+    # 3a. ADR-0084 Task 2B — coordinator overlay runs before the cap.
+    # When the plan has a blocked_operator task AND the coordinator is
+    # alive, manual retry is refused with a different 409 message so
+    # the operator sees why. ``force_bypass_cap`` overrides both gates
+    # (single bypass flag covers operator-knows-better escapes).
+    if not body.force_bypass_cap:
+        overlay = await coordinator_overlay_decision(session, task_id)
+        if overlay is CapOverlayDecision.BLOCK_BY_COORDINATOR:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "plan is in coordinator-blocked state "
+                    "(task_board status = blocked_operator); coordinator "
+                    "must release before retry, or pass "
+                    "force_bypass_cap=true to override"
+                ),
+            )
+
+    # 3b. Check cap; 409 if at cap and force_bypass_cap not set.
     if await _is_capped(session, task_id, workflow_id) and not body.force_bypass_cap:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
