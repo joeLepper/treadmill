@@ -88,6 +88,7 @@ _SEED_TABLES = (
     "workflow_versions",
     "roles",
     "workflow_version_steps",
+    "event_triggers",
     "plans",
     "tasks",
     "workflow_runs",
@@ -187,26 +188,22 @@ async def async_session_maker(
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-class _RecordingDispatcher:
-    """Records every dispatcher.publish call so the assertion can
-    compare the routing sequence directly."""
+class _RecordingPublisher:
+    """Recording publisher passed into the REAL Dispatcher.
+
+    Captures every ``publish(event, payload)`` invocation in arrival
+    order. The trigger paths and ``dispatch_task`` both call into
+    ``dispatcher.publisher.publish`` — must match the shape in
+    ``scripts/capture_trace_baseline.py``."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(
-        self,
-        *,
-        workflow_id: str,
-        task_id: uuid.UUID | str,
-        source_event_id: uuid.UUID | str | None = None,
-        **extra: Any,
-    ) -> None:
+    async def publish(self, event: Any, payload: Any) -> None:
         self.calls.append({
-            "workflow_id": workflow_id,
-            "task_id": str(task_id),
-            "source_event_id": str(source_event_id) if source_event_id else None,
-            "extra_keys": sorted(extra.keys()),
+            "kind": "publisher.publish",
+            "event_type": getattr(event, "entity_type", None),
+            "event_action": getattr(event, "action", None),
         })
 
 
@@ -285,7 +282,14 @@ async def test_trace_replay_matches_baseline(
 
     baseline = _load_baseline()
 
-    dispatcher = _RecordingDispatcher()
+    from treadmill_api.dispatch import Dispatcher
+
+    publisher = _RecordingPublisher()
+    dispatcher = Dispatcher(
+        publisher=publisher,
+        sqs_client=None,
+        work_queue_url=None,
+    )
     reevaluate_call_count = 0
     consumer = CoordinationConsumer(
         sqs_client=None,
@@ -317,34 +321,52 @@ async def test_trace_replay_matches_baseline(
         "scripts/capture_trace_baseline.py)."
     )
 
-    # 1-3. Compare table snapshots.
-    snapshot: dict[str, list[dict[str, Any]]] = {}
-    for table in ("events", "workflow_run_steps", "task_prs"):
-        with engine.begin() as conn:
-            rows = conn.execute(
-                sa.text(f"SELECT * FROM {table} ORDER BY 1"),
-            ).all()
-            snapshot[table] = [_row_to_dict(r) for r in rows]
+    # 1. Per-table row counts. The trigger evaluator creates downstream
+    # rows (workflow_runs / workflow_run_steps / events) with
+    # ``gen_random_uuid()`` defaults so row-level UUID comparison is
+    # nondeterministic across capture / replay runs. Behaviour
+    # equivalence holds at the COUNT level; the publisher.publish
+    # sequence (next assertion) gives an order-sensitive equivalence
+    # check on the routing decisions themselves.
+    table_counts: dict[str, int] = {}
+    with engine.begin() as conn:
+        for table in ("events", "workflow_run_steps", "task_prs"):
+            (count,) = conn.execute(
+                sa.text(f"SELECT COUNT(*) FROM {table}"),
+            ).one()
+            table_counts[table] = count
+        events_by_kind = dict(conn.execute(
+            sa.text(
+                "SELECT entity_type || '.' || action AS kind, COUNT(*) "
+                "FROM events GROUP BY 1 ORDER BY 1"
+            ),
+        ).all())
 
-    for table in ("events", "workflow_run_steps", "task_prs"):
-        actual = snapshot[table]
-        expected = baseline["tables"][table]
-        assert actual == expected, (
-            f"{table}: post-extraction snapshot diverges from baseline. "
-            f"Actual rows: {len(actual)}; baseline rows: {len(expected)}. "
-            "Either the extraction changed routing behavior or the "
-            "baseline is stale (regenerate via "
-            "scripts/capture_trace_baseline.py)."
-        )
-
-    # 4. Dispatcher publish sequence.
-    assert dispatcher.calls == baseline["dispatcher_calls"], (
-        f"dispatcher publish sequence diverges: replay made "
-        f"{len(dispatcher.calls)} calls; baseline recorded "
-        f"{len(baseline['dispatcher_calls'])} calls."
+    assert table_counts == baseline["table_counts"], (
+        f"table row counts diverge from baseline: replay produced "
+        f"{table_counts}; baseline recorded {baseline['table_counts']}. "
+        "Either the extraction changed routing behavior or the baseline "
+        "is stale (regenerate via scripts/capture_trace_baseline.py)."
     )
 
-    # 5. _reevaluate call count.
+    # 2. Events broken down by (entity_type, action) — catches
+    # divergences in which event kinds are produced even when totals
+    # happen to match.
+    assert events_by_kind == baseline["events_by_kind"], (
+        f"events_by_kind diverges from baseline: replay produced "
+        f"{events_by_kind}; baseline recorded {baseline['events_by_kind']}."
+    )
+
+    # 3. Publisher publish sequence (recording publisher passed into
+    # the real Dispatcher captures every publish from trigger paths +
+    # cross_step_dispatch + _reevaluate's downstream dispatch_task).
+    assert publisher.calls == baseline["publisher_calls"], (
+        f"publisher.publish sequence diverges: replay made "
+        f"{len(publisher.calls)} calls; baseline recorded "
+        f"{len(baseline['publisher_calls'])} calls."
+    )
+
+    # 4. _reevaluate call count.
     assert reevaluate_call_count == baseline["reevaluate_call_count"], (
         f"_reevaluate invocation count diverges: replay fired "
         f"{reevaluate_call_count}; baseline recorded "

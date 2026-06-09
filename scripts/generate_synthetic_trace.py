@@ -235,18 +235,34 @@ def build_trace() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             if ti == 3 and is_last_step:
                 output_decision = "gate-broken"  # exercises gate-broken escalation
 
+            # Branch artifact gates write_task_prs (paired with the
+            # ``payload.pr_number``); only present on first-step output
+            # so only the author step triggers the D.8 drain.
+            artifacts = (
+                [{"kind": "branch", "value": f"task/{task_id[:8]}-synthetic-{ti}"}]
+                if si == 0
+                else []
+            )
             output_payload = {
                 "summary": f"Step {step_name} terminal for task {ti}",
                 "decision": output_decision,
                 "commit_sha": "deadbeefcafe",
-                "artifacts": [],
+                "artifacts": artifacts,
                 # Embed a quote-bearing patch fragment so the JSON encoder
                 # has something to actually escape — this is the failure
-                # shape the old fixture was bitten by.
+                # shape the old fixture was bitten by. The pr_number lives
+                # here (inside ``output.payload``) per the projector's
+                # write_task_prs contract — top-level ``payload.pr_number``
+                # is NOT read.
                 "payload": {
                     "patch_fragment": (
                         "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n"
                         "+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
+                    ),
+                    **(
+                        {"pr_number": 1000 + ti}
+                        if si == 0
+                        else {}
                     ),
                 },
                 "metadata": {},
@@ -274,13 +290,6 @@ def build_trace() -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 payload={
                     "completed_at": _ts(step_minute),
                     "output": output_payload,
-                    # Author steps carry a pr_number envelope so task_prs
-                    # gets written + the D.8 drain fires.
-                    **(
-                        {"pr_number": 1000 + ti}
-                        if si == 0
-                        else {}
-                    ),
                 },
                 task_id=task_id,
                 run_id=run_id,
@@ -288,15 +297,31 @@ def build_trace() -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 minute=step_minute,
             ))
 
-        # Per-task github events.
+        # Per-task github events. Schema-conformant payloads (sender,
+        # title, head_sha required on pr_opened; sender required on
+        # pr_merged) — without these the github branch's pydantic
+        # validator drops the event before evaluate_triggers can fire.
+        github_action = "pr_opened" if ti % 2 == 0 else "pr_merged"
+        github_payload: dict[str, Any] = {
+            "repo": REPO,
+            "pr_number": 1000 + ti,
+            "sender": "synthetic-bot",
+        }
+        if github_action == "pr_opened":
+            github_payload.update({
+                "title": f"Synthetic PR for task {ti}",
+                "head_branch": f"task/{task_id[:8]}-synthetic-{ti}",
+                "head_sha": "deadbeefcafe",
+            })
+        else:
+            github_payload.update({
+                "head_branch": f"task/{task_id[:8]}-synthetic-{ti}",
+                "merged_sha": "deadbeefcafe",
+            })
         events.append(_event(
             entity_type="github",
-            action="pr_opened" if ti % 2 == 0 else "pr_merged",
-            payload={
-                "repo": REPO,
-                "pr_number": 1000 + ti,
-                "head_branch": f"task/{task_id[:8]}-synthetic-{ti}",
-            },
+            action=github_action,
+            payload=github_payload,
             plan_id=None,
             task_id=None,
             minute=minute_base + 9,
@@ -351,6 +376,22 @@ def build_trace() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             "step_name": name,
             "role_id": ROLES[i],
         } for i, name in enumerate(STEP_NAMES)],
+        # event_triggers — without these the github branch's
+        # ``evaluate_triggers`` finds no candidate workflows + returns
+        # without firing dispatcher.dispatch_task. Seeding the two
+        # event_types my synthetic github events use exercises the
+        # publish path and gives dispatcher_calls > 0 in the baseline.
+        "event_triggers": [
+            {
+                "id": _u(f"trigger-{event_type}"),
+                "repo": REPO,
+                "event_type": event_type,
+                "workflow_id": WORKFLOW_ID,
+                "version_strategy": "latest",
+                "enabled": True,
+            }
+            for event_type in ("pr_opened", "pr_merged")
+        ],
         "tasks": tasks,
         "workflow_runs": workflow_runs,
         "workflow_run_steps": workflow_run_steps,
