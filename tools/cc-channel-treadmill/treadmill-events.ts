@@ -191,6 +191,9 @@ async function isMine(frame: Record<string, unknown>): Promise<boolean> {
   // Checked before ownedPlans/ownedTasks so a coordinator does not need to
   // be the dispatcher of a task to receive its events.
   if (IS_COORDINATOR && plan && COORDINATOR_PLAN_IDS.has(plan)) return true
+  // ADR-0086: plan.submitted events carry coordinator_label in the frame
+  // payload; the server already filtered server-side, so trust the frame.
+  if (IS_COORDINATOR && frame['action'] === 'submitted' && frame['entity_type'] === 'plan') return true
   if (plan && ownedPlans.has(plan)) return true
   if (task && ownedTasks.has(task)) return true
   if ((plan || task) && Date.now() - lastReconcileMs > RECONCILE_MIN_INTERVAL_MS) {
@@ -232,6 +235,13 @@ function wsUrl(): string {
   // coordinator before any plan is assigned is a valid bootstrap state.
   if (IS_COORDINATOR && COORDINATOR_PLAN_IDS.size > 0) {
     params.set('plan_ids', Array.from(COORDINATOR_PLAN_IDS).join(','))
+  }
+  // ADR-0086: coordinators also send ?coordinator_label=<label> so the
+  // server forwards plan.submitted events for new plans not yet in
+  // plan_ids. Without this, a coordinator only discovers new plans on
+  // restart (when coordinator.env is re-read) rather than in-session.
+  if (IS_COORDINATOR) {
+    params.set('coordinator_label', LABEL)
   }
   return `${base}/api/v1/dashboard/ws/events?${params.toString()}`
 }
