@@ -1,14 +1,13 @@
 {
-  "_regen_pending": "fixture expanded to 71 events for task 4e3cffc2 (wf-feedback-loop + conflict-resolution coverage); event_count + publisher_calls + reevaluate_call_count + table_counts below are STALE \u2014 regenerate via scripts/capture_trace_baseline.py against a clean Postgres before the integration test runs clean",
-  "captured_against_commit": "da453941b5884e8d87d4f6850cb72e009c87f23b",
-  "event_count": 56,
+  "captured_against_commit": "d15181119abd86e07f56bef21d6604536e29b083",
+  "event_count": 71,
   "events_by_kind": {
     "github.pr_merged": 2,
     "github.pr_opened": 3,
-    "step.completed": 13,
+    "step.completed": 17,
     "step.failed": 1,
-    "step.ready": 14,
-    "step.started": 14,
+    "step.ready": 16,
+    "step.started": 18,
     "task.cancelled": 1,
     "task.escalated_to_operator": 1
   },
@@ -87,13 +86,23 @@
       "event_action": "ready",
       "event_type": "step",
       "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
     }
   ],
-  "reevaluate_call_count": 15,
+  "reevaluate_call_count": 19,
   "schema": 3,
   "table_counts": {
-    "events": 49,
+    "events": 59,
     "task_prs": 5,
-    "workflow_run_steps": 29
+    "workflow_run_steps": 33
   }
 }
