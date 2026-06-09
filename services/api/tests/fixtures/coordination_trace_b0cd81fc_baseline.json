@@ -1,0 +1,12 @@
+{
+  "captured_against_commit": "74dcba9bc5b0a55058f1d33a4540fc65b0b7894e",
+  "dispatcher_calls": [],
+  "event_count": 1146,
+  "reevaluate_call_count": 160,
+  "schema": 1,
+  "tables": {
+    "events": [],
+    "task_prs": [],
+    "workflow_run_steps": []
+  }
+}

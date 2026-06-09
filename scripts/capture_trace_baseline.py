@@ -155,13 +155,28 @@ async def _capture(fixture_path: Path, output_path: Path, database_url: str) -> 
 
     consumer._reevaluate = _wrapped_reevaluate  # type: ignore[assignment]
 
-    # Replay every event sequentially.
+    # Replay every parseable event sequentially.
+    #
+    # The fixture has a pre-existing defect: ~21% of lines have malformed
+    # JSON (unescaped ``\"`` inside patch payloads — capture-pipeline bug,
+    # follow-up task tracks the fix). The replay test mirrors the same
+    # skip behavior so the event counts match. Logged here for visibility.
     event_count = 0
+    malformed_count = 0
     with gzip.open(fixture_path, "rt") as f:
         for line in f:
-            record = json.loads(line)
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                malformed_count += 1
+                continue
             await consumer.handle(record)
             event_count += 1
+    if malformed_count:
+        print(
+            f"WARNING: {malformed_count}/{malformed_count + event_count} "
+            "events skipped — malformed payload escaping in capture pipeline"
+        )
 
     # Snapshot the tables the consumer writes to.
     tables = ("events", "workflow_run_steps", "task_prs")
