@@ -345,6 +345,29 @@ def test_status_executing_with_pending_step(
     assert _status_for(engine, task_id) == "wf-author: executing"
 
 
+def test_status_pr_merged_wins_over_pending_step(
+    engine: Engine, fixtures: FixtureBuilder,
+) -> None:
+    """ADR-0085+0086 combined-plan Task A — ``github.pr_merged``
+    precedence over a freshly-created ``pending`` step.
+
+    The coordinator-led dispatch shape creates a workflow_run + step row
+    UP FRONT (``status='pending'``) before the worker actually starts.
+    Before this migration, clause 4 (active steps) fired above
+    clause 6c (pr_merged), so a coordinator-dispatched task whose PR
+    had already merged would return ``<workflow_id>: executing``
+    indefinitely. The new clause 3b inserts a pr_merged precedence check
+    between clause 3 (registered) and clause 4 (executing): a merged PR
+    wins over step state.
+    """
+    plan_id = fixtures.make_plan()
+    task_id = fixtures.make_task(plan_id)
+    fixtures.add_run_with_steps(task_id, "wf-author", ["pending"])
+    fixtures.add_task_pr(task_id)
+    fixtures.add_event(task_id, "github", "pr_merged")
+    assert _status_for(engine, task_id) == "pr_merged"
+
+
 def test_status_failed_no_pr(engine: Engine, fixtures: FixtureBuilder) -> None:
     plan_id = fixtures.make_plan()
     task_id = fixtures.make_task(plan_id)

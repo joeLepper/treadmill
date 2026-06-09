@@ -21,7 +21,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, TIMESTAMP, UUID
 
 
 revision: str = "20260609_1000"
-down_revision: Union[str, Sequence[str], None] = "20260608_2200"
+down_revision: Union[str, Sequence[str], None] = "20260609_0900"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
