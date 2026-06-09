@@ -138,6 +138,8 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 
 **Task 3C** — auto_merge_loop migration to coordinator ✓ MERGED (e624934 / PR #261)
 - `AutoMergeLoop` extracted to `coordination/auto_merge_loop.py` (117 lines); consumer constructs + lifecycles it; consumer shrank 623→597 lines. Full migration to coordinator session is Phase 6.
+- Follow-up (PR #263 / fa0335f7): synthetic trace fixture replaces malformed RAMJAC capture; 56-event deterministic generator, schema v2, _MIN_REPLAYED_EVENTS floor removed.
+- Follow-up (PR #265 / 35382159): `__getattr__/__setattr__` back-compat shim removed from CoordinationConsumer; consumer.py 597→542 lines; PlanRouter surface permanent.
 
 **Task 3D** — Coordinator handoff doc generator ✓ MERGED (a79985d8 / PR #255)
 - API endpoint or coordinator-side script to snapshot: current task board, per-worker lane summary, unresolved signals, operator-instance designation
