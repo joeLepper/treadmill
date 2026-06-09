@@ -109,7 +109,7 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 
 ## Phase 2 — Consumer split (2–3 days) — IN PROGRESS
 
-**Task 2A** — Extract event projector from consumer.py ✓ Phase 1 MERGED (a8bf1f6f / PR #256); Phase 2 (PlanRouter + trace-replay harness) Donna in progress
+**Task 2A** — Extract event projector from consumer.py ✓ FULLY MERGED — Phase 1 (a8bf1f6f / PR #256) + Phase 2 (e5ff9d75 / PR #258). consumer.py 2366→623 lines; PlanRouter 1694 lines; trace-replay harness green (78.9% fixture coverage; capture-pipeline fix follow-up tracked)
 - Split `services/api/treadmill_api/coordination/consumer.py` (2366 lines): `EventProjector` handles projection-only DB writes (single-writer path per ADR-0011); `PlanRouter` handles cross-step dispatch, feedback trigger, conflict resolution
 - `EventProjector` emits internal `step.projection_completed` event after each DB write
 - **Behavior-equivalence gate** (Bert): before merging, capture a 1-hour event trace against a live RAMJAC plan; replay through both old + new code paths; assert identical DB writes + emitted events. Trace-replay-equivalence is the merge gate, not test-suite-green alone.
