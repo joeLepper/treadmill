@@ -146,11 +146,11 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 - Handoff-receive prompt: incoming coordinator reads handoff + runs §6 restart reconciliation procedure
 - Phase 5 sub-criterion: coordinator approaches context limit → produces handoff doc → coordinator-2 resumes routing correctly
 
-## Phase 4a — Disable autoscaler (1 hour)
+## Phase 4a — Disable autoscaler (1 hour) ✓ PREP MERGED (10b4a319 / PR #257)
 
-- Set `autoscaler.enabled: false` config flag (or equivalent) in `treadmill-local up` — autoscaler.py stays in tree, just doesn't start
-- Update `personal.yaml` `autoscaler:` block to reflect disabled state
-- Confirm `treadmill-local up` still launches without autoscaler process
+- `autoscaler.enabled` flag added to local-adapter config (default true; false suppresses spawn)
+- `--no-autoscaler` CLI flag AND `enabled=false` config both gate the spawn; differentiated log messages
+- personal.yaml unchanged — flag flip (`enabled: false`) is the Phase-5-eve operator step
 
 **Reversal**: flip flag back to true. 30 seconds.
 
