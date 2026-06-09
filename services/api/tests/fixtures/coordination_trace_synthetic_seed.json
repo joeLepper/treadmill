@@ -1,0 +1,260 @@
+{
+  "plans": [
+    {
+      "created_by": "synthetic-generator",
+      "description": "Generated for trace-replay coverage.",
+      "id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic plan"
+    }
+  ],
+  "roles": [
+    {
+      "id": "role-author",
+      "model": "claude-sonnet-4-6",
+      "output_kind": "ANALYSIS",
+      "system_prompt": "Synthetic role for trace-replay seeding."
+    },
+    {
+      "id": "role-validate",
+      "model": "claude-sonnet-4-6",
+      "output_kind": "ANALYSIS",
+      "system_prompt": "Synthetic role for trace-replay seeding."
+    },
+    {
+      "id": "role-review",
+      "model": "claude-sonnet-4-6",
+      "output_kind": "ANALYSIS",
+      "system_prompt": "Synthetic role for trace-replay seeding."
+    }
+  ],
+  "tasks": [
+    {
+      "created_by": "synthetic-generator",
+      "description": "Designed to exercise routing helpers in trace-replay.",
+      "id": "913623b6-b6b9-57af-a6a4-ae7772d945b8",
+      "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic task 0",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "created_by": "synthetic-generator",
+      "description": "Designed to exercise routing helpers in trace-replay.",
+      "id": "34bd3bf5-9587-55a6-bb85-7e86a484fe25",
+      "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic task 1",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "created_by": "synthetic-generator",
+      "description": "Designed to exercise routing helpers in trace-replay.",
+      "id": "860af6d9-e15a-5654-9bac-c5c0d89c38a9",
+      "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic task 2",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "created_by": "synthetic-generator",
+      "description": "Designed to exercise routing helpers in trace-replay.",
+      "id": "50698a94-82b8-5747-bed7-ae2aaa09a56b",
+      "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic task 3",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "created_by": "synthetic-generator",
+      "description": "Designed to exercise routing helpers in trace-replay.",
+      "id": "1c78c724-eb36-5a4c-8a9c-794edb965035",
+      "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
+      "repo": "acme/widget",
+      "title": "Synthetic task 4",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    }
+  ],
+  "workflow_run_steps": [
+    {
+      "id": "76e4ef1e-541f-5856-bfe7-b534b465adb7",
+      "role_id": "role-author",
+      "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
+      "status": "pending",
+      "step_index": 0,
+      "step_name": "step-a-author"
+    },
+    {
+      "id": "fc2960d6-7a76-5afc-bba6-46a25d5b2940",
+      "role_id": "role-validate",
+      "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
+      "status": "pending",
+      "step_index": 1,
+      "step_name": "step-b-validate"
+    },
+    {
+      "id": "a2d1a5bd-54a3-596a-bc1a-9299a098da91",
+      "role_id": "role-review",
+      "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
+      "status": "pending",
+      "step_index": 2,
+      "step_name": "step-c-review"
+    },
+    {
+      "id": "b138d03c-5972-5082-b375-1ff8442c81bf",
+      "role_id": "role-author",
+      "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
+      "status": "pending",
+      "step_index": 0,
+      "step_name": "step-a-author"
+    },
+    {
+      "id": "8019efcd-50c4-548b-9089-31ad7401206a",
+      "role_id": "role-validate",
+      "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
+      "status": "pending",
+      "step_index": 1,
+      "step_name": "step-b-validate"
+    },
+    {
+      "id": "22a28808-5359-5152-baaf-00f68ca53654",
+      "role_id": "role-review",
+      "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
+      "status": "pending",
+      "step_index": 2,
+      "step_name": "step-c-review"
+    },
+    {
+      "id": "88dd5e3e-734c-5a11-a569-6fed67f29c1c",
+      "role_id": "role-author",
+      "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
+      "status": "pending",
+      "step_index": 0,
+      "step_name": "step-a-author"
+    },
+    {
+      "id": "c80a9130-bc20-5754-9eb9-b36f43f603a5",
+      "role_id": "role-validate",
+      "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
+      "status": "pending",
+      "step_index": 1,
+      "step_name": "step-b-validate"
+    },
+    {
+      "id": "09181b4f-70ec-5627-84ed-4e9d6777e8b1",
+      "role_id": "role-review",
+      "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
+      "status": "pending",
+      "step_index": 2,
+      "step_name": "step-c-review"
+    },
+    {
+      "id": "b46fddb1-dd24-5825-91d4-e83d8e34a251",
+      "role_id": "role-author",
+      "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
+      "status": "pending",
+      "step_index": 0,
+      "step_name": "step-a-author"
+    },
+    {
+      "id": "d5a4a5fa-edce-595a-8bed-8a54169536d7",
+      "role_id": "role-validate",
+      "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
+      "status": "pending",
+      "step_index": 1,
+      "step_name": "step-b-validate"
+    },
+    {
+      "id": "ea85e020-2f73-5a18-97b1-74ba6b96ef0a",
+      "role_id": "role-review",
+      "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
+      "status": "pending",
+      "step_index": 2,
+      "step_name": "step-c-review"
+    },
+    {
+      "id": "7ce0857c-9df7-5ec1-b312-778c6d416d80",
+      "role_id": "role-author",
+      "run_id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
+      "status": "pending",
+      "step_index": 0,
+      "step_name": "step-a-author"
+    },
+    {
+      "id": "5c3f7697-d554-56a7-92ce-ede73ed435e1",
+      "role_id": "role-validate",
+      "run_id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
+      "status": "pending",
+      "step_index": 1,
+      "step_name": "step-b-validate"
+    }
+  ],
+  "workflow_runs": [
+    {
+      "id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
+      "task_id": "913623b6-b6b9-57af-a6a4-ae7772d945b8",
+      "trigger": "registered",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
+      "task_id": "34bd3bf5-9587-55a6-bb85-7e86a484fe25",
+      "trigger": "registered",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
+      "task_id": "860af6d9-e15a-5654-9bac-c5c0d89c38a9",
+      "trigger": "registered",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "f460539a-7cdf-550f-81ff-d04b84a13426",
+      "task_id": "50698a94-82b8-5747-bed7-ae2aaa09a56b",
+      "trigger": "registered",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
+      "task_id": "1c78c724-eb36-5a4c-8a9c-794edb965035",
+      "trigger": "registered",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    }
+  ],
+  "workflow_version_steps": [
+    {
+      "id": "fe2198f4-2b1d-52fe-a6d7-7c98f495bb6c",
+      "role_id": "role-author",
+      "step_index": 0,
+      "step_name": "step-a-author",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "aa8dd653-ff3e-5265-bdfb-4aab6c96e00b",
+      "role_id": "role-validate",
+      "step_index": 1,
+      "step_name": "step-b-validate",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    },
+    {
+      "id": "d4632e4f-2007-57da-9e2a-833a9599983c",
+      "role_id": "role-review",
+      "step_index": 2,
+      "step_name": "step-c-review",
+      "workflow_version_id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14"
+    }
+  ],
+  "workflow_versions": [
+    {
+      "id": "d2686b5e-5053-54d6-b9b1-684c5c54dc14",
+      "version": 1,
+      "workflow_id": "wf-author-synthetic"
+    }
+  ],
+  "workflows": [
+    {
+      "description": "Synthetic workflow",
+      "id": "wf-author-synthetic"
+    }
+  ]
+}
