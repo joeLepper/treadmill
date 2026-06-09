@@ -60,6 +60,23 @@ jobs:
             exit 1
           fi
 
+      # Pure-files chain linter (post-mortem surprise C from the
+      # ADR-0085+0086 plan): catches multi-head + duplicate-revision +
+      # dangling-down-revision via regex over the migration files. No
+      # alembic install needed; runs as a sibling to the live
+      # ``alembic heads`` check above so a missing dep on either side
+      # doesn't silently let a chain bug through. Recognises alembic
+      # merge-migration tuple shapes (false-positive class fixed in
+      # PR #281). The same tool is the pre-commit and worker-sandbox
+      # primitive — keeping CI on the same command means a green PR
+      # locally is a green PR in CI.
+      - name: Migration-chain linter (pure-files)
+        if: matrix.component == 'services/api'
+        run: |
+          uv run --project cli python -m treadmill_cli.cli \
+            plan check-migration-chain \
+            --versions-dir services/api/alembic/versions
+
   # The pytest job runs in the uv workspace, whose env carries transitive deps
   # a component may import without declaring. The container image installs only
   # the component's *direct* deps (`pip install .`), so a missing declaration
