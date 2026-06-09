@@ -48,29 +48,43 @@ Run this on every session start (cold start or restart).
    the API hasn't assigned you a plan yet. Re-launch is required when
    the file changes.
 
-2. **Reconcile the task board**: for each plan UUID in
+2. **Read any prior coordinator's handoff doc**: list
+   `~/.treadmill/teams/<slug>/handoff-*.md`, sorted by filename
+   (timestamp-ordered). If any exist, read the most recent one before
+   touching the task board. It contains: the prior coordinator's task
+   board snapshot, per-worker lane summary at handoff time, unresolved
+   signals + notes, and operator-instance designation. Treat it as
+   priors-to-reconcile, not ground truth — the next step verifies.
+
+3. **Reconcile the task board**: for each plan UUID in
    `TREADMILL_COORDINATOR_PLANS`, call:
    ```
    GET /api/v1/task_board/{plan_id}
    ```
-   The response is the authoritative state. Walk every row; for any task
-   in a state that requires action (`ready`, `blocked_dependency` whose
-   blocker is now `done`, `blocked_operator` whose escalation is now
-   resolved), queue a brief or follow-up.
+   The response is the authoritative state. If you read a handoff doc in
+   step 2, diff its snapshot against the live response — any row whose
+   `updated_at` is newer than the handoff's `Generated` timestamp moved
+   during or after the handoff. Walk every row; for any task in a state
+   that requires action (`ready`, `blocked_dependency` whose blocker is
+   now `done`, `blocked_operator` whose escalation is now resolved),
+   queue a brief or follow-up. If the handoff named pending escalations
+   that are not yet resolved, prioritize those.
 
-3. **Re-establish liveness expectations**: for each worker label that
+4. **Re-establish liveness expectations**: for each worker label that
    appears in `task_board.assignee`, note when its tasks were last
    updated (`task_board.updated_at`). After 15 minutes without a `push`
    event or board update, treat that worker as offline and trigger the
    re-route path (see §4 routing table, last row).
 
-4. **Read per-repo memory**: open `~/.treadmill/teams/<slug>/memory/main.md`
+5. **Read per-repo memory**: open `~/.treadmill/teams/<slug>/memory/main.md`
    (create if absent). Skim the pitfalls and prior-plan notes; you'll
    include relevant entries in each worker brief.
 
-5. **Note operator-instance designation**: read the plan metadata from
-   the task board for `operator_instance_label`. That session is the
-   strategic escalation target for `supersede` verdicts and architectural
+6. **Note operator-instance designation**: if the handoff doc named one,
+   use it. Otherwise read the plan metadata from the task board for
+   `operator_instance_label`, or fall back to the
+   `TREADMILL_OPERATOR_INSTANCE` env var. That session is the strategic
+   escalation target for `supersede` verdicts and architectural
    disagreements. Often it is your own label (single-team operation);
    when it differs, hold the distinction.
 
@@ -317,19 +331,36 @@ budget for Phase 5 is capped at 200K. Three rules:
 2. **Keep the task board in sync**: every routing decision lands in the
    board BEFORE you act on it. The board, not your context, is the
    source of truth. A restarted you reconstructs from the board.
-3. **Hand off at 80%**: when your context usage crosses ~80% of the
-   cap, generate a handoff document (Task 3D — landing in a follow-up)
-   and relay it to the incoming coordinator session. The handoff
-   document includes: current task board snapshot, per-worker lane
-   summary, unresolved signals, the operator-instance designation. The
-   incoming coordinator begins with the §2 reconciliation procedure
-   and then reads your handoff to restore routing memory.
+3. **Hand off at ~50K tokens remaining** (equivalently ~75% of the
+   200K Phase 5 cap). Stop initiating new briefs and run the handoff
+   generator for each plan you coordinate:
+   ```
+   python3 tools/coordinator/handoff.py \
+       --plan-id <plan-id> --output-dir ~/.treadmill/teams/<slug>/
+   ```
+   The script reads the live task board via the API, captures the
+   per-worker lane summary, surfaces unresolved signals
+   (`blocked_operator`, `blocked_dependency` with notes), and writes
+   `handoff-<UTC>.md` to the team dir. Include the operator-instance
+   designation by exporting `TREADMILL_OPERATOR_INSTANCE=<label>`
+   before running the script.
 
-Until Task 3D lands, the fallback is: at 80% context, summarize your
-routing state into per-repo memory, relay a one-line handoff to the
-operator instance ("coordinator approaching context limit; restart the
-unit"), and stop initiating new briefs. The next launch reconstructs
-from the board.
+   Then relay the file to the operator instance so they know to
+   restart you:
+   ```
+   python3 tools/cc-channels/cc-relay.py \
+       --to <operator-instance-label> --from <your-label> \
+       --type action --subfolder coord \
+       --meta plan_id=<plan-id> --meta handoff_at=<UTC> \
+       --file ~/.treadmill/teams/<slug>/handoff-<UTC>.md
+   ```
+   The operator instance restarts the coordinator unit; the incoming
+   coordinator's §2 startup checklist reads the handoff file and
+   reconciles against live task-board state before acting.
+
+   The handoff file stays on disk after the restart — it's an audit
+   trail. The next coordinator's reconcile diff captures what moved
+   between handoff-time and restart-time.
 
 ---
 
