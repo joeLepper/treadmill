@@ -141,6 +141,46 @@ async def _lookup_created_by(
         return row[0] if row else None
 
 
+async def _lookup_coordinator_label(
+    plan_id: str | None,
+    session_factory: Any = None,
+) -> str | None:
+    """Look up the coordinator_label for the repo owning ``plan_id``.
+
+    Resolves via ``plans JOIN team_configs ON team_configs.repo =
+    plans.repo``. Returns ``None`` when the plan doesn't exist, when the
+    repo has no ``team_configs`` row (no coordinator registered), or
+    when no session factory is available.
+
+    This is the ADR-0085+0086 fix for the in-session plan-pickup gap:
+    new plans are submitted with ``created_by=<orchestrator-label>`` (e.g.
+    ``treadmill-alan``), so a ``coordinator-medicoder`` socket
+    subscribing only on ``created_by`` and ``plan_ids`` never sees its
+    own ``plan.submitted`` because (a) the plan is new — not in
+    ``plan_ids`` yet, and (b) ``created_by`` doesn't match. This helper
+    backs the third filter branch (``coordinator_label``) that closes
+    the gap by resolving plan → repo → coordinator_label per event.
+
+    Tests monkeypatch this function with a stub mapping to avoid DB
+    access — the caller in ``events_socket`` always calls the module-
+    level name so the patch is effective.
+    """
+    if plan_id is None or session_factory is None:
+        return None
+    async with session_factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT tc.coordinator_label "
+                "FROM plans p "
+                "JOIN team_configs tc ON tc.repo = p.repo "
+                "WHERE p.id = :id"
+            ),
+            {"id": uuid.UUID(plan_id)},
+        )
+        row = result.fetchone()
+        return row[0] if row else None
+
+
 @router.websocket("/ws/events")
 async def events_socket(
     websocket: WebSocket,
@@ -175,6 +215,20 @@ async def events_socket(
             "event is forwarded if EITHER filter matches. Ownerless "
             "events are still dropped on any filtered connection. "
             "Malformed UUIDs are silently skipped."
+        ),
+    ),
+    coordinator_label: str | None = Query(
+        None,
+        max_length=255,
+        description=(
+            "When set, events whose plan belongs to this coordinator are "
+            "also forwarded. Resolved via plans JOIN team_configs ON "
+            "team_configs.repo = plans.repo. Composes by OR with "
+            "created_by and plan_ids: an event is forwarded if ANY filter "
+            "matches. Coordinators use this to receive plan.submitted "
+            "events for newly-submitted plans not yet in plan_ids and "
+            "whose created_by is the submitting orchestrator (ADR-0085+0086 "
+            "in-session pickup gap)."
         ),
     ),
 ) -> None:
@@ -237,7 +291,11 @@ async def events_socket(
                 logger.warning(
                     "plan_ids: dropping malformed UUID %r", candidate,
                 )
-    _filter_active = created_by is not None or bool(_plan_id_set)
+    _filter_active = (
+        created_by is not None
+        or bool(_plan_id_set)
+        or coordinator_label is not None
+    )
 
     # ``receive`` doubles as a disconnect detector — the dashboard never
     # sends client→server frames, so any completion of this task is our
@@ -273,38 +331,83 @@ async def events_socket(
                         # Ownerless event — drop on filtered connections.
                         continue
 
-                    # ADR-0084 coordinator filter takes precedence: if
-                    # the event's plan_id is in the subscribed set, the
-                    # event is forwarded without a created_by lookup.
-                    # Avoids a DB round-trip on the hot routing path.
-                    if _plan_id_set and plan_id and str(plan_id) in _plan_id_set:
-                        pass  # match — fall through to forward
-                    elif created_by is None:
-                        # Only the plan_ids filter is active and it
-                        # didn't match; drop.
-                        continue
-                    else:
+                    # Three-way OR filter (ADR-0084 + ADR-0085+0086):
+                    # forward if ANY of plan_ids / coordinator_label /
+                    # created_by matches. Each branch is independent and
+                    # we early-set ``matched`` to skip work on cheaper
+                    # hits — plan_ids is the in-memory hot path; the
+                    # two label branches each cost one DB lookup
+                    # (cached per (plan_id|task_id) for the lifetime of
+                    # the socket).
+                    matched = False
+
+                    # 1. plan_ids fast path. In-memory set lookup; no DB.
+                    if (
+                        _plan_id_set
+                        and plan_id
+                        and str(plan_id) in _plan_id_set
+                    ):
+                        matched = True
+
+                    # 2. coordinator_label. ADR-0085+0086 in-session
+                    # plan-pickup gap: new plans carry
+                    # created_by=<submitting-orchestrator>, so a
+                    # coordinator subscribed only on created_by + plan_ids
+                    # never sees plan.submitted for its own plans. Resolves
+                    # plan → repo → coordinator_label per event.
+                    if (
+                        not matched
+                        and coordinator_label is not None
+                        and plan_id is not None
+                    ):
+                        cl_key = f"coordinator:{plan_id}"
+                        if cl_key not in _owner_cache:
+                            try:
+                                _owner_cache[cl_key] = (
+                                    await _lookup_coordinator_label(
+                                        plan_id, _session_factory
+                                    )
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "coordinator_label lookup failed "
+                                    "for plan %s; dropping event",
+                                    plan_id,
+                                )
+                                continue  # drop; socket stays alive
+                        if _owner_cache.get(cl_key) == coordinator_label:
+                            matched = True
+
+                    # 3. created_by. Resolves plan → plans.created_by or
+                    # task → tasks.created_by per ADR-0084's original
+                    # filter. Cached per (plan|task) id so a flood of
+                    # events on the same plan only hits the DB once.
+                    if not matched and created_by is not None:
                         if plan_id:
                             cache_key = f"plan:{plan_id}"
                         elif task_id:
                             cache_key = f"task:{task_id}"
                         else:
                             continue  # defensive — already guarded above
-
                         if cache_key not in _owner_cache:
                             try:
-                                _owner_cache[cache_key] = await _lookup_created_by(
-                                    plan_id, task_id, _session_factory
+                                _owner_cache[cache_key] = (
+                                    await _lookup_created_by(
+                                        plan_id, task_id, _session_factory
+                                    )
                                 )
                             except Exception:
                                 logger.exception(
-                                    "created_by lookup failed for %s; dropping event",
+                                    "created_by lookup failed for %s; "
+                                    "dropping event",
                                     cache_key,
                                 )
                                 continue  # drop; socket stays alive
+                        if _owner_cache.get(cache_key) == created_by:
+                            matched = True
 
-                        if _owner_cache.get(cache_key) != created_by:
-                            continue  # label mismatch → drop
+                    if not matched:
+                        continue  # no filter matched → drop
 
                 if not await _safe_send(websocket, _event_frame(record)):
                     break
