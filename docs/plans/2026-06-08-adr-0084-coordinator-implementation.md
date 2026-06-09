@@ -109,14 +109,14 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 
 ## Phase 2 — Consumer split (2–3 days) — IN PROGRESS
 
-**Task 2A** — Extract event projector from consumer.py — Donna in progress
+**Task 2A** — Extract event projector from consumer.py ✓ Phase 1 MERGED (a8bf1f6f / PR #256); Phase 2 (PlanRouter + trace-replay harness) Donna in progress
 - Split `services/api/treadmill_api/coordination/consumer.py` (2366 lines): `EventProjector` handles projection-only DB writes (single-writer path per ADR-0011); `PlanRouter` handles cross-step dispatch, feedback trigger, conflict resolution
 - `EventProjector` emits internal `step.projection_completed` event after each DB write
 - **Behavior-equivalence gate** (Bert): before merging, capture a 1-hour event trace against a live RAMJAC plan; replay through both old + new code paths; assert identical DB writes + emitted events. Trace-replay-equivalence is the merge gate, not test-suite-green alone.
 - `auto_merge_loop` stays wired to `consumer.__init__` as a transitional shim through this phase. It moves to the coordinator in Phase 3.
 - Existing consumer tests must stay green; refactor does not change observable behavior
 
-**Task 2B** — Cap retirement: coordinator-check-first path — Bert in progress (design ACK'd)
+**Task 2B** — Cap retirement: coordinator-check-first path — Bert rebasing + marking #254 ready
 - At each `_is_capped()` callsite in `services/api/treadmill_api/coordination/triggers.py`: before invoking the existing cap logic, check `task_board` for `blocked_operator` status on this task's plan
 - **Coordinator-liveness guard** (Bert): if `task_board.updated_at` for any task in this plan is older than N minutes (configurable, default 15), the coordinator is absent — skip the coordinator-check and apply cap behavior immediately. Coordinator absence = caps actively load-bearing.
 - **Caps remain hard-stop backstop** (Carla): constants are not relaxed. Coordinator-check is an earlier-stop overlay. A coordinator-blocked task stops before the cap fires; an uncoordinated task still hits the cap.
