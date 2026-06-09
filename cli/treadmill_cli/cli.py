@@ -281,8 +281,24 @@ def plan_validate(
         err_console.print(f"[red]plan validation error: {exc}[/red]")
         raise typer.Exit(code=2) from exc
 
+    # Post-mortem surprise B (2026-06-09 ADR-0085+0086): an ADR can
+    # reference an HTTP endpoint that doesn't exist in the API surface
+    # yet. The brief gets dispatched, the coordinator calls a 404,
+    # the operator scrambles. Catch the gap here, surface as a warning
+    # (NOT a violation) so the operator sees it before brief dispatch.
+    # The check no-ops when the plan doesn't reference any ADR; runs
+    # automatically when references are present.
+    from treadmill_cli.adr_api_coverage import check_adr_api_coverage
+    repo_root = _find_repo_root(doc)
+    adr_gaps = (
+        check_adr_api_coverage(content, repo_root=repo_root)
+        if repo_root is not None else []
+    )
+
     if not violations:
         console.print(f"[green]clean:[/green] {doc} ({len(content.splitlines())} lines)")
+        if adr_gaps:
+            _print_adr_coverage_warnings(adr_gaps)
         raise typer.Exit(code=0)
 
     table = Table(title=f"Plan-rule violations ({len(violations)})")
@@ -298,11 +314,49 @@ def plan_validate(
         )
         table.add_row(v.task_id, where, v.rule, v.detail)
     console.print(table)
+    if adr_gaps:
+        _print_adr_coverage_warnings(adr_gaps)
     err_console.print(
         "[red]plan failed validation; fix the gates above before "
         "dispatching (see citations in SKILL.md)[/red]"
     )
     raise typer.Exit(code=1)
+
+
+def _find_repo_root(doc: Path) -> Path | None:
+    """Walk up from the plan doc looking for the ``docs/adrs/`` +
+    ``services/api/`` markers that identify the treadmill repo root.
+
+    Returns the matching parent path or ``None`` if the doc is
+    outside a treadmill checkout (in which case the coverage check
+    is a no-op rather than an error)."""
+    current = doc.resolve().parent
+    while True:
+        if (
+            (current / "docs" / "adrs").is_dir()
+            and (current / "services" / "api").is_dir()
+        ):
+            return current
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def _print_adr_coverage_warnings(gaps: list) -> None:
+    """Render ADR coverage gaps as plain warnings under the violations
+    table. Warnings — not errors. Post-mortem surprise B framing:
+    ADRs can legitimately reference future endpoints; the check
+    surfaces gaps the operator should know about, doesn't block the
+    plan from going out."""
+    err_console.print(
+        f"[yellow]ADR-referenced API coverage: {len(gaps)} gap(s)[/yellow]"
+    )
+    for gap in gaps:
+        err_console.print(
+            f"  [yellow]WARN[/yellow] {gap.adr_id} references "
+            f"{gap.endpoint.method} {gap.endpoint.path} — "
+            f"not found in route inventory"
+        )
 
 
 # ── submit (intent shorthand; auto-creates implicit one-task plan) ───────────
