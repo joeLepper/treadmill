@@ -102,7 +102,10 @@ class TestMultiHeadCollision:
         v = violations[0]
         assert v.kind == "multi-head"
         assert set(v.revisions) == {"bert_branch", "carla_branch"}
-        assert "down_revision='parent'" in v.detail
+        # Detail names both heads + the merge-migration remediation
+        # path (alembic merge with tuple down_revision).
+        assert "terminal heads" in v.detail
+        assert "merge migration" in v.detail
 
     def test_three_migrations_share_parent(self, tmp_path: Path) -> None:
         _write_migration(tmp_path, revision="parent", down_revision=None)
@@ -111,6 +114,68 @@ class TestMultiHeadCollision:
         violations = find_chain_violations(tmp_path)
         assert len(violations) == 1
         assert set(violations[0].revisions) == {"a", "b", "c"}
+
+
+class TestMergeMigrationReconverges:
+    """Alembic's ``down_revision = (parent_a, parent_b)`` tuple shape is
+    the canonical reconciliation for a multi-head condition. After the
+    merge migration lands, the chain has a single terminal head and
+    the linter MUST NOT flag the original split as a violation.
+
+    This is the false positive the linter shipped with — caught against
+    the live treadmill repo's
+    ``20260605_1615_merge_architect_gold_and_dspy_variant_heads.py``
+    before CI-wiring would have rejected every PR.
+    """
+
+    def _write_merge(
+        self,
+        versions_dir: Path,
+        *,
+        revision: str,
+        parents: tuple[str, ...],
+        filename: str | None = None,
+    ) -> Path:
+        """Write a merge-style migration (tuple down_revision)."""
+        versions_dir.mkdir(parents=True, exist_ok=True)
+        down = "(" + ", ".join(f'"{p}"' for p in parents) + ")"
+        name = filename or f"{revision}_merge.py"
+        path = versions_dir / name
+        path.write_text(
+            _MIGRATION_TEMPLATE.format(
+                title="merge", revision=revision, down=down
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_merge_migration_clears_split(self, tmp_path: Path) -> None:
+        # Split at the parent, then immediately reconverge.
+        _write_migration(tmp_path, revision="parent", down_revision=None)
+        _write_migration(tmp_path, revision="branch_a", down_revision="parent")
+        _write_migration(tmp_path, revision="branch_b", down_revision="parent")
+        self._write_merge(
+            tmp_path, revision="reconverged", parents=("branch_a", "branch_b")
+        )
+        assert find_chain_violations(tmp_path) == []
+
+    def test_split_with_no_merge_still_violates(self, tmp_path: Path) -> None:
+        # Sanity check: removing the merge re-trips the linter.
+        _write_migration(tmp_path, revision="parent", down_revision=None)
+        _write_migration(tmp_path, revision="branch_a", down_revision="parent")
+        _write_migration(tmp_path, revision="branch_b", down_revision="parent")
+        violations = find_chain_violations(tmp_path)
+        assert len(violations) == 1
+        assert violations[0].kind == "multi-head"
+
+    def test_three_way_merge(self, tmp_path: Path) -> None:
+        _write_migration(tmp_path, revision="parent", down_revision=None)
+        for c in ("a", "b", "c"):
+            _write_migration(tmp_path, revision=c, down_revision="parent")
+        self._write_merge(
+            tmp_path, revision="reconverged", parents=("a", "b", "c")
+        )
+        assert find_chain_violations(tmp_path) == []
 
 
 class TestDuplicateRevision:
