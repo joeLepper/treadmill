@@ -513,9 +513,14 @@ def test_reap_closure_swallows_remove_failures(monkeypatch):
 
 
 # ── workload closure against a fake SQS client ────────────────────────────────
+#
+# Post-ADR-0085+0086 Task E the live autoscaler reads queue depth via the
+# API (see ``test_get_depth_from_api_*`` below). These tests pin the
+# original SQS-direct closure shape (renamed ``get_depth`` → ``get_depth_sqs``
+# in the module) because it remains available for reference + debugging.
 
 
-def test_get_depth_closure_returns_visible_and_in_flight_in_one_call():
+def test_get_depth_sqs_closure_returns_visible_and_in_flight_in_one_call():
     """The closure built in main() asks SQS for both attribute counts in a
     single get_queue_attributes call and returns them as a tuple. Verifying
     this here pins the contract the Autoscaler depends on — visible-only
@@ -556,7 +561,7 @@ def test_get_depth_closure_returns_visible_and_in_flight_in_one_call():
     )
 
 
-def test_get_depth_closure_defaults_missing_attributes_to_zero():
+def test_get_depth_sqs_closure_defaults_missing_attributes_to_zero():
     """If SQS omits an attribute (shouldn't happen for these two, but be
     defensive), the closure treats it as zero rather than raising."""
     fake_sqs = MagicMock()
@@ -575,6 +580,97 @@ def test_get_depth_closure_defaults_missing_attributes_to_zero():
         return visible, in_flight
 
     assert get_depth() == (0, 0)
+
+
+# ── get_depth_from_api — ADR-0085+0086 Task E ─────────────────────────────────
+#
+# The live autoscaler's queue_depth_fn calls the API instead of SQS so
+# coordinator-emitted tasks (registered with ``created_by =
+# <coordinator_label>``) are excluded from the scaling signal. Three
+# behaviors are pinned: happy path, HTTP error, and connection error.
+
+
+def test_get_depth_from_api_success_returns_visible_and_in_flight() -> None:
+    """The happy path: 2xx response with the {visible, in_flight} JSON
+    shape the API contract guarantees → returned as a (visible, in_flight)
+    tuple. INFO log lines on success aren't asserted directly here; the
+    return-value contract is the autoscaler-facing surface."""
+    from treadmill_local.autoscaler import get_depth_from_api
+
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.json.return_value = {"visible": 7, "in_flight": 3}
+
+    fake_client = MagicMock()
+    fake_client.get.return_value = fake_response
+
+    visible, in_flight = get_depth_from_api(
+        "http://api.example", fake_client
+    )
+    assert visible == 7
+    assert in_flight == 3
+    fake_client.get.assert_called_once()
+    called_args = fake_client.get.call_args
+    assert called_args.args[0] == "http://api.example/api/v1/queue_depth"
+
+
+def test_get_depth_from_api_http_error_returns_zero_and_logs_warning(
+    caplog,
+) -> None:
+    """Non-2xx response from the API → ``raise_for_status`` raises,
+    function returns ``(0, 0)`` (so autoscaler scales to ``min_count``),
+    and a WARNING is logged. Autoscaler keeps ticking — a transient API
+    blip never crash-loops the loop."""
+    import logging
+
+    import httpx
+
+    from treadmill_local.autoscaler import get_depth_from_api
+
+    fake_response = MagicMock()
+    fake_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "503 Service Unavailable",
+        request=MagicMock(),
+        response=MagicMock(status_code=503),
+    )
+
+    fake_client = MagicMock()
+    fake_client.get.return_value = fake_response
+
+    caplog.set_level(logging.WARNING, logger="treadmill.autoscaler")
+    result = get_depth_from_api("http://api.example", fake_client)
+
+    assert result == (0, 0)
+    assert any(
+        "queue_depth read" in rec.message and rec.levelno == logging.WARNING
+        for rec in caplog.records
+    ), "expected WARNING log on HTTP error"
+
+
+def test_get_depth_from_api_connection_error_returns_zero_and_logs_warning(
+    caplog,
+) -> None:
+    """``httpx.ConnectError`` (transient network blip, API not up yet,
+    dev-local stop) → returns ``(0, 0)`` and logs WARNING. Identical
+    handling shape to the HTTP-error path; pinned separately because the
+    failure surface (no response at all) is structurally different."""
+    import logging
+
+    import httpx
+
+    from treadmill_local.autoscaler import get_depth_from_api
+
+    fake_client = MagicMock()
+    fake_client.get.side_effect = httpx.ConnectError("connection refused")
+
+    caplog.set_level(logging.WARNING, logger="treadmill.autoscaler")
+    result = get_depth_from_api("http://api.example", fake_client)
+
+    assert result == (0, 0)
+    assert any(
+        "queue_depth read" in rec.message and rec.levelno == logging.WARNING
+        for rec in caplog.records
+    ), "expected WARNING log on connection error"
 
 
 # ── egress proxy helpers (ADR-0060) ───────────────────────────────────────────
