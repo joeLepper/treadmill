@@ -512,3 +512,190 @@ def test_plan_ids_filter_drops_ownerless_events() -> None:
             frame = ws.receive_json()
 
     assert frame["plan_id"] == plan_in
+
+
+# ── ADR-0085+0086: coordinator_label subscription ──────────────────────────────
+
+
+def test_coordinator_label_forwards_when_plan_repo_matches(monkeypatch) -> None:
+    """``?coordinator_label=coordinator-medicoder`` forwards a
+    plan.submitted event whose plan belongs to a repo whose team_config
+    points at this coordinator. Closes the ADR-0085+0086 in-session
+    pickup gap: new plans have created_by=<orchestrator> so the
+    plain created_by filter never matches; resolving plan → repo →
+    team_configs.coordinator_label is the path that does.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_owned = str(uuid.uuid4())     # belongs to coordinator-medicoder
+    plan_other = str(uuid.uuid4())     # belongs to coordinator-otherrepo
+    plan_unknown = str(uuid.uuid4())   # no team_config row
+
+    async def stub_coord_lookup(plan_id, session_factory=None):
+        if plan_id == plan_owned:
+            return "coordinator-medicoder"
+        if plan_id == plan_other:
+            return "coordinator-otherrepo"
+        return None
+
+    monkeypatch.setattr(
+        ws_module, "_lookup_coordinator_label", stub_coord_lookup
+    )
+
+    app = _build_app()
+    rec_other = _make_record(plan_id=plan_other)        # non-matching coord
+    rec_unknown = _make_record(plan_id=plan_unknown)    # unmatched plan
+    rec_owned = _make_record(plan_id=plan_owned)        # matching
+    rec_sentinel = _make_record(plan_id=plan_owned)     # sentinel
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events"
+            "?coordinator_label=coordinator-medicoder"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec_other)
+            _broadcast_local(rec_unknown)
+            _broadcast_local(rec_owned)
+            _broadcast_local(rec_sentinel)
+
+            frame1 = ws.receive_json()
+            frame2 = ws.receive_json()
+
+    assert frame1["type"] == "event"
+    assert frame1["plan_id"] == plan_owned
+    assert frame2["type"] == "event"
+    assert frame2["plan_id"] == plan_owned
+
+
+def test_coordinator_label_composes_with_created_by_and_plan_ids_by_or(
+    monkeypatch,
+) -> None:
+    """All three filters compose by OR. A frame is forwarded if ANY of
+    plan_ids / coordinator_label / created_by matches; only the
+    none-matching frame is dropped.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_via_plan_ids = str(uuid.uuid4())
+    plan_via_coord_label = str(uuid.uuid4())
+    plan_via_created_by = str(uuid.uuid4())
+    plan_neither = str(uuid.uuid4())
+
+    async def stub_created_by(plan_id, task_id, session_factory=None):
+        if plan_id == plan_via_created_by:
+            return "lbl-a"
+        return "other-label"
+
+    async def stub_coord(plan_id, session_factory=None):
+        if plan_id == plan_via_coord_label:
+            return "coordinator-medicoder"
+        return None
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_created_by)
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_coord)
+
+    app = _build_app()
+    rec_plan_ids = _make_record(plan_id=plan_via_plan_ids)
+    rec_coord = _make_record(plan_id=plan_via_coord_label)
+    rec_label = _make_record(plan_id=plan_via_created_by)
+    rec_neither = _make_record(plan_id=plan_neither)
+    rec_sentinel = _make_record(plan_id=plan_via_plan_ids)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events"
+            "?created_by=lbl-a"
+            f"&plan_ids={plan_via_plan_ids}"
+            "&coordinator_label=coordinator-medicoder"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+            _broadcast_local(rec_plan_ids)
+            _broadcast_local(rec_coord)
+            _broadcast_local(rec_label)
+            _broadcast_local(rec_neither)
+            _broadcast_local(rec_sentinel)
+
+            frame1 = ws.receive_json()
+            frame2 = ws.receive_json()
+            frame3 = ws.receive_json()
+            frame4 = ws.receive_json()
+
+    plan_ids_received = {
+        frame1["plan_id"], frame2["plan_id"],
+        frame3["plan_id"], frame4["plan_id"],
+    }
+    assert plan_neither not in plan_ids_received
+    assert plan_ids_received == {
+        plan_via_plan_ids, plan_via_coord_label, plan_via_created_by
+    }
+
+
+def test_coordinator_label_lookup_is_cached(monkeypatch) -> None:
+    """Multiple events on the same plan_id trigger exactly one
+    ``_lookup_coordinator_label`` call — the per-connection cache absorbs
+    the hot path. Mirrors the equivalent cached-lookup contract for
+    ``_lookup_created_by``.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_id = str(uuid.uuid4())
+    call_count = 0
+
+    async def stub_lookup(pid, session_factory=None):
+        nonlocal call_count
+        call_count += 1
+        return "coordinator-medicoder"
+
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
+
+    app = _build_app()
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events"
+            "?coordinator_label=coordinator-medicoder"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            for _ in range(5):
+                _broadcast_local(_make_record(plan_id=plan_id))
+            for _ in range(5):
+                ws.receive_json()
+
+    assert call_count == 1
+
+
+def test_coordinator_label_lookup_failure_drops_event(monkeypatch) -> None:
+    """A ``_lookup_coordinator_label`` exception drops the event but
+    keeps the socket alive. Mirrors the created_by failure-path contract.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_failing = str(uuid.uuid4())
+    plan_ok = str(uuid.uuid4())
+
+    async def stub_lookup(pid, session_factory=None):
+        if pid == plan_failing:
+            raise RuntimeError("simulated DB blip")
+        return "coordinator-medicoder"
+
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
+
+    app = _build_app()
+    rec_fail = _make_record(plan_id=plan_failing)
+    rec_sentinel = _make_record(plan_id=plan_ok)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events"
+            "?coordinator_label=coordinator-medicoder"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec_fail)
+            _broadcast_local(rec_sentinel)
+            frame = ws.receive_json()
+
+    # The failing-lookup event was dropped; the socket survived and
+    # delivered the next event.
+    assert frame["plan_id"] == plan_ok
