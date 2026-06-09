@@ -136,11 +136,10 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 - `tools/coordinator/brief_worker.py`: helper templating task brief (scope, active peers, pitfalls from per-repo memory, ownership claims format)
 - Quality gate for cap retirement: coordinator has successfully brokered ≥10 tasks (real run) AND amend rate on those 10 ≤30%. If >30%, briefing prompt iterates before Phase 4a.
 
-**Task 3C** — auto_merge_loop migration to coordinator — Carla starting (branches after Bert's 2A Phase 2 merges)
-- Extract `auto_merge_loop` from `consumer.__init__`; wire to coordinator session (the coordinator polls or subscribes to `pr_merged`-eligible tasks and triggers auto-merge)
-- This is the final step in the consumer split; consumer no longer owns any plan-routing concern after this task
+**Task 3C** — auto_merge_loop migration to coordinator ✓ MERGED (e624934 / PR #261)
+- `AutoMergeLoop` extracted to `coordination/auto_merge_loop.py` (117 lines); consumer constructs + lifecycles it; consumer shrank 623→597 lines. Full migration to coordinator session is Phase 6.
 
-**Task 3D** — Coordinator handoff doc generator — Carla in progress (Donna on 2A)
+**Task 3D** — Coordinator handoff doc generator ✓ MERGED (a79985d8 / PR #255)
 - API endpoint or coordinator-side script to snapshot: current task board, per-worker lane summary, unresolved signals, operator-instance designation
 - Coordinator prompt includes: "at N-50K tokens remaining, generate handoff doc and relay to incoming coordinator"
 - Handoff-receive prompt: incoming coordinator reads handoff + runs §6 restart reconciliation procedure
