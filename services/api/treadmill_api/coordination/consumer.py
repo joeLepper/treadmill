@@ -74,6 +74,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import func, select, String, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from treadmill_api.coordination.auto_merge_loop import AutoMergeLoop
 from treadmill_api.coordination.event_projector import (
     EventProjector,
     TaskPRWritten,
@@ -157,7 +158,8 @@ class CoordinationConsumer:
         "sqs", "queue_url", "sessionmaker", "wait_time_seconds",
         "max_messages", "redis_client", "publisher", "dispatcher",
         "github_client", "settings", "projector", "router",
-        "_stopped", "_task", "_auto_merge_task", "_health_status",
+        "auto_merge_loop",
+        "_stopped", "_task", "_health_status",
     })
 
     _ROUTED_PREFIXES: tuple[str, ...] = (
@@ -236,8 +238,10 @@ class CoordinationConsumer:
         # The router owns every downstream routing decision (`_maybe_*` +
         # cross-step + re-evaluation + webhook drain + entity-type
         # handlers). The consumer owns the poll loop, projection commit,
-        # and the transitional ``_auto_merge_loop`` background task per
-        # ADR-0084 Task 2A Phase 2.
+        # and the ``auto_merge_loop`` lifecycle (delegated to the
+        # ``AutoMergeLoop`` instance per ADR-0084 Task 3C — body lives
+        # in ``coordination/auto_merge_loop.py``; a future phase rewires
+        # it to a coordinator session).
         self.projector = EventProjector()
         self.router = PlanRouter(
             sessionmaker=sessionmaker,
@@ -248,33 +252,34 @@ class CoordinationConsumer:
             github_client=github_client,
             settings=settings,
         )
+        self.auto_merge_loop = AutoMergeLoop(
+            sessionmaker=sessionmaker,
+            redis_client=redis_client,
+            github_client=github_client,
+        )
         self._stopped = False
         self._task: asyncio.Task[None] | None = None
-        self._auto_merge_task: asyncio.Task[None] | None = None
         self._health_status: HealthStatus = "starting"
 
     async def start(self) -> None:
         self._stopped = False
         self._health_status = "starting"
         self._task = asyncio.create_task(self._run(), name="coordination-consumer")
-        self._auto_merge_task = asyncio.create_task(
-            self._auto_merge_loop(), name="auto-merge-poll",
-        )
+        await self.auto_merge_loop.start()
         logger.info("coordination consumer started: queue=%s", self.queue_url)
 
     async def stop(self) -> None:
         self._stopped = True
-        for task in (self._task, self._auto_merge_task):
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    logger.exception("coordination consumer raised on shutdown")
+        await self.auto_merge_loop.stop()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("coordination consumer raised on shutdown")
         self._task = None
-        self._auto_merge_task = None
         logger.info("coordination consumer stopped")
 
     async def _run(self) -> None:
@@ -553,42 +558,11 @@ class CoordinationConsumer:
                 )
 
     # ── Self-trigger: wf-review changes_requested → wf-feedback (#108) ────────
-
-    async def _auto_merge_loop(self) -> None:
-        """5-second tick: detect elapsed auto-merge deadlines and fire merges.
-
-        Scans ``treadmill:auto-merge-deadline:*`` keys in Redis. For each key
-        whose ``deadline_at`` has elapsed, re-verifies mergeability and issues
-        ``PUT /repos/{repo}/pulls/{pr_number}/merge`` with ``merge_method=squash``.
-
-        Short-circuits cleanly when ``redis_client`` or ``github_client`` is
-        not wired. All non-cancellation exceptions are swallowed so the loop
-        stays alive on transient GitHub API or Redis errors.
-        """
-        while not self._stopped:
-            try:
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                raise
-            if self.redis_client is None or self.github_client is None:
-                continue
-            try:
-                from treadmill_api.coordination.triggers import (
-                    fire_elapsed_auto_merges,
-                )
-                fired = await fire_elapsed_auto_merges(
-                    redis_client=self.redis_client,
-                    sessionmaker=self.sessionmaker,
-                    github_client=self.github_client,
-                )
-                if fired:
-                    logger.info(
-                        "auto-merge poll: fired %d merge(s) this tick", fired,
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("auto-merge poll loop raised; continuing")
+    #
+    # ``_auto_merge_loop`` moved to ``coordination/auto_merge_loop.py`` as
+    # an ``AutoMergeLoop`` class per ADR-0084 Task 3C. The consumer still
+    # owns the lifecycle via ``self.auto_merge_loop.{start,stop}()``; a
+    # future phase rewires the loop to a coordinator Claude session.
 
     # ── Cross-step dispatch (B.2) ─────────────────────────────────────────────
 
