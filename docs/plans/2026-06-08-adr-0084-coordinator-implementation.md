@@ -164,7 +164,7 @@ coordinator.env updated to include plan ID. Workers briefed via cc-relay.
 **Task routing** (2026-06-09):
 - Bert: otel-collector-deploy (78af1379), dispatcher-coverage (449d380f)
 - Donna: datadog-dashboards-as-code (9959c49c) ✓ MERGED PR #1231, dedup-purge-cloud-run-job (9bbda236) in flight
-- Carla: consumer-subscription-validation (7877139d) ✓ MERGED PR #25 (medicoder-events), planrouter-fixture-expansion (4e3cffc2)
+- Carla: consumer-subscription-validation (7877139d) ✓ MERGED PR #25 (medicoder-events), dashboard-generator-gcp (9c586a77) in flight, planrouter-fixture-expansion (4e3cffc2)
 - Alan: cloud-trace-verify (82179115) — blocked on otel-collector-deploy
 
 **Brokered count so far**: 2 merged
