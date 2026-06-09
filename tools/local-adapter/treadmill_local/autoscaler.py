@@ -328,6 +328,43 @@ class Autoscaler:
         self._stop_event.set()
 
 
+# ── Queue-depth source ────────────────────────────────────────────────────────
+
+
+def get_depth_from_api(
+    api_base_url: str, client: "httpx.Client"
+) -> tuple[int, int]:
+    """Return (visible, in_flight) from ``GET /api/v1/queue_depth``.
+
+    The API-side query excludes tasks whose ``created_by`` matches a
+    registered coordinator label (see ADR-0085+0086 Task C), so the
+    autoscaler scales on triage-needing depth only — coordinator-owned
+    tasks already have a routing owner.
+
+    On any failure (connection error, timeout, non-2xx, JSON parse, key
+    missing) log a WARNING and return ``(0, 0)`` so the autoscaler
+    scales down to ``min_count`` rather than crash-looping on a
+    transient API blip. The SQS path remains available via
+    :func:`get_depth_sqs` for reference + debugging.
+    """
+    endpoint = f"{api_base_url}/api/v1/queue_depth"
+    try:
+        resp = client.get(endpoint, timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        visible = int(data["visible"])
+        in_flight = int(data["in_flight"])
+    except Exception as exc:
+        logger.warning("queue_depth read from %s failed: %s", endpoint, exc)
+        return 0, 0
+    logger.info(
+        "queue_depth: %d visible, %d in_flight (coordinator-owned excluded)",
+        visible,
+        in_flight,
+    )
+    return visible, in_flight
+
+
 # ── ScalableTarget parsing ────────────────────────────────────────────────────
 
 
@@ -474,12 +511,17 @@ def main() -> int:
     else:
         runtime = LocalRuntime(infra_dir=infra_dir, build_images=build_images)
 
-    def get_depth() -> tuple[int, int]:
+    def get_depth_sqs() -> tuple[int, int]:
         """Return (visible, in_flight) message counts in one SQS call.
 
-        The autoscaler sums these into the workload signal it sizes on.
-        Visible-only under-provisioned by ignoring long-running in-flight
-        messages — see Autoscaler class docstring + ADR-0018.
+        Preserved for reference + fallback / debugging. The live
+        autoscaler reads queue depth via the API (``get_depth_from_api``
+        below) so coordinator-owned tasks — registered via
+        ``team_configs.coordinator_label`` and routed straight to a
+        named worker by the coordinator — are excluded from the scaling
+        signal. SQS depth still counts them; the API endpoint does not.
+
+        See ADR-0085+0086 Task E for the cut-over rationale.
         """
         attrs = sqs.get_queue_attributes(
             QueueUrl=queue_url,
@@ -559,11 +601,14 @@ def main() -> int:
     # ``main()`` rather than the package root.
     staleness_guard = StalenessGuard(module="treadmill_local.autoscaler")
 
-    # Heartbeat function for system_status updates (task 3).
-    # Constructs the httpx client here so it's available for all ticks.
+    # Heartbeat + queue-depth share one httpx.Client at run-loop scope so
+    # connections are pooled across ticks (every tick fires both calls).
+    # Lifetime is the autoscaler.run() invocation; teardown is via the
+    # try/finally below.
     import httpx
 
     api_base_url = os.environ.get("TREADMILL_API_BASE_URL", "http://localhost:8000")
+    client = httpx.Client(timeout=5.0)
 
     def heartbeat_fn_impl(state: dict[str, Any]) -> None:
         """POST autoscaler state to the API heartbeat endpoint.
@@ -574,14 +619,13 @@ def main() -> int:
         """
         try:
             endpoint = f"{api_base_url}/api/v1/system_status/heartbeat"
-            with httpx.Client(timeout=5.0) as client:
-                response = client.post(endpoint, json=state)
-                response.raise_for_status()
+            response = client.post(endpoint, json=state)
+            response.raise_for_status()
         except Exception as e:
             logger.warning("heartbeat write to %s failed: %s", endpoint, e)
 
     autoscaler = Autoscaler(
-        queue_depth_fn=get_depth,
+        queue_depth_fn=lambda: get_depth_from_api(api_base_url, client),
         worker_count_fn=count_workers,
         start_worker_fn=start_worker,
         reap_dead_workers_fn=reap_dead_workers,
@@ -601,7 +645,10 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
-    autoscaler.run()
+    try:
+        autoscaler.run()
+    finally:
+        client.close()
     return 0
 
 
