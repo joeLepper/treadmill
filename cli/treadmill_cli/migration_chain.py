@@ -43,10 +43,23 @@ _REVISION_RE = re.compile(
     r"^revision(?:\s*:\s*[^=]+)?\s*=\s*['\"]([^'\"]+)['\"]",
     re.MULTILINE,
 )
-_DOWN_REVISION_RE = re.compile(
-    r"^down_revision(?:\s*:\s*[^=]+)?\s*=\s*(?:['\"]([^'\"]+)['\"]|None)",
+# ``down_revision`` accepts three concrete forms in real migrations:
+#   1. ``"abc123"``                  — single parent (linear chain).
+#   2. ``None``                       — root migration.
+#   3. ``("abc", "def")`` / ``["abc", "def"]`` — merge migration
+#      consuming N parents (alembic's multi-head reconciliation
+#      surface, ``alembic merge`` output). Recognizing this third form
+#      is load-bearing: a merge migration is the SOLUTION to a
+#      multi-head condition, not the cause of one. Treating the merge
+#      as a child of each parent is what un-flags both parents as
+#      heads. Catching this is exactly the false positive that bit
+#      the linter against the live treadmill repo
+#      (``20260605_1615_merge_architect_gold_and_dspy_variant_heads.py``).
+_DOWN_REVISION_LINE_RE = re.compile(
+    r"^down_revision(?:\s*:\s*[^=]+)?\s*=\s*(.+?)(?:\s*#.*)?$",
     re.MULTILINE,
 )
+_QUOTED_ID_RE = re.compile(r"['\"]([^'\"]+)['\"]")
 
 
 @dataclass(frozen=True)
@@ -66,8 +79,15 @@ class ChainViolation:
     detail: str
 
 
-def _parse_migration_file(path: Path) -> tuple[str, str | None] | None:
-    """Extract ``(revision, down_revision)`` from a migration file.
+def _parse_migration_file(
+    path: Path,
+) -> tuple[str, tuple[str, ...]] | None:
+    """Extract ``(revision, parents)`` from a migration file.
+
+    ``parents`` is a tuple of zero or more revision ids: empty for a
+    root migration (``down_revision = None``), one element for a
+    linear migration, multiple for a merge migration whose
+    ``down_revision`` is a tuple / list literal.
 
     Returns ``None`` when the file doesn't look like a migration
     (missing the ``revision`` assignment). Non-migration files in the
@@ -83,18 +103,25 @@ def _parse_migration_file(path: Path) -> tuple[str, str | None] | None:
     if rev_match is None:
         return None
     revision = rev_match.group(1)
-    down_match = _DOWN_REVISION_RE.search(text)
-    down_revision: str | None
+
+    down_match = _DOWN_REVISION_LINE_RE.search(text)
     if down_match is None:
         # File declares a revision but no down_revision — treat as
         # root (Alembic's convention for the initial migration is
         # ``down_revision = None``).
-        down_revision = None
-    else:
-        # Group 1 is the quoted id; ``None`` literal yields no group 1
-        # match. Both branches of the regex collapse here.
-        down_revision = down_match.group(1)
-    return revision, down_revision
+        return revision, ()
+
+    rhs = down_match.group(1).strip()
+    # ``None`` literal — root migration.
+    if rhs == "None":
+        return revision, ()
+    # ``"abc"`` / ``'abc'`` — linear chain.
+    # ``("abc", "def")`` / ``["abc", "def"]`` — merge migration. The
+    # quoted-id regex extracts every quoted token from the RHS; tuple
+    # / list literal vs single string is transparent here, which is
+    # the property we want.
+    parents = tuple(_QUOTED_ID_RE.findall(rhs))
+    return revision, parents
 
 
 def find_chain_violations(versions_dir: Path) -> list[ChainViolation]:
@@ -132,7 +159,10 @@ def find_chain_violations(versions_dir: Path) -> list[ChainViolation]:
     # rev_id -> list of files declaring that rev_id
     rev_to_files: dict[str, list[Path]] = {}
     # parent_rev_id -> list of (child_rev_id, child_file) so multi-head
-    # collisions surface with both branches named.
+    # collisions surface with both branches named. A child of N
+    # parents (alembic merge migration) registers under each parent.
+    # ``None`` parent key represents a root migration; multiple roots
+    # are legitimate and skipped by the multi-head check.
     parent_to_children: dict[str | None, list[tuple[str, Path]]] = {}
 
     for path in sorted(versions_dir.iterdir()):
@@ -143,9 +173,16 @@ def find_chain_violations(versions_dir: Path) -> list[ChainViolation]:
         parsed = _parse_migration_file(path)
         if parsed is None:
             continue
-        revision, down_revision = parsed
+        revision, parents = parsed
         rev_to_files.setdefault(revision, []).append(path)
-        parent_to_children.setdefault(down_revision, []).append((revision, path))
+        if not parents:
+            # Root migration — no parent edge to register, but record
+            # the implicit ``None`` key so root-count diagnostics stay
+            # available downstream.
+            parent_to_children.setdefault(None, []).append((revision, path))
+            continue
+        for parent in parents:
+            parent_to_children.setdefault(parent, []).append((revision, path))
 
     violations: list[ChainViolation] = []
 
@@ -168,30 +205,43 @@ def find_chain_violations(versions_dir: Path) -> list[ChainViolation]:
             )
         )
 
-    # Multi-head: two migrations point at the same down_revision.
-    # Skip the ``None`` parent — multiple root migrations are
-    # legitimate when an Alembic branch with branch_labels is in use,
-    # which we don't do today but the linter should not false-positive on.
-    for parent, children in sorted(
-        parent_to_children.items(), key=lambda kv: (kv[0] is None, kv[0])
-    ):
-        if parent is None:
-            continue
-        if len(children) <= 1:
-            continue
-        child_ids = tuple(child[0] for child in children)
-        child_files = tuple(child[1] for child in children)
+    # Multi-head: more than one terminal revision exists.
+    #
+    # A "head" is a revision that no other migration claims as a
+    # parent — the tip of the chain. Alembic's upgrade walks each
+    # head independently, so > 1 head means the chain branched and
+    # never reconverged. Two migrations sharing a ``down_revision``
+    # is NOT inherently a violation: when a later merge migration
+    # consumes both branches (alembic's ``down_revision = (rev_a,
+    # rev_b)`` tuple shape, e.g. ``alembic merge`` output), the
+    # chain re-converges to a single head and the multi-head
+    # condition is resolved. Counting terminal heads is the
+    # structurally correct check; counting shared parents would
+    # false-positive every legitimate merge migration. Caught the
+    # hard way by tonight's run against the live treadmill repo:
+    # ``20260605_1615_merge_architect_gold_and_dspy_variant_heads.py``
+    # is the merge that reconverges the ``20260604_0200`` /
+    # ``20260604_1200`` branches.
+    declared_revisions = set(rev_to_files.keys())
+    heads = sorted(
+        rev for rev in declared_revisions if rev not in parent_to_children
+    )
+    if len(heads) > 1:
+        head_files = tuple(rev_to_files[h][0] for h in heads)
         violations.append(
             ChainViolation(
                 kind="multi-head",
-                revisions=child_ids,
-                files=child_files,
+                revisions=tuple(heads),
+                files=head_files,
                 detail=(
-                    f"chain collision: migrations "
-                    f"{[str(r) for r in child_ids]} all declare "
-                    f"down_revision={parent!r}. Pick one to keep at "
-                    "that parent; rebase the others' down_revision to "
-                    "point at the eventual head of the merge order. "
+                    f"chain has {len(heads)} terminal heads "
+                    f"{heads!r}; alembic upgrade would walk each "
+                    "independently, leaving the schema in a "
+                    "branch-dependent state. Pick the head you want "
+                    "to keep, rebase the others' down_revision to "
+                    "point at the keeper (linearize), OR add a merge "
+                    "migration with ``down_revision = "
+                    f"({heads!r})`` to reconverge the branches. "
                     "(Post-mortem surprise C from the ADR-0085+0086 plan — "
                     "the exact failure mode that bit Bert + Carla on "
                     "2026-06-09.)"
