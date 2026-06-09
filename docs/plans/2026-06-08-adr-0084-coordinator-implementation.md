@@ -163,13 +163,15 @@ coordinator.env updated to include plan ID. Workers briefed via cc-relay.
 
 **Task routing** (2026-06-09):
 - Bert: otel-collector-deploy (78af1379), dispatcher-coverage (449d380f)
-- Donna: datadog-dashboards-as-code (9959c49c) ✓ MERGED PR #1231, dedup-purge-cloud-run-job (9bbda236) in flight
+- Bert: otel-collector-deploy (78af1379) blocked on operator prereqs, dispatcher-coverage (449d380f)
+- Donna: datadog-dashboards-as-code (9959c49c) ✓ MERGED PR #1231, dedup-purge-cloud-run-job (9bbda236) ✓ MERGED PR #1233 + lib PR #26, chain-dep-bump-0.1.8 (07ad049d) in flight
 - Carla: consumer-subscription-validation (7877139d) ✓ MERGED PR #25 (medicoder-events), dashboard-generator-gcp (9c586a77) in flight, planrouter-fixture-expansion (4e3cffc2)
 - Alan: cloud-trace-verify (82179115) — blocked on otel-collector-deploy
 
-**Brokered count so far**: 2 merged
+**Brokered count so far**: 3 merged
 - 9959c49c / PR #1231 (datadog-dashboards-as-code) 2026-06-09T06:39Z
 - 7877139d / PR #25 medicoder-events (consumer-subscription-validation) 2026-06-09T06:46Z
+- 9bbda236 / PR #1233 + medicoder-events PR #26 (dedup-purge) 2026-06-09T06:49Z
 
 Run a real plan on RAMJAC using coordinator-medicoder + 2 workers. Verify:
 - Coordinator provisions workers (not autoscaler)
