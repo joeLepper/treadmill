@@ -1,0 +1,45 @@
+[Unit]
+# Specialized concrete unit overriding the generic
+# ``treadmill-channel@.service`` template for the medicoder coordinator
+# (ADR-0084 Phase 5). systemd resolves a concrete name before falling
+# back to a template — starting ``treadmill-channel@coordinator-medicoder``
+# uses THIS file, not the template, so the coordinator-specific
+# Environment/WorkingDirectory/EnvironmentFile take effect.
+#
+# Other repos that need a coordinator copy this file with the slug
+# substituted (every ``medicoder`` → ``<repo-slug>``).
+Description=Treadmill coordinator session (label coordinator-medicoder, ADR-0084)
+After=default.target
+
+[Service]
+Type=simple
+
+# Unit-level intent. The label-based detection in launch-session.sh
+# (added in Task 3A) also sets these from the label + sources the env
+# file, so both layers agree. Setting them here makes the systemd
+# inspection (``systemctl --user show treadmill-channel@coordinator-medicoder``)
+# self-documenting and applies on a cold start (fresh tmux server).
+Environment=TREADMILL_ROLE=coordinator
+Environment=TREADMILL_LABEL=coordinator-medicoder
+
+# The API writes TREADMILL_COORDINATOR_PLANS into this file at plan-start;
+# the launcher sources it under ``set -a`` so the values propagate to
+# the spawned Claude process. systemd reads the file at unit start time
+# too — both layers benefit. A missing file is tolerated (the ``-``
+# prefix tells systemd to skip rather than fail).
+EnvironmentFile=-%h/.treadmill/teams/medicoder/coordinator.env
+
+WorkingDirectory=%h/.treadmill/teams/medicoder
+
+# Same launcher script the template uses; %i resolves to the instance
+# (``coordinator-medicoder``) when invoked via the template syntax. We
+# pass the literal label explicitly so this unit can also be started
+# without the ``@`` instance specifier (``systemctl --user start
+# treadmill-channel@coordinator-medicoder.service``).
+ExecStart=%h/treadmill/tools/cc-channels/systemd/treadmill-channel-launch coordinator-medicoder
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

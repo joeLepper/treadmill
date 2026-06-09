@@ -87,6 +87,78 @@ coordinator team directory are independent — the worktree convention
 *editing* the Treadmill repo across parallel sessions; the team dir is
 for *operating* a coordinator session.
 
+## Phase 5 launch
+
+The Phase 5 end-to-end proof runs against RAMJAC (medicoder). Three
+pieces are pre-staged for one-command launch:
+
+1. A specialized systemd unit at
+   `tools/cc-channels/systemd/treadmill-channel@coordinator-medicoder.service`
+   — sets `TREADMILL_ROLE=coordinator`, `TREADMILL_LABEL=coordinator-medicoder`,
+   `EnvironmentFile=%h/.treadmill/teams/medicoder/coordinator.env` (the
+   `-` prefix tolerates a missing file), `WorkingDirectory=%h/.treadmill/teams/medicoder`.
+2. The `launch-session.sh` label-detection from Task 3A — also sources
+   `coordinator.env` and pins workdir, so the two layers agree even when
+   the unit is bypassed (direct `launch-session.sh coordinator-medicoder`
+   on the operator's terminal).
+3. A wrapper `tools/coordinator/launch-coordinator.sh` that reconciles
+   the plan id into the env file and starts the unit.
+
+### Installing the unit (one-time per workstation)
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -s ~/treadmill/tools/cc-channels/systemd/treadmill-channel@coordinator-medicoder.service \
+    ~/.config/systemd/user/treadmill-channel@coordinator-medicoder.service
+systemctl --user daemon-reload
+```
+
+The unit name uses `@coordinator-medicoder` literally — systemd resolves
+this as a concrete unit name and uses the specialized file (not the
+generic `treadmill-channel@.service` template).
+
+### Starting a coordinator for a plan
+
+```bash
+~/treadmill/tools/coordinator/launch-coordinator.sh \
+    --repo medicoder --plan-id <plan-uuid>
+```
+
+The wrapper:
+- Ensures `~/.treadmill/teams/medicoder/` exists.
+- Reconciles `coordinator.env` — replaces an existing
+  `TREADMILL_COORDINATOR_PLANS=` line if present (preserving any other
+  vars the API wrote, e.g. `TREADMILL_OPERATOR_INSTANCE`), or writes
+  `TREADMILL_ROLE` + the plan id if the file is fresh.
+- Runs `systemctl --user start treadmill-channel@coordinator-medicoder.service`.
+
+### Observing the session
+
+```bash
+tmux attach -t coordinator-medicoder
+```
+
+systemd's `Restart=on-failure` brings the unit back if the session
+crashes (Claude OOM, tmux server died), restoring the tmux session
+behind the same label. The Phase 5 quality gate (≥10 tasks brokered,
+amend rate ≤ 30%) is measured across the session's plan-close events.
+
+### Stopping cleanly
+
+```bash
+systemctl --user stop treadmill-channel@coordinator-medicoder.service
+```
+
+The launcher sets a SIGTERM/SIGINT trap that suppresses systemd's
+restart-on-failure when stop is operator-initiated. An unexpected
+session end still triggers restart.
+
+### Adding a new repo
+
+Copy `treadmill-channel@coordinator-medicoder.service` and substitute
+every `medicoder` with the new slug. Same install-via-symlink, same
+launch wrapper with `--repo <new-slug>`.
+
 ## Future contents
 
 This directory will grow to hold the coordinator's operating prompt and
