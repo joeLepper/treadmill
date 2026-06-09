@@ -3,7 +3,7 @@ auto_merge: false
 ---
 # Plan: ADR-0085 — Automatic Team Provisioning
 
-- **Status:** drafting
+- **Status:** superseded by 2026-06-09-adr-0085-0086-combined-implementation
 - **Date:** 2026-06-09
 - **Related ADRs:** ADR-0085, ADR-0084, ADR-0050 (repo onboarding), ADR-0018 (autoscaler — retired)
 

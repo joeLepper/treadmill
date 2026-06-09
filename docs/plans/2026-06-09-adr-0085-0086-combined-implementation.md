@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: ADR-0085 + ADR-0086 Combined Implementation
 
-- **Status:** drafting
+- **Status:** active
 - **Date:** 2026-06-09
 - **Related ADRs:** ADR-0085 (automatic team provisioning), ADR-0086 (coordinator owns task lifecycle)
 - **Supersedes:** 2026-06-09-adr-0085-automatic-team-provisioning
