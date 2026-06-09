@@ -131,7 +131,7 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 - `coordinator.env.template` + README in `tools/coordinator/`
 - `coordinator.env` file written by API at plan-start with `TREADMILL_COORDINATOR_PLANS=<id>,...`; coordinator reads on startup (reload path deferred to Task 3A follow-up per v1 scope)
 
-**Task 3B** — Coordinator briefing prompt v1 — Carla in progress
+**Task 3B** — Coordinator briefing prompt v1 ✓ MERGED (cb31afcb / PR #253)
 - `tools/coordinator/coordinator_prompt.md`: system prompt covering task brief format, signal routing table, task_board API calls, per-repo memory read/write, escalation chain, self-compaction guidance (re-brief at context limit)
 - `tools/coordinator/brief_worker.py`: helper templating task brief (scope, active peers, pitfalls from per-repo memory, ownership claims format)
 - Quality gate for cap retirement: coordinator has successfully brokered ≥10 tasks (real run) AND amend rate on those 10 ≤30%. If >30%, briefing prompt iterates before Phase 4a.
@@ -140,7 +140,7 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 - Extract `auto_merge_loop` from `consumer.__init__`; wire to coordinator session (the coordinator polls or subscribes to `pr_merged`-eligible tasks and triggers auto-merge)
 - This is the final step in the consumer split; consumer no longer owns any plan-routing concern after this task
 
-**Task 3D** — Coordinator handoff doc generator (Donna)
+**Task 3D** — Coordinator handoff doc generator — Carla in progress (Donna on 2A)
 - API endpoint or coordinator-side script to snapshot: current task board, per-worker lane summary, unresolved signals, operator-instance designation
 - Coordinator prompt includes: "at N-50K tokens remaining, generate handoff doc and relay to incoming coordinator"
 - Handoff-receive prompt: incoming coordinator reads handoff + runs §6 restart reconciliation procedure
