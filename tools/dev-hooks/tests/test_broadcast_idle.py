@@ -3,10 +3,10 @@
 Pins the skip conditions + the broadcast shape:
 - TREADMILL_SESSION_LABEL unset → no-op
 - coordinator-* label → no-op
-- cooldown active (< 300s since last broadcast) → no-op
+- cooldown active (< 3600s since last broadcast) → no-op
 - first broadcast → writes availability JSON + a relay file in every
   ``~/.cc-channels/coordinator-*/relay/`` dir found
-- second broadcast within 300s → skipped (cooldown)
+- second broadcast within 3600s → skipped (cooldown)
 
 The hook is invoked as a subprocess with a synthetic ``HOME`` so
 filesystem effects are isolated to ``tmp_path``.
@@ -118,7 +118,7 @@ def test_first_broadcast_writes_files(tmp_path: Path) -> None:
 
 
 def test_cooldown_blocks_second_broadcast(tmp_path: Path) -> None:
-    """Two broadcasts within the 300s window: the first writes files;
+    """Two broadcasts within the 3600s window: the first writes files;
     the second exits without touching either coordinator inbox or the
     availability record."""
     home = tmp_path / "home"
@@ -146,19 +146,19 @@ def test_cooldown_blocks_second_broadcast(tmp_path: Path) -> None:
 
 
 def test_cooldown_expires_allows_rebroadcast(tmp_path: Path) -> None:
-    """When the cooldown stamp is older than 300s, the next broadcast
+    """When the cooldown stamp is older than 3600s, the next broadcast
     fires again. Simulate elapsed time by writing a stale timestamp."""
     home = tmp_path / "home"
     home.mkdir()
     relays = _seed_coordinator_dirs(home, ["medicoder"])
 
-    # Seed a stale cooldown stamp (400s ago) directly on disk
+    # Seed a stale cooldown stamp (older than the 3600s floor) directly on disk
     cooldown = (
         home / ".treadmill" / "session-state" / "treadmill-bert"
         / "last-idle-broadcast"
     )
     cooldown.parent.mkdir(parents=True)
-    cooldown.write_text(f"{int(time.time()) - 400}\n")
+    cooldown.write_text(f"{int(time.time()) - 4000}\n")
 
     result = _run(home=home, label="treadmill-bert")
     assert result.returncode == 0
