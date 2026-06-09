@@ -518,14 +518,13 @@ async def create_plan(
             ) from exc
 
     # ADR-0085+0086 Task D — repo-scoped team_configs lookup.
-    # When the repo has a team_configs row AND the request didn't
-    # supply ``created_by``, auto-derive it from the team's
-    # coordinator label. When the row is absent, behavior is
-    # unchanged — the legacy ``body.created_by`` lands verbatim and
-    # no ``plan.submitted`` event is emitted at the end.
+    # ``created_by`` is the submitting orchestrator's session label and is
+    # never overridden here — it comes from the caller verbatim (or stays
+    # None if omitted). The coordinator discovers plans via the
+    # ``coordinator_label`` field in the plan.submitted event payload, not
+    # via created_by. When the row is absent no plan.submitted event fires
+    # and the legacy PlanRegistered/PlanActivated lifecycle applies.
     team_config = await team_config_store.get_by_repo(session, body.repo)
-    if team_config is not None and body.created_by is None:
-        body.created_by = team_config.coordinator_label
 
     # D.10 — resolve the dev fast-path. Honored in any LOCAL mode
     # (fully_local OR dev_local) for intent-only (Scenario 2) submissions;
