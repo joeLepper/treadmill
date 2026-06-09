@@ -172,7 +172,7 @@ async def test_architect_gate_broken_verdict_emits_escalation_event() -> None:
     step_id = str(uuid.uuid4())
 
     # ── Act: drive the consumer's gate-broken seam directly ──────────────
-    await consumer._maybe_dispatch_gate_broken_escalation(
+    await consumer.router._maybe_dispatch_gate_broken_escalation(
         session,  # type: ignore[arg-type]
         step_id,
         typed,

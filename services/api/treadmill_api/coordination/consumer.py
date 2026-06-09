@@ -140,64 +140,9 @@ class CoordinationConsumer:
     Owns no clients — all dependencies are injected so tests can construct
     one against a fake SQS or a synchronous handler.
 
-    Back-compat shim: routing helpers + entity-type handlers moved to
-    :class:`PlanRouter` in Task 2A Phase 2, but existing tests reach into
-    ``consumer._maybe_fire_validate_feedback`` etc. directly (read or
-    monkey-patch). ``__getattr__`` + ``__setattr__`` redirect those
-    accesses to ``self.router`` so the test API is unchanged. The router
-    is the real implementation; the consumer just forwards.
+    Post-extraction surface: routing helpers + entity-type handlers
+    live on :class:`PlanRouter`; access them via ``consumer.router``.
     """
-
-    # Names that should NOT be redirected to the router. Anything not
-    # listed here that looks like a routing helper / entity-type handler
-    # (``_maybe_*``, ``_handle_*``, ``_cross_step_dispatch``,
-    # ``_reevaluate``, ``_sweep_*``, ``_try_task_prs_*``,
-    # ``_set_task_prs_*``, ``_update_triage_*``,
-    # ``_write_task_prs_on_completed``) gets delegated.
-    _LOCAL_ATTRS: frozenset[str] = frozenset({
-        "sqs", "queue_url", "sessionmaker", "wait_time_seconds",
-        "max_messages", "redis_client", "publisher", "dispatcher",
-        "github_client", "settings", "projector", "router",
-        "auto_merge_loop",
-        "_stopped", "_task", "_health_status",
-    })
-
-    _ROUTED_PREFIXES: tuple[str, ...] = (
-        "_maybe_", "_handle_", "_sweep_", "_try_task_prs_",
-        "_set_task_prs_", "_update_triage_",
-    )
-    _ROUTED_NAMES: frozenset[str] = frozenset({
-        "_cross_step_dispatch", "_reevaluate",
-        "_write_task_prs_on_completed",
-    })
-
-    @classmethod
-    def _is_routed(cls, name: str) -> bool:
-        if name in cls._ROUTED_NAMES:
-            return True
-        return any(name.startswith(p) for p in cls._ROUTED_PREFIXES)
-
-    def __getattr__(self, name: str) -> Any:
-        # Only fires when normal attribute lookup fails — i.e. the name
-        # isn't a class attribute, instance attribute, or method on
-        # CoordinationConsumer. The routing helpers no longer live here,
-        # so accessing one goes through this path.
-        if self._is_routed(name):
-            router = self.__dict__.get("router")
-            if router is not None and hasattr(router, name):
-                return getattr(router, name)
-        raise AttributeError(name)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        # Redirect monkey-patches of routing helper names onto the
-        # router so tests that did ``consumer._maybe_X = stub`` still
-        # affect the helper actually called from route_step.
-        if name not in self._LOCAL_ATTRS and self._is_routed(name):
-            router = self.__dict__.get("router")
-            if router is not None:
-                setattr(router, name, value)
-                return
-        super().__setattr__(name, value)
 
     def __init__(
         self,

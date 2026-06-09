@@ -294,14 +294,14 @@ async def test_trace_replay_matches_baseline(
         dispatcher=dispatcher,
     )
 
-    original_reevaluate = consumer._reevaluate
+    original_reevaluate = consumer.router._reevaluate
 
     async def _wrapped_reevaluate(*args: Any, **kwargs: Any) -> Any:
         nonlocal reevaluate_call_count
         reevaluate_call_count += 1
         return await original_reevaluate(*args, **kwargs)
 
-    consumer._reevaluate = _wrapped_reevaluate  # type: ignore[assignment]
+    consumer.router._reevaluate = _wrapped_reevaluate  # type: ignore[assignment]
 
     event_count = 0
     with gzip.open(_EVENTS_PATH, "rt") as f:

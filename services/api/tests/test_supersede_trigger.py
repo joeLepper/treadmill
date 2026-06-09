@@ -210,7 +210,7 @@ async def test_consumer_routes_step_completed_to_supersede_helper() -> None:
     async def _stub(*args: object, **kwargs: object) -> None:
         calls.append({"args": args, "kwargs": kwargs})
 
-    consumer._maybe_dispatch_supersede = _stub  # type: ignore[method-assign]
+    consumer.router._maybe_dispatch_supersede = _stub  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "step",
