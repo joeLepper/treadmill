@@ -212,7 +212,7 @@ async def test_handle_github_pr_merged_runs_reevaluate_for_dependent_tasks() -> 
     async def _stub_reevaluate() -> None:
         reevaluate_calls.append(1)
 
-    consumer._reevaluate = _stub_reevaluate  # type: ignore[method-assign]
+    consumer.router._reevaluate = _stub_reevaluate  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "github",
@@ -311,7 +311,7 @@ async def test_handle_github_pr_opened_does_not_run_reevaluate() -> None:
     async def _stub_reevaluate() -> None:
         reevaluate_calls.append(1)
 
-    consumer._reevaluate = _stub_reevaluate  # type: ignore[method-assign]
+    consumer.router._reevaluate = _stub_reevaluate  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "github",
@@ -432,7 +432,7 @@ async def test_task_prs_fallback_parses_branch_and_inserts_row() -> None:
         side_effect=[exec_result_no_prs, exec_result_matching, exec_result_insert]
     )
 
-    await consumer._try_task_prs_fallback_on_pr_merged(
+    await consumer.router._try_task_prs_fallback_on_pr_merged(
         session,
         MagicMock(
             repo="x/y",
@@ -464,7 +464,7 @@ async def test_task_prs_fallback_skips_when_row_exists() -> None:
 
     session.execute = AsyncMock(return_value=exec_result)
 
-    await consumer._try_task_prs_fallback_on_pr_merged(
+    await consumer.router._try_task_prs_fallback_on_pr_merged(
         session,
         MagicMock(
             repo="x/y",
@@ -491,7 +491,7 @@ async def test_task_prs_fallback_skips_without_head_branch() -> None:
     exec_result.scalar_one_or_none.return_value = None
     session.execute = AsyncMock(return_value=exec_result)
 
-    await consumer._try_task_prs_fallback_on_pr_merged(
+    await consumer.router._try_task_prs_fallback_on_pr_merged(
         session,
         MagicMock(
             repo="x/y",
@@ -527,7 +527,7 @@ async def test_task_prs_fallback_skips_malformed_branch_name() -> None:
 
     for branch in malformed_names:
         session.execute.reset_mock()
-        await consumer._try_task_prs_fallback_on_pr_merged(
+        await consumer.router._try_task_prs_fallback_on_pr_merged(
             session,
             MagicMock(
                 repo="x/y",
@@ -565,7 +565,7 @@ async def test_task_prs_fallback_skips_multiple_matching_tasks() -> None:
         side_effect=[exec_result_no_prs, exec_result_matching]
     )
 
-    await consumer._try_task_prs_fallback_on_pr_merged(
+    await consumer.router._try_task_prs_fallback_on_pr_merged(
         session,
         MagicMock(
             repo="x/y",
@@ -599,7 +599,7 @@ async def test_task_prs_fallback_skips_zero_matching_tasks() -> None:
         side_effect=[exec_result_no_prs, exec_result_matching]
     )
 
-    await consumer._try_task_prs_fallback_on_pr_merged(
+    await consumer.router._try_task_prs_fallback_on_pr_merged(
         session,
         MagicMock(
             repo="x/y",
@@ -844,7 +844,7 @@ async def test_validation_fail_triggers_wf_feedback() -> None:
         feedback_calls.append({"args": args, "kwargs": kwargs})
 
     # Patch the trigger to record calls without actually dispatching
-    consumer._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
+    consumer.router._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
 
     from treadmill_api.events.step import StepCompleted, StepOutput
 
@@ -885,7 +885,7 @@ async def test_validation_pass_does_not_trigger_wf_feedback() -> None:
     async def _stub_feedback_dispatch(*args: object, **kwargs: object) -> None:
         feedback_calls.append({"args": args, "kwargs": kwargs})
 
-    consumer._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
+    consumer.router._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "step",
@@ -1068,7 +1068,7 @@ async def test_docs_check_fail_triggers_wf_doc_amend_helper() -> None:
     async def _stub_feedback_dispatch(*args: object, **kwargs: object) -> None:
         feedback_calls.append({"args": args, "kwargs": kwargs})
 
-    consumer._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
+    consumer.router._maybe_fire_validate_feedback = _stub_feedback_dispatch  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "step",
@@ -1141,7 +1141,7 @@ async def test_consumer_routes_step_completed_to_review_override_helper() -> Non
     async def _stub(*args: object, **kwargs: object) -> None:
         override_calls.append({"args": args, "kwargs": kwargs})
 
-    consumer._maybe_emit_review_override = _stub  # type: ignore[method-assign]
+    consumer.router._maybe_emit_review_override = _stub  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "step",
@@ -1228,7 +1228,7 @@ async def test_consumer_routes_step_completed_to_rule_tuning_helper() -> None:
     async def _stub(*args: object, **kwargs: object) -> None:
         tuning_calls.append({"args": args, "kwargs": kwargs})
 
-    consumer._maybe_dispatch_rule_tuning = _stub  # type: ignore[method-assign]
+    consumer.router._maybe_dispatch_rule_tuning = _stub  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "step",

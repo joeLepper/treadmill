@@ -665,7 +665,7 @@ async def test_consumer_calls_maybe_fire_auto_merge_on_step_completed() -> None:
     async def _stub_auto_merge(sess, step_id):
         calls.append({"step_id": step_id})
 
-    consumer._maybe_fire_auto_merge = _stub_auto_merge  # type: ignore[method-assign]
+    consumer.router._maybe_fire_auto_merge = _stub_auto_merge  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "step",
@@ -724,7 +724,7 @@ async def test_consumer_skips_auto_merge_when_redis_not_wired() -> None:
     original = _triggers.maybe_auto_merge_on_mergeable
     _triggers.maybe_auto_merge_on_mergeable = _stub  # type: ignore[assignment]
     try:
-        await consumer._maybe_fire_auto_merge(session, "step-id-1")
+        await consumer.router._maybe_fire_auto_merge(session, "step-id-1")
     finally:
         _triggers.maybe_auto_merge_on_mergeable = original  # type: ignore[assignment]
 
@@ -769,7 +769,7 @@ async def test_consumer_arms_auto_merge_on_check_run_completed() -> None:
     async def _stub(sess, *, repo, pr_number):
         calls.append({"repo": repo, "pr_number": pr_number})
 
-    consumer._maybe_fire_auto_merge_on_github = _stub  # type: ignore[method-assign]
+    consumer.router._maybe_fire_auto_merge_on_github = _stub  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "github",
@@ -824,7 +824,7 @@ async def test_consumer_does_not_arm_auto_merge_on_pr_merged() -> None:
     async def _stub(sess, *, repo, pr_number):
         calls.append({"repo": repo, "pr_number": pr_number})
 
-    consumer._maybe_fire_auto_merge_on_github = _stub  # type: ignore[method-assign]
+    consumer.router._maybe_fire_auto_merge_on_github = _stub  # type: ignore[method-assign]
 
     await consumer.handle({
         "entity_type": "github",
