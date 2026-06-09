@@ -107,16 +107,16 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 - `PATCH /api/v1/task_board/{task_id}` — coordinator writes status + assignee
 - Tests: upsert, status vocab validation, FK cascade, reconciliation against `task_status` view
 
-## Phase 2 — Consumer split (2–3 days)
+## Phase 2 — Consumer split (2–3 days) — IN PROGRESS
 
-**Task 2A** — Extract event projector from consumer.py
+**Task 2A** — Extract event projector from consumer.py — Donna in progress
 - Split `services/api/treadmill_api/coordination/consumer.py` (2366 lines): `EventProjector` handles projection-only DB writes (single-writer path per ADR-0011); `PlanRouter` handles cross-step dispatch, feedback trigger, conflict resolution
 - `EventProjector` emits internal `step.projection_completed` event after each DB write
 - **Behavior-equivalence gate** (Bert): before merging, capture a 1-hour event trace against a live RAMJAC plan; replay through both old + new code paths; assert identical DB writes + emitted events. Trace-replay-equivalence is the merge gate, not test-suite-green alone.
 - `auto_merge_loop` stays wired to `consumer.__init__` as a transitional shim through this phase. It moves to the coordinator in Phase 3.
 - Existing consumer tests must stay green; refactor does not change observable behavior
 
-**Task 2B** — Cap retirement: coordinator-check-first path
+**Task 2B** — Cap retirement: coordinator-check-first path — Bert in progress (design ACK'd)
 - At each `_is_capped()` callsite in `services/api/treadmill_api/coordination/triggers.py`: before invoking the existing cap logic, check `task_board` for `blocked_operator` status on this task's plan
 - **Coordinator-liveness guard** (Bert): if `task_board.updated_at` for any task in this plan is older than N minutes (configurable, default 15), the coordinator is absent — skip the coordinator-check and apply cap behavior immediately. Coordinator absence = caps actively load-bearing.
 - **Caps remain hard-stop backstop** (Carla): constants are not relaxed. Coordinator-check is an earlier-stop overlay. A coordinator-blocked task stops before the cap fires; an uncoordinated task still hits the cap.
@@ -125,12 +125,13 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 
 ## Phase 3 — Coordinator session + briefing protocol (3–4 days)
 
-**Task 3A** — Coordinator launch + workdir convention
+**Task 3A** — Coordinator launch + workdir convention ✓ MERGED (e77ec38 / PR #252)
 - Systemd naming: `treadmill-channel@coordinator-<repo-slug>.service`
-- `launch-session.sh`: if `TREADMILL_ROLE=coordinator`, skip dispatch-reminder, set workdir `~/.treadmill/teams/<repo-slug>/`
-- `coordinator.env` file written by API at plan-start with `TREADMILL_COORDINATOR_PLANS=<id>,...`; coordinator reads on startup + reloads if it needs to subscribe to additional plans
+- `launch-session.sh`: if `TREADMILL_ROLE=coordinator`, skip dispatch-reminder, set workdir `~/.treadmill/teams/<repo-slug>/`; `set -a` sources `coordinator.env` so bare KEY=value lines export across `exec`
+- `coordinator.env.template` + README in `tools/coordinator/`
+- `coordinator.env` file written by API at plan-start with `TREADMILL_COORDINATOR_PLANS=<id>,...`; coordinator reads on startup (reload path deferred to Task 3A follow-up per v1 scope)
 
-**Task 3B** — Coordinator briefing prompt v1
+**Task 3B** — Coordinator briefing prompt v1 — Carla in progress
 - `tools/coordinator/coordinator_prompt.md`: system prompt covering task brief format, signal routing table, task_board API calls, per-repo memory read/write, escalation chain, self-compaction guidance (re-brief at context limit)
 - `tools/coordinator/brief_worker.py`: helper templating task brief (scope, active peers, pitfalls from per-repo memory, ownership claims format)
 - Quality gate for cap retirement: coordinator has successfully brokered ≥10 tasks (real run) AND amend rate on those 10 ≤30%. If >30%, briefing prompt iterates before Phase 4a.
