@@ -33,7 +33,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from treadmill_api.config import DeploymentMode, Settings, get_settings
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.dispatch import Dispatcher, DispatchError, get_dispatcher
-from treadmill_api.events.plan import PlanActivated, PlanRegistered
+from treadmill_api.events.plan import (
+    PlanActivated,
+    PlanRegistered,
+    PlanSubmitted,
+)
 from treadmill_api.events.task import TaskRegistered
 from treadmill_api.models import (
     Plan,
@@ -50,11 +54,29 @@ from treadmill_api.parsers import (
     parse_plan_doc_frontmatter,
 )
 from treadmill_api.parsers.plan_doc import validate_unique_task_ids
+from treadmill_api.team_config_store import TeamConfigStore
 
 logger = logging.getLogger("treadmill.plans")
 
 
 router = APIRouter(prefix="/api/v1/plans", tags=["plans"])
+
+
+def get_team_config_store() -> TeamConfigStore:
+    """FastAPI dependency factory for the :class:`TeamConfigStore`.
+
+    Plain instantiation — same shape as ``get_dispatcher`` /
+    ``get_settings``. The factory seam exists so tests can override
+    the dependency via ``app.dependency_overrides`` to inject a fake
+    store that returns ``None`` for every repo (the "no team_config
+    row" code path) without touching the route signature.
+
+    Task D of the combined ADR-0085+0086 plan added this as the first
+    ``TeamConfigStore`` injection in ``plans.py``; subsequent routers
+    that need it should re-export this same factory rather than
+    constructing a duplicate.
+    """
+    return TeamConfigStore()
 
 
 # ── Pydantic request / response shapes ────────────────────────────────────────
@@ -458,6 +480,9 @@ async def create_plan(
     session: Annotated[AsyncSession, Depends(get_session)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     settings: Annotated[Settings, Depends(get_settings)],
+    team_config_store: Annotated[
+        TeamConfigStore, Depends(get_team_config_store)
+    ],
 ) -> PlanResponse:
     """Create a Plan. Scenario 1 (with ``doc_content``) parses the doc and
     spawns Task rows; Scenario 2 (``intent`` only) creates a drafting plan
@@ -491,6 +516,16 @@ async def create_plan(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"plan-doc parse failed: {exc}",
             ) from exc
+
+    # ADR-0085+0086 Task D — repo-scoped team_configs lookup.
+    # When the repo has a team_configs row AND the request didn't
+    # supply ``created_by``, auto-derive it from the team's
+    # coordinator label. When the row is absent, behavior is
+    # unchanged — the legacy ``body.created_by`` lands verbatim and
+    # no ``plan.submitted`` event is emitted at the end.
+    team_config = await team_config_store.get_by_repo(session, body.repo)
+    if team_config is not None and body.created_by is None:
+        body.created_by = team_config.coordinator_label
 
     # D.10 — resolve the dev fast-path. Honored in any LOCAL mode
     # (fully_local OR dev_local) for intent-only (Scenario 2) submissions;
@@ -541,6 +576,12 @@ async def create_plan(
         plan_id=plan.id,
     )
 
+    # Track how many tasks the submission spawned. Used below for the
+    # ``plan.submitted`` event payload — coordinator-side fan-out sizing
+    # depends on this. Scenarios that don't spawn tasks (Scenario 2
+    # standard intent-only) leave it at 0.
+    task_count = 0
+
     if body.doc_content is not None:
         # Scenario 1: doc-driven create. PlanActivated fires in the same
         # transaction (decision #4) before tasks dispatch — Phase 3 D.5's
@@ -562,6 +603,7 @@ async def create_plan(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
             ) from exc
+        task_count = len(tasks)
     elif dev_active:
         # D.10 — dev fast-path for intent-only submissions in local mode.
         # Skip the wf-plan PR-merge gate: emit PlanActivated inline and
@@ -583,6 +625,27 @@ async def create_plan(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
             ) from exc
+        task_count = 1
+
+    # ADR-0085+0086 Task D — emit the plan.submitted event so the
+    # team's coordinator picks the work up without polling. Only fires when
+    # ``team_configs`` has a row for the plan's repo; repos without a
+    # row stay on the legacy ``PlanRegistered`` + ``PlanActivated`` shape
+    # and never fire this. Lands in the same transaction as the rest of
+    # the plan lifecycle events so the coordinator's listener sees the
+    # plan + tasks atomically.
+    if team_config is not None:
+        await dispatcher.persist_and_publish(
+            session,
+            entity_type="plan",
+            action="submitted",
+            payload=PlanSubmitted(
+                repo=plan.repo,
+                coordinator_label=team_config.coordinator_label,
+                task_count=task_count,
+            ),
+            plan_id=plan.id,
+        )
 
     await session.commit()
     await session.refresh(plan)

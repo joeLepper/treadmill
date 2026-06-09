@@ -59,3 +59,28 @@ class PlanAbandoned(EventPayload):
     ACTION: ClassVar[str] = "abandoned"
 
     reason: str | None = None
+
+
+class PlanSubmitted(EventPayload):
+    """A plan was submitted through a repo whose ``team_configs`` row
+    names a coordinator. Emitted by ``POST /plans`` (Task D of the
+    ADR-0085+0086 plan) so the coordinator subscribed to the repo can
+    pick the work up without polling.
+
+    Only fires when ``team_configs`` has a row for the plan's repo;
+    repos without one stay on the legacy ``PlanRegistered`` +
+    ``PlanActivated`` lifecycle and don't get this event.
+
+    Payload fields are the minimum the coordinator needs to fan out to
+    workers: the plan id (for lookups), the repo (for routing), the
+    coordinator label (echoed back so the coordinator can ack against
+    its own identity), and the task count (so the coordinator can size
+    its initial dispatch batch).
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "plan"
+    ACTION: ClassVar[str] = "submitted"
+
+    repo: str
+    coordinator_label: str
+    task_count: int

@@ -88,6 +88,7 @@ _TEST_TABLES = (
     "workflow_runs",
     "workflow_run_steps",
     "events",
+    "team_configs",
     "workflows",
     "workflow_versions",
     "workflow_version_steps",
@@ -324,6 +325,182 @@ sequence_of_work:
     # 400 from our explicit parse check, OR 422 if Pydantic field-level
     # validation kicks in first. Either way, NOT 201.
     assert response.status_code in (400, 422)
+
+
+# ── Task D — team_configs auto-routing + plan.submitted event ────────────────
+
+
+def _seed_team_config(
+    engine: Engine,
+    *,
+    repo: str,
+    coordinator_label: str,
+    worker_labels: list[str] | None = None,
+) -> None:
+    """Insert a single ``team_configs`` row + return after commit."""
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO team_configs "
+                "(repo, coordinator_label, worker_labels) "
+                "VALUES (:repo, :coord, :workers)"
+            ),
+            {
+                "repo": repo,
+                "coord": coordinator_label,
+                "workers": worker_labels or [],
+            },
+        )
+
+
+def test_create_plan_when_team_config_exists_auto_sets_created_by_and_emits_submitted(
+    client: httpx.Client, engine: Engine, truncate: None,
+) -> None:
+    """ADR-0085+0086 Task D — a repo with a team_configs row:
+    (a) auto-derives created_by from team.coordinator_label when the
+    request body omits it, and (b) emits a plan.submitted event."""
+    _seed_team_config(
+        engine,
+        repo="team-d/auto-routing",
+        coordinator_label="coord-team-alpha",
+    )
+
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "team-d/auto-routing",
+            "intent": "test the auto-routing path",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    plan_id = body["id"]
+
+    # (a) created_by auto-derived from the team_config row.
+    with engine.connect() as conn:
+        plan_row = conn.execute(
+            sa.text("SELECT created_by FROM plans WHERE id = :id"),
+            {"id": plan_id},
+        ).fetchone()
+    assert plan_row is not None
+    assert plan_row[0] == "coord-team-alpha"
+
+    # (b) the plan.submitted event landed in the events table with the
+    # right payload shape.
+    with engine.connect() as conn:
+        submitted_event = conn.execute(
+            sa.text(
+                "SELECT payload FROM events "
+                "WHERE plan_id = :id AND entity_type = 'plan' "
+                "AND action = 'submitted'"
+            ),
+            {"id": plan_id},
+        ).fetchone()
+    assert submitted_event is not None
+    payload = submitted_event[0]
+    assert payload["repo"] == "team-d/auto-routing"
+    assert payload["coordinator_label"] == "coord-team-alpha"
+    # Scenario 2 intent-only → no tasks spawned.
+    assert payload["task_count"] == 0
+
+
+def test_create_plan_when_no_team_config_preserves_created_by_and_skips_submitted(
+    client: httpx.Client, engine: Engine, truncate: None,
+) -> None:
+    """ADR-0085+0086 Task D — a repo with NO team_configs row:
+    (a) preserves the request body's created_by verbatim (no auto-
+    override), and (b) does NOT emit a plan.submitted event. Repos
+    without a team config stay on the legacy lifecycle."""
+    # No team_configs row for this repo.
+    explicit_created_by = "user-explicit-author"
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "team-d/no-config",
+            "intent": "test the legacy path",
+            "created_by": explicit_created_by,
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    plan_id = body["id"]
+
+    # (a) created_by lands verbatim.
+    with engine.connect() as conn:
+        plan_row = conn.execute(
+            sa.text("SELECT created_by FROM plans WHERE id = :id"),
+            {"id": plan_id},
+        ).fetchone()
+    assert plan_row is not None
+    assert plan_row[0] == explicit_created_by
+
+    # (b) NO plan.submitted event landed.
+    with engine.connect() as conn:
+        submitted_event = conn.execute(
+            sa.text(
+                "SELECT COUNT(*) FROM events "
+                "WHERE plan_id = :id AND action = 'submitted'"
+            ),
+            {"id": plan_id},
+        ).scalar()
+    assert submitted_event == 0
+
+
+def test_create_plan_with_doc_and_team_config_includes_task_count(
+    client: httpx.Client, engine: Engine, truncate: None,
+    seed_wf_author: None,
+) -> None:
+    """Scenario 1 + team_config: the plan.submitted event's task_count
+    reflects the number of tasks spawned by the doc."""
+    _seed_team_config(
+        engine,
+        repo="team-d/with-tasks",
+        coordinator_label="coord-team-beta",
+    )
+
+    doc = """\
+# Task D Test Plan
+
+## Sequence of work
+
+```yaml
+sequence_of_work:
+  - id: t1
+    title: First task
+    workflow: wf-author
+    depends_on: []
+    intent: do stuff
+  - id: t2
+    title: Second task
+    workflow: wf-author
+    depends_on: [t1]
+    intent: do more stuff
+```
+"""
+
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "team-d/with-tasks",
+            "doc_content": doc,
+            "doc_path": "docs/plans/team-d-test.md",
+        },
+    )
+    assert response.status_code == 201, response.text
+    plan_id = response.json()["id"]
+
+    with engine.connect() as conn:
+        submitted_event = conn.execute(
+            sa.text(
+                "SELECT payload FROM events "
+                "WHERE plan_id = :id AND action = 'submitted'"
+            ),
+            {"id": plan_id},
+        ).fetchone()
+    assert submitted_event is not None
+    payload = submitted_event[0]
+    assert payload["task_count"] == 2
+    assert payload["coordinator_label"] == "coord-team-beta"
 
 
 # ── GET /plans/{id} ───────────────────────────────────────────────────────────
