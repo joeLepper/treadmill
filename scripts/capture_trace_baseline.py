@@ -96,26 +96,23 @@ def _row_to_dict(row: sa.engine.Row) -> dict[str, Any]:
     }
 
 
-class _RecordingDispatcher:
-    """Stub dispatcher — records every ``publish`` call in order so the
-    equivalence assertion can compare routing-side effects directly."""
+class _RecordingPublisher:
+    """Recording publisher passed into the REAL Dispatcher.
+
+    Captures every ``publish(event, payload)`` invocation in arrival
+    order. The trigger paths and ``dispatch_task`` both call into
+    ``dispatcher.publisher.publish``, so this surfaces every event
+    publish the consumer triggers — without needing to mock the
+    dispatcher's internal DB writes."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(
-        self,
-        *,
-        workflow_id: str,
-        task_id: uuid.UUID | str,
-        source_event_id: uuid.UUID | str | None = None,
-        **extra: Any,
-    ) -> None:
+    async def publish(self, event: Any, payload: Any) -> None:
         self.calls.append({
-            "workflow_id": workflow_id,
-            "task_id": str(task_id),
-            "source_event_id": str(source_event_id) if source_event_id else None,
-            "extra_keys": sorted(extra.keys()),
+            "kind": "publisher.publish",
+            "event_type": getattr(event, "entity_type", None),
+            "event_action": getattr(event, "action", None),
         })
 
 
@@ -126,6 +123,7 @@ _SEED_TABLES = (
     "workflow_versions",
     "roles",
     "workflow_version_steps",
+    "event_triggers",
     "plans",
     "tasks",
     "workflow_runs",
@@ -177,7 +175,14 @@ async def _capture(database_url: str) -> None:
         f"{len(manifest.get('workflow_run_steps', []))} step rows."
     )
 
-    dispatcher = _RecordingDispatcher()
+    from treadmill_api.dispatch import Dispatcher
+
+    publisher = _RecordingPublisher()
+    dispatcher = Dispatcher(
+        publisher=publisher,
+        sqs_client=None,
+        work_queue_url=None,
+    )
     reevaluate_call_count = 0
     consumer = CoordinationConsumer(
         sqs_client=None,
@@ -186,14 +191,14 @@ async def _capture(database_url: str) -> None:
         dispatcher=dispatcher,
     )
 
-    original_reevaluate = consumer._reevaluate
+    original_reevaluate = consumer.router._reevaluate
 
     async def _wrapped_reevaluate(*args: Any, **kwargs: Any) -> Any:
         nonlocal reevaluate_call_count
         reevaluate_call_count += 1
         return await original_reevaluate(*args, **kwargs)
 
-    consumer._reevaluate = _wrapped_reevaluate  # type: ignore[assignment]
+    consumer.router._reevaluate = _wrapped_reevaluate  # type: ignore[assignment]
 
     # Replay every event sequentially. The synthetic fixture is clean
     # by construction (the generator validates round-trip parsing
@@ -206,23 +211,36 @@ async def _capture(database_url: str) -> None:
             await consumer.handle(record)
             event_count += 1
 
-    # Snapshot the tables the consumer writes to.
-    tables = ("events", "workflow_run_steps", "task_prs")
-    table_rows: dict[str, list[dict[str, Any]]] = {}
+    # Snapshot table shape and the per-(entity_type,action) projection
+    # of events. Trigger paths create downstream rows with
+    # ``gen_random_uuid()`` defaults so row-level UUID comparison is
+    # nondeterministic across capture / replay runs; behaviour-
+    # equivalence holds at the COUNT + KIND-COUNT level, which is what
+    # the harness asserts. The publisher.publish sequence (next field)
+    # still gives an order-sensitive equivalence check on the
+    # downstream routing decisions.
+    table_counts: dict[str, int] = {}
     with sync_engine.begin() as conn:
-        for table in tables:
-            rows = conn.execute(
-                sa.text(f"SELECT * FROM {table} ORDER BY 1"),
-            ).all()
-            table_rows[table] = [_row_to_dict(r) for r in rows]
+        for table in ("events", "workflow_run_steps", "task_prs"):
+            (count,) = conn.execute(
+                sa.text(f"SELECT COUNT(*) FROM {table}"),
+            ).one()
+            table_counts[table] = count
+        events_by_kind = dict(conn.execute(
+            sa.text(
+                "SELECT entity_type || '.' || action AS kind, COUNT(*) "
+                "FROM events GROUP BY 1 ORDER BY 1"
+            ),
+        ).all())
     sync_engine.dispose()
 
     baseline = {
         "schema": _SCHEMA_VERSION,
         "captured_against_commit": _git_head_sha(),
         "event_count": event_count,
-        "tables": table_rows,
-        "dispatcher_calls": dispatcher.calls,
+        "table_counts": table_counts,
+        "events_by_kind": events_by_kind,
+        "publisher_calls": publisher.calls,
         "reevaluate_call_count": reevaluate_call_count,
     }
 
@@ -230,14 +248,14 @@ async def _capture(database_url: str) -> None:
         json.dump(baseline, f, indent=2, sort_keys=True)
     print(
         f"captured baseline: {event_count} events, "
-        f"{len(dispatcher.calls)} dispatcher calls, "
+        f"{len(publisher.calls)} publisher.publish calls, "
         f"{reevaluate_call_count} _reevaluate calls -> {_BASELINE_PATH}"
     )
     print(
         f"snapshot row counts — "
-        f"events: {len(table_rows['events'])}, "
-        f"workflow_run_steps: {len(table_rows['workflow_run_steps'])}, "
-        f"task_prs: {len(table_rows['task_prs'])}"
+        f"events: {table_counts['events']}, "
+        f"workflow_run_steps: {table_counts['workflow_run_steps']}, "
+        f"task_prs: {table_counts['task_prs']}"
     )
 
     await engine.dispose()

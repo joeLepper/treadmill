@@ -1,773 +1,98 @@
 {
-  "captured_against_commit": "889500d0c006e16b891fd9af1295616fb4714b66",
-  "dispatcher_calls": [],
+  "captured_against_commit": "da453941b5884e8d87d4f6850cb72e009c87f23b",
   "event_count": 56,
-  "reevaluate_call_count": 8,
+  "events_by_kind": {
+    "github.pr_merged": 2,
+    "github.pr_opened": 3,
+    "step.completed": 13,
+    "step.failed": 1,
+    "step.ready": 14,
+    "step.started": 14,
+    "task.cancelled": 1,
+    "task.escalated_to_operator": 1
+  },
+  "publisher_calls": [
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "escalated_to_operator",
+      "event_type": "task",
+      "kind": "publisher.publish"
+    },
+    {
+      "event_action": "ready",
+      "event_type": "step",
+      "kind": "publisher.publish"
+    }
+  ],
+  "reevaluate_call_count": 15,
   "schema": 2,
-  "tables": {
-    "events": [
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "0266e9be-d1bf-5c60-8a1d-e83dd182c2b1",
-        "payload": {
-          "started_at": "2026-06-01T16:05:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "step_id": "d5a4a5fa-edce-595a-8bed-8a54169536d7",
-        "task_id": "50698a94-82b8-5747-bed7-ae2aaa09a56b"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "05e7b768-3137-580b-87db-f2810dce450f",
-        "payload": {
-          "completed_at": "2026-06-01T15:37:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "pass",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-c-review terminal for task 0"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "step_id": "a2d1a5bd-54a3-596a-bc1a-9299a098da91",
-        "task_id": "913623b6-b6b9-57af-a6a4-ae7772d945b8"
-      },
-      {
-        "action": "cancelled",
-        "commit_sha": null,
-        "entity_type": "task",
-        "id": "169b9bb9-d3d5-5239-a684-dd562eecef6b",
-        "payload": {
-          "reason": "synthetic cancellation for coverage"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": null,
-        "step_id": null,
-        "task_id": "1c78c724-eb36-5a4c-8a9c-794edb965035"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "1dbf0dc3-7965-561a-8c18-cf78a4a1f578",
-        "payload": {
-          "started_at": "2026-06-01T16:07:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "step_id": "ea85e020-2f73-5a18-97b1-74ba6b96ef0a",
-        "task_id": "50698a94-82b8-5747-bed7-ae2aaa09a56b"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "2efb1f5a-05ad-5c23-9034-a7500aeb2793",
-        "payload": {
-          "started_at": "2026-06-01T15:53:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "step_id": "88dd5e3e-734c-5a11-a569-6fed67f29c1c",
-        "task_id": "860af6d9-e15a-5654-9bac-c5c0d89c38a9"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "49ddd266-765b-5948-9df5-e4a49748dfa7",
-        "payload": {
-          "started_at": "2026-06-01T15:55:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "step_id": "c80a9130-bc20-5754-9eb9-b36f43f603a5",
-        "task_id": "860af6d9-e15a-5654-9bac-c5c0d89c38a9"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "4ba01259-cb00-54a6-ab29-40fb331ee1e3",
-        "payload": {
-          "started_at": "2026-06-01T15:37:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "step_id": "a2d1a5bd-54a3-596a-bc1a-9299a098da91",
-        "task_id": "913623b6-b6b9-57af-a6a4-ae7772d945b8"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "4e3cc085-f306-5b22-a5b4-d186f37cafcc",
-        "payload": {
-          "completed_at": "2026-06-01T15:47:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "pass",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-c-review terminal for task 1"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "step_id": "22a28808-5359-5152-baaf-00f68ca53654",
-        "task_id": "34bd3bf5-9587-55a6-bb85-7e86a484fe25"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "4f4120ce-606a-5b98-ace2-4f1f720d21ed",
-        "payload": {
-          "started_at": "2026-06-01T16:13:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
-        "step_id": "7ce0857c-9df7-5ec1-b312-778c6d416d80",
-        "task_id": "1c78c724-eb36-5a4c-8a9c-794edb965035"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "5dff1545-8121-50c5-a2f4-d472492084f7",
-        "payload": {
-          "started_at": "2026-06-01T15:33:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "step_id": "76e4ef1e-541f-5856-bfe7-b534b465adb7",
-        "task_id": "913623b6-b6b9-57af-a6a4-ae7772d945b8"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "726ae997-dd4c-5b91-b53b-ef5ec11b9b4a",
-        "payload": {
-          "completed_at": "2026-06-01T15:55:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "pass",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-b-validate terminal for task 2"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "step_id": "c80a9130-bc20-5754-9eb9-b36f43f603a5",
-        "task_id": "860af6d9-e15a-5654-9bac-c5c0d89c38a9"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "7d61dd16-f0d2-59c6-a551-bc57b43866cd",
-        "payload": {
-          "completed_at": "2026-06-01T15:35:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "pass",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-b-validate terminal for task 0"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "step_id": "fc2960d6-7a76-5afc-bba6-46a25d5b2940",
-        "task_id": "913623b6-b6b9-57af-a6a4-ae7772d945b8"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "83de3674-1066-525d-a359-7f6761102624",
-        "payload": {
-          "started_at": "2026-06-01T16:15:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
-        "step_id": "5c3f7697-d554-56a7-92ce-ede73ed435e1",
-        "task_id": "1c78c724-eb36-5a4c-8a9c-794edb965035"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "97e94106-76ac-521e-a71e-737ab61ee1ff",
-        "payload": {
-          "started_at": "2026-06-01T15:47:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "step_id": "22a28808-5359-5152-baaf-00f68ca53654",
-        "task_id": "34bd3bf5-9587-55a6-bb85-7e86a484fe25"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "99eacb77-7708-5ac3-9fe4-81e78d084075",
-        "payload": {
-          "completed_at": "2026-06-01T16:07:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "gate-broken",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-c-review terminal for task 3"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "step_id": "ea85e020-2f73-5a18-97b1-74ba6b96ef0a",
-        "task_id": "50698a94-82b8-5747-bed7-ae2aaa09a56b"
-      },
-      {
-        "action": "failed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "9f8c3821-88d0-53bf-acf4-26a278b6c055",
-        "payload": {
-          "error": "synthetic worker crash for trace coverage",
-          "failed_at": "2026-06-01T16:15:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
-        "step_id": "5c3f7697-d554-56a7-92ce-ede73ed435e1",
-        "task_id": "1c78c724-eb36-5a4c-8a9c-794edb965035"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "a7080973-788e-5599-9882-62d538b22d40",
-        "payload": {
-          "started_at": "2026-06-01T15:45:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "step_id": "8019efcd-50c4-548b-9089-31ad7401206a",
-        "task_id": "34bd3bf5-9587-55a6-bb85-7e86a484fe25"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "ab9e72a8-5e9f-5867-afdf-77b781c5b110",
-        "payload": {
-          "completed_at": "2026-06-01T16:05:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "pass",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-b-validate terminal for task 3"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "step_id": "d5a4a5fa-edce-595a-8bed-8a54169536d7",
-        "task_id": "50698a94-82b8-5747-bed7-ae2aaa09a56b"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "b16a0d11-e124-5368-956f-2883b9a396b8",
-        "payload": {
-          "started_at": "2026-06-01T15:57:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "step_id": "09181b4f-70ec-5627-84ed-4e9d6777e8b1",
-        "task_id": "860af6d9-e15a-5654-9bac-c5c0d89c38a9"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "b1fb10f4-233c-5871-960e-e5825a2c62c7",
-        "payload": {
-          "started_at": "2026-06-01T15:43:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "step_id": "b138d03c-5972-5082-b375-1ff8442c81bf",
-        "task_id": "34bd3bf5-9587-55a6-bb85-7e86a484fe25"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "c327dd0a-e531-5064-bcd0-bdacb04accb9",
-        "payload": {
-          "started_at": "2026-06-01T15:35:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "step_id": "fc2960d6-7a76-5afc-bba6-46a25d5b2940",
-        "task_id": "913623b6-b6b9-57af-a6a4-ae7772d945b8"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "cd98f741-1a14-52aa-a9e0-e1c9909fb228",
-        "payload": {
-          "completed_at": "2026-06-01T15:57:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "changes_requested",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-c-review terminal for task 2"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "step_id": "09181b4f-70ec-5627-84ed-4e9d6777e8b1",
-        "task_id": "860af6d9-e15a-5654-9bac-c5c0d89c38a9"
-      },
-      {
-        "action": "completed",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "d08ae64b-8f52-5a3d-b867-faa175efe914",
-        "payload": {
-          "completed_at": "2026-06-01T15:45:00+00:00",
-          "output": {
-            "artifacts": [],
-            "commit_sha": "deadbeefcafe",
-            "decision": "fail",
-            "metadata": {},
-            "payload": {
-              "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-            },
-            "summary": "Step step-b-validate terminal for task 1"
-          }
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "step_id": "8019efcd-50c4-548b-9089-31ad7401206a",
-        "task_id": "34bd3bf5-9587-55a6-bb85-7e86a484fe25"
-      },
-      {
-        "action": "started",
-        "commit_sha": null,
-        "entity_type": "step",
-        "id": "d3673366-a7f6-5201-99aa-0694eee8b4fd",
-        "payload": {
-          "started_at": "2026-06-01T16:03:00+00:00"
-        },
-        "plan_id": "7ef84557-3593-5449-b065-2de2319c0f99",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "step_id": "b46fddb1-dd24-5825-91d4-e83d8e34a251",
-        "task_id": "50698a94-82b8-5747-bed7-ae2aaa09a56b"
-      }
-    ],
-    "task_prs": [],
-    "workflow_run_steps": [
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T15:57:00+00:00",
-        "error": null,
-        "id": "09181b4f-70ec-5627-84ed-4e9d6777e8b1",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "changes_requested",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-c-review terminal for task 2"
-        },
-        "output_tokens": null,
-        "role_id": "role-review",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "started_at": "2026-06-01T15:57:00+00:00",
-        "status": "completed",
-        "step_index": 2,
-        "step_name": "step-c-review"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T15:47:00+00:00",
-        "error": null,
-        "id": "22a28808-5359-5152-baaf-00f68ca53654",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "pass",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-c-review terminal for task 1"
-        },
-        "output_tokens": null,
-        "role_id": "role-review",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "started_at": "2026-06-01T15:47:00+00:00",
-        "status": "completed",
-        "step_index": 2,
-        "step_name": "step-c-review"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T16:15:00+00:00",
-        "error": "synthetic worker crash for trace coverage",
-        "id": "5c3f7697-d554-56a7-92ce-ede73ed435e1",
-        "input_tokens": null,
-        "model": null,
-        "output": null,
-        "output_tokens": null,
-        "role_id": "role-validate",
-        "run_id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
-        "started_at": "2026-06-01T16:15:00+00:00",
-        "status": "failed",
-        "step_index": 1,
-        "step_name": "step-b-validate"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": null,
-        "error": null,
-        "id": "76e4ef1e-541f-5856-bfe7-b534b465adb7",
-        "input_tokens": null,
-        "model": null,
-        "output": null,
-        "output_tokens": null,
-        "role_id": "role-author",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "started_at": "2026-06-01T15:33:00+00:00",
-        "status": "running",
-        "step_index": 0,
-        "step_name": "step-a-author"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": null,
-        "error": null,
-        "id": "7ce0857c-9df7-5ec1-b312-778c6d416d80",
-        "input_tokens": null,
-        "model": null,
-        "output": null,
-        "output_tokens": null,
-        "role_id": "role-author",
-        "run_id": "b4d0a690-a6aa-5f7b-948a-6068813f24e2",
-        "started_at": "2026-06-01T16:13:00+00:00",
-        "status": "running",
-        "step_index": 0,
-        "step_name": "step-a-author"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T15:45:00+00:00",
-        "error": null,
-        "id": "8019efcd-50c4-548b-9089-31ad7401206a",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "fail",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-b-validate terminal for task 1"
-        },
-        "output_tokens": null,
-        "role_id": "role-validate",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "started_at": "2026-06-01T15:45:00+00:00",
-        "status": "completed",
-        "step_index": 1,
-        "step_name": "step-b-validate"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": null,
-        "error": null,
-        "id": "88dd5e3e-734c-5a11-a569-6fed67f29c1c",
-        "input_tokens": null,
-        "model": null,
-        "output": null,
-        "output_tokens": null,
-        "role_id": "role-author",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "started_at": "2026-06-01T15:53:00+00:00",
-        "status": "running",
-        "step_index": 0,
-        "step_name": "step-a-author"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T15:37:00+00:00",
-        "error": null,
-        "id": "a2d1a5bd-54a3-596a-bc1a-9299a098da91",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "pass",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-c-review terminal for task 0"
-        },
-        "output_tokens": null,
-        "role_id": "role-review",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "started_at": "2026-06-01T15:37:00+00:00",
-        "status": "completed",
-        "step_index": 2,
-        "step_name": "step-c-review"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": null,
-        "error": null,
-        "id": "b138d03c-5972-5082-b375-1ff8442c81bf",
-        "input_tokens": null,
-        "model": null,
-        "output": null,
-        "output_tokens": null,
-        "role_id": "role-author",
-        "run_id": "79f7c474-1bc3-5186-ae7e-29a7daadc42b",
-        "started_at": "2026-06-01T15:43:00+00:00",
-        "status": "running",
-        "step_index": 0,
-        "step_name": "step-a-author"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": null,
-        "error": null,
-        "id": "b46fddb1-dd24-5825-91d4-e83d8e34a251",
-        "input_tokens": null,
-        "model": null,
-        "output": null,
-        "output_tokens": null,
-        "role_id": "role-author",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "started_at": "2026-06-01T16:03:00+00:00",
-        "status": "running",
-        "step_index": 0,
-        "step_name": "step-a-author"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T15:55:00+00:00",
-        "error": null,
-        "id": "c80a9130-bc20-5754-9eb9-b36f43f603a5",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "pass",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-b-validate terminal for task 2"
-        },
-        "output_tokens": null,
-        "role_id": "role-validate",
-        "run_id": "ccb040c2-4fdc-5460-aec4-a12870cc95db",
-        "started_at": "2026-06-01T15:55:00+00:00",
-        "status": "completed",
-        "step_index": 1,
-        "step_name": "step-b-validate"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T16:05:00+00:00",
-        "error": null,
-        "id": "d5a4a5fa-edce-595a-8bed-8a54169536d7",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "pass",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-b-validate terminal for task 3"
-        },
-        "output_tokens": null,
-        "role_id": "role-validate",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "started_at": "2026-06-01T16:05:00+00:00",
-        "status": "completed",
-        "step_index": 1,
-        "step_name": "step-b-validate"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T16:07:00+00:00",
-        "error": null,
-        "id": "ea85e020-2f73-5a18-97b1-74ba6b96ef0a",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "gate-broken",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-c-review terminal for task 3"
-        },
-        "output_tokens": null,
-        "role_id": "role-review",
-        "run_id": "f460539a-7cdf-550f-81ff-d04b84a13426",
-        "started_at": "2026-06-01T16:07:00+00:00",
-        "status": "completed",
-        "step_index": 2,
-        "step_name": "step-c-review"
-      },
-      {
-        "cache_creation_tokens": null,
-        "cache_read_tokens": null,
-        "completed_at": "2026-06-01T15:35:00+00:00",
-        "error": null,
-        "id": "fc2960d6-7a76-5afc-bba6-46a25d5b2940",
-        "input_tokens": null,
-        "model": null,
-        "output": {
-          "artifacts": [],
-          "commit_sha": "deadbeefcafe",
-          "decision": "pass",
-          "metadata": {
-            "cost_usd": null,
-            "duration_ms": null,
-            "extra": {},
-            "input_tokens": null,
-            "model": null,
-            "output_tokens": null
-          },
-          "payload": {
-            "patch_fragment": "+ORGANIZATION_ID=\"YOUR_ORG_ID\"\n+BILLING_ACCOUNT_ID=\"YOUR_BILLING_ID\"\n"
-          },
-          "summary": "Step step-b-validate terminal for task 0"
-        },
-        "output_tokens": null,
-        "role_id": "role-validate",
-        "run_id": "e411fa71-a0ba-50ff-80f4-143796ec82ad",
-        "started_at": "2026-06-01T15:35:00+00:00",
-        "status": "completed",
-        "step_index": 1,
-        "step_name": "step-b-validate"
-      }
-    ]
+  "table_counts": {
+    "events": 49,
+    "task_prs": 5,
+    "workflow_run_steps": 29
   }
 }

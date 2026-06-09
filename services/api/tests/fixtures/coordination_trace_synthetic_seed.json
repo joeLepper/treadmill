@@ -1,4 +1,22 @@
 {
+  "event_triggers": [
+    {
+      "enabled": true,
+      "event_type": "pr_opened",
+      "id": "fdab91a6-8c7e-58ba-8db5-cacba11e9af4",
+      "repo": "acme/widget",
+      "version_strategy": "latest",
+      "workflow_id": "wf-author-synthetic"
+    },
+    {
+      "enabled": true,
+      "event_type": "pr_merged",
+      "id": "607de4fd-64ff-525d-a994-0ee3baab4a0d",
+      "repo": "acme/widget",
+      "version_strategy": "latest",
+      "workflow_id": "wf-author-synthetic"
+    }
+  ],
   "plans": [
     {
       "created_by": "synthetic-generator",
