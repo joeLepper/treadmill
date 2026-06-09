@@ -155,7 +155,19 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 
 **Reversal**: flip flag back to true. 30 seconds.
 
-## Phase 5 — End-to-end proof on RAMJAC (2 days)
+## Phase 5 — End-to-end proof on RAMJAC (2 days) — IN PROGRESS
+
+**Testbed plan**: `b3a8bd29-38d9-448c-85f9-046eb493c855` — GCP observability stack +
+dashboards-as-code (7 tasks). Submitted 2026-06-09T06:37Z by coordinator-medicoder.
+coordinator.env updated to include plan ID. Workers briefed via cc-relay.
+
+**Task routing** (2026-06-09):
+- Bert: otel-collector-deploy (78af1379), dispatcher-coverage (449d380f)
+- Donna: datadog-dashboards-as-code (9959c49c) ✓ MERGED PR #1231, dedup-purge-cloud-run-job (9bbda236)
+- Carla: consumer-subscription-validation (7877139d), planrouter-fixture-expansion (4e3cffc2)
+- Alan: cloud-trace-verify (82179115) — blocked on otel-collector-deploy
+
+**Brokered count so far**: 1 merged (9959c49c / PR #1231, 2026-06-09T06:39Z)
 
 Run a real plan on RAMJAC using coordinator-medicoder + 2 workers. Verify:
 - Coordinator provisions workers (not autoscaler)
