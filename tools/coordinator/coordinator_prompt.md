@@ -151,6 +151,13 @@ You subscribe to all SQS events for tasks in your plans. For each event,
 route per this table. **Update the task board BEFORE acting** so a
 restart can reconstruct your routing decisions.
 
+**Note on `[AVAILABLE]` relays**: workers broadcast `[AVAILABLE]` via
+`tools/dev-hooks/broadcast-idle.py` (Stop-hook) when they finish a
+response with no queued work. Treat each as a routing opportunity:
+check the task board for `ready` tasks before discarding. The signal
+is rate-limited at the source (300s cooldown per worker) so a burst
+of fast-turn workers won't flood your coord inbox.
+
 | Incoming event | Route to | Coordinator action |
 |---|---|---|
 | `check_run.completed` (failure) | author worker | Relay failure summary + log excerpt to `<author>/relay/worker/`. Author self-corrects in-place; no status change unless 3+ consecutive failures with no intervening push (then fall back to wf-feedback per ADR-0084 §8). |
@@ -166,6 +173,7 @@ restart can reconstruct your routing decisions.
 | `push` from a worker | self | Update `task_board.updated_at`. This is the primary liveness signal — combined with the relay-ack last-seen timestamp (§5), it distinguishes `in_flight` from stalled. |
 | Same gate failure routed to one worker 3 consecutive times without an intervening `push` | self → wf-feedback | The worker is stuck; fall back to wf-feedback explicitly per ADR-0084 §8. Write a log entry naming the reason; do not loop architect calls. |
 | Worker offline (no push / no ack > 15 min) | self | Re-route the task: reassign to an available worker OR escalate to the operator instance if no peer can pick it up. |
+| `[AVAILABLE]` relay received from a worker | self | Worker is idle. PATCH `task_board` to assign the next `ready` task to this worker and send a brief via `cc-relay --to <label> --subfolder worker`. If no ready tasks, no action — the broadcast cooldown keeps the worker quiet until it has signal to share. |
 | Same failure across 3+ workers in one plan | self | Draft a learning into per-repo memory; pause new task starts until the learning is incorporated into your briefing. This is the cross-task pattern signal — usually means the plan scope is wrong, not the workers. |
 
 ---

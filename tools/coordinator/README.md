@@ -159,6 +159,49 @@ Copy `treadmill-channel@coordinator-medicoder.service` and substitute
 every `medicoder` with the new slug. Same install-via-symlink, same
 launch wrapper with `--repo <new-slug>`.
 
+## Worker availability protocol
+
+Workers don't wait to be asked — they announce when they're idle.
+
+The mechanism: `tools/dev-hooks/broadcast-idle.py` runs as a `Stop`
+hook (`.claude/settings.json`) when a worker session finishes
+responding. It writes an `[AVAILABLE]` relay file into every
+discovered coordinator inbox (glob `~/.cc-channels/coordinator-*/relay/`)
+plus an availability record at `~/.treadmill/availability/<label>.json`.
+
+The relay file shape:
+
+```
+[AVAILABLE]
+
+[from: treadmill-bert]
+
+Worker treadmill-bert is idle and available for task assignment.
+```
+
+Filename convention: `<ns_ts>-<token>-available-from-<label>.md` so
+two workers idling in the same nanosecond don't collide.
+
+**Cooldown**: 300 seconds per worker (tracked in
+`~/.treadmill/session-state/<label>/last-idle-broadcast`). A worker
+that finishes 12 turns in 5 minutes broadcasts once, not 12 times.
+
+**Coordinator side**: the prompt §4 routing table handles `[AVAILABLE]`
+relays as a routing opportunity — check the task board for `ready`
+tasks and brief the worker, or no-op if nothing is queued.
+
+**Skip conditions** (the hook returns 0 silently):
+- `TREADMILL_SESSION_LABEL` unset — not a labeled session.
+- Label starts with `coordinator-` — coordinators don't broadcast.
+- Cooldown still active (< 300s since last broadcast).
+- I/O failures (disk full, permission denied) — Stop hooks must not
+  block the worker from idling.
+
+**Wiring**: every worker session running in the Treadmill repo (or any
+of its `.claude/settings.json`-scoped worktrees) gets the hook
+automatically. The hook is in the project settings file; no per-worker
+configuration is required.
+
 ## Future contents
 
 This directory will grow to hold the coordinator's operating prompt and
