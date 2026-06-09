@@ -44,7 +44,17 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "moto[server]>=5.0.0",
+    # ``test_starters`` exercises ``seed()``, which lazily imports
+    # ``treadmill_cli.api_client.ApiError`` (see ``starters.py``). The
+    # workspace install in CI provides it via ``uv sync --all-packages``,
+    # but a pip-only ``pip install services/api[dev]`` would miss it.
+    # Declaring the dev dep explicitly closes that gap and matches the
+    # workspace source rule below.
+    "treadmill-cli",
 ]
+
+[tool.uv.sources]
+treadmill-cli = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

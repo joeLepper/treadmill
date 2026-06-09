@@ -26,6 +26,36 @@ from treadmill_api.starters import (
 )
 
 
+def _treadmill_cli_importable() -> bool:
+    """Whether the ``treadmill_cli`` workspace package resolves in this env.
+
+    ``test_starters`` content tests don't touch it, but the ``seed()``
+    behavior tests below do (via ``starters.seed()``'s local import of
+    ``treadmill_cli.api_client.ApiError``). Running pytest in an env
+    that wasn't built with ``uv sync --all-packages`` (e.g. a pip-only
+    install of ``services/api[dev]``) misses the workspace dep and the
+    seed() tests would ImportError at run-time. With the dev-deps fix
+    in services/api/pyproject.toml this should always be True in CI;
+    the skipif below is the safety net so a transient build still
+    surfaces a clear SKIP rather than ERROR.
+    """
+    try:
+        import treadmill_cli.api_client  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+_requires_treadmill_cli = pytest.mark.skipif(
+    not _treadmill_cli_importable(),
+    reason=(
+        "treadmill_cli not in env — see services/api/pyproject.toml "
+        "dev-dep + docs/learnings/2026-06-08-pre-existing-test-failures-"
+        "in-worktree-scope.md"
+    ),
+)
+
+
 # Expected workflow id-set + role id-set per ADR-0015 §"Role taxonomy"
 # and §"Per-workflow shape matrix", plus ADR-0032 (documentarian + architect).
 # Kept as module-level constants so the assertions below read declaratively.
@@ -785,6 +815,7 @@ class _StubApiClient:
         raise AssertionError(f"unexpected request: {method} {path}")
 
 
+@_requires_treadmill_cli
 def test_seed_posts_every_role_and_workflow_on_clean_install() -> None:
     """First-time seed POSTs every role, workflow, and v1 version."""
     from treadmill_api.starters import seed
@@ -822,6 +853,7 @@ def test_seed_posts_every_role_and_workflow_on_clean_install() -> None:
     assert len(version_posts) == len(STARTERS)
 
 
+@_requires_treadmill_cli
 def test_seed_is_idempotent_on_re_run() -> None:
     """A re-run against an already-seeded install: returns ``0`` newly-
     created workflows, does NOT create new versions (versions auto-
@@ -846,6 +878,7 @@ def test_seed_is_idempotent_on_re_run() -> None:
         assert client._workflows[wf["id"]]["latest_version"] == pre_second_run_versions[wf["id"]]
 
 
+@_requires_treadmill_cli
 def test_seed_creates_v1_when_workflow_exists_without_versions() -> None:
     """Edge case: a half-seeded install (workflow row present, no version
     yet) gets its v1 created on a re-run, but the workflow is NOT counted
@@ -863,6 +896,7 @@ def test_seed_creates_v1_when_workflow_exists_without_versions() -> None:
     assert client._workflows["wf-author"]["latest_version"] == 1
 
 
+@_requires_treadmill_cli
 def test_seed_default_does_not_overwrite_existing_role_prompts() -> None:
     """ADR-0028 default behavior: a re-run against an already-seeded
     install with ``reset_prompts_from_code=False`` (the default) does
@@ -887,6 +921,7 @@ def test_seed_default_does_not_overwrite_existing_role_prompts() -> None:
     assert patches == []
 
 
+@_requires_treadmill_cli
 def test_seed_reset_prompts_from_code_patches_existing_roles() -> None:
     """ADR-0028 recovery path: ``reset_prompts_from_code=True``
     overwrites every existing role's system_prompt with the code-side
@@ -911,6 +946,7 @@ def test_seed_reset_prompts_from_code_patches_existing_roles() -> None:
     )
 
 
+@_requires_treadmill_cli
 def test_seed_posts_role_code_author_only_once() -> None:
     """Per ADR-0015 — ``role-code-author`` is referenced by four
     workflows; ``_all_roles()`` de-duplicates so ``seed()`` POSTs it
@@ -928,6 +964,7 @@ def test_seed_posts_role_code_author_only_once() -> None:
     assert len(code_author_posts) == 1
 
 
+@_requires_treadmill_cli
 def test_seed_posts_default_event_triggers() -> None:
     """Per Week-3 plan §C.2, ``seed()`` ensures the five default
     catch-all ``event_triggers`` rows exist (in addition to alembic
@@ -1029,6 +1066,7 @@ def test_validate_workflow_shapes_rejects_undefined_role_reference(
         _validate_workflow_shapes()
 
 
+@_requires_treadmill_cli
 def test_seed_default_event_triggers_match_week3_plan() -> None:
     """The exact (event_type → workflow_id) mappings per Week-3 plan
     §C.2. Tripwire — keeps the seed in sync with the table in the plan
