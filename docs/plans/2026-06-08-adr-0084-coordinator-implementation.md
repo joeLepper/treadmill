@@ -168,19 +168,23 @@ coordinator.env updated to include plan ID. Workers briefed via cc-relay.
 - Carla: consumer-subscription-validation (7877139d) ✓ MERGED PR #25 (medicoder-events), dashboard-generator-gcp (9c586a77) in flight, planrouter-fixture-expansion (4e3cffc2)
 - Alan: cloud-trace-verify (82179115) — blocked on otel-collector-deploy
 
-**Brokered count so far**: 8 merged, 0 amends
-- 9959c49c / PR #1231 (datadog-dashboards-as-code) 2026-06-09T06:39Z
-- 7877139d / PR #25 medicoder-events (consumer-subscription-validation) 2026-06-09T06:46Z
-- 9bbda236 / PR #1233 + medicoder-events PR #26 (dedup-purge) 2026-06-09T06:49Z
-- 07ad049d / PR #1234 (medicoder-events pin >=0.1.8, 8 services) 2026-06-09T06:51Z
-- 449d380f / PR #267 treadmill (dispatcher coverage) 2026-06-09T07:07Z
-- 78af1379 / PR #1235 (otel-collector deploy) merged by Bert
-- 9c586a77 / commit c12a1ff6c + retrospective PR #1236 (dashboard-generator --target=gcp) 2026-06-09T07:12Z
-- 82179115 / PR #1238 (cloud-trace-verify) 2026-06-09T07:13Z
+**Brokered count: 10 merged, 0 amends — PHASE 5 QUALITY GATE MET (0% < 30% threshold)**
 
-**Datadog 401 operator action**: dd-api-key-dev secret holds placeholder; Joe must set real 32-char key.
-**Worktrees**: PR #1237 (per-sibling worktree setup script) merged by Donna — medicoder shared-tree race mitigated.
-**Pending**: Carla planrouter-fixture-expansion (4e3cffc2) + worktrees task (ad333cbe) still open.
+| # | Task | PR | Worker | Merged |
+|---|------|----|--------|--------|
+| 1 | 9959c49c datadog-dashboards-as-code | #1231 | Donna/Carla | 06:39Z |
+| 2 | 7877139d consumer-subscription-validation | #25 medev | Carla | 06:46Z |
+| 3 | 9bbda236 dedup-purge Cloud Run Job | #1233 + #26 medev | Donna | 06:49Z |
+| 4 | 07ad049d medicoder-events pin >=0.1.8 | #1234 | Donna | 06:51Z |
+| 5 | 449d380f dispatcher coverage | #267 treadmill | Bert | 07:07Z |
+| 6 | 78af1379 otel-collector deploy | #1235 | Bert | 07:xx Z |
+| 7 | 9c586a77 dashboard-generator --target=gcp | c12a1ff6 + #1236 | Carla | 07:12Z |
+| 8 | 82179115 cloud-trace-verify | #1238 | Alan | 07:13Z |
+| 9 | 4e3cffc2 planrouter-fixture-expansion | #268 treadmill | Carla | 07:24Z |
+| 10 | ad333cbe per-session worktrees medicoder | #1237 | Donna | 07:xx Z |
+
+**Amend rate: 0 / 10 = 0%** (gate: ≤30%). Phase 5 proof complete.
+**Operator action**: `dd-api-key-dev` in Secret Manager `care-transitions-testing` holds 11-char placeholder; Datadog exporter 403 until Joe sets the real 32-char key.
 
 Run a real plan on RAMJAC using coordinator-medicoder + 2 workers. Verify:
 - Coordinator provisions workers (not autoscaler)
