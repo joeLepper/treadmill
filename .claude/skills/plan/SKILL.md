@@ -133,6 +133,35 @@ Filled in when the plan transitions to `completed` or `abandoned`.
 - **Every tool the gate invokes must exist in the worker sandbox.** A deterministic gate runs inside the agent container, which is intentionally narrower than dev-local: no docker daemon, no live AWS, no network egress by default, and only the tooling our agent image installs (Python + pip extras + `make` + `cdk` + the project test runner). **Do NOT use in a deterministic gate:** `cdk synth` against a live AWS account, any `aws ...` command that hits a real endpoint, `docker run` / `docker compose`, anything that requires network egress to packages or services, or tooling not in the agent image. These fail with cryptic `Script exited 1` errors the architect can't diagnose and the wf-feedback loop can't repair — symptom is the architect verdicting `amend` 5x while the author has logically-correct code (per the 2026-05-27 RAMJAC wedge incident, learning `2026-05-27-deterministic-gates-must-run-in-worker-sandbox.md`). Prefer pure `pytest` invocations, or shell commands that operate on the repo (`make unit_test`, `make lint`, `grep`, `find`). If a check genuinely requires live infrastructure, scope it as an `llm-judge` or as a separate post-merge soak task, not as the deterministic gate.
 - **No emojis, no marketing language.** Plans are operational, not promotional.
 
+## Before submitting to Treadmill
+
+After writing the plan doc and before calling `treadmill plan submit`:
+
+1. **Run `treadmill plan validate`** — catches schema violations, missing `description` fields,
+   and `depends_on` syntax errors. Fix all findings before proceeding.
+
+2. **Relay to at least one sibling for review** — relay the plan file as an action request:
+   ```bash
+   python3 ~/treadmill/tools/cc-channels/cc-relay.py \
+     --to treadmill-bert --from treadmill-alan --type action \
+     --file <plan_path>
+   ```
+   Follow up with a context message: what to look for (scope gaps, depends_on, sandbox safety,
+   infra gotchas). Hold submission until the sibling clears it.
+
+   **Why this step is load-bearing**: A sibling has independent context about the infrastructure
+   and codebase. The authoring session has just spent time with the plan and is likely to miss
+   mistakes that are obvious to a fresh reader. On the first real use of this pattern (2026-06-09
+   scheduler GCP plan), Bert caught 3 critical errors that would have caused active service
+   breakage if dispatched: a wrong IAM assumption, a wrong AR region instruction, and a false
+   "no existing workflow" claim. The cost of holding for 5 minutes is trivially lower than
+   a worker executing broken instructions.
+
+3. **Address review findings** — for CRITICAL items, fix before submitting. For scope gaps and
+   minor items, either fix them or explicitly defer with a note in the Risks section.
+
+4. **Relay a patch summary** back to the reviewer if significant changes were made.
+
 ## Status transitions
 
 - `drafting` → `active` when work starts.
