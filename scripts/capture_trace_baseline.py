@@ -50,7 +50,8 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-_SCHEMA_VERSION = 2  # bumped from 1 — synthetic fixture replaces RAMJAC capture
+_SCHEMA_VERSION = 3  # bumped from 2 — task 4e3cffc2: fixture expanded
+# from 56 → 71 events adding wf-feedback-loop + conflict-resolution paths.
 
 _FIXTURES_DIR = Path(__file__).resolve().parent.parent / "services" / "api" / "tests" / "fixtures"
 _EVENTS_PATH = _FIXTURES_DIR / "coordination_trace_synthetic_events.jsonl.gz"
