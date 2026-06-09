@@ -353,12 +353,15 @@ def _seed_team_config(
         )
 
 
-def test_create_plan_when_team_config_exists_auto_sets_created_by_and_emits_submitted(
+def test_create_plan_when_team_config_exists_preserves_created_by_and_emits_submitted(
     client: httpx.Client, engine: Engine, truncate: None,
 ) -> None:
     """ADR-0085+0086 Task D — a repo with a team_configs row:
-    (a) auto-derives created_by from team.coordinator_label when the
-    request body omits it, and (b) emits a plan.submitted event."""
+    (a) created_by is NOT overridden to the coordinator label; it is
+    preserved verbatim from the request (or stays None when omitted), and
+    (b) emits a plan.submitted event whose payload carries coordinator_label.
+    The coordinator discovers plans via coordinator_label in the event
+    payload, not via created_by."""
     _seed_team_config(
         engine,
         repo="team-d/auto-routing",
@@ -370,20 +373,21 @@ def test_create_plan_when_team_config_exists_auto_sets_created_by_and_emits_subm
         json={
             "repo": "team-d/auto-routing",
             "intent": "test the auto-routing path",
+            "created_by": "treadmill-alan",
         },
     )
     assert response.status_code == 201, response.text
     body = response.json()
     plan_id = body["id"]
 
-    # (a) created_by auto-derived from the team_config row.
+    # (a) created_by is the submitting orchestrator, not the coordinator.
     with engine.connect() as conn:
         plan_row = conn.execute(
             sa.text("SELECT created_by FROM plans WHERE id = :id"),
             {"id": plan_id},
         ).fetchone()
     assert plan_row is not None
-    assert plan_row[0] == "coord-team-alpha"
+    assert plan_row[0] == "treadmill-alan"
 
     # (b) the plan.submitted event landed in the events table with the
     # right payload shape.
