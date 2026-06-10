@@ -170,11 +170,23 @@ Tests for hook script logic. AGENT.md for worker/evaluator template component.
 
 ---
 
-### Between Wave 3 and Wave 4 — Alan restarts sessions (after BOTH PR-D AND PR-E merge)
+### PR-H — wiring reconciliation (GATES the restart step; added 2026-06-10)
 
-After both PR-D and PR-E merge, **Alan runs `systemctl --user restart treadmill-channel@<label>.service`**
+Discovered after Wave 3 merged: `install_team()` writes per-session config (CLAUDE.md,
+settings.json) to `<team>/<label>/` subdirs, but `launch-session.sh` runs coordinators from the
+team-dir cwd (and workers from the default workdir), and Claude Code discovers settings at
+`<cwd>/.claude/settings.json`. The rendered files are never read. PR-H reconciles the layout:
+launcher cwd → per-label subdir for every session; install_team() → `<label>/.claude/settings.json`;
+remove the stale `<team>/CLAUDE.md`. Migration hazard: coordinator cwd change orphans the live
+`--resume` transcript slug — handle in the same PR. Split between Bert (launcher) + Carla
+(install.py). See `docs/learnings/2026-06-10-template-install-layout-vs-launcher-cwd-mismatch.md`.
+
+### Between PR-H and Wave 4 — Alan restarts sessions (after PR-H merges)
+
+After PR-H merges, **Alan runs `systemctl --user restart treadmill-channel@<label>.service`**
 for each active coordinator and worker session so live sessions pick up the updated CLAUDE.md
-(PR-D) and the PostToolUse hook settings.json (PR-E). Do NOT restart before both PRs merge —
+(PR-D) and the PostToolUse hook settings.json (PR-E). Do NOT restart before PR-H —
+without the wiring reconciliation the restart re-reads stale config (no-op). Also do NOT restart before both PRs merge —
 a coordinator writing to `task_executions` with workers that lack the PostToolUse hook means
 mid-execution steering is absent for any task dispatched in that window. The restart must
 happen before PR-F drops `workflow_runs`.
@@ -256,6 +268,28 @@ Current `install.py:install_team()` has an explicit comment `# The coordinator's
 config is NOT written by this function — PR-D owns coordinator-side CLAUDE.md content.`
 Bert is extending install.py in PR-D to render coordinator/CLAUDE.md.tmpl, folding in the
 CLI-wiring follow-up Carla flagged.
+
+**2026-06-10: Wave 3 complete (PR-D #292 merged) — but restart step GATED on a reconciliation PR**
+
+All of PR-A/B/C/D/E merged. Before running the session-restart step, on-disk inspection of the
+live `coordinator-medicoder` surfaced a 3-part layout seam between `install_team()` and
+`launch-session.sh` + Claude Code's config discovery:
+
+1. Launcher pins coordinator cwd to `<team>/`; `install_team()` renders coordinator CLAUDE.md to
+   `<team>/coordinator-<slug>/` (subdir). Running coordinator reads the stale `<team>/CLAUDE.md`.
+2. Worker `settings.json` rendered to `<team>/<label>/settings.json`, but Claude reads
+   `<cwd>/.claude/settings.json` — PostToolUse hook never registers.
+3. Launcher has per-label cwd handling only for `coordinator-*`; workers/evaluator run from
+   default workdir.
+
+Restarting now would re-read stale config — no-op. **The restart step is blocked on a wiring
+PR** that reconciles install_team() output with launcher cwd + Claude `.claude/` discovery.
+Leading option: per-label-subdir cwd for every session + `<label>/.claude/settings.json` +
+remove stale `<team>/CLAUDE.md`. HAZARD: coordinator cwd change orphans the live `--resume`
+transcript slug — needs migration. Captured in
+`docs/learnings/2026-06-10-template-install-layout-vs-launcher-cwd-mismatch.md`. Relayed to
+Bert (launcher/CLI) + Carla (install.py) to split + own. This becomes **PR-H (wiring)**, inserted
+before the restart step and Wave 4.
 
 ## Post-mortem
 
