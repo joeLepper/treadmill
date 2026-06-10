@@ -26,8 +26,35 @@ from treadmill_cli.commands.team import team_app
 
 runner = CliRunner()
 
+# Captured before the autouse ``stub_template_install`` fixture patches
+# the module attribute — used by the one integration test that exercises
+# the real loader.
+_REAL_INSTALL_TEMPLATES = team_module._install_templates
+
 
 # ── Fixtures ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def stub_template_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, int]]:
+    """Replace ``_install_templates`` with a recorder.
+
+    Autouse so no test renders real templates into the developer's
+    actual ``~/.treadmill/teams/`` — ``install.py``'s ``_TEAMS_ROOT``
+    is bound to the real ``Path.home()`` at its import time, outside
+    the ``teams_dir`` fixture's patch. The render logic itself is
+    covered by ``tools/team-templates/tests/test_install.py``; these
+    tests assert the CLI wiring (call + args + failure surface).
+    """
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        team_module,
+        "_install_templates",
+        lambda slug, workers: calls.append((slug, workers)),
+    )
+    return calls
 
 
 @pytest.fixture
@@ -327,3 +354,77 @@ class TestSystemdUnavailable:
         assert (teams_dir / "x-y" / "coordinator-x-y" / ".session-id").exists()
         assert (teams_dir / "x-y" / "evaluator-x-y" / ".session-id").exists()
         assert (teams_dir / "x-y" / "worker-x-y-1" / ".session-id").exists()
+
+
+# ── Template render wiring (ADR-0087 PR-D/E/H CLI follow-up) ─────────────
+
+
+class TestTemplateInstallWiring:
+    def test_up_calls_install_templates_with_slug_and_workers(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+        stub_template_install: list[tuple[str, int]],
+    ) -> None:
+        """``team up`` renders the per-session templates — the wiring
+        whose absence meant sessions booted with no CLAUDE.md and no
+        ``.claude/settings.json`` (so the PostToolUse relay-inject hook
+        never registered). See docs/learnings/
+        2026-06-10-template-install-layout-vs-launcher-cwd-mismatch.md."""
+        result = runner.invoke(team_app, ["Acme/Widget", "--workers", "2"])
+        assert result.exit_code == 0, result.stdout
+        assert stub_template_install == [("acme-widget", 2)]
+
+    def test_template_failure_aborts_with_exit_2_before_systemd(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A render failure is a hard abort (exit 2) and the systemd
+        start never fires — booting sessions without templates is the
+        silent no-op PR-H exists to prevent."""
+
+        def _boom(slug: str, workers: int) -> None:
+            raise FileNotFoundError("install.py not found")
+
+        monkeypatch.setattr(team_module, "_install_templates", _boom)
+        result = runner.invoke(team_app, ["x/y", "--workers", "1"])
+        assert result.exit_code == 2
+        assert systemctl_success == []  # no enable/start attempted
+
+    def test_repo_root_honors_env_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("TREADMILL_REPO_DIR", str(tmp_path))
+        assert team_module._repo_root() == tmp_path
+
+    def test_repo_root_derives_from_module_location(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without the env override, the repo root is three levels up
+        from ``commands/team.py`` — the editable-install layout."""
+        monkeypatch.delenv("TREADMILL_REPO_DIR", raising=False)
+        root = team_module._repo_root()
+        assert (root / "cli" / "treadmill_cli" / "commands" / "team.py").is_file()
+
+    def test_install_templates_real_module_load_and_render(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Integration: ``_install_templates`` loads the real
+        ``tools/team-templates/install.py`` and renders to disk.
+        install.py resolves ``_TEAMS_ROOT`` from ``Path.home()`` at
+        import time and ``_install_templates`` imports it fresh per
+        call, so patching ``HOME`` redirects the render. Uses the
+        pre-stub captured function (the autouse fixture replaces the
+        module attribute)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # pathlib.Path.home() reads HOME on POSIX.
+        _REAL_INSTALL_TEMPLATES("acme-widget", 1)
+        team_dir = tmp_path / ".treadmill" / "teams" / "acme-widget"
+        assert (team_dir / "coordinator-acme-widget" / "CLAUDE.md").is_file()
+        assert (
+            team_dir / "worker-acme-widget-1" / ".claude" / "settings.json"
+        ).is_file()
