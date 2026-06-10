@@ -209,3 +209,27 @@ def test_timestamps_are_timezone_aware():
             assert isinstance(col.type, TIMESTAMP) and col.type.timezone, (
                 f"{table.name}.created_at must be TIMESTAMPTZ"
             )
+
+
+def test_mergeability_view_migration_projects_detail_columns():
+    """Regression for the Phase 5 hotfix (20260611_0300): the
+    ``task_mergeability`` VIEW must project the five detail columns its
+    live consumers SELECT (``GET /tasks/{id}/mergeability`` +
+    dashboard overview) alongside ``derived_mergeability``. The Phase 4
+    rewrite silently narrowed the projection and both consumers 500'd
+    with UndefinedColumnError on deploy."""
+    from pathlib import Path as _P
+
+    body = (
+        _P(__file__).resolve().parent.parent
+        / "alembic" / "versions"
+        / "20260611_0300_mergeability_detail_columns.py"
+    ).read_text()
+    for col in (
+        "head.head_sha",
+        "review.decision AS review_decision",
+        "validate.decision AS validate_decision",
+        "ci.conclusion AS ci_conclusion",
+        "conflict.is_conflicting AS pr_conflicting",
+    ):
+        assert col in body, f"VIEW projection missing {col!r}"

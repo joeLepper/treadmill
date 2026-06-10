@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.eventbus import EventPublisher
 from treadmill_api.events import EventPayload
+from treadmill_api.events.registry import encode_payload
 from treadmill_api.events.internal import DispatchPublishFailed
 from treadmill_api.models import Event
 
@@ -123,7 +124,7 @@ class Dispatcher:
             task_id=task_id,
             run_id=run_id,
             step_id=step_id,
-            payload=payload.model_dump(mode="json"),
+            payload=encode_payload(payload),
             commit_sha=commit_sha,
         )
         session.add(event)
