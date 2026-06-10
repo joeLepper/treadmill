@@ -107,7 +107,7 @@ are executives who submit plans. They are never in `worker_labels`.
    which workers have recent context in the area vs. which provide independent perspective).
    If only 1 worker in the team, skip peer review and proceed to step 6.
    For each reviewer:
-   - POST /task_executions {task_id, worker_label=reviewer, trigger="coordinator-rework"}
+   - POST /task_executions {task_id, worker_label=reviewer, trigger="peer-review"}
    - Spawn reviewer worker subprocess: "review PR #N; leave inline GitHub comments via gh pr review"
    Reviewers run in parallel. Each reviewer:
    - Posts inline comments on the PR via treadmill bot GitHub App identity
@@ -192,8 +192,10 @@ judgment over the resulting thread.
 - Coordinator writes a `task.peer_review_verdict` event when collating, for audit trail.
 
 **Trigger semantics:**
-Peer-review-driven author rework uses `coordinator-rework` — no new trigger value. The
-`task.peer_review_verdict` event is the separate audit signal.
+Each per-reviewer row uses `trigger='peer-review'`. When the coordinator dispatches a rework
+cycle for the *author* after collating feedback, that uses `trigger='coordinator-rework'` (the
+coordinator is initiating an author work cycle, same as CI failure rework). This keeps the two
+activities semantically distinct in the schema. See §Rework tracking for the metric queries.
 
 ### CI and conflict signals
 
@@ -330,10 +332,12 @@ sequenceDiagram
 
     Note over COORD: CI green + branch clean — assign peer reviewers
     par parallel peer review
+        COORD->>API: POST /task_executions {worker_label: reviewer-1, trigger: peer-review}
         COORD->>REV: spawn reviewer-1 "review PR #N; gh pr review --comment"
         REV->>GH: posts inline comments (treadmill bot App identity)
         REV->>FS: cc-relay "lgtm" or "needs-changes: <summary>"
     and
+        COORD->>API: POST /task_executions {worker_label: reviewer-2, trigger: peer-review}
         COORD->>REV: spawn reviewer-2 "review PR #N; gh pr review --comment"
         REV->>GH: posts inline comments (treadmill bot App identity)
         REV->>FS: cc-relay "lgtm" or "needs-changes: <summary>"
@@ -402,11 +406,31 @@ Rework count per task = `COUNT(*) WHERE task_id = X AND trigger != 'initial'`
 Per-plan rework = `SUM(rework counts) GROUP BY plan_id`
 
 The trigger taxonomy:
-- `initial` — first brief on a task
-- `coordinator-rework` — coordinator re-brief (CI failure, worker error, dependency unblocked)
-- `evaluator-rework` — evaluator requested changes
+- `initial` — first brief on a task; one per task
+- `coordinator-rework` — coordinator re-brief for the *author* (CI failure, conflict, peer review feedback, dependency unblocked)
+- `evaluator-rework` — evaluator requested changes; author re-briefed
+- `peer-review` — reviewer execution; one row per reviewer spawned per review round
 
-This is the primary metric for whether long-lived context-sharing reduces loops.
+`peer-review` rows are explicitly excluded from rework counts so reviewer activity does not
+contaminate author-cycle metrics. Two clean queries:
+
+```sql
+-- Author rework cycles per task (excludes reviewer rows)
+SELECT COUNT(*) AS rework_count
+FROM task_executions
+WHERE task_id = :task_id
+  AND trigger IN ('coordinator-rework', 'evaluator-rework');
+
+-- Reviewer executions per task (independent metric)
+SELECT COUNT(*) AS review_count
+FROM task_executions
+WHERE task_id = :task_id
+  AND trigger = 'peer-review';
+```
+
+Author rework count is the primary metric for whether long-lived context-sharing reduces loops.
+Reviewer count is its own signal: tasks with many review rounds but few author rework cycles
+indicate good code quality with high review coverage.
 
 ## Schema changes
 
@@ -418,7 +442,7 @@ CREATE TABLE task_executions (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     task_id     UUID NOT NULL REFERENCES tasks(id),
     worker_label TEXT NOT NULL,
-    trigger     TEXT NOT NULL CHECK (trigger IN ('initial','coordinator-rework','evaluator-rework')),
+    trigger     TEXT NOT NULL CHECK (trigger IN ('initial','coordinator-rework','evaluator-rework','peer-review')),
     status      TEXT NOT NULL DEFAULT 'running'
                     CHECK (status IN ('running','completed','failed')),
     started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
