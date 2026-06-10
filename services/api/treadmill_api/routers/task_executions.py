@@ -14,7 +14,11 @@ Three endpoints:
   by the coordinator to count rework cycles.
 
 404 when the referenced ``task_id`` or execution ``id`` does not exist.
-400 when ``trigger`` or ``status`` values are out-of-vocabulary.
+409 when the ``uq_task_executions_spawn`` UNIQUE constraint fires (same
+``(task_id, trigger, worker_label, started_at)`` already exists) — the
+coordinator receives a clean signal to short-circuit rather than retry.
+422 when ``trigger`` or ``status`` values are out-of-vocabulary (Pydantic
+``field_validator`` raises ``ValueError`` → FastAPI 422 Unprocessable Entity).
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.dependencies_db import get_session
@@ -111,9 +116,20 @@ async def create_task_execution(
         status="running",
     )
     session.add(execution)
-    await session.flush()
-    await session.refresh(execution)
-    await session.commit()
+    try:
+        await session.flush()
+        await session.refresh(execution)
+        await session.commit()
+    except IntegrityError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"task_execution already exists for "
+                f"(task_id={body.task_id!s}, trigger={body.trigger!r}, "
+                f"worker_label={body.worker_label!r}, started_at=<server-assigned>); "
+                "coordinator may have restarted mid-spawn"
+            ),
+        )
     return TaskExecutionRow.model_validate(execution, from_attributes=True)
 
 
@@ -126,6 +142,11 @@ async def update_task_execution(
     body: TaskExecutionUpdate,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TaskExecutionRow:
+    """Partial-update a task_execution.
+
+    ``trigger`` is intentionally not patchable — it records the dispatch
+    event that created the row and must not change after creation.
+    """
     execution = await session.get(TaskExecution, execution_id)
     if execution is None:
         raise HTTPException(

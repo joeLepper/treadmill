@@ -8,14 +8,15 @@ Coverage axes
 POST /api/v1/task_executions
   - creates a row, returns 201 + body with correct fields
   - 404 on unknown task_id
-  - 400 on out-of-vocabulary trigger value
-  - 400 on out-of-vocabulary status value in PATCH (validated here)
+  - 409 on duplicate (task_id, trigger, worker_label, started_at) — coordinator-restart guard
+  - 422 on out-of-vocabulary trigger value (Pydantic field_validator)
 
 PATCH /api/v1/task_executions/{id}
   - status=completed sets completed_at when present
   - status=failed + failure_reason sets both fields
   - partial update (only status, no completed_at) leaves other fields untouched
   - 404 on unknown execution id
+  - 422 on out-of-vocabulary status value
 
 GET /api/v1/task_executions?task_id=<id>
   - returns rows ordered by started_at ascending
@@ -26,11 +27,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.models import Task, TaskExecution
@@ -77,9 +79,11 @@ class _StubSession:
         *,
         get_returns: object = None,
         scalars_returns: list | None = None,
+        flush_raises: Exception | None = None,
     ) -> None:
         self._get_returns = get_returns
         self._scalars_returns = scalars_returns or []
+        self._flush_raises = flush_raises
         self.added: list[object] = []
 
     async def get(self, model_class, pk):  # noqa: ANN001
@@ -89,6 +93,8 @@ class _StubSession:
         self.added.append(obj)
 
     async def flush(self) -> None:
+        if self._flush_raises is not None:
+            raise self._flush_raises
         # Simulate server-side assignment of id/started_at.
         for obj in self.added:
             if not hasattr(obj, "id") or obj.id is None:
@@ -164,7 +170,41 @@ class TestCreateTaskExecution:
         )
         assert resp.status_code == 404
 
-    def test_400_invalid_trigger(self) -> None:
+    def test_409_duplicate_spawn_on_coordinator_restart(self) -> None:
+        """uq_task_executions_spawn fires → 409, not 500.
+
+        Simulates the coordinator-restart race: coordinator re-runs the
+        dispatch loop and tries to POST the same (task_id, trigger,
+        worker_label, started_at) row it already wrote before crashing.
+        The IntegrityError from the DB must surface as 409 so the
+        coordinator can short-circuit instead of retrying into an error
+        loop.
+        """
+        task_id = uuid.uuid4()
+        integrity_err = IntegrityError(
+            "duplicate key value violates unique constraint "
+            '"uq_task_executions_spawn"',
+            params=None,
+            orig=Exception("unique violation"),
+        )
+        session = _StubSession(
+            get_returns=_stub_task(task_id),
+            flush_raises=integrity_err,
+        )
+        client = TestClient(_app(session))
+
+        resp = client.post(
+            "/api/v1/task_executions",
+            json={
+                "task_id": str(task_id),
+                "worker_label": "worker-treadmill-1",
+                "trigger": "initial",
+            },
+        )
+        assert resp.status_code == 409, resp.text
+        assert "already exists" in resp.json()["detail"]
+
+    def test_422_invalid_trigger(self) -> None:
         task_id = uuid.uuid4()
         session = _StubSession(get_returns=_stub_task(task_id))
         client = TestClient(_app(session))
@@ -254,7 +294,7 @@ class TestUpdateTaskExecution:
         )
         assert resp.status_code == 404
 
-    def test_400_invalid_status(self) -> None:
+    def test_422_invalid_status(self) -> None:
         task_id = uuid.uuid4()
         ex = _stub_execution(task_id=task_id)
         session = _StubSession(get_returns=ex)
