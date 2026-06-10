@@ -457,3 +457,64 @@ def test_manual_event_with_real_dispatcher_dict_payload() -> None:
     assert publisher.published == [
         {"check_name": "services/api", "conclusion": "success"}
     ]
+
+
+
+class TestDedupScopedToGithub:
+    """The (entity_type, action, task_id) dedup guard is scoped to
+    entity_type='github' — Path A/B idempotency on canonical GitHub
+    facts. Audit events (task.*) repeat by nature (one peer-review
+    verdict per round, multiple ci_results) and must NOT 409.
+    Regression for the 2026-06-10 coordinator workaround where the
+    unscoped guard forced invented action-name variants
+    (peer_review_verdict_final, _template, ...)."""
+
+    def test_task_audit_event_repeats_without_409(
+        self,
+        app_and_state: tuple[FastAPI, _StubSession, _StubDispatcher],
+    ) -> None:
+        app, session, _ = app_and_state
+        task_id = session.seed_task()
+        # A prior identical-triple audit event already exists.
+        session.seed_event(
+            entity_type="task",
+            action="peer_review_verdict",
+            task_id=task_id,
+            payload={"round": 1, "verdict": "approved"},
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/v1/events",
+                json={
+                    "entity_type": "task",
+                    "action": "peer_review_verdict",
+                    "task_id": str(task_id),
+                    "payload": {"round": 2, "verdict": "approved"},
+                },
+            )
+        assert resp.status_code == 201, resp.text
+
+    def test_github_duplicate_still_409(
+        self,
+        app_and_state: tuple[FastAPI, _StubSession, _StubDispatcher],
+    ) -> None:
+        app, session, dispatcher = app_and_state
+        task_id = session.seed_task()
+        session.seed_event(
+            entity_type="github",
+            action="pr_merged",
+            task_id=task_id,
+            payload={"pr_number": 1},
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/v1/events",
+                json={
+                    "entity_type": "github",
+                    "action": "pr_merged",
+                    "task_id": str(task_id),
+                    "payload": {"pr_number": 1},
+                },
+            )
+        assert resp.status_code == 409
+        assert dispatcher.calls == []

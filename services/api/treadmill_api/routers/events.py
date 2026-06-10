@@ -78,12 +78,22 @@ async def create_event(
     * 404 if ``task_id`` is supplied but does not resolve in ``tasks``.
       Plan FK is not enforced here (no current caller cares); add when
       a Path B emitter needs it.
-    * 409 if an event with the same ``(entity_type, action, task_id)``
-      already exists. The check is intentionally narrow — same triple
-      → same logical event from the coordinator's view — and avoids
-      hashing the payload because Path B + Path A may legitimately
-      carry slightly different payload shapes (e.g. the webhook
-      includes the GitHub action username; the manual fire may not).
+    * 409 if a ``github.*`` event with the same ``(entity_type,
+      action, task_id)`` already exists. The dedup guard is SCOPED to
+      ``entity_type='github'`` — its purpose is Path A (webhook) vs
+      Path B (manual backfill) idempotency on canonical GitHub facts,
+      where the triple identifies one real-world occurrence. The check
+      avoids hashing the payload because the two paths legitimately
+      carry slightly different shapes (e.g. the webhook includes the
+      GitHub action username; the manual fire may not).
+
+      Non-github audit/observation events (``task.ci_result``,
+      ``task.peer_review_verdict``, ``task.routing_pattern_observation``,
+      …) repeat by nature — multi-cycle reviews produce one verdict per
+      round against the same task — so they are NOT deduped. Round /
+      cycle discriminators belong in the payload, not in invented
+      action-name variants (which is what coordinators resorted to
+      while the guard was unscoped — 2026-06-10).
     * 201 + the persisted row on success.
 
     The event is persisted via :meth:`Dispatcher.persist_and_publish`
@@ -100,28 +110,33 @@ async def create_event(
                 detail=f"task {body.task_id!s} not found",
             )
 
-    # Idempotency guard: same (entity_type, action, task_id) → 409.
-    # Coordinators retry Path B on transient API errors; without this
-    # guard, a successful-but-slow first call followed by a retry
-    # would produce two identical rows in the events log.
-    existing = await session.execute(
-        select(Event).where(
-            Event.entity_type == body.entity_type,
-            Event.action == body.action,
-            Event.task_id == body.task_id,
+    # Idempotency guard — github.* ONLY: same (entity_type, action,
+    # task_id) → 409. Path A (webhook) and Path B (manual backfill)
+    # can both record the same canonical GitHub fact; the triple
+    # identifies one real-world occurrence, so a retry after a
+    # successful-but-slow first call must not produce a second row.
+    # Audit/observation events (task.*) repeat by nature (one
+    # peer-review verdict per round, multiple ci_results per task) and
+    # are deliberately NOT deduped — see the route docstring.
+    if body.entity_type == "github":
+        existing = await session.execute(
+            select(Event).where(
+                Event.entity_type == body.entity_type,
+                Event.action == body.action,
+                Event.task_id == body.task_id,
+            )
         )
-    )
-    duplicate = existing.scalar_one_or_none()
-    if duplicate is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"event ({body.entity_type!r}, {body.action!r}, "
-                f"task_id={body.task_id!s}) already exists with id "
-                f"{duplicate.id!s}; coordinators should not "
-                "double-fire the same lifecycle event"
-            ),
-        )
+        duplicate = existing.scalar_one_or_none()
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"event ({body.entity_type!r}, {body.action!r}, "
+                    f"task_id={body.task_id!s}) already exists with id "
+                    f"{duplicate.id!s}; coordinators should not "
+                    "double-fire the same canonical GitHub event"
+                ),
+            )
 
     event = await dispatcher.persist_and_publish(
         session,
