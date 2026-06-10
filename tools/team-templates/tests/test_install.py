@@ -204,13 +204,16 @@ def test_install_team_no_cross_team_overwrite(
     assert "scraper-v2" not in medi_body
 
 
-def test_install_team_does_not_render_coordinator_claude_md(
+def test_install_team_renders_coordinator_claude_md(
     synthetic_home: Path,
 ) -> None:
-    """PR-D (Bert) owns coordinator CLAUDE.md content; this installer
-    must not touch the coordinator's session dir. Stays explicit so a
-    future contributor doesn't add a 'render coordinator template too'
-    line without realizing PR-D owns it."""
+    """ADR-0087 PR-D — install_team now writes the coordinator's
+    rendered CLAUDE.md alongside the worker + evaluator ones. The
+    file lands at
+    ``~/.treadmill/teams/<slug>/coordinator-<slug>/CLAUDE.md`` with
+    ``{{REPO_SLUG}}`` resolved to the team's slug. No settings.json
+    is written (the coordinator does not run the worker's PostToolUse
+    hook substrate — it IS the live process routing signals)."""
     spec = make_team_spec("medicoder", worker_count=2)
     install_team(spec)
 
@@ -221,4 +224,76 @@ def test_install_team_does_not_render_coordinator_claude_md(
         / "medicoder"
         / "coordinator-medicoder"
     )
-    assert not coord_dir.exists()
+    assert coord_dir.is_dir()
+    coord_claude = coord_dir / "CLAUDE.md"
+    assert coord_claude.is_file()
+    body = coord_claude.read_text()
+    assert "coordinator-medicoder" in body  # substituted REPO_SLUG appears in the label form
+    assert "medicoder" in body
+    assert "{{REPO_SLUG}}" not in body  # placeholder fully resolved
+    # Coordinator-specific: no settings.json next to it (workers only).
+    assert not (coord_dir / "settings.json").exists()
+
+
+def test_install_team_coordinator_does_not_carry_worker_label_placeholder(
+    synthetic_home: Path,
+) -> None:
+    """Coordinator template references ``{{REPO_SLUG}}`` only — the
+    ``{{WORKER_LABEL}}`` placeholder used in worker templates must not
+    leak into the coordinator's rendered output."""
+    spec = make_team_spec("scraper-v2", worker_count=3)
+    install_team(spec)
+
+    body = (
+        synthetic_home
+        / ".treadmill"
+        / "teams"
+        / "scraper-v2"
+        / "coordinator-scraper-v2"
+        / "CLAUDE.md"
+    ).read_text()
+    assert "{{WORKER_LABEL}}" not in body
+
+
+def test_install_team_coordinator_is_idempotent(synthetic_home: Path) -> None:
+    """Re-running ``install_team`` overwrites the coordinator's
+    rendered CLAUDE.md cleanly (same shape ``test_install_team_is_
+    idempotent`` pins for worker + evaluator)."""
+    spec = make_team_spec("medicoder", worker_count=2)
+    install_team(spec)
+    first = (
+        synthetic_home
+        / ".treadmill"
+        / "teams"
+        / "medicoder"
+        / "coordinator-medicoder"
+        / "CLAUDE.md"
+    ).read_text()
+    install_team(spec)
+    second = (
+        synthetic_home
+        / ".treadmill"
+        / "teams"
+        / "medicoder"
+        / "coordinator-medicoder"
+        / "CLAUDE.md"
+    ).read_text()
+    assert first == second
+
+
+def test_install_shared_templates_includes_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared template dir picks up coordinator/ alongside
+    worker/ + evaluator/. AGENT.md (editor-facing) is skipped on the
+    copy so the deployed __templates__ tree stays minimal."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    install_shared_templates(
+        dest_root=tmp_path / ".treadmill" / "teams" / "__templates__"
+    )
+    coord_dir = (
+        tmp_path / ".treadmill" / "teams" / "__templates__" / "coordinator"
+    )
+    assert (coord_dir / "CLAUDE.md.tmpl").is_file()
+    assert not (coord_dir / "AGENT.md").exists()

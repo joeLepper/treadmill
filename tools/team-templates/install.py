@@ -13,9 +13,11 @@ Layout written:
         CLAUDE.md.tmpl                 # source (not consumed directly)
     ~/.treadmill/teams/__templates__/evaluator/
         CLAUDE.md.tmpl                 # source
+    ~/.treadmill/teams/__templates__/coordinator/
+        CLAUDE.md.tmpl                 # source (ADR-0087 PR-D)
 
     ~/.treadmill/teams/<slug>/coordinator-<slug>/
-        (coordinator session config — owned by PR-D)
+        CLAUDE.md                      # rendered from template (ADR-0087 PR-D)
     ~/.treadmill/teams/<slug>/evaluator-<slug>/
         CLAUDE.md                      # rendered from template
     ~/.treadmill/teams/<slug>/worker-<slug>-N/   (one per worker)
@@ -97,12 +99,15 @@ def install_shared_templates(
     so the source-of-truth stays the repo's `tools/team-templates/`.
     """
     dest_root.mkdir(parents=True, exist_ok=True)
-    for role in ("worker", "evaluator"):
+    for role in ("worker", "evaluator", "coordinator"):
         src = _PACKAGE_ROOT / role
         dst = dest_root / role
         dst.mkdir(parents=True, exist_ok=True)
         for entry in src.iterdir():
-            if entry.is_file():
+            # AGENT.md is an editor-facing doc, not part of the
+            # operator runtime tree — skip it on copy so the deployed
+            # __templates__/ shape stays minimal.
+            if entry.is_file() and entry.name != "AGENT.md":
                 shutil.copy2(entry, dst / entry.name)
 
 
@@ -116,15 +121,31 @@ def install_team(spec: TeamSpec) -> None:
       ~/.treadmill/teams/<slug>/<label>/settings.json   (workers only)
           rendered from settings.json.tmpl
 
-    The coordinator's per-session config is NOT written by this
-    function — PR-D owns coordinator-side CLAUDE.md content. This
-    install is for evaluator + workers only.
+    ADR-0087 PR-D extension: the coordinator's CLAUDE.md is now
+    installed by this function alongside the evaluator + workers.
+    The render pass uses the same shared `_render` helper; the
+    coordinator template only references ``{{REPO_SLUG}}`` (no
+    per-label placeholder, as there is exactly one coordinator per
+    team).
 
-    Idempotent: re-installing overwrites the rendered files.
+    Idempotent: re-installing overwrites the rendered files. The
+    operator-step to land a new template revision on a LIVE
+    coordinator session is a `systemctl --user restart
+    treadmill-channel@coordinator-<slug>.service` after `treadmill
+    team up`; the live session reads CLAUDE.md fresh on respawn.
     """
     install_shared_templates()
     team_dir = _TEAMS_ROOT / spec.repo_slug
     team_dir.mkdir(parents=True, exist_ok=True)
+
+    # Coordinator — rendered CLAUDE.md only (no settings.json; the
+    # coordinator's session does not run with the worker's
+    # PostToolUse relay-inject hook — coordinators do not run
+    # subprocesses, they ARE the live process routing signals).
+    coord_src = _PACKAGE_ROOT / "coordinator" / "CLAUDE.md.tmpl"
+    coord_dir = team_dir / spec.coordinator_label
+    coord_dir.mkdir(parents=True, exist_ok=True)
+    _render(coord_src, coord_dir / "CLAUDE.md", spec)
 
     # Evaluator — rendered CLAUDE.md only (no settings.json; the
     # evaluator runs without the worker's PostToolUse relay-inject
