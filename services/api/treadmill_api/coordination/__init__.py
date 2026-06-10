@@ -14,9 +14,14 @@ events and the table no longer exist — coordinators write
   ``persist_and_resolve_webhook_event`` helper.
 * ``NotificationFanout`` — pushes operator notifications (Slack /
   Telegram) off the event bus.
-* Health sweeps (stuck-task, escalation-close, terminal-gate,
-  step-starvation, fleet-wedge, conflict, auto-merge) — scheduler-direct
-  callbacks per ADR-0087 §Health bots.
+* ``escalation_close_sweep.emit_operator_close`` — the one surviving
+  piece of the health-sweep family; the escalations router uses it to
+  emit close events. The sweep loops themselves (stuck-task,
+  terminal-gate, step-starvation, fleet-wedge, conflict, auto-merge)
+  were deleted in ADR-0087 Phase 5 — they queried the dropped
+  workflow_runs tables and had no caller since the consumer's removal.
+  Their replacement is the coordinator's own monitoring per ADR-0087
+  §Health bots (follow-on track).
 """
 
 from treadmill_api.coordination.notification_fanout import (

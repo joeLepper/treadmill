@@ -34,7 +34,6 @@ from treadmill_api.routers.claude_credentials import router as claude_credential
 from treadmill_api.routers.context_docs import router as context_docs_router
 from treadmill_api.routers.dashboard import router as dashboard_router
 from treadmill_api.routers.escalations import router as escalations_router
-from treadmill_api.routers.event_triggers import router as event_triggers_router
 from treadmill_api.routers.events import router as events_router
 from treadmill_api.routers.github import router as github_router
 from treadmill_api.routers.onboarding import router as onboarding_router
@@ -48,7 +47,6 @@ from treadmill_api.routers.llm_calls import router as llm_calls_router
 from treadmill_api.routers.team_configs import router as team_configs_router
 from treadmill_api.routers.webhooks import router as webhooks_router
 from treadmill_api.routers.task_prs import router as task_prs_router
-from treadmill_api.routers.workflows import router as workflows_router
 
 logger = logging.getLogger(__name__)
 
@@ -263,11 +261,9 @@ def create_app() -> FastAPI:
     app.include_router(task_executions_router)
     app.include_router(llm_calls_router)
     app.include_router(team_configs_router)
-    app.include_router(workflows_router)
     app.include_router(task_prs_router)
     app.include_router(schedules_router)
     app.include_router(system_status_router)
-    app.include_router(event_triggers_router)
     app.include_router(events_router)
     app.include_router(github_router)
     app.include_router(webhooks_router)

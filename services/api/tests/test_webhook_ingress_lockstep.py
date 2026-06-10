@@ -13,7 +13,6 @@ the curated allowlist of pre-existing, legitimate non-webhook writers.
 Allowlisted sites (one entry per path, with a one-line reason):
   treadmill_api/coordination/consumer.py
       _persist_event: replays worker-origin events via ON CONFLICT DO NOTHING
-  treadmill_api/coordination/triggers.py
       lifecycle event publisher: review.override + validate.override (ADR-0042)
 
 NOT scanned (outside the scope of this gate):
@@ -48,9 +47,6 @@ _WRITE_PATTERNS = re.compile(
 # before ADR-0063 was enforced.  New webhook ingress paths are NOT eligible.
 _ALLOWLIST: dict[str, str] = {
     # lifecycle event publisher: review.override + validate.override (ADR-0042)
-    "treadmill_api/coordination/triggers.py": (
-        "lifecycle event publisher: review.override + validate.override (ADR-0042)"
-    ),
 }
 
 

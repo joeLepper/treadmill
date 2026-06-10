@@ -17,14 +17,12 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
     PrimaryKeyConstraint,
     String,
     Text,
-    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
@@ -49,15 +47,6 @@ class Task(Base):
     repo: Mapped[str] = mapped_column(String(255), nullable=False)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    workflow_version_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("workflow_versions.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    """Snapshot-on-submission per ADR-0010: tasks pin a specific workflow
-    version row, so editing the workflow does not retroactively change the
-    task's behavior."""
-
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -89,7 +78,6 @@ class Task(Base):
     __table_args__ = (
         Index("ix_tasks_plan_id", "plan_id"),
         Index("ix_tasks_repo", "repo"),
-        Index("ix_tasks_workflow_version_id", "workflow_version_id"),
         Index("ix_tasks_parent_task_id", "parent_task_id"),
     )
 
@@ -155,60 +143,4 @@ class TaskDependency(Base):
 
     __table_args__ = (
         Index("ix_task_dependencies_task_id", "task_id"),
-    )
-
-
-class TaskValidation(Base):
-    """An ordered validation check attached to a task — the ``validation:``
-    block from a plan-doc task spec (per the 2026-05-11 closure plan D.3 +
-    decision #14).
-
-    Two kinds at v0:
-
-      * ``deterministic`` — an executable check (e.g. ``pytest tests/...``)
-        that the validator workflow runs against the task's PR.
-      * ``llm-judge``     — a natural-language criterion the validator
-        workflow evaluates via an LLM judge.
-
-    The kinds are gated by a ``CHECK`` constraint so an unknown ``kind``
-    cannot enter the table. ``position`` enforces a deterministic ordering
-    so re-renders of a plan doc preserve check identity.
-
-    ``script`` (for deterministic) and ``prompt`` (for llm-judge) are
-    paired: exactly one must be NOT NULL per the CHECK constraint.
-    """
-
-    __tablename__ = "task_validations"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=text("gen_random_uuid()"),
-    )
-    task_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tasks.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    position: Mapped[int] = mapped_column(Integer, nullable=False)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    script: Mapped[str | None] = mapped_column(Text, nullable=True)
-    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True),
-        nullable=False,
-        server_default=text("now()"),
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "(kind='deterministic' AND script IS NOT NULL AND prompt IS NULL) "
-            "OR (kind='llm-judge' AND prompt IS NOT NULL AND script IS NULL)",
-            name="ck_task_validations_kind_script_prompt",
-        ),
-        UniqueConstraint(
-            "task_id", "position", name="uq_task_validations_task_position"
-        ),
-        Index("ix_task_validations_task_id", "task_id"),
     )

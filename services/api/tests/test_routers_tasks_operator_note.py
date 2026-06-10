@@ -59,7 +59,6 @@ class _StubSession:
             repo=self.task["repo"],
             title=self.task["title"],
             description=self.task.get("description"),
-            workflow_version_id=uuid.UUID(self.task["workflow_version_id"]),
             created_by=self.task.get("created_by"),
             operator_note=self.task.get("operator_note"),
         )

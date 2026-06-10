@@ -19,7 +19,6 @@ when ``submit-doc`` (or ``wf-plan``) attaches the doc.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import uuid
@@ -28,7 +27,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.config import Settings, get_settings
@@ -129,7 +127,10 @@ class TaskResponse(BaseModel):
     repo: str
     title: str
     description: str | None
-    workflow_version_id: uuid.UUID
+    workflow_version_id: uuid.UUID | None = None
+    """Always null post-ADR-0087 Phase 5 — tasks no longer pin a
+    workflow version (the coordinator decides execution at dispatch
+    time). Field kept for wire-compat one deprecation window."""
     created_at: datetime
     derived_status: str | None = None
 
@@ -142,29 +143,6 @@ class PlansSubmitDocRequest(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-async def _resolve_workflow_version(session: AsyncSession, slug: str) -> uuid.UUID:
-    """Find the latest WorkflowVersion id for a workflow slug, or raise 400."""
-    workflow = await session.get(Workflow, slug)
-    if workflow is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"workflow {slug!r} not registered; register it via the workflows router first",
-        )
-    result = await session.execute(
-        select(WorkflowVersion)
-        .where(WorkflowVersion.workflow_id == slug)
-        .order_by(WorkflowVersion.version.desc())
-        .limit(1)
-    )
-    version = result.scalar_one_or_none()
-    if version is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"workflow {slug!r} has no versions yet",
-        )
-    return version.id
-
-
 async def _spawn_tasks_from_specs(
     session: AsyncSession,
     dispatcher: Dispatcher,
@@ -172,14 +150,16 @@ async def _spawn_tasks_from_specs(
     specs: list[TaskSpec],
     created_by: str | None,
 ) -> list[Task]:
-    """Translate the parsed TaskSpec list into Task rows, resolving each
-    spec's workflow slug to a workflow_version_id.
+    """Translate the parsed TaskSpec list into Task rows.
+
+    Post-ADR-0087 Phase 5, a spec's ``workflow:`` field is accepted for
+    back-compat (older plan docs carry ``workflow: wf-author``) but
+    ignored — tasks no longer pin a workflow version; the coordinator
+    decides how a task executes at dispatch time.
 
     Side effects beyond ``tasks`` INSERTs:
 
       * Persist + publish a ``TaskRegistered`` event per task (A.6).
-      * INSERT ``task_validations`` rows for each spec's ``validation:``
-        list (D.3).
       * INSERT ``task_dependencies`` rows after sibling-id → UUID
         substitution + grammar validation (D.1).
     """
@@ -188,23 +168,19 @@ async def _spawn_tasks_from_specs(
     # write task_dependencies in pass 1 because a sibling might not have a
     # UUID yet when its dependant is processed.
     tasks: list[Task] = []
-    workflow_version_by_task: dict[uuid.UUID, uuid.UUID] = {}
     sibling_id_to_uuid: dict[str, uuid.UUID] = {}
     spec_by_task_id: dict[uuid.UUID, TaskSpec] = {}
     for spec in specs:
-        wv_id = await _resolve_workflow_version(session, spec.workflow)
         task = Task(
             plan_id=plan.id,
             repo=plan.repo,
             title=spec.title,
             description=spec.intent,
-            workflow_version_id=wv_id,
             created_by=created_by,
         )
         session.add(task)
         tasks.append(task)
         await session.flush()  # produces task.id
-        workflow_version_by_task[task.id] = wv_id
         sibling_id_to_uuid[spec.id] = task.id
         spec_by_task_id[task.id] = spec
 
@@ -238,7 +214,6 @@ async def _spawn_tasks_from_specs(
             payload=TaskRegistered(
                 repo=task.repo,
                 title=task.title,
-                workflow_version_id=workflow_version_by_task[task.id],
                 plan_id=plan.id,
             ),
             plan_id=plan.id,
@@ -410,76 +385,6 @@ async def _read_plan_derived_status(
     return row.derived_status
 
 
-async def _auto_seed_starters_on_submit(
-    session: AsyncSession,
-    settings: Settings,
-    dispatcher: Dispatcher,
-) -> None:
-    """Run the empty-workflows auto-seed branch (post-mortem surprise A).
-
-    Post-mortem of the combined ADR-0085+0086 plan (2026-06-09): a
-    fresh DB has no workflows registered; the first
-    ``treadmill plan submit`` would 400 with "workflow 'wf-author' not
-    registered" until ``treadmill workflows seed-starters`` ran
-    manually. This closes the cliff edge by running the same
-    ``seed_starters_if_empty`` transaction the startup-side
-    ``_auto_seed_starters`` uses when ``wf-author`` is absent.
-
-    Cheap on the happy path — one async EXISTS query against the
-    ``workflows`` table; nothing else fires when seeded. On the cold
-    branch we run the sync seed via ``asyncio.to_thread`` so the event
-    loop isn't blocked, then emit one ``system.auto_seeded_starters``
-    event so the dashboard + treadmill-events stream carry an audit
-    trail.
-
-    Failure modes:
-      * Seed transaction raises → ``HTTPException(500)`` naming
-        auto-seed as the cause. Never silently persist a plan against
-        an unseeded DB.
-      * Seed returns 0 (another replica won the ``SELECT FOR UPDATE``
-        race between our EXISTS check and the lock acquisition) → no
-        event, no log; the other replica's commit fired one already.
-    """
-    wf_author_present = await session.scalar(
-        select(exists().where(Workflow.id == "wf-author"))
-    )
-    if wf_author_present:
-        return
-
-    from treadmill_api.starters import run_auto_seed_starters_sync
-
-    try:
-        seeded_role_count = await asyncio.to_thread(
-            run_auto_seed_starters_sync, settings
-        )
-    except Exception as exc:
-        logger.error(
-            "plan submit: auto-seed of starter roles failed: %s", exc
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=(
-                "plan rejected: auto-seed of starter roles failed: "
-                f"{exc}"
-            ),
-        ) from exc
-
-    if seeded_role_count > 0:
-        logger.info(
-            "plan submit: auto-seeded %d starter roles into fresh DB",
-            seeded_role_count,
-        )
-        await dispatcher.persist_and_publish(
-            session,
-            entity_type="system",
-            action="auto_seeded_starters",
-            payload=SystemAutoSeededStarters(
-                roles_seeded=seeded_role_count,
-                triggered_by="plan_submit",
-            ),
-        )
-
-
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -520,7 +425,6 @@ async def create_plan(
                 detail=f"plan-doc parse failed: {exc}",
             ) from exc
 
-    await _auto_seed_starters_on_submit(session, settings, dispatcher)
 
     # ADR-0087 — a team_configs row is required. The coordinator discovers
     # plans via the coordinator_label field in the plan.submitted event.
@@ -629,7 +533,7 @@ async def list_plan_tasks(
         text(
             """
             SELECT t.id, t.plan_id, t.repo, t.title, t.description,
-                   t.workflow_version_id, t.created_at,
+                   t.created_at,
                    ts.derived_status
             FROM tasks t
             LEFT JOIN task_status ts ON ts.id = t.id
@@ -646,7 +550,6 @@ async def list_plan_tasks(
             repo=row.repo,
             title=row.title,
             description=row.description,
-            workflow_version_id=row.workflow_version_id,
             created_at=row.created_at,
             derived_status=row.derived_status,
         )

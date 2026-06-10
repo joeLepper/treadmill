@@ -16,10 +16,8 @@ that bypass ``run()`` are unaffected):
    ``alembic.ini`` is copied there, so the relative path resolves. If
    alembic fails, we fail-fast (let the exception propagate) — a
    schema-misaligned API serving traffic is worse than crash-looping.
-3. Auto-seed starters when ``roles`` is empty (ADR-0028 Q28.a). Closes
-   the bunkhouse "I forgot to run seed-starters" failure mode. Multi-
-   replica safety via ``SELECT FOR UPDATE`` on the ``alembic_version``
-   sentinel row.
+3. (Removed — ADR-0087 Phase 5. The roles/workflows starter auto-seed
+   died with the tables.)
 4. Auto-seed the system Plan (ADR-0057). The single Plan row that owns
    every synthetic Task created by ``handle_scheduled_tick`` and the
    operator-trigger endpoint. Runs BEFORE schedules seed so the first

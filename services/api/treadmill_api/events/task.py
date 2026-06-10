@@ -175,7 +175,10 @@ class TaskRegistered(EventPayload):
 
     repo: str
     title: str
-    workflow_version_id: uuid.UUID
+    workflow_version_id: uuid.UUID | None = None
+    """Always ``None`` post-ADR-0087 Phase 5 — tasks no longer pin a
+    workflow version. Field kept for wire-compat one deprecation
+    window."""
     plan_id: uuid.UUID
 
 

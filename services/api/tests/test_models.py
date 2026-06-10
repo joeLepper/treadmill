@@ -3,6 +3,12 @@
 These are unit tests; no database required. The integration test for the
 migration (upgrade + downgrade against live Postgres) lives in
 ``test_integration_local.py``.
+
+Post-ADR-0087 Phase 5 the model surface is the lean set: plans, tasks
+(+ deps + PRs), task_executions + llm_calls, events, schedules,
+team_configs, onboarding rows, task_board, system_status. The workflow
+definition/run layer, roles/skills/hooks, task_validations, and the
+DSPy corpora are gone with their tables.
 """
 
 from __future__ import annotations
@@ -13,23 +19,13 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from treadmill_api.database import Base
 from treadmill_api.models import (
     Event,
-    EventTrigger,
-    Hook,
+    LLMCall,
     Plan,
-    Role,
-    RoleHook,
-    RoleSkill,
     Schedule,
-    Skill,
     Task,
     TaskDependency,
+    TaskExecution,
     TaskPR,
-    TaskValidation,
-    Workflow,
-    WorkflowRun,
-    WorkflowRunStep,
-    WorkflowVersion,
-    WorkflowVersionStep,
 )
 
 
@@ -40,72 +36,53 @@ def test_all_models_register_on_base_metadata():
         "tasks",
         "task_prs",
         "task_dependencies",
-        "task_validations",
-        "workflows",
-        "workflow_versions",
-        "workflow_version_steps",
-        "workflow_runs",
-        "workflow_run_steps",
-        "roles",
-        "skills",
-        "hooks",
-        "role_skills",
-        "role_hooks",
-        "event_triggers",
+        "task_executions",
+        "llm_calls",
         "events",
         "schedules",
+        "team_configs",
     }
     actual = set(Base.metadata.tables.keys())
     missing = expected - actual
     assert not missing, f"missing tables in Base.metadata: {missing}"
 
 
-def test_task_validation_table_shape():
-    """``task_validations`` carries the ``validation:`` block from a
-    plan-doc task spec. The model must expose every column the spec
-    promises (per the 2026-05-11 closure plan D.3) plus the integrity
-    constraints that keep it honest."""
-    table = TaskValidation.__table__
-    cols = {c.name for c in table.columns}
-    assert cols == {
-        "id",
-        "task_id",
-        "position",
-        "kind",
-        "description",
-        "script",
-        "prompt",
-        "created_at",
+def test_no_legacy_execution_tables_registered():
+    """ADR-0087 Phases 4–5 dropped the legacy execution model. None of
+    its tables may re-enter Base.metadata — a stray import of a deleted
+    model module would silently re-register one and resurrect it on the
+    next autogenerate."""
+    legacy = {
+        "workflows",
+        "workflow_versions",
+        "workflow_version_steps",
+        "workflow_runs",
+        "workflow_run_steps",
+        "workflow_dispatch_dedup",
+        "roles",
+        "role_versions",
+        "role_skills",
+        "role_hooks",
+        "skills",
+        "hooks",
+        "event_triggers",
+        "task_validations",
+        "architect_gold_rows",
+        "validator_gold_rows",
+        "review_dspy_variant_pr",
+        "triage_findings",
     }
-
-    # task_id FK targets tasks.id with cascade.
-    fk = next(iter(TaskValidation.__table__.foreign_keys))
-    assert fk.column.table.name == "tasks"
-    assert fk.ondelete == "CASCADE"
-
-    # CHECK constraint enforces script/prompt pairing per kind.
-    check_names = {
-        c.name for c in table.constraints
-        if c.__class__.__name__ == "CheckConstraint"
-    }
-    assert "ck_task_validations_kind_script_prompt" in check_names
-
-    # UNIQUE (task_id, position) so re-renders stay stable.
-    uniques = [
-        c for c in table.constraints
-        if c.__class__.__name__ == "UniqueConstraint"
-    ]
-    assert any(
-        {col.name for col in c.columns} == {"task_id", "position"}
-        for c in uniques
-    )
+    present = legacy & set(Base.metadata.tables.keys())
+    assert not present, f"legacy tables re-registered: {present}"
 
 
-def test_task_has_workflow_version_id_fk():
-    """Tasks pin to a specific workflow version per ADR-0010."""
+def test_task_has_no_workflow_version_pin():
+    """ADR-0087 Phase 5 — tasks no longer pin a workflow version; the
+    coordinator decides execution at dispatch time."""
+    assert "workflow_version_id" not in Task.__table__.columns
     fkeys = {fk.column.table.name for fk in Task.__table__.foreign_keys}
-    assert "workflow_versions" in fkeys
     assert "plans" in fkeys
+    assert "workflow_versions" not in fkeys
 
 
 def test_task_pr_has_composite_primary_key():
@@ -123,8 +100,8 @@ def test_event_payload_is_jsonb():
 
 def test_event_commit_sha_is_nullable_text():
     """events.commit_sha is the ADR-0014 column. Nullable TEXT — populated
-    by the webhook receiver / consumer / dispatcher when the event runs
-    against (or describes) a specific HEAD; NULL for pre-commit events.
+    by the webhook receiver / dispatcher when the event runs against (or
+    describes) a specific HEAD; NULL for pre-commit events.
     """
     table = Event.__table__
     assert "commit_sha" in table.columns, (
@@ -156,42 +133,33 @@ def test_event_has_partial_indexes_on_commit_sha():
     ]
 
 
-def test_workflow_run_step_output_is_jsonb():
-    """workflow_run_steps.output is JSONB per ADR-0011 (the second
-    allowed site)."""
-    output_col = WorkflowRunStep.__table__.columns["output"]
-    assert isinstance(output_col.type, JSONB)
-
-
-def test_workflow_run_step_has_token_usage_columns():
-    """ADR-0020 — ``workflow_run_steps`` carries five nullable columns
-    that the coordination consumer projects from
-    ``step.completed.token_usage``. All must be nullable: steps that made
-    no LLM call (dry-run, ``wf-validate``) and rows written before this
-    migration legitimately have no usage data.
-
-    The four counter columns are ``BIGINT`` (Claude's per-request token
-    totals are tiny but row-level aggregates over a long-lived run can
-    blow past ``int4`` headroom); ``model`` is ``TEXT`` to match the
-    rest of the model-id columns in the schema.
-    """
-    table = WorkflowRunStep.__table__
-    for name in (
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_tokens",
-        "cache_read_tokens",
-    ):
-        assert name in table.columns, f"missing column {name!r}"
+def test_llm_call_has_token_usage_columns():
+    """ADR-0087 — ``llm_calls`` carries the per-subprocess token
+    attribution. Counter columns are ``BIGINT`` (aggregates over a
+    long-lived team can blow past ``int4`` headroom); cache columns are
+    nullable (not every call reports cache usage)."""
+    table = LLMCall.__table__
+    for name in ("input_tokens", "output_tokens"):
         col = table.columns[name]
-        assert isinstance(col.type, BigInteger), (
-            f"{name} must be BIGINT, got {type(col.type).__name__}"
-        )
+        assert isinstance(col.type, BigInteger)
+        assert col.nullable is False, f"{name} must be NOT NULL"
+    for name in ("cache_creation_tokens", "cache_read_tokens"):
+        col = table.columns[name]
+        assert isinstance(col.type, BigInteger)
         assert col.nullable is True, f"{name} must be nullable"
-    assert "model" in table.columns
-    model_col = table.columns["model"]
-    assert isinstance(model_col.type, Text)
-    assert model_col.nullable is True
+    assert isinstance(table.columns["model"].type, Text)
+
+
+def test_task_execution_shape():
+    """ADR-0087 — ``task_executions`` is the coordinator's lifecycle
+    write target. The 409/CHECK behaviors are pinned in
+    ``test_routers_task_executions``; here we pin the column shape."""
+    table = TaskExecution.__table__
+    for name in ("task_id", "worker_label", "trigger", "status",
+                 "started_at"):
+        assert name in table.columns, f"missing column {name!r}"
+    assert table.columns["failure_reason"].nullable is True
+    assert table.columns["completed_at"].nullable is True
 
 
 def test_no_unexpected_jsonb_columns():
@@ -199,23 +167,16 @@ def test_no_unexpected_jsonb_columns():
 
     Allowed sites:
     - events.payload (ADR-0011)
-    - workflow_run_steps.output (ADR-0011)
     - schedules.payload_template (ADR-0035 exception)
-    - (triage_findings.evidence_summary was an ADR-0061 exception — a small
-      denormalized counts dict the labeling UI scans without S3 fetches;
-      the keyset (console_errors / http_4xx / http_5xx / requestfailed)
-      is open-ended as the bug taxonomy expands per the v1 prompt's
-      `other`-rate-as-signal contract, so a fixed-column shape would
-      force a migration per taxonomy update.)
     - repo_configs.sensitive_strings (ADR-0078 — operator-curated
       list of additional substrings the secret-leak gate blocks on
-      vault writes; a list type is the natural shape, and a fixed-
-      column shape would force a migration each time the operator
-      added a new pattern.)
+      vault writes)
+
+    ``workflow_run_steps.output`` and ``triage_findings.evidence_summary``
+    left the list with their tables (ADR-0087 Phases 4–5).
     """
     allowed = {
         ("events", "payload"),
-        ("workflow_run_steps", "output"),
         ("schedules", "payload_template"),
         ("repo_configs", "sensitive_strings"),
     }
@@ -234,7 +195,8 @@ def test_no_unexpected_jsonb_columns():
 def test_uuid_primary_keys_use_postgres_uuid_type():
     """UUID PKs use the Postgres UUID type with as_uuid=True so the model
     layer hands real ``uuid.UUID`` objects, not strings."""
-    for model in (Plan, Task, TaskDependency, WorkflowVersion, WorkflowRun, WorkflowRunStep, Event, EventTrigger, Schedule):
+    for model in (Plan, Task, TaskDependency, TaskExecution, LLMCall,
+                  Event, Schedule):
         col = model.__table__.columns["id"]
         assert isinstance(col.type, UUID), f"{model.__name__}.id is not UUID"
 
@@ -247,11 +209,3 @@ def test_timestamps_are_timezone_aware():
             assert isinstance(col.type, TIMESTAMP) and col.type.timezone, (
                 f"{table.name}.created_at must be TIMESTAMPTZ"
             )
-
-
-def test_string_id_models_use_slug_pks():
-    """Workflow / Role / Skill / Hook are slug-keyed (string PK)."""
-    for model in (Workflow, Role, Skill, Hook):
-        col = model.__table__.columns["id"]
-        assert col.type.python_type is str
-        assert col.primary_key

@@ -21,8 +21,6 @@ from treadmill_api.events.task import ArchitectEmitFailure, TaskRegistered, Task
 from treadmill_api.models import (
     Plan,
     Task,
-    Workflow,
-    WorkflowVersion,
 )
 from treadmill_api.events.task import OperatorHintSet
 
@@ -34,8 +32,10 @@ class TaskCreateRequest(BaseModel):
     plan_id: uuid.UUID
     title: str = Field(..., min_length=1, max_length=512)
     description: str | None = None
-    workflow: str = Field(..., min_length=1, max_length=64)
-    """Workflow slug; the latest version is pinned at submission time."""
+    workflow: str | None = None
+    """Accepted for wire-compat, ignored post-ADR-0087 Phase 5 — tasks
+    no longer pin a workflow version; the coordinator decides execution
+    at dispatch time."""
 
     created_by: str | None = None
 
@@ -46,7 +46,9 @@ class TaskResponse(BaseModel):
     repo: str
     title: str
     description: str | None
-    workflow_version_id: uuid.UUID
+    workflow_version_id: uuid.UUID | None = None
+    """Always null post-ADR-0087 Phase 5 — wire-compat one deprecation
+    window."""
     created_by: str | None
     created_at: datetime
     parent_task_id: uuid.UUID | None = None
@@ -104,7 +106,6 @@ def _row_to_response(row) -> TaskResponse:
     return TaskResponse(
         id=row.id, plan_id=row.plan_id, repo=row.repo,
         title=row.title, description=row.description,
-        workflow_version_id=row.workflow_version_id,
         created_by=row.created_by, created_at=row.created_at,
         parent_task_id=row.parent_task_id,
         operator_note=row.operator_note,
@@ -115,7 +116,7 @@ def _row_to_response(row) -> TaskResponse:
 
 _TASK_WITH_STATUS_SQL = """
     SELECT t.id, t.plan_id, t.repo, t.title, t.description,
-           t.workflow_version_id, t.created_by, t.created_at,
+           t.created_by, t.created_at,
            t.parent_task_id, t.operator_note,
            ts.derived_status,
            tm.derived_mergeability
@@ -123,28 +124,6 @@ _TASK_WITH_STATUS_SQL = """
     LEFT JOIN task_status ts ON ts.id = t.id
     LEFT JOIN task_mergeability tm ON tm.task_id = t.id
 """
-
-
-async def _resolve_workflow_version(session: AsyncSession, slug: str) -> uuid.UUID:
-    workflow = await session.get(Workflow, slug)
-    if workflow is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"workflow {slug!r} not registered",
-        )
-    result = await session.execute(
-        select(WorkflowVersion)
-        .where(WorkflowVersion.workflow_id == slug)
-        .order_by(WorkflowVersion.version.desc())
-        .limit(1)
-    )
-    version = result.scalar_one_or_none()
-    if version is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"workflow {slug!r} has no versions yet",
-        )
-    return version.id
 
 
 @router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
@@ -159,11 +138,10 @@ async def create_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"plan {body.plan_id} not found",
         )
-    wv_id = await _resolve_workflow_version(session, body.workflow)
     task = Task(
         plan_id=plan.id, repo=plan.repo,
         title=body.title, description=body.description,
-        workflow_version_id=wv_id, created_by=body.created_by,
+        created_by=body.created_by,
     )
     session.add(task)
     await session.flush()
@@ -175,7 +153,6 @@ async def create_task(
         payload=TaskRegistered(
             repo=task.repo,
             title=task.title,
-            workflow_version_id=wv_id,
             plan_id=plan.id,
         ),
         plan_id=plan.id,
@@ -196,7 +173,7 @@ async def create_task(
 
 _TASK_NEEDS_OPERATOR_SQL = """
     SELECT DISTINCT t.id, t.plan_id, t.repo, t.title, t.description,
-           t.workflow_version_id, t.created_by, t.created_at,
+           t.created_by, t.created_at,
            t.parent_task_id, t.operator_note,
            ts.derived_status,
            tm.derived_mergeability
@@ -367,7 +344,6 @@ async def retry_task(
         payload=TaskRegistered(
             repo=task.repo,
             title=task.title,
-            workflow_version_id=task.workflow_version_id,
             plan_id=task.plan_id,
         ),
         plan_id=task.plan_id,
