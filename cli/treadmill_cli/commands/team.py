@@ -34,7 +34,13 @@ What the command does
    - ``<label>.env`` — env vars for the session's systemd unit. The
      env-var shape mirrors the existing coordinator.env pattern.
 
-4. ``systemctl --user enable`` + ``start`` for every label's
+4. Render the per-session templates (ADR-0087 PR-D/E/H): coordinator +
+   evaluator + worker ``CLAUDE.md`` and worker
+   ``.claude/settings.json`` via ``tools/team-templates/install.py``'s
+   ``install_team()``. Render failures abort (exit 2) — a session that
+   boots without its templates is the silent no-op PR-H fixed.
+
+5. ``systemctl --user enable`` + ``start`` for every label's
    ``treadmill-channel@<label>.service`` unit. Systemd failures warn
    but do not abort — the load-bearing artifacts (team_configs row +
    directory tree) survive and the operator can retry the systemd hop
@@ -62,8 +68,10 @@ down (N smaller) is gated by the server-side guard described above.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -174,6 +182,63 @@ def _ensure_session_tree(
         )
     )
     return session_id_path, env_path
+
+
+def _repo_root() -> Path:
+    """Locate the treadmill repo checkout.
+
+    ``TREADMILL_REPO_DIR`` wins when set (matches the launcher's
+    override contract); otherwise derive from this file's location —
+    ``<repo>/cli/treadmill_cli/commands/team.py`` → ``parents[3]``.
+    Works for the editable install this CLI ships as; a wheel install
+    without the repo checkout fails loudly in
+    :func:`_install_templates`.
+    """
+    env = os.environ.get("TREADMILL_REPO_DIR", "").strip()
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[3]
+
+
+def _install_templates(repo_slug: str, worker_count: int) -> None:
+    """Render the per-session CLAUDE.md + settings.json files.
+
+    Loads ``tools/team-templates/install.py`` from the repo checkout
+    by path (it is intentionally not a package — stdlib-only, owned by
+    the team-templates component) and calls
+    ``install_team(make_team_spec(slug, worker_count))``.
+
+    This is the CLI wiring half of ADR-0087 PR-D/E/H: without it,
+    ``team up`` creates the directory tree + systemd units but the
+    sessions boot with no rendered CLAUDE.md and no
+    ``.claude/settings.json`` (so the worker PostToolUse relay-inject
+    hook never registers). See
+    docs/learnings/2026-06-10-template-install-layout-vs-launcher-cwd-mismatch.md.
+    """
+    install_path = _repo_root() / "tools" / "team-templates" / "install.py"
+    if not install_path.is_file():
+        raise FileNotFoundError(
+            f"{install_path} not found — template render requires the "
+            "treadmill repo checkout (set TREADMILL_REPO_DIR if it "
+            "lives somewhere other than the editable-install location)"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "_treadmill_team_templates_install", install_path
+    )
+    assert spec is not None and spec.loader is not None  # path checked above
+    module = importlib.util.module_from_spec(spec)
+    # Register before exec: install.py's @dataclass resolves its string
+    # annotations via sys.modules[cls.__module__] — absent registration
+    # the dataclass machinery crashes on NoneType.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
+    module.install_team(
+        module.make_team_spec(repo_slug, worker_count=worker_count)
+    )
 
 
 def _run_systemctl(args: list[str]) -> tuple[int, str]:
@@ -289,7 +354,23 @@ def up(
         session_id_paths.append(sid)
         env_paths.append(env)
 
-    # ── Step 3: systemctl --user enable / start per session ────────
+    # ── Step 3: render per-session templates (ADR-0087 PR-D/E/H) ───
+    # Must happen BEFORE the systemd start so sessions boot with their
+    # CLAUDE.md + .claude/settings.json already on disk. Hard failure:
+    # a team whose sessions boot without templates is the exact silent
+    # no-op PR-H fixed — fail loudly and let the operator re-run.
+    try:
+        _install_templates(slug, workers)
+    except Exception as exc:
+        err_console.print(f"[red]template render failed: {exc}[/red]")
+        err_console.print(
+            "[yellow]team_configs row + directory tree are persisted; "
+            "fix the cause and re-run `treadmill team up` (idempotent)."
+            "[/yellow]"
+        )
+        raise typer.Exit(code=2)
+
+    # ── Step 4: systemctl --user enable / start per session ────────
     systemd_warnings: list[str] = []
     for label in all_labels:
         unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
@@ -300,7 +381,7 @@ def up(
                     f"systemctl --user {verb} {unit}: rc={rc} stderr={err!r}"
                 )
 
-    # ── Step 4: Summary ─────────────────────────────────────────────
+    # ── Step 5: Summary ─────────────────────────────────────────────
     console.print(f"[green]repo[/green]              {repo}")
     console.print(f"[green]slug[/green]              {slug}")
     console.print(f"[green]coordinator label[/green] {coordinator_label}")
