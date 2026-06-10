@@ -88,18 +88,26 @@ Creates `~/.treadmill/teams/<slug>/` directory tree per session:
 - `~/.treadmill/teams/<slug>/<label>/.session-id` — empty file on creation; coordinator writes
   actual session ID on first subprocess exit; `--resume` reads from it on subsequent spawns
 - `~/.treadmill/teams/<slug>/<label>/<label>.env` — env vars for the session unit
+**Scale-down guard:** if `--workers N` reduces the worker count, check for `task_executions
+WHERE worker_label IN (to-be-removed labels) AND status='running'`; abort naming the offending
+labels if any exist. Accept `--force` to skip the check (operator's explicit acknowledgment
+that in-flight work is being abandoned).
 Enables + starts `treadmill-channel@<label>.service` units. Update `tests/test_routers_team_configs.py`.
-CLI test (assert directory tree + .session-id stub files created). AGENT.md for team_configs component.
+CLI test (assert directory tree + .session-id stub files created + scale-down guard fires).
+AGENT.md for team_configs component.
 
 ---
 
 ### Wave 2 — sequential (PR-C after PR-A merged)
 
 **PR-C — Alan: task_executions + llm_calls tables + VIEW**
-Alembic migration: CREATE `task_executions` + `llm_calls` (full schema per ADR-0087 §Schema
-changes — four-value CHECK constraint including `peer-review`). ORM models. Update `task_status`
-VIEW to include `task_executions`-derived status alongside existing workflow_runs-derived status
-(additive — both tables live during transition). Add minimal CRUD endpoints:
+Alembic migration: CREATE `task_executions` + `llm_calls`. Schema per ADR-0087 §Schema changes:
+- four-value trigger CHECK constraint (`initial`, `coordinator-rework`, `evaluator-rework`, `peer-review`)
+- `failure_reason TEXT NULL` column for coordinator_restart and other failure annotations
+- UNIQUE (task_id, trigger, worker_label, started_at) — prevents duplicate spawns on coordinator restart
+ORM models. Update `task_status` VIEW to include `task_executions`-derived status alongside
+existing workflow_runs-derived status (additive — both tables live during transition; prefer
+task_executions when present). Add minimal CRUD endpoints:
 `POST /api/v1/task_executions`, `PATCH /api/v1/task_executions/{id}`,
 `GET /api/v1/task_executions?task_id=<id>`. Add `POST /api/v1/llm_calls`.
 New test file `tests/test_routers_task_executions.py`. AGENT.md.
@@ -149,7 +157,11 @@ live session picks up the updated CLAUDE.md. This must happen before PR-F drops 
 ### Wave 4 — sequential (PR-F → PR-G, after operator restart + PR-D merged)
 
 **PR-F — Bert: delete old execution tables (Phase 4)**
-Alembic migration dropping: `workflow_runs`, `workflow_run_steps`, `roles`, `role_version`,
+Alembic migration includes precondition guard: check `SELECT MAX(created_at) FROM workflow_runs`;
+if within last 5 min (configurable `DEPRECATED_TABLE_QUIESCE_SECONDS`, default 300), abort with
+message naming coordinator sessions to restart. Fails loudly instead of dropping a table with
+an active writer.
+Drops: `workflow_runs`, `workflow_run_steps`, `roles`, `role_version`,
 `role_skill`, `role_hook`, `skills`, `hooks`, `output_kind`, `task_validation`,
 `architect_gold`, `validator_gold`, `review_dspy_variant_pr`, `triage_finding`,
 `workflow_dispatch_dedup`. Remove ORM model files and any imports. Remove API router endpoints

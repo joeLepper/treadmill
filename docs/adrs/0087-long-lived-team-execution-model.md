@@ -86,6 +86,9 @@ are executives who submit plans. They are never in `worker_labels`.
    Reads tasks. For each unblocked task:
    - POST /api/v1/task_executions {task_id, worker_label, trigger="initial"}
    - Briefs worker via cc-relay
+   If N unblocked tasks > N available workers, the coordinator queues excess tasks and spawns
+   them FIFO as workers free up (subprocess exits). No task is dropped; queueing is in-memory
+   within the coordinator session.
 
 3. Worker executes task
    Writes code, opens PR on a dedicated branch.
@@ -137,7 +140,13 @@ are executives who submit plans. They are never in `worker_labels`.
    On REWORK  → coordinator POST task_executions {trigger: "evaluator-rework"}, re-briefs worker,
                 loop to step 4 (CI check → peer review → evaluator; full cycle repeats).
 
-   Coordinator writes a task.evaluator_verdict event on receipt of either verdict. Audit trail.
+   Coordinator writes a `task.evaluator_verdict` event on receipt of either verdict. Audit trail.
+
+   **Evaluator timeout:** if the coordinator receives no verdict within 30 minutes of briefing
+   the evaluator, it re-briefs once. If no verdict arrives within 60 minutes of the re-brief,
+   the coordinator escalates to the orchestrator and emits a `task.evaluator_timeout` event
+   with the elapsed time. The audit trail distinguishes timeout escalations (no verdict) from
+   rework escalations (verdict = rework, max cycles exceeded).
 
    **Max-cycles cap:** if a task accumulates ≥ 3 `evaluator-rework` rows
    (i.e. `COUNT(*) WHERE trigger='evaluator-rework' AND task_id=X` ≥ 3), the coordinator
@@ -203,6 +212,19 @@ cycle for the *author* after collating feedback, that uses `trigger='coordinator
 coordinator is initiating an author work cycle, same as CI failure rework). This keeps the two
 activities semantically distinct in the schema. See §Rework tracking for the metric queries.
 
+**Single-session constraint:** Each worker runs at most one subprocess at a time (`--print` mode
+is single-process-per-session). If the coordinator wants to spawn a reviewer whose subprocess is
+already in flight (e.g. the same worker is simultaneously authoring a different task), it must
+wait for the in-flight process to exit before spawning the review subprocess. The coordinator
+serializes per worker label, not globally.
+
+**Post-review conflict check:** After collating peer review verdicts (whether all-lgtm or
+needs-changes), the coordinator immediately re-polls the `task_mergeability` VIEW before
+proceeding to the evaluator or issuing a coordinator-rework brief. If the branch became
+conflicted while peer review was in flight, the coordinator opens a `coordinator-rework`
+task_execution for the author to resolve the conflict before the evaluator sees potentially
+obsolete code.
+
 **Re-cycle semantics:**
 Peer review re-runs on every coordinator-rework cycle. After the author addresses feedback and
 pushes (whether triggered by CI failure, conflict, or prior peer review findings), the full CI
@@ -267,6 +289,14 @@ worker-medicoder-3   (default count: 3; override with --workers N)
 
 Sessions are created fresh if they don't exist; the command is idempotent (re-running against
 an existing team config updates worker count without replacing running sessions).
+
+**Scale-down semantics.** If `--workers N` reduces the worker count (e.g. 5 → 3), `treadmill
+team up` first checks for in-flight `task_executions` rows whose `worker_label` matches any
+to-be-removed label (i.e. `worker-<slug>-4`, `worker-<slug>-5` in this example). If any such
+rows have `status = 'running'`, the command aborts with an error naming the in-flight labels
+and tasks — the operator must wait for those tasks to complete or manually mark them `failed`
+before reducing the worker count. This prevents coordinator re-spawn attempts against
+decommissioned labels.
 
 ### Worker execution model
 
@@ -469,15 +499,16 @@ indicate good code quality with high review coverage.
 ```sql
 -- Replaces workflow_runs + workflow_run_steps
 CREATE TABLE task_executions (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    task_id     UUID NOT NULL REFERENCES tasks(id),
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id      UUID NOT NULL REFERENCES tasks(id),
     worker_label TEXT NOT NULL,
-    trigger     TEXT NOT NULL CHECK (trigger IN ('initial','coordinator-rework','evaluator-rework','peer-review')),
-    status      TEXT NOT NULL DEFAULT 'running'
-                    CHECK (status IN ('running','completed','failed')),
-    started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    trigger      TEXT NOT NULL CHECK (trigger IN ('initial','coordinator-rework','evaluator-rework','peer-review')),
+    status       TEXT NOT NULL DEFAULT 'running'
+                     CHECK (status IN ('running','completed','failed')),
+    failure_reason TEXT,              -- populated on status='failed'; e.g. 'coordinator_restart'
+    started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
-    UNIQUE (task_id, started_at)  -- dedup guard
+    UNIQUE (task_id, trigger, worker_label, started_at)  -- prevents duplicate spawns on coordinator restart
 );
 
 -- team_configs gains evaluator_label
@@ -520,7 +551,12 @@ VIEW to read `task_executions`. Update coordinator §12.2 path to write `task_ex
 Install worker `settings.json` with PostToolUse relay-inject hook + `bypassPermissions`.
 
 **Phase 4**: Delete `workflow_runs`, `workflow_run_steps`, roles/skills/hooks machinery,
-task_validation, DSPy corpora tables. Alembic migration.
+task_validation, DSPy corpora tables. Alembic migration. **Precondition guard:** the Phase 4
+migration script checks `SELECT MAX(created_at) FROM workflow_runs`; if any row was inserted
+within the last 5 minutes (configurable via `DEPRECATED_TABLE_QUIESCE_SECONDS`, default 300),
+the migration aborts with: *"live coordinator detected — restart coordinator-<slug> sessions
+then retry"*. This prevents the table drop racing a coordinator that was not restarted after
+Phase 3.
 
 **Phase 5**: Delete `workflows`, `workflow_versions`, `workflow_version_steps`. Alembic.
 Remove starters.py role-seeding on API startup.
