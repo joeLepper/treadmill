@@ -273,7 +273,7 @@ ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT;
 path. Tasks created at submit stay in `registered` status until coordinator §12.1 handler
 fires. One-time SQS drain for orphaned messages.
 
-**Phase 2** (same-day): Add `architect_label` to `team_configs`. Populate `worker_labels`
+**Phase 2** (same-day): Add `evaluator_label` to `team_configs`. Populate `worker_labels`
 with actual worker session labels per repo. Run `treadmill team up` bootstrap for each
 active repo.
 
@@ -326,7 +326,7 @@ Remove starters.py role-seeding on API startup.
   actual data drive Option A vs B. Schema extension is intentionally deferred so we do not
   over-engineer a path that may not reflect real worker invocation patterns.
 - 2026-06-10: **Single-writer invariant confirmed as architectural principle.** Coordinator is
-  the sole writer of `task_executions` rows and lifecycle state. Architect reads only. Workers
+  the sole writer of `task_executions` rows and lifecycle state. Evaluator reads only. Workers
   report outcomes via relay; coordinator transcribes into DB. No exceptions — multiple writers
   on lifecycle state produce races that are difficult to diagnose and replay.
 - 2026-06-10: **Subprocess-per-task framing preferred if feasible.** The existing
