@@ -14,7 +14,7 @@ step before exiting. Each container was stateless; the database was the coordina
 ADR-0084 and ADR-0086 introduced coordinators as long-lived named sessions that own lifecycle
 bookkeeping. That was the first step toward the model described here. However, those ADRs
 retained the old dispatch machinery (SQS, `dispatch_task`, workflow version steps) and did
-not fully specify the worker or architect roles.
+not fully specify the worker or evaluator roles.
 
 On 2026-06-10, a gap audit (Alan + Bert) found three writer-conflicts, a missing consumer
 (40 SQS messages with no subscribers), and a fundamental mismatch between the coordinator
@@ -23,22 +23,30 @@ model and the still-running autoscaler machinery. Joe directed a full rethink.
 ## Decision
 
 Replace the ephemeral Docker worker model entirely with a **long-lived named-session team**
-per repo. All repos are coordinator-owned. No autoscaler. No SQS work queue for task dispatch.
+per repo. All repos are coordinator-owned. No autoscaler. No SQS **worker dispatch** queue.
+
+The `events` table is the durable event log for all state transitions including `plan.submitted`.
+The WS subscription is the real-time delivery mechanism for online coordinators. On reconnect,
+a coordinator replays missed events by querying the `events` table for unprocessed
+`plan.submitted` entries (tasks with no `task_executions` row). This preserves the same
+ordering guarantee as the existing GitHub webhook intake path.
 
 ### The three-locus model
 
 ```
-API / DB              Coordinator              Architect
+API / DB              Coordinator              Evaluator
 ─────────────         ────────────────         ─────────────────
 Event log +           Live coordination        Independent audit
-state store           engine. Routes work,     node. Reviews PRs,
-                      writes lifecycle         returns approve or
-Records what          state to DB.             rework to coordinator
-happened. Serves      Receives events                 │
-crash recovery +      via WS subscription.            │
-dashboard.                    │                       │
-                              │ cc-relay              │ cc-relay
-                              ▼                       │
+state store           engine. Routes work,     node. Evaluates PRs,
+(durable queue)       writes lifecycle         returns approve or
+                      state to DB.             rework to coordinator
+Records what          Receives plan.submitted         │
+happened. WS          via WS (real-time) or           │
+delivers in           events-table replay             │
+real-time;            on reconnect.                   │
+events table                  │                       │
+is the durable                │ cc-relay              │ cc-relay
+log.                          ▼                       │
                          Workers                      │
                          ──────────────               │
                          Long-lived named             │
@@ -54,11 +62,14 @@ Every registered repo gets a software team:
 | Role | Label pattern | Count | Responsibility |
 |---|---|---|---|
 | Coordinator | `coordinator-<slug>` | 1 | Routes tasks to workers, owns lifecycle writes |
-| Architect | `architect-<slug>` | 1 | Reviews PRs; verdicts merge or rework |
-| Workers | `worker-<name>` | configurable | Implement code, open PRs |
+| Evaluator | `evaluator-<slug>` | 1 | Evaluates PRs independently; verdicts merge or rework |
+| Workers | `worker-<slug>-N` | configurable | Implement code, open PRs |
 
-`team_configs` stores `coordinator_label` (string), `architect_label` (string),
-and `worker_labels` (string array). Worker count is configurable per repo; default 2.
+`team_configs` stores `coordinator_label` (string), `evaluator_label` (string),
+and `worker_labels` (string array). Worker count is configurable per repo; default 3.
+
+Worker labels are derived deterministically from the repo slug at bootstrap time
+(`worker-<slug>-1`, `worker-<slug>-2`, `worker-<slug>-3`). No manual assignment required.
 
 Orchestrators (`treadmill-alan`, `treadmill-bert`, `treadmill-carla`, `treadmill-donna`)
 are executives who submit plans. They are never in `worker_labels`.
@@ -70,7 +81,8 @@ are executives who submit plans. They are never in `worker_labels`.
    POST /api/v1/plans → persists plan + tasks → emits plan.submitted
    (no dispatch_task; no SQS send)
 
-2. Coordinator receives plan.submitted via WS (?coordinator_label=... filter)
+2. Coordinator receives plan.submitted via WS (?coordinator_label=... filter) or events-table
+   replay on reconnect (queries for plan.submitted events with no task_executions rows).
    Reads tasks. For each unblocked task:
    - POST /api/v1/task_executions {task_id, worker_label, trigger="initial"}
    - Briefs worker via cc-relay
@@ -81,14 +93,16 @@ are executives who submit plans. They are never in `worker_labels`.
 
 4. Coordinator registers PR
    POST /api/v1/task_prs {task_id, repo, pr_number}
-   Briefs architect via cc-relay: "PR #N is ready for review"
+   Briefs evaluator via cc-relay: "PR #N is ready for evaluation"
+   (The evaluator knows work is evaluable because the coordinator says so. The coordinator
+   is the only session that knows a PR has been opened and registered.)
 
-5. Architect reviews
+5. Evaluator evaluates
    GET /api/v1/task_executions/{task_id} — reads current state (read-only)
    Checks CI, branch state, rules distilled from learnings, repo memories.
    Verdict via cc-relay to coordinator (fixed format):
 
-     [from: architect-<slug>]
+     [from: evaluator-<slug>]
      [verdict: approve | rework]
      [pr_number: N]
      [task_id: <uuid>]
@@ -98,9 +112,9 @@ are executives who submit plans. They are never in `worker_labels`.
      <for rework: bulleted remediation list — coordinator pastes verbatim into worker's next brief>
 
    On APPROVE → coordinator merges PR, PATCH task_execution {status: completed}
-   On REWORK  → coordinator POST task_executions {trigger: "architect-rework"}, re-briefs worker
+   On REWORK  → coordinator POST task_executions {trigger: "evaluator-rework"}, re-briefs worker
 
-   Coordinator writes a task.architect_verdict event on receipt of either verdict. Audit trail.
+   Coordinator writes a task.evaluator_verdict event on receipt of either verdict. Audit trail.
 
 6. On coordinator-initiated rework (CI failure, worker error):
    POST task_executions {trigger: "coordinator-rework"}, re-briefs worker.
@@ -110,20 +124,20 @@ are executives who submit plans. They are never in `worker_labels`.
    Emits pr_merged event path per ADR-0086 §12.4.
 ```
 
-### Architect WS subscription
+### Evaluator WS subscription
 
-The architect subscribes with `?architect_label=architect-<slug>`. This filter composes with
+The evaluator subscribes with `?evaluator_label=evaluator-<slug>`. This filter composes with
 the existing `coordinator_label`, `created_by`, and `plan_ids` filters by OR
-(per the WS filter implementation in PR #286). Architect receives events for its repo's plans.
+(per the WS filter implementation in PR #286). Evaluator receives events for its repo's plans.
 
-Architect is **read-only API**. All lifecycle writes flow through the coordinator.
+Evaluator is **read-only API**. All lifecycle writes flow through the coordinator.
 
-*Why relay-based (architect → coordinator → DB) instead of direct architect writes?* Two
+*Why relay-based (evaluator → coordinator → DB) instead of direct evaluator writes?* Two
 reasons. First, **single-writer invariant**: coordinator is the only mutator of lifecycle
 state; no multi-writer races on `task_executions`. Second, **judgment carries in-band**: the
-architect's relay carries verdict reasoning + remediation list directly to the coordinator,
+evaluator's relay carries verdict reasoning + remediation list directly to the coordinator,
 which incorporates it verbatim into the worker's next brief. Direct API writes would force
-the coordinator to re-fetch and re-derive the architect's intent. The relay format carries
+the coordinator to re-fetch and re-derive the evaluator's intent. The relay format carries
 meaning in-band; schema would carry only IDs.
 
 ### Health bots
@@ -136,13 +150,22 @@ Schedules table preserved; no workflow_version lookup required.
 ### Team bootstrap
 
 ```bash
-treadmill team up --repo MediCoderHQ/medicoder \
-  --coordinator coordinator-medicoder \
-  --architect architect-medicoder \
-  --workers worker-adam,worker-bethany
+treadmill team up --repo MediCoderHQ/medicoder
 ```
 
-Writes `team_configs` row; spawns systemd units for each named session.
+Writes `team_configs` row; spawns systemd units for each named session. Worker labels and the
+evaluator label are derived deterministically from the repo slug — no manual naming required:
+
+```
+coordinator-medicoder
+evaluator-medicoder
+worker-medicoder-1
+worker-medicoder-2
+worker-medicoder-3   (default count: 3; override with --workers N)
+```
+
+Sessions are created fresh if they don't exist; the command is idempotent (re-running against
+an existing team config updates worker count without replacing running sessions).
 
 ### Token economics
 
@@ -152,8 +175,11 @@ Two options under evaluation:
 
 **Option A — Subprocess-per-task (preserves clean attribution):**
 Workers dispatch each task as a `claude --print --output-format json` subprocess internally.
-Tokens are extracted at subprocess exit and tagged with `task_id`. The worker session is
-long-lived (preserves repo memory + team context), but each task's LLM work is subprocess-scoped.
+Tokens are extracted at subprocess exit and tagged with `task_id`. The worker session process
+is long-lived (preserves repo memory, CLAUDE.md context, cc-relay channel connection); only
+the per-task LLM invocation is subprocess-scoped. The outer session continues to receive
+cc-relay messages from coordinator and peer workers between (and alongside) task subprocesses —
+two-way channel communication is unaffected by the subprocess model.
 
 **Option B — Aggregate tracking:**
 Workers run in fully interactive mode. Token attribution is per-session via Anthropic API
@@ -199,7 +225,7 @@ Per-plan rework = `SUM(rework counts) GROUP BY plan_id`
 The trigger taxonomy:
 - `initial` — first brief on a task
 - `coordinator-rework` — coordinator re-brief (CI failure, worker error, dependency unblocked)
-- `architect-rework` — architect requested changes
+- `evaluator-rework` — evaluator requested changes
 
 This is the primary metric for whether long-lived context-sharing reduces loops.
 
@@ -213,7 +239,7 @@ CREATE TABLE task_executions (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     task_id     UUID NOT NULL REFERENCES tasks(id),
     worker_label TEXT NOT NULL,
-    trigger     TEXT NOT NULL CHECK (trigger IN ('initial','coordinator-rework','architect-rework')),
+    trigger     TEXT NOT NULL CHECK (trigger IN ('initial','coordinator-rework','evaluator-rework')),
     status      TEXT NOT NULL DEFAULT 'running'
                     CHECK (status IN ('running','completed','failed')),
     started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -222,8 +248,8 @@ CREATE TABLE task_executions (
     UNIQUE (task_id, started_at)  -- dedup guard
 );
 
--- team_configs gains architect_label
-ALTER TABLE team_configs ADD COLUMN architect_label TEXT;
+-- team_configs gains evaluator_label
+ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT;
 ```
 
 ### Keep (unchanged)
@@ -266,13 +292,13 @@ Remove starters.py role-seeding on API startup.
 **Positive:**
 - Single clear dispatch path: plan.submitted → coordinator → worker. No competing paths.
 - Rework measurement is native to the schema, not inferred from event sequences.
-- Architect as independent auditor decouples quality judgment from implementation momentum.
+- Evaluator as independent auditor decouples quality judgment from implementation momentum.
 - Long-lived sessions accumulate repo-specific memory, reducing context re-establishment cost.
 - ~12 tables deleted; API surface shrinks; no autoscaler operational burden.
 
 **Negative / risks:**
 - Token attribution model is not yet decided. If Option B, per-task granularity is lost.
-- Three named sessions per repo (coordinator + architect + N workers) increases operational
+- Three named sessions per repo (coordinator + evaluator + N workers) increases operational
   surface for session restarts and context recovery.
 - No UI plan for the new model. Task tracking surfaces need a separate pass.
 - DSPy prompt optimization corpus is lost. If future work needs it, corpora must be
@@ -281,16 +307,15 @@ Remove starters.py role-seeding on API startup.
 ## Open questions
 
 1. **Token path (A vs B):** Joe's call pending. Determines `task_executions` token columns.
-2. **Worker specialization:** Generalist for now; `worker_capabilities` JSONB on `team_configs`
-   as future extension when routing hints are needed.
+2. **Worker specialization:** ~~Generalist for now~~ — **CLOSED** (2026-06-10). Generalist is
+   the permanent default. Specializations are expected to emerge naturally through task
+   routing history (orchestrators tend to route to workers who last knew the area best).
+   No `worker_capabilities` column needed in v1.
 3. **Health-bot brief shape:** Deferred. Coordinator's memory tells it what to do when
    it receives a health-check plan.
 4. **UI:** Subsequent pass. May be task-tracking only or eliminated.
-5. **Cross-repo team-tier sharing:** Can `worker-adam` serve both `coordinator-medicoder`
-   and `coordinator-treadmill` simultaneously, or are workers dedicated to one repo?
-   Current model assumes dedicated (one team per repo). Shared workers would reduce session
-   overhead but introduce cross-repo context bleed. Deferred; tackle when operational cost of
-   dedicated workers becomes measurable.
+5. **Cross-repo team-tier sharing:** ~~Deferred~~ — **CLOSED** (2026-06-10). Workers are
+   dedicated to their repo. OS processes are cheap. No cross-repo worker sharing.
 
 ## Decisions captured during execution
 
