@@ -31,6 +31,15 @@ class TeamConfig(Base):
     )
     repo: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     coordinator_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluator_label: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    """Evaluator session label for the per-repo team (ADR-0087). One
+    evaluator per repo; reads PRs after CI + peer review, issues
+    approve/rework verdicts via cc-relay to the coordinator. Nullable
+    so pre-ADR-0087 rows survive the migration; ``treadmill team up``
+    populates it for the new model."""
     worker_labels: Mapped[list[str]] = mapped_column(
         ARRAY(TEXT()),
         nullable=False,
