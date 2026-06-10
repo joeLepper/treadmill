@@ -291,6 +291,35 @@ transcript slug — needs migration. Captured in
 Bert (launcher/CLI) + Carla (install.py) to split + own. This becomes **PR-H (wiring)**, inserted
 before the restart step and Wave 4.
 
+**2026-06-10: PR-H merged (#293), PR-I merged (#294) — restart executed; medicoder team live on canonical slug**
+
+PR-I (Alan, sibling co-signs from Bert + Carla) closed the last wiring gap: `team up` now calls
+`install_team()`. Gate verification passed: scratch-slug install (10/10 checks incl. stale-root
+unlink + `.claude/settings.json`), real-launcher end-to-end with fake claude (per-label cwd +
+`TREADMILL_SESSION_LABEL` + per-label env all correct).
+
+Two operational surprises during the restart:
+
+1. **Slug derivation cutover.** `treadmill team up MediCoderHQ/medicoder` derives slug
+   `medicoderhq-medicoder`, not the hand-rolled ADR-0084-era `medicoder`. The upsert rewrote
+   `team_configs` to the canonical labels and `team up` started units for them. Decision: adopt
+   the canonical derivation (it is the merged design — "no manual override"); the old
+   `coordinator-medicoder` session was retired (its transcript was being reset anyway per
+   option 3), `memory.md` copied into the new coordinator's cwd, old `~/.treadmill/teams/medicoder/`
+   tree left in place for later cleanup. The live team is now `coordinator-medicoderhq-medicoder`,
+   `evaluator-medicoderhq-medicoder`, `worker-medicoderhq-medicoder-1/2`.
+2. **settings.json `$comment` wedge.** Claude Code's boot-time settings validation flags the
+   template's `$comment` keys (non-schema) with an interactive "values were skipped — Continue?"
+   prompt; both workers wedged on first boot. Fixed operationally (clean settings applied on disk +
+   unit restart) and durably via PR #295 (strip `$comment` keys; constraint pinned in AGENT.md).
+
+Also fixed en route: local dev API was down (image predated the PR-B migration the DB was stamped
+with — rebuilt from main, `treadmill-local up --deployment personal`); `treadmill-local` editable
+install pointed at Carla's worktree (repointed to the main repo).
+
+Verified post-restart: coordinator booted on the new ADR-0087 template (cites §2 startup
+checklist), evaluator clean, all sessions at per-label cwd. **PR-F is unblocked.**
+
 ## Post-mortem
 
 *(filled when completed or abandoned)*
