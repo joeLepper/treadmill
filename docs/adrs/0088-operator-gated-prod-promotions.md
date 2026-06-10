@@ -31,8 +31,14 @@ as documentation.
 A `prod_promotions` row holds current state (`proposal_id` PK, `repo`,
 `status`, `bundle` JSONB, `expires_at`, `decided_by`, `decided_at`,
 `decision_note`). Status transitions are enforced by guarded `UPDATE ...
-WHERE status = '<expected>'` (single-use invariant 2 falls out of row-state
-compare-and-swap, not application logic). Every transition also emits the
+WHERE status = '<expected>' AND expires_at > now()` (single-use invariant 2
+falls out of row-state compare-and-swap, and the expiry predicate on the
+same guard closes the expired-but-undecided hole — a status-only check
+would approve a stale proposal exactly where invariant 3 matters most;
+Carla's contract-author review, #303). Reads apply the same treatment
+lazily: the GET reports `expired` for an undecided row past `expires_at`,
+emitting `prod_promotion.expired` on first such read. Every transition
+also emits the
 contract's `prod_promotion.*` event (audit-class, `proposal_id`
 discriminator) — the events table stays the audit trail; the row is the
 current-status read the workflow re-verifies against
