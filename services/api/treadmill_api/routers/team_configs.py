@@ -42,6 +42,7 @@ class TeamConfigRow(BaseModel):
     id: uuid.UUID
     repo: str
     coordinator_label: str
+    evaluator_label: str | None
     worker_labels: list[str]
     created_at: datetime
     updated_at: datetime
@@ -50,6 +51,7 @@ class TeamConfigRow(BaseModel):
 class TeamConfigUpsert(BaseModel):
     repo: str = Field(min_length=1, max_length=255)
     coordinator_label: str = Field(min_length=1, max_length=64)
+    evaluator_label: str | None = Field(default=None, max_length=64)
     worker_labels: list[str] = Field(default_factory=list)
 
 
@@ -66,15 +68,82 @@ class QueueDepth(BaseModel):
 async def upsert_team_config(
     body: TeamConfigUpsert,
     session: Annotated[AsyncSession, Depends(get_session)],
+    force: bool = False,
 ) -> TeamConfigRow:
+    """Upsert a ``team_configs`` row.
+
+    ADR-0087 scale-down guard: if the upsert SHRINKS ``worker_labels``
+    relative to the current persisted row, refuse with 409 when any
+    running ``task_executions`` row references a to-be-removed
+    ``worker_label`` — the in-flight work would be orphaned by the
+    re-spawn loop. ``?force=true`` skips the check (operator's
+    explicit acknowledgement that in-flight work is being abandoned).
+
+    The check uses ``to_regclass('task_executions')`` so it is safe to
+    run before PR-C (Wave 2) creates the table — when the table does
+    not yet exist, the guard is structurally inert.
+    """
+    current = await _store.get_by_repo(session, body.repo)
+    if current is not None and not force:
+        removed_labels = set(current.worker_labels) - set(body.worker_labels)
+        if removed_labels:
+            in_flight = await _in_flight_task_executions_for_labels(
+                session, removed_labels
+            )
+            if in_flight:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "scale-down would orphan in-flight task_executions on "
+                        f"worker labels {sorted(removed_labels)!r}: "
+                        f"{in_flight!r}. Wait for these task_executions to "
+                        "reach status='completed' or 'failed', or re-run "
+                        "with ?force=true to override."
+                    ),
+                )
+
     row = await _store.upsert(
         session,
         repo=body.repo,
         coordinator_label=body.coordinator_label,
         worker_labels=body.worker_labels,
+        evaluator_label=body.evaluator_label,
     )
     await session.commit()
     return TeamConfigRow.model_validate(row, from_attributes=True)
+
+
+async def _in_flight_task_executions_for_labels(
+    session: AsyncSession, worker_labels: set[str]
+) -> list[str]:
+    """Return task_execution IDs whose worker_label is in
+    ``worker_labels`` and whose status is ``running``.
+
+    Returns an empty list when the ``task_executions`` table does not
+    exist yet (Phase 3 — PR-C — has not landed). ``to_regclass`` is
+    the canonical Postgres existence check for a relation by name; it
+    returns ``NULL`` for missing relations without raising.
+    """
+    if not worker_labels:
+        return []
+    exists = await session.execute(
+        text("SELECT to_regclass('task_executions')")
+    )
+    if exists.scalar_one_or_none() is None:
+        return []
+    result = await session.execute(
+        text(
+            """
+            SELECT id::text
+            FROM task_executions
+            WHERE worker_label = ANY(:labels)
+              AND status = 'running'
+            ORDER BY started_at
+            """
+        ),
+        {"labels": list(worker_labels)},
+    )
+    return [row[0] for row in result.fetchall()]
 
 
 @router.get("/team_configs", response_model=list[TeamConfigRow])

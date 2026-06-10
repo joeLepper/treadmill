@@ -32,19 +32,27 @@ class TeamConfigStore:
         repo: str,
         coordinator_label: str,
         worker_labels: list[str],
+        evaluator_label: str | None = None,
     ) -> TeamConfig:
-        """Insert or update by ``repo``. Returns the persisted row."""
+        """Insert or update by ``repo``. Returns the persisted row.
+
+        ``evaluator_label`` is the ADR-0087 per-repo evaluator session
+        label. Optional for back-compat with pre-ADR-0087 callers; new
+        ``treadmill team up`` flows populate it.
+        """
         stmt = (
             pg_insert(TeamConfig)
             .values(
                 repo=repo,
                 coordinator_label=coordinator_label,
+                evaluator_label=evaluator_label,
                 worker_labels=list(worker_labels),
             )
             .on_conflict_do_update(
                 index_elements=["repo"],
                 set_={
                     "coordinator_label": coordinator_label,
+                    "evaluator_label": evaluator_label,
                     "worker_labels": list(worker_labels),
                     "updated_at": sa.text("now()"),
                 },

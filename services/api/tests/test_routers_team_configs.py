@@ -51,6 +51,7 @@ class _StubTeamConfig:
         repo: str,
         coordinator_label: str,
         worker_labels: list[str],
+        evaluator_label: str | None = None,
         config_id: uuid.UUID | None = None,
         created_at: datetime | None = None,
         updated_at: datetime | None = None,
@@ -59,6 +60,7 @@ class _StubTeamConfig:
         self.id = config_id or uuid.uuid4()
         self.repo = repo
         self.coordinator_label = coordinator_label
+        self.evaluator_label = evaluator_label
         self.worker_labels = list(worker_labels)
         self.created_at = created_at or now
         self.updated_at = updated_at or now
@@ -68,11 +70,13 @@ def _make_team_config(
     repo: str,
     coordinator_label: str,
     worker_labels: list[str],
+    evaluator_label: str | None = None,
 ) -> _StubTeamConfig:
     return _StubTeamConfig(
         repo=repo,
         coordinator_label=coordinator_label,
         worker_labels=worker_labels,
+        evaluator_label=evaluator_label,
     )
 
 
@@ -101,8 +105,11 @@ class _StubSession:
         repo: str,
         coordinator_label: str,
         worker_labels: list[str],
+        evaluator_label: str | None = None,
     ) -> _StubTeamConfig:
-        row = _make_team_config(repo, coordinator_label, worker_labels)
+        row = _make_team_config(
+            repo, coordinator_label, worker_labels, evaluator_label
+        )
         self._team_configs[repo] = row
         return row
 
@@ -134,6 +141,18 @@ class _StubSession:
         if "task_status" in compiled_sql:
             return _QueueDepthResult(self._compute_queue_depth())
 
+        # ADR-0087 scale-down guard probe — table absent in stub.
+        # The router uses ``to_regclass('task_executions')`` to detect
+        # whether the table exists; in the stub world it doesn't, so
+        # return ``None`` and the guard's in-flight check short-circuits.
+        if "to_regclass" in compiled_sql:
+            return _ScalarResult(None)
+        if "FROM task_executions" in compiled_sql:
+            # Defensive — should never reach here in the unit-stub
+            # path because the to_regclass branch above short-circuits
+            # first, but in case a test mocks evaluations differently.
+            return _FetchAllResult([])
+
         # pg_insert(TeamConfig).on_conflict_do_update — upsert path.
         if "INSERT INTO team_configs" in compiled_sql:
             params = self._params_dict(stmt)
@@ -141,6 +160,7 @@ class _StubSession:
                 params["repo"],
                 params["coordinator_label"],
                 list(params["worker_labels"]),
+                evaluator_label=params.get("evaluator_label"),
             )
             return _ExecResult(rowcount=1)
 
@@ -200,6 +220,26 @@ class _QueueDepthResult:
 
     def one(self) -> _QueueDepthRow:
         return self._row
+
+
+class _ScalarResult:
+    """Wraps ``scalar_one_or_none`` for raw-SQL queries in the stub session."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def scalar_one_or_none(self) -> Any:
+        return self._value
+
+
+class _FetchAllResult:
+    """Wraps ``fetchall`` for raw-SQL queries in the stub session."""
+
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[Any]:
+        return self._rows
 
 
 # ── App fixture ─────────────────────────────────────────────────────────
@@ -365,3 +405,212 @@ def test_queue_depth_no_coordinators_counts_everything(app_and_session) -> None:
     client = TestClient(app)
     resp = client.get("/api/v1/queue_depth")
     assert resp.json() == {"visible": 2, "in_flight": 1}
+
+
+# ── ADR-0087: evaluator_label round-trip + scale-down guard ─────────────
+
+
+def test_upsert_round_trips_evaluator_label(app_and_session) -> None:
+    """ADR-0087 — new ``evaluator_label`` field on team_configs lands
+    on the wire and survives round-trip via GET."""
+    app, _ = app_and_session
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "joeLepper/treadmill",
+            "coordinator_label": "coordinator-joelepper-treadmill",
+            "evaluator_label": "evaluator-joelepper-treadmill",
+            "worker_labels": [
+                "worker-joelepper-treadmill-1",
+                "worker-joelepper-treadmill-2",
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["evaluator_label"] == "evaluator-joelepper-treadmill"
+
+    get = client.get("/api/v1/team_configs/joeLepper/treadmill")
+    assert get.status_code == 200
+    assert get.json()["evaluator_label"] == "evaluator-joelepper-treadmill"
+
+
+def test_upsert_evaluator_label_optional(app_and_session) -> None:
+    """``evaluator_label`` is optional; pre-ADR-0087 callers that omit
+    it get a row with ``evaluator_label = None``."""
+    app, _ = app_and_session
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": [],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["evaluator_label"] is None
+
+
+# Scale-down guard tests — patch _in_flight_task_executions_for_labels
+# so we control the in-flight return value without standing up a real
+# task_executions table. The router queries via the module-level name;
+# monkeypatching it is sufficient.
+
+
+def test_scale_down_aborts_409_when_in_flight_workers_would_be_removed(
+    app_and_session, monkeypatch
+) -> None:
+    """ADR-0087 §Team bootstrap §Scale-down semantics — reducing
+    ``worker_labels`` while a to-be-removed worker has a running
+    ``task_execution`` returns 409.
+    """
+    app, session = app_and_session
+    session.seed_team_config(
+        repo="x/y",
+        coordinator_label="c-xy",
+        worker_labels=["w-1", "w-2", "w-3"],
+    )
+
+    from treadmill_api.routers import team_configs as router_mod
+
+    async def _fake_in_flight(_session, labels):
+        # Simulate w-3 currently running a task.
+        return [str(uuid.uuid4())] if "w-3" in labels else []
+
+    monkeypatch.setattr(
+        router_mod,
+        "_in_flight_task_executions_for_labels",
+        _fake_in_flight,
+    )
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": ["w-1", "w-2"],   # drops w-3
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert "scale-down would orphan" in detail
+    assert "w-3" in detail
+
+
+def test_scale_down_succeeds_when_no_in_flight_workers_removed(
+    app_and_session, monkeypatch
+) -> None:
+    """No in-flight task_executions on the to-be-removed labels → the
+    scale-down passes through. Trigger is the table-absent / quiet
+    state."""
+    app, session = app_and_session
+    session.seed_team_config(
+        repo="x/y",
+        coordinator_label="c-xy",
+        worker_labels=["w-1", "w-2", "w-3"],
+    )
+
+    from treadmill_api.routers import team_configs as router_mod
+
+    async def _fake_in_flight(_session, _labels):
+        return []  # no in-flight; safe to scale down
+
+    monkeypatch.setattr(
+        router_mod,
+        "_in_flight_task_executions_for_labels",
+        _fake_in_flight,
+    )
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": ["w-1", "w-2"],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_scale_down_force_skips_check(app_and_session, monkeypatch) -> None:
+    """``?force=true`` short-circuits the scale-down guard even when
+    in-flight workers WOULD be orphaned. Operator's explicit override.
+    """
+    app, session = app_and_session
+    session.seed_team_config(
+        repo="x/y",
+        coordinator_label="c-xy",
+        worker_labels=["w-1", "w-2", "w-3"],
+    )
+
+    from treadmill_api.routers import team_configs as router_mod
+
+    in_flight_called = False
+
+    async def _fake_in_flight(_session, _labels):
+        nonlocal in_flight_called
+        in_flight_called = True
+        return [str(uuid.uuid4())]
+
+    monkeypatch.setattr(
+        router_mod,
+        "_in_flight_task_executions_for_labels",
+        _fake_in_flight,
+    )
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs?force=true",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": ["w-1"],   # drops w-2, w-3
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    # Force path must NOT have queried in-flight at all.
+    assert in_flight_called is False
+
+
+def test_scale_up_does_not_invoke_scale_down_check(
+    app_and_session, monkeypatch
+) -> None:
+    """Scale-up (more workers than current) doesn't trip the guard
+    even when in-flight is non-empty — the set of REMOVED labels is
+    empty, so the in-flight lookup never fires."""
+    app, session = app_and_session
+    session.seed_team_config(
+        repo="x/y",
+        coordinator_label="c-xy",
+        worker_labels=["w-1"],
+    )
+
+    from treadmill_api.routers import team_configs as router_mod
+
+    in_flight_called = False
+
+    async def _fake_in_flight(_session, _labels):
+        nonlocal in_flight_called
+        in_flight_called = True
+        return [str(uuid.uuid4())]  # would 409 if invoked
+
+    monkeypatch.setattr(
+        router_mod,
+        "_in_flight_task_executions_for_labels",
+        _fake_in_flight,
+    )
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": ["w-1", "w-2", "w-3"],  # adds w-2, w-3
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert in_flight_called is False  # no removed labels → no lookup

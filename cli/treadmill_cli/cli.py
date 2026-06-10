@@ -33,6 +33,7 @@ from treadmill_cli.commands.escalations import escalations_app
 from treadmill_cli.commands.learnings import learnings_app
 from treadmill_cli.commands.onboarding import onboarding_app
 from treadmill_cli.commands.repo import repo_app
+from treadmill_cli.commands.team import team_app
 from treadmill_cli.commands.schedules import schedules_app
 from treadmill_cli.config import load_config
 from treadmill_cli.identity import resolve_created_by
@@ -63,6 +64,7 @@ app.add_typer(learnings_app)
 app.add_typer(observe_app)
 app.add_typer(schedules_app)
 app.add_typer(onboarding_app)
+app.add_typer(team_app)
 app.add_typer(repo_app)
 app.add_typer(escalations_app)
 app.add_typer(corpus_app)
