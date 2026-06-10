@@ -88,18 +88,40 @@ are executives who submit plans. They are never in `worker_labels`.
    - Briefs worker via cc-relay
 
 3. Worker executes task
-   Writes code, opens PR.
-   Reports "PR: #N" to coordinator via cc-relay.
+   Writes code, opens PR on a dedicated branch.
+   Reports "PR: #N" to coordinator via cc-relay. Subprocess exits.
 
-4. Coordinator registers PR
+4. Coordinator registers PR and monitors CI/mergeability
    POST /api/v1/task_prs {task_id, repo, pr_number}
-   Briefs evaluator via cc-relay: "PR #N is ready for evaluation"
-   (The evaluator knows work is evaluable because the coordinator says so. The coordinator
-   is the only session that knows a PR has been opened and registered.)
+   Subscribes to check_run.completed + pull_request events via existing webhook → events table path.
 
-5. Evaluator evaluates
-   GET /api/v1/task_executions/{task_id} — reads current state (read-only)
-   Checks CI, branch state, rules distilled from learnings, repo memories.
+   4a. CI failure → POST /task_executions {trigger: "coordinator-rework", brief: failure log}
+       Re-spawn author worker. Worker fixes, pushes, exits. Loop to step 4.
+
+   4b. Merge conflict detected (task_mergeability VIEW) →
+       POST /task_executions {trigger: "coordinator-rework", brief: "resolve conflicts on <branch>"}
+       Re-spawn author worker. Worker resolves, pushes, exits. Loop to step 4.
+
+5. CI green + branch clean → assign peer reviewers
+   Coordinator picks 1–2 workers who are NOT the author (coordinator's routing memory informs
+   which workers have recent context in the area vs. which provide independent perspective).
+   If only 1 worker in the team, skip peer review and proceed to step 6.
+   For each reviewer:
+   - POST /task_executions {task_id, worker_label=reviewer, trigger="coordinator-rework"}
+   - Spawn reviewer worker subprocess: "review PR #N; leave inline GitHub comments via gh pr review"
+   Reviewers run in parallel. Each reviewer:
+   - Posts inline comments on the PR via treadmill bot GitHub App identity
+   - Relays verdict to coordinator: "lgtm" or "needs-changes: <summary>"
+   - Subprocess exits.
+   Coordinator collates:
+   - All lgtm → proceed to step 6
+   - Any needs-changes → POST /task_executions {trigger: "coordinator-rework", brief: collated feedback}
+     Re-spawn author. Author addresses feedback, pushes, exits. Loop to step 4 (CI check again).
+
+6. Evaluator evaluates
+   Coordinator briefs evaluator: "PR #N ready for evaluation"
+   Evaluator reads PR, CI status, inline review thread, rules from docs/knowledge-base/rules/,
+   repo memories. Full holistic judgment — not gated on a checklist.
    Verdict via cc-relay to coordinator (fixed format):
 
      [from: evaluator-<slug>]
@@ -112,16 +134,15 @@ are executives who submit plans. They are never in `worker_labels`.
      <for rework: bulleted remediation list — coordinator pastes verbatim into worker's next brief>
 
    On APPROVE → coordinator merges PR, PATCH task_execution {status: completed}
-   On REWORK  → coordinator POST task_executions {trigger: "evaluator-rework"}, re-briefs worker
+   On REWORK  → coordinator POST task_executions {trigger: "evaluator-rework"}, re-briefs worker,
+                loop to step 4.
 
    Coordinator writes a task.evaluator_verdict event on receipt of either verdict. Audit trail.
 
-6. On coordinator-initiated rework (CI failure, worker error):
-   POST task_executions {trigger: "coordinator-rework"}, re-briefs worker.
-
 7. On task complete (PR merged):
-   Coordinator PATCH task_execution {status: completed, completed_at, token_usage (see §Token)}
+   Coordinator PATCH task_execution {status: completed, completed_at}
    Emits pr_merged event path per ADR-0086 §12.4.
+   Unblocks any tasks with depends_on: task.<id>.pr_merged.
 ```
 
 ### Evaluator WS subscription
@@ -139,6 +160,62 @@ evaluator's relay carries verdict reasoning + remediation list directly to the c
 which incorporates it verbatim into the worker's next brief. Direct API writes would force
 the coordinator to re-fetch and re-derive the evaluator's intent. The relay format carries
 meaning in-band; schema would carry only IDs.
+
+### Peer review
+
+After CI turns green and the branch is conflict-free, the coordinator assigns peer workers to
+review the PR before the evaluator sees it. Peer review is the inner quality loop: workers who
+know the affected area leave inline comments; the evaluator then performs a holistic final
+judgment over the resulting thread.
+
+**Assignment rules:**
+- Reviewer must not be the PR author.
+- Coordinator selects 1–2 reviewers from the team based on routing memory (workers most recently
+  active in the affected files get priority; one reviewer may be chosen for independent
+  perspective if routing memory doesn't differentiate).
+- If the team has only 1 worker, skip peer review; proceed directly to the evaluator.
+
+**Execution:**
+- Coordinator spawns each reviewer as a parallel `--print --resume` subprocess with brief:
+  "review PR #N; leave inline comments using `gh pr review <URL> --comment --body '<comment>'`;
+  relay your verdict when done."
+- All `gh` commands run under the treadmill GitHub App bot identity.
+- Each reviewer relays verdict to coordinator in fixed format: `"lgtm"` or
+  `"needs-changes: <one-sentence summary>"`.
+- Reviewer subprocess exits after relaying.
+
+**Collation:**
+- All lgtm → coordinator briefs evaluator.
+- Any needs-changes → coordinator opens a new `coordinator-rework` task_execution for the author,
+  briefs with the collated feedback list. Author addresses feedback, pushes, exits. CI re-check
+  loop repeats from step 4.
+- Coordinator writes a `task.peer_review_verdict` event when collating, for audit trail.
+
+**Trigger semantics:**
+Peer-review-driven author rework uses `coordinator-rework` — no new trigger value. The
+`task.peer_review_verdict` event is the separate audit signal.
+
+### CI and conflict signals
+
+The coordinator subscribes to two GitHub event streams via the existing webhook → events table
+intake path (ADR-0086 §12.4; unchanged):
+
+**CI results: `check_run.completed`**
+- Webhook → API persists to `events` → coordinator receives via WS.
+- Coordinator reads `conclusion`: `success` | `failure` | `cancelled` | `timed_out`.
+- On any non-success: open `coordinator-rework` task_execution; include the check_run log in
+  the worker brief. Worker reads it, fixes, pushes. The push re-triggers CI; coordinator waits
+  for the next `check_run.completed`.
+- Coordinator does not proceed to peer review before all required checks succeed.
+- Coordinator writes a `task.ci_result` event on each `check_run.completed` for auditable history.
+
+**Merge conflicts: `task_mergeability` VIEW**
+- The `task_mergeability` VIEW (existing, unchanged) exposes `mergeable: true | false | null`
+  per PR.
+- Coordinator polls this VIEW after each push or on receiving `pull_request.synchronize`.
+  `null` means GitHub is still computing — retry in 10 s.
+- On `mergeable: false`: open `coordinator-rework` task_execution; brief worker to rebase or
+  merge the base branch. After the conflict push, loop back to CI check.
 
 ### Health bots
 
@@ -211,9 +288,11 @@ pre-drained relay content as injection.
 sequenceDiagram
     participant ORCH as orchestrator
     participant API as API / events table
+    participant GH as GitHub (CI + PRs)
     participant COORD as coordinator-<slug>
     participant FS as relay inbox (filesystem)
     participant W as worker-<slug>-N subprocess
+    participant REV as reviewer workers (parallel)
     participant EVAL as evaluator-<slug>
 
     ORCH->>API: POST /plans → emits plan.submitted
@@ -228,31 +307,60 @@ sequenceDiagram
         FS-->>W: inject pending relay (decision:block+reason) if any
     end
 
-    alt coordinator has mid-task steering message
-        COORD->>FS: write relay to worker inbox
-        Note over W,FS: picked up at next PostToolUse boundary
-    end
-
+    W->>GH: opens PR on dedicated branch
     W->>FS: cc-relay "PR: #N opened"
     COORD-->>COORD: receives via treadmill-events MCP
     W->>W: subprocess exits; token JSON emitted
+    COORD->>API: POST /task_prs {task_id, pr_number}
 
-    COORD->>FS: check worker inbox post-exit
-    alt pending messages in inbox
-        COORD->>W: re-spawn --resume <id> with drained inbox in prompt
-    else inbox empty
-        COORD->>API: POST /task_prs {task_id, pr_number}
-        COORD->>EVAL: relay "PR #N ready for evaluation"
+    loop until CI green + branch clean
+        GH-->>COORD: check_run.completed (webhook → events table → WS)
+        alt CI failure
+            COORD->>API: POST /task_executions {trigger: coordinator-rework}
+            COORD->>W: re-spawn with CI failure log brief
+            W->>GH: fixes, pushes → re-triggers CI
+            W->>W: subprocess exits
+        else merge conflict (task_mergeability VIEW)
+            COORD->>API: POST /task_executions {trigger: coordinator-rework}
+            COORD->>W: re-spawn "resolve conflicts on <branch>"
+            W->>GH: resolves, pushes → re-triggers CI
+            W->>W: subprocess exits
+        end
     end
 
+    Note over COORD: CI green + branch clean — assign peer reviewers
+    par parallel peer review
+        COORD->>REV: spawn reviewer-1 "review PR #N; gh pr review --comment"
+        REV->>GH: posts inline comments (treadmill bot App identity)
+        REV->>FS: cc-relay "lgtm" or "needs-changes: <summary>"
+    and
+        COORD->>REV: spawn reviewer-2 "review PR #N; gh pr review --comment"
+        REV->>GH: posts inline comments (treadmill bot App identity)
+        REV->>FS: cc-relay "lgtm" or "needs-changes: <summary>"
+    end
+
+    COORD-->>COORD: collates peer review verdicts; writes task.peer_review_verdict event
+    alt any needs-changes
+        COORD->>API: POST /task_executions {trigger: coordinator-rework, brief: collated feedback}
+        COORD->>W: re-spawn author with feedback brief
+        W->>GH: addresses feedback, pushes
+        W->>W: subprocess exits
+        Note over W,GH: loop back to CI check
+    end
+
+    COORD->>EVAL: relay "PR #N ready for evaluation"
     EVAL->>API: GET /task_executions (read-only)
+    EVAL->>GH: reads PR diff, CI status, inline review thread
     EVAL->>COORD: relay verdict [approve|rework]
-    COORD-->>COORD: receives verdict via treadmill-events
+    COORD-->>COORD: receives verdict; writes task.evaluator_verdict event
+
     alt approve
+        COORD->>GH: merge PR
         COORD->>API: PATCH task_execution {status: completed}
     else rework
         COORD->>API: POST /task_executions {trigger: evaluator-rework}
         COORD->>W: re-spawn with rework brief
+        Note over W,GH: loop back to step 3
     end
 ```
 
@@ -356,6 +464,17 @@ task_validation, DSPy corpora tables. Alembic migration.
 
 **Phase 5**: Delete `workflows`, `workflow_versions`, `workflow_version_steps`. Alembic.
 Remove starters.py role-seeding on API startup.
+
+## Supersession map
+
+| Superseded ADR | What it contributed | Replaced by in ADR-0087 |
+|---|---|---|
+| ADR-0018 — Autoscaler + Docker workers | Ephemeral Docker containers; SQS work queue; autoscaler daemon; container lifecycle | `--print --resume` subprocess chain; coordinator manages spawn/exit; no autoscaler; SQS worker dispatch queue deleted |
+| ADR-0022 — Role output kinds + role-reviewer | `roles`, `skills`, `hooks`, `output_kind` tables; role-reviewer audit agent | All four tables deleted; peer workers + evaluator replace the role-reviewer audit path; worker CLAUDE.md replaces role prompts |
+| ADR-0029 — Task validations + gate runner | `task_validations` table; gate runner; LLM-judge validation gates per PR | `task_validation` table deleted; evaluator performs holistic PR judgment using `docs/knowledge-base/rules/`; no gate runner process |
+| ADR-0032 — Role-documentarian + wf-doc-amend | Documentarian and architect roles; `wf-doc-amend` workflow for automatic doc updates | Evaluator handles doc-currency checks as part of PR review; doc update tasks are plain plan tasks; no separate workflow step |
+| ADR-0084 — Coordinator-led execution model | `coordinator_label` on plans; coordinator owns bookkeeping; `task_board` VIEW; escalation path | Carried forward as the foundation. `task_board` VIEW kept. `coordinator_label` WS filter preserved. SQS routing replaced by WS + events-table replay. |
+| ADR-0086 — Coordinator bookkeeping surface | `POST /api/v1/events` manual event surface; `coordinator_label` WS param; lifecycle event pattern (task.started, pr_merged, etc.) | `workflow_runs` / `workflow_run_steps` replaced by `task_executions`. Event pattern and all coordinator bookkeeping principles carried forward unchanged. |
 
 ## Consequences
 
