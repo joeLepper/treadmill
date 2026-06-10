@@ -317,12 +317,16 @@ memory), requires no schema change, and is parallel to the existing env files.
 
 **Dispatch:**
 ```
+# First spawn: .session-id is empty — omit --resume; Claude Code creates a new session.
+# Subsequent spawns: .session-id contains the session ID written on first exit.
+SESSION_ID=$(cat ~/.treadmill/teams/<slug>/<worker-label>/.session-id)
 claude --print \
-  --resume $(cat ~/.treadmill/teams/<slug>/<worker-label>/.session-id) \
+  ${SESSION_ID:+--resume "$SESSION_ID"} \
   --output-format json \
   --permission-mode bypassPermissions \
   --settings ~/.treadmill/teams/<slug>/<worker-label>/settings.json \
   "<task brief + any pre-drained relay messages>"
+# After exit: write .usage.session_id from JSON output to .session-id if not already set.
 ```
 
 **Two-way relay — both directions experimentally proven:**
@@ -462,8 +466,8 @@ Each re-brief is a new `task_executions` row, not a counter increment. This pres
 per-cycle token attribution and answers the key question: "did cycle 2 burn more tokens
 because the worker needed more context?"
 
-Rework count per task = `COUNT(*) WHERE task_id = X AND trigger != 'initial'`
-Per-plan rework = `SUM(rework counts) GROUP BY plan_id`
+Rework count per task = `COUNT(*) WHERE task_id = X AND trigger IN ('coordinator-rework', 'evaluator-rework')`
+Per-plan rework = `SUM(rework counts per task) WHERE trigger IN ('coordinator-rework', 'evaluator-rework') GROUP BY plan_id`
 
 The trigger taxonomy:
 - `initial` — first brief on a task; one per task
@@ -511,8 +515,9 @@ CREATE TABLE task_executions (
     UNIQUE (task_id, trigger, worker_label, started_at)  -- prevents duplicate spawns on coordinator restart
 );
 
--- team_configs gains evaluator_label
+-- team_configs gains evaluator_label + worker_labels
 ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT;
+ALTER TABLE team_configs ADD COLUMN worker_labels    TEXT[];
 ```
 
 ### Keep (unchanged)
@@ -539,8 +544,8 @@ preference clause is a safety net rather than a regular-path merge.
 ## Migration phases
 
 **Phase 1** (no-risk, same-day): Delete `dispatch_task()` call from `plans.py` plan-submit
-path. Tasks created at submit stay in `registered` status until coordinator §12.1 handler
-fires. One-time SQS drain for orphaned messages.
+path. Tasks created at submit stay in `registered` status until the coordinator picks them up
+via `plan.submitted` WS event. One-time SQS drain for orphaned messages.
 
 **Phase 2** (same-day): Add `evaluator_label` to `team_configs`. Populate `worker_labels`
 with actual worker session labels per repo. Run `treadmill team up` bootstrap for each

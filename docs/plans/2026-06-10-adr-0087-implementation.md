@@ -75,6 +75,10 @@ Add a test for the 412 path (missing team_configs). AGENT.md for `routers/plans.
 they serve the scheduler synthetic-task path. Leave them wired; they become dead code after
 Phase 4 and will be removed then.*
 
+*Note on the dev fast-path (`body.dev and is_local`):* the 412 guard must be skipped in dev
+mode — local dev workflows don't require a team_configs row. The guard fires only when
+`body.dev` is false (or `is_local` is false). Verify the condition before landing.
+
 **PR-B — Bert: team_configs schema + `treadmill team up` CLI**
 Alembic migration: `ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT; ALTER TABLE
 team_configs ADD COLUMN worker_labels TEXT[]` (both columns — evaluator_label for single
@@ -171,10 +175,13 @@ that only served the dropped tables. Remove `dispatch.py` Dispatcher class and c
 Remove tests for dropped components. AGENT.md cleanup.
 
 **PR-G — Alan: delete workflow versioning + starters (Phase 5)**
+Pre-work: audit `coordination/triggers.py` to understand what dispatch_task callers remain
+after PR-F and what each one does — some may be dead code, others may need replacement with
+a `task.registered` event or coordinator re-brief signal. Determine the correct replacement
+before cutting the branch.
 Alembic migration dropping: `workflows`, `workflow_versions`, `workflow_version_steps`.
 Remove `seed/starters.py` role seeding from API startup (`app.py` lifespan). Remove
-`coordination/triggers.py` synthetic-task dispatch_task path (replace with a no-op or
-task.registered event). Remove `coordination/redispatch.py` if fully dead.
+`coordination/triggers.py` synthetic-task dispatch_task path (replacement TBD from pre-work audit). Remove `coordination/redispatch.py` if fully dead.
 Remove `coordination/cross_step.py` if fully dead. Clean up any remaining workflow_run
 references in routers and tests. Final AGENT.md sweep.
 
