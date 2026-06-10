@@ -33,9 +33,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from treadmill_api.coordination.coordinator_overlay import (
-    invalidate_overlay_cache,
-)
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.models import Task
 from treadmill_api.models.task_board import TASK_BOARD_STATUSES, TaskBoard
@@ -193,9 +190,8 @@ async def patch_task_board(
 
     await session.commit()
     await session.refresh(existing)
-    # ADR-0084 Task 2B — drop the coordinator-overlay cache entry for
-    # this plan so the next cap-check sees the new status (e.g. a fresh
-    # ``blocked_operator`` write becomes visible to the dispatch path
-    # immediately, not after the 30s TTL).
-    invalidate_overlay_cache(existing.plan_id)
+    # The ADR-0084 coordinator-overlay cache invalidation that lived here
+    # was removed with the cap-overlay machinery (ADR-0087 Phase 5): the
+    # cache's only reader was triggers.py's dispatch cap-check, deleted
+    # with the dispatch path.
     return TaskBoardRow.model_validate(existing, from_attributes=True)

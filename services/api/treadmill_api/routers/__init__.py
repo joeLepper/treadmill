@@ -7,22 +7,18 @@ each one explicitly.
 
 from treadmill_api.routers import (
     escalations,
-    event_triggers,
     plans,
     schedules,
     system_status,
     tasks,
     webhooks,
-    workflows,
 )
 
 __all__ = [
     "escalations",
-    "event_triggers",
     "plans",
     "schedules",
     "system_status",
     "tasks",
     "webhooks",
-    "workflows",
 ]
