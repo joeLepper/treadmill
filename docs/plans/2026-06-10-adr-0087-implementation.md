@@ -55,12 +55,21 @@ Two sessions × until done. No artificial time cap; phases are the gate.
 ### Wave 1 — parallel (PR-A ∥ PR-B)
 
 **PR-A — Alan: remove dispatch_task from plan-submit path**
+Pre-work: grep `tests/` for `mock.*sqs|publish.*work_queue|dispatch_task` to identify all
+test consumers before cutting the branch; flag the full surface so nothing goes unexpectedly red.
+
+Add a `412 Precondition Failed` guard at `POST /api/v1/plans`: if no `team_configs` row exists
+for `body.repo`, return `{"detail": "no team configured for repo — run: treadmill team up --repo <slug>"}`.
+This ensures plan submit fails loudly rather than silently creating a plan with no coordinator
+to pick it up.
+
 Remove the `dispatch_task` calls in `routers/plans.py` (4 call sites) on the plan creation and
 doc-merge paths. Tasks stay in `registered` after submit; coordinator picks them up via
 `plan.submitted` WS event. Remove the `dispatch_task` call in `routers/tasks.py` line ~194
 (manual retry path) — replace with a `task.registered` event emit so coordinator can re-pick-up.
-Update `tests/test_integration_plans_router.py` and `tests/test_dispatch_unit.py` to expect no
-SQS publish on plan submit. AGENT.md for `routers/plans.py` component.
+Update `tests/test_integration_plans_router.py`, `tests/test_dispatch_unit.py`, and any
+additional consumers surfaced by the pre-work grep to expect no SQS publish on plan submit.
+Add a test for the 412 path (missing team_configs). AGENT.md for `routers/plans.py` component.
 
 *Note: `redispatch.py` and `triggers.py` dispatch_task calls are out of scope for this PR —
 they serve the scheduler synthetic-task path. Leave them wired; they become dead code after
@@ -74,9 +83,13 @@ evaluator session label, worker_labels for the full array of worker session labe
 Add `treadmill team up --repo <slug> [--workers N]` CLI command (superseding `treadmill repo add`
 which becomes a deprecated alias) in `cli/treadmill_cli/commands/` that writes the team_configs
 row with deterministic labels (`coordinator-<slug>`, `evaluator-<slug>`, `worker-<slug>-1…N`).
-Creates `~/.treadmill/teams/<slug>/` env files per session; enables + starts
-`treadmill-channel@<label>.service` units. Update `tests/test_routers_team_configs.py`. CLI test.
-AGENT.md for team_configs component.
+Creates `~/.treadmill/teams/<slug>/` directory tree per session:
+- `~/.treadmill/teams/<slug>/<label>/` — one directory per session (coordinator + evaluator + workers)
+- `~/.treadmill/teams/<slug>/<label>/.session-id` — empty file on creation; coordinator writes
+  actual session ID on first subprocess exit; `--resume` reads from it on subsequent spawns
+- `~/.treadmill/teams/<slug>/<label>/<label>.env` — env vars for the session unit
+Enables + starts `treadmill-channel@<label>.service` units. Update `tests/test_routers_team_configs.py`.
+CLI test (assert directory tree + .session-id stub files created). AGENT.md for team_configs component.
 
 ---
 
@@ -95,7 +108,7 @@ New test file `tests/test_routers_task_executions.py`. AGENT.md.
 
 ### Wave 3 — parallel (PR-D ∥ PR-E, both after PR-B + PR-C merged)
 
-**PR-D — Bert: coordinator CLAUDE.md + evaluator_label wiring**
+**PR-D — Bert: coordinator CLAUDE.md + evaluator_label wiring + failure recovery**
 Update the coordinator's CLAUDE.md to reflect the ADR-0087 lifecycle:
 - On `plan.submitted`: POST task_executions {trigger: initial}, cc-relay worker brief
 - Monitor CI via `check_run.completed` events; POST task_executions {trigger: coordinator-rework} on failure
@@ -107,6 +120,11 @@ Update the coordinator's CLAUDE.md to reflect the ADR-0087 lifecycle:
 
 Also: ensure `team_configs` `evaluator_label` column is read by the coordinator's session-
 bootstrap path (wherever the coordinator discovers its own repo config).
+
+Add §Startup recovery section to coordinator CLAUDE.md:
+- On start: query `task_executions WHERE status='running' AND started_at < NOW() - INTERVAL '1 hour'`; mark each `failed` with reason `coordinator_restart`
+- On start: drain own relay inbox (`~/.cc-channels/coordinator-<slug>/relay/`) before processing any new WS events
+- On start: re-poll `task_mergeability` VIEW for all open `task_prs` entries to catch state drift during the gap
 
 **PR-E — Alan: worker subprocess hook template + evaluator stub + team up deployment**
 Add worker settings.json template (PostToolUse hook on Bash: checks relay inbox, returns
