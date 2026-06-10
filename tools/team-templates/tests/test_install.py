@@ -141,7 +141,11 @@ def test_install_team_writes_one_worker_config_per_worker(
         worker_dir = team_dir / f"worker-medicoder-{n}"
         assert worker_dir.is_dir()
         claude = worker_dir / "CLAUDE.md"
-        settings = worker_dir / "settings.json"
+        # settings.json now lives under <label>/.claude/ so Claude
+        # Code's project-settings discovery (cwd/.claude/settings.json)
+        # actually picks it up. Pre-ADR-0087-PR-H, it landed bare at
+        # <label>/settings.json — read by nothing.
+        settings = worker_dir / ".claude" / "settings.json"
         assert claude.is_file()
         assert settings.is_file()
 
@@ -297,3 +301,71 @@ def test_install_shared_templates_includes_coordinator(
     )
     assert (coord_dir / "CLAUDE.md.tmpl").is_file()
     assert not (coord_dir / "AGENT.md").exists()
+
+
+# ── ADR-0087 PR-H regressions — layout vs launcher cwd mismatch ────
+
+
+def test_worker_settings_json_renders_under_dot_claude(
+    synthetic_home: Path,
+) -> None:
+    """Regression for the 2026-06-10 layout mismatch: settings.json
+    must land at <label>/.claude/settings.json, NOT <label>/settings.json,
+    or Claude Code's project-settings discovery doesn't fire and the
+    PostToolUse relay-inject hook never registers.
+
+    See docs/learnings/2026-06-10-template-install-layout-vs-launcher-
+    cwd-mismatch.md.
+    """
+    spec = make_team_spec("medicoder", worker_count=1)
+    install_team(spec)
+    worker_dir = (
+        synthetic_home / ".treadmill" / "teams" / "medicoder"
+        / "worker-medicoder-1"
+    )
+    assert (worker_dir / ".claude" / "settings.json").is_file(), (
+        "settings.json must live under .claude/ for Claude Code discovery"
+    )
+    assert not (worker_dir / "settings.json").exists(), (
+        "bare settings.json at cwd is the legacy bug shape — must not exist"
+    )
+
+
+def test_install_team_removes_stale_root_claude_md(
+    synthetic_home: Path,
+) -> None:
+    """Pre-ADR-0087 deployments left a stale CLAUDE.md at the team-dir
+    root (ADR-0084 era, ~23KB on existing medicoder team). Claude
+    reads CLAUDE.md hierarchically so the stale parent shadows the
+    new per-label files. install_team() must unlink it.
+    """
+    team_dir = synthetic_home / ".treadmill" / "teams" / "medicoder"
+    team_dir.mkdir(parents=True, exist_ok=True)
+    stale = team_dir / "CLAUDE.md"
+    stale.write_text("# stale ADR-0084 content\n")
+
+    install_team(make_team_spec("medicoder", worker_count=1))
+
+    assert not stale.exists(), "stale parent CLAUDE.md must be removed"
+    # Per-label CLAUDE.md files DO exist (the install renders them).
+    assert (
+        team_dir / "coordinator-medicoder" / "CLAUDE.md"
+    ).is_file()
+    assert (
+        team_dir / "worker-medicoder-1" / "CLAUDE.md"
+    ).is_file()
+
+
+def test_install_team_root_claude_cleanup_idempotent(
+    synthetic_home: Path,
+) -> None:
+    """Second `team up` (no stale file present) must not raise. The
+    `if stale.exists()` guard makes the unlink idempotent."""
+    spec = make_team_spec("medicoder", worker_count=1)
+    install_team(spec)
+    # No stale file remaining after first install. Second install must
+    # complete cleanly.
+    install_team(spec)
+    assert not (
+        synthetic_home / ".treadmill" / "teams" / "medicoder" / "CLAUDE.md"
+    ).exists()
