@@ -368,3 +368,92 @@ class TestCreateEventGenericPassthrough:
         assert body["entity_type"] == "deployment"
         assert body["action"] == "rolled_back"
         assert body["payload"]["image"] == "treadmill-api:abc"
+
+
+# ── dict-payload regression (Phase 5 deploy residual) ─────────────────
+
+
+class _RecordingPublisher:
+    """Real-shaped publisher: exercises _build_record/encode_payload."""
+
+    def __init__(self) -> None:
+        self.published: list = []
+
+    async def publish(self, event, typed_payload) -> None:
+        from treadmill_api.events.registry import encode_payload
+
+        # The real SNS/logging publishers serialize through
+        # encode_payload — do the same so a dict payload that would
+        # crash them crashes this test.
+        self.published.append(encode_payload(typed_payload))
+
+
+def test_manual_event_with_real_dispatcher_dict_payload() -> None:
+    """POST /api/v1/events passes a plain dict payload into the REAL
+    ``Dispatcher.persist_and_publish`` (not a stub). Regression for the
+    2026-06-10 coordinator outage: every prior test stubbed the
+    dispatcher, so ``payload.model_dump`` blowing up on dict was
+    invisible until the live coordinator exercised the route."""
+    import uuid as _uuid
+    from unittest.mock import MagicMock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from treadmill_api.dependencies_db import get_session
+    from treadmill_api.dispatch import Dispatcher, get_dispatcher
+    from treadmill_api.routers.events import router as events_router
+
+    class _Session:
+        def __init__(self) -> None:
+            self.added = []
+
+        def add(self, obj) -> None:
+            self.added.append(obj)
+
+        async def flush(self) -> None:
+            for obj in self.added:
+                if getattr(obj, "id", None) is None:
+                    obj.id = _uuid.uuid4()
+                if getattr(obj, "created_at", None) is None:
+                    from datetime import datetime, timezone
+
+                    obj.created_at = datetime.now(timezone.utc)
+
+        async def commit(self) -> None:
+            pass
+
+        async def refresh(self, obj) -> None:
+            pass
+
+        async def execute(self, stmt):  # duplicate-triple probe
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = None
+            result.first.return_value = None
+            return result
+
+        async def get(self, model, pk):
+            return None
+
+    publisher = _RecordingPublisher()
+    session = _Session()
+    app = FastAPI()
+    app.include_router(events_router)
+    app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[get_dispatcher] = lambda: Dispatcher(
+        publisher=publisher
+    )
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/events",
+        json={
+            "entity_type": "task",
+            "action": "ci_result",
+            "payload": {"check_name": "services/api", "conclusion": "success"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert publisher.published == [
+        {"check_name": "services/api", "conclusion": "success"}
+    ]

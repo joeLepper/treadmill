@@ -153,8 +153,15 @@ def parse_payload(
     return cls.model_validate(payload or {})
 
 
-def encode_payload(payload: EventPayload) -> dict[str, Any]:
+def encode_payload(payload: "EventPayload | dict[str, Any]") -> dict[str, Any]:
     """Serialize a typed payload to a JSON-compatible dict for storage in
     the JSONB ``events.payload`` column. UUIDs become strings; datetimes
-    become ISO-8601 strings."""
+    become ISO-8601 strings.
+
+    Accepts a plain ``dict`` as well: the manual-event surface
+    (``POST /api/v1/events``, ADR-0086 §12.4 Path B) carries
+    caller-supplied JSON with no registered payload class. Dicts pass
+    through unchanged — the caller owns JSON-compatibility."""
+    if isinstance(payload, dict):
+        return payload
     return payload.model_dump(mode="json")
