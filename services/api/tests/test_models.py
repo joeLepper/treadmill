@@ -233,3 +233,14 @@ def test_mergeability_view_migration_projects_detail_columns():
         "conflict.is_conflicting AS pr_conflicting",
     ):
         assert col in body, f"VIEW projection missing {col!r}"
+
+
+def test_metadata_sorted_tables_resolves_all_foreign_keys():
+    """Force SQLAlchemy to resolve every ORM-declared ForeignKey against
+    Base.metadata. A string-based ForeignKey pointing at a deleted
+    model's table raises NoReferencedTableError here — the same error
+    that otherwise first fires at INSERT-flush time in production
+    (2026-06-10: every events INSERT 500'd because Event.run_id /
+    .step_id still declared FKs to the dropped workflow_runs tables)."""
+    tables = Base.metadata.sorted_tables
+    assert len(tables) >= 9
