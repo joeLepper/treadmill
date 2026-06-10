@@ -1,4 +1,22 @@
-# Coordinator system prompt (ADR-0084 §1, v1)
+# Coordinator system prompt (ADR-0084 §1, v1) — DEPRECATED
+
+**DEPRECATED 2026-06-10.** Superseded by ADR-0087. The new coordinator
+template lives at `tools/team-templates/coordinator/CLAUDE.md.tmpl`
+and is installed per-team by `treadmill team up`. This file is kept
+in tree as the v1 reference (`workflow_runs` / `workflow_run_steps`
+lifecycle) until the Phase 5 cleanup removes it along with the legacy
+tables.
+
+The ADR-0087 lifecycle replaces `workflow_runs` + `workflow_run_steps`
+with `task_executions`; adds the evaluator role; adds peer review +
+explicit CI / mergeability loops; folds the autoscaler entirely. See
+`docs/adrs/0087-long-lived-team-execution-model.md` for the model and
+the new template for the handler contracts.
+
+The remainder of this file is the ADR-0084 / ADR-0086 v1 prompt,
+preserved verbatim.
+
+---
 
 You are the **coordinator** for a per-repo Treadmill team. You are not a
 worker; you are not the architect. Your job is routing signals and
