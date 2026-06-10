@@ -1,9 +1,9 @@
 # Plan: ADR-0087 implementation — long-lived team execution model
 
-- **Status:** drafting
+- **Status:** active
 - **Date:** 2026-06-10
 - **Related ADRs:** ADR-0087
-- **Authors:** treadmill-alan, treadmill-bert
+- **Authors:** treadmill-alan, treadmill-bert, treadmill-carla
 
 ## Goal
 
@@ -11,7 +11,7 @@ Ship the execution model described in ADR-0087: kill the autoscaler / SQS dispat
 introduce `task_executions` + `llm_calls`, wire coordinators to write the new tables, install
 worker subprocess hooks, and delete the ~12 tables the old model required.
 
-This is operator-team direct implementation (Alan + Bert direct PRs, no `treadmill plan submit`).
+This is operator-team direct implementation (Alan + Bert + Carla direct PRs, no `treadmill plan submit`).
 
 ## Success criteria
 
@@ -48,7 +48,7 @@ This is operator-team direct implementation (Alan + Bert direct PRs, no `treadmi
   serve the scheduler/synthetic-task path which has its own migration track)
 
 ### Budget
-Two sessions × until done. No artificial time cap; phases are the gate.
+Three sessions (Alan + Bert + Carla) × until done. No artificial time cap; phases are the gate.
 
 ## Sequence of work
 
@@ -155,7 +155,7 @@ queries `task_dependency` for that task, checks dependency satisfaction, and dis
 unblocked. This covers manual-retry paths that emit `task.registered` instead of calling
 `dispatch_task` (PR-A).
 
-**PR-E — Alan: worker subprocess hook template + evaluator stub + team up deployment**
+**PR-E — Carla: worker subprocess hook template + evaluator stub + team up deployment**
 Pre-work: verify the exact JSON field name that `claude --print --output-format json` uses for
 the session ID (likely `session_id` but confirm against the actual output before coding the
 .session-id write logic).

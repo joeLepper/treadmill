@@ -31,9 +31,9 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from treadmill_api.config import DeploymentMode, Settings, get_settings
+from treadmill_api.config import Settings, get_settings
 from treadmill_api.dependencies_db import get_session
-from treadmill_api.dispatch import Dispatcher, DispatchError, get_dispatcher
+from treadmill_api.dispatch import Dispatcher, get_dispatcher
 from treadmill_api.events.plan import (
     PlanActivated,
     PlanRegistered,
@@ -90,16 +90,8 @@ class PlanCreateRequest(BaseModel):
     * ``doc_content`` present → Scenario 1: server parses + spawns tasks.
     * ``intent`` present, ``doc_content`` absent → Scenario 2: drafting.
 
-    ``dev`` is a fully-local-only fast-path flag (per D.10 in the
-    2026-05-11 closure plan). When ``True`` AND
-    ``TREADMILL_DEPLOYMENT_MODE=fully_local``, an intent-only submission
-    short-circuits the ``wf-plan`` PR-merge gate: the plan is created
-    active and an implicit single ``wf-author`` task is spawned with the
-    intent as its description, dispatched immediately. Outside fully_local
-    mode (dev_local, fully_remote) the flag is ignored with a logged
-    warning so production traffic never accidentally side-steps planning.
-    When ``doc_content`` is present, ``dev`` is a no-op — the standard
-    doc path already produces an active plan.
+    A ``team_configs`` row for the plan's repo is required; the request
+    412s without one — run ``treadmill team up --repo <slug>`` first.
     """
 
     repo: str = Field(..., min_length=1)
@@ -107,7 +99,6 @@ class PlanCreateRequest(BaseModel):
     doc_path: str | None = None
     doc_content: str | None = None
     created_by: str | None = None
-    dev: bool = False
 
     @model_validator(mode="after")
     def require_intent_or_doc(self) -> "PlanCreateRequest":
@@ -267,47 +258,6 @@ async def _spawn_tasks_from_specs(
     return tasks
 
 
-async def _spawn_dev_wf_author_task(
-    session: AsyncSession,
-    dispatcher: Dispatcher,
-    plan: Plan,
-    intent: str,
-    created_by: str | None,
-) -> Task:
-    """Spawn the implicit one-task wf-author run that the ``--dev`` flag
-    creates for intent-only submissions in local mode (D.10).
-
-    Mirrors a minimal subset of ``_spawn_tasks_from_specs``: resolve
-    ``wf-author``'s latest version, INSERT the task, emit
-    ``TaskRegistered``. The caller dispatches.
-    """
-    wv_id = await _resolve_workflow_version(session, "wf-author")
-    title = (intent or "untitled").strip()[:200] or "untitled"
-    task = Task(
-        plan_id=plan.id,
-        repo=plan.repo,
-        title=title,
-        description=intent or None,
-        workflow_version_id=wv_id,
-        created_by=created_by,
-    )
-    session.add(task)
-    await session.flush()
-    await dispatcher.persist_and_publish(
-        session,
-        entity_type="task",
-        action="registered",
-        payload=TaskRegistered(
-            repo=task.repo,
-            title=task.title,
-            workflow_version_id=wv_id,
-            plan_id=plan.id,
-        ),
-        plan_id=plan.id,
-        task_id=task.id,
-    )
-    return task
-
 
 # ── task_dependencies expression rewriter ─────────────────────────────────────
 
@@ -387,7 +337,8 @@ async def create_plan_from_doc(
     Used by both ``POST /plans`` (when ``doc_content`` is supplied) and
     the merge-to-main trigger handler (ADR-0021). Parses the doc, INSERTs
     the Plan + Task rows, emits ``PlanRegistered`` + ``PlanActivated`` +
-    one ``TaskRegistered`` per task, and dispatches each task.
+    one ``TaskRegistered`` per task. Tasks stay in ``registered``
+    state; the coordinator picks them up via ``task.registered`` WS events.
 
     ``plan_id`` is optional: when supplied, the Plan row is INSERTed with
     that id; the caller controls the id so merge-trigger redelivery
@@ -409,8 +360,6 @@ async def create_plan_from_doc(
         HTTPException: 400 when the workflow slug is unknown or the
             depends_on grammar is violated. The merge handler catches
             this; the HTTP route lets FastAPI surface it.
-        DispatchError: a downstream dispatch failure. Same handling as
-            ``HTTPException`` above.
     """
     specs = parse_plan_doc(doc_content)
     validate_unique_task_ids(specs)
@@ -450,8 +399,6 @@ async def create_plan_from_doc(
     tasks = await _spawn_tasks_from_specs(
         session, dispatcher, plan, specs, created_by,
     )
-    for task in tasks:
-        await dispatcher.dispatch_task(session, task)
     return plan
 
 
@@ -560,20 +507,14 @@ async def create_plan(
     spawns Task rows; Scenario 2 (``intent`` only) creates a drafting plan
     that will be activated by a later ``submit-doc`` call.
 
-    Lifecycle events emitted (A.6):
-      * Always: ``PlanRegistered``.
-      * Scenario 1 only: ``PlanActivated`` in the same transaction
-        (decision #4 — the plan doc *is* on hand, so we don't wait for a
-        ``submit-doc`` round-trip).
-      * One ``TaskRegistered`` per spawned task.
+    Requires a ``team_configs`` row for the plan's repo (412 otherwise).
+    Tasks stay in ``registered`` state after creation; the coordinator
+    picks them up via ``plan.submitted`` WS events.
 
-    D.10 — ``body.dev`` short-circuits the ``wf-plan`` PR-merge gate for
-    intent-only submissions when
-    ``TREADMILL_DEPLOYMENT_MODE=fully_local``: the plan is activated
-    inline and a single ``wf-author`` task is spawned with the intent as
-    its description. Outside fully_local mode the flag is ignored with a
-    logged warning. With ``doc_content`` present, the flag is a no-op —
-    the standard path already produces an active plan.
+    Lifecycle events emitted (A.6):
+      * Always: ``PlanRegistered`` + ``plan.submitted``.
+      * Scenario 1 only: ``PlanActivated`` in the same transaction.
+      * One ``TaskRegistered`` per spawned task.
     """
     frontmatter_auto_merge: bool | None = None
     if body.doc_content is not None:
@@ -591,39 +532,16 @@ async def create_plan(
 
     await _auto_seed_starters_on_submit(session, settings, dispatcher)
 
-    # ADR-0085+0086 Task D — repo-scoped team_configs lookup.
-    # ``created_by`` is the submitting orchestrator's session label and is
-    # never overridden here — it comes from the caller verbatim (or stays
-    # None if omitted). The coordinator discovers plans via the
-    # ``coordinator_label`` field in the plan.submitted event payload, not
-    # via created_by. When the row is absent no plan.submitted event fires
-    # and the legacy PlanRegistered/PlanActivated lifecycle applies.
+    # ADR-0087 — a team_configs row is required. The coordinator discovers
+    # plans via the coordinator_label field in the plan.submitted event.
     team_config = await team_config_store.get_by_repo(session, body.repo)
-
-    # D.10 — resolve the dev fast-path. Honored in any LOCAL mode
-    # (fully_local OR dev_local) for intent-only (Scenario 2) submissions;
-    # doc-driven Scenario 1 already produces an active plan so the flag
-    # is a no-op there. Rejected only in fully_remote, where the wf-plan
-    # PR-merge gate is the only governance path.
-    #
-    # 2026-05-18: extended from fully_local-only to also include dev_local
-    # after observing that ``treadmill submit`` (intent-only) in dev_local
-    # created inert plans (status=drafting) with no path to activation
-    # short of authoring a sequence_of_work-shaped doc and POSTing to
-    # /submit-doc. The gate the flag skips is the wf-plan PR-merge gate
-    # (a plan-doc PR has to merge before tasks dispatch); that gate is
-    # orthogonal to AWS — the moto/real-AWS distinction the original
-    # comment cited doesn't actually apply to plan activation. Operators
-    # in dev_local who explicitly pass --dev want the same fast-path.
-    is_local = (
-        settings.deployment_mode == DeploymentMode.FULLY_LOCAL
-        or settings.deployment_mode == DeploymentMode.DEV_LOCAL
-    )
-    dev_active = body.dev and is_local and body.doc_content is None
-    if body.dev and not is_local:
-        logger.warning(
-            "dev flag ignored — fully_remote deployment requires "
-            "wf-plan PR-merge gate; running standard plan-creation path",
+    if team_config is None:
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail=(
+                f"no team configured for repo {body.repo!r} — "
+                "run: treadmill team up --repo <slug>"
+            ),
         )
 
     plan = Plan(
@@ -657,8 +575,8 @@ async def create_plan(
 
     if body.doc_content is not None:
         # Scenario 1: doc-driven create. PlanActivated fires in the same
-        # transaction (decision #4) before tasks dispatch — Phase 3 D.5's
-        # plan-active gate will read this state before unblocking work.
+        # transaction (decision #4) — Phase 3 D.5's plan-active gate reads
+        # this state before unblocking work.
         await dispatcher.persist_and_publish(
             session,
             entity_type="plan",
@@ -669,56 +587,21 @@ async def create_plan(
         tasks = await _spawn_tasks_from_specs(
             session, dispatcher, plan, specs, body.created_by,
         )
-        try:
-            for task in tasks:
-                await dispatcher.dispatch_task(session, task)
-        except DispatchError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
-            ) from exc
         task_count = len(tasks)
-    elif dev_active:
-        # D.10 — dev fast-path for intent-only submissions in local mode.
-        # Skip the wf-plan PR-merge gate: emit PlanActivated inline and
-        # spawn an implicit one-task wf-author run with the intent as
-        # both the task title and description.
-        await dispatcher.persist_and_publish(
-            session,
-            entity_type="plan",
-            action="activated",
-            payload=PlanActivated(doc_path=None),
-            plan_id=plan.id,
-        )
-        try:
-            implicit_task = await _spawn_dev_wf_author_task(
-                session, dispatcher, plan, body.intent or "", body.created_by,
-            )
-            await dispatcher.dispatch_task(session, implicit_task)
-        except DispatchError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
-            ) from exc
-        task_count = 1
 
-    # ADR-0085+0086 Task D — emit the plan.submitted event so the
-    # team's coordinator picks the work up without polling. Only fires when
-    # ``team_configs`` has a row for the plan's repo; repos without a
-    # row stay on the legacy ``PlanRegistered`` + ``PlanActivated`` shape
-    # and never fire this. Lands in the same transaction as the rest of
-    # the plan lifecycle events so the coordinator's listener sees the
-    # plan + tasks atomically.
-    if team_config is not None:
-        await dispatcher.persist_and_publish(
-            session,
-            entity_type="plan",
-            action="submitted",
-            payload=PlanSubmitted(
-                repo=plan.repo,
-                coordinator_label=team_config.coordinator_label,
-                task_count=task_count,
-            ),
-            plan_id=plan.id,
-        )
+    # ADR-0087 — emit plan.submitted so the coordinator picks up the work.
+    # Lands in the same transaction; coordinator sees plan + tasks atomically.
+    await dispatcher.persist_and_publish(
+        session,
+        entity_type="plan",
+        action="submitted",
+        payload=PlanSubmitted(
+            repo=plan.repo,
+            coordinator_label=team_config.coordinator_label,
+            task_count=task_count,
+        ),
+        plan_id=plan.id,
+    )
 
     await session.commit()
     await session.refresh(plan)
@@ -824,13 +707,6 @@ async def submit_plan_doc(
     tasks = await _spawn_tasks_from_specs(
         session, dispatcher, plan, specs, plan.created_by,
     )
-    try:
-        for task in tasks:
-            await dispatcher.dispatch_task(session, task)
-    except DispatchError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
-        ) from exc
     await session.commit()
     await session.refresh(plan)
     derived_status = await _read_plan_derived_status(session, plan.id)

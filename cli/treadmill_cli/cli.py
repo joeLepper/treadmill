@@ -126,17 +126,12 @@ def plan_submit(
     created_by: Annotated[str | None, typer.Option(
         "--created-by", help="Identifier of the human or agent submitting.",
     )] = None,
-    dev: Annotated[bool, typer.Option(
-        "--dev",
-        help=(
-            "Local-only fast-path: when running against TREADMILL_LOCAL=true, "
-            "an intent-only submission skips the wf-plan PR-merge gate and "
-            "spawns an implicit one-task wf-author run immediately. Ignored "
-            "in non-local environments."
-        ),
-    )] = False,
 ) -> None:
-    """Submit a plan. Either ``--doc`` (Scenario 1) or ``--intent`` (Scenario 2)."""
+    """Submit a plan. Either ``--doc`` (Scenario 1) or ``--intent`` (Scenario 2).
+
+    Requires a team to be configured for the repo: run
+    ``treadmill team up --repo <slug>`` first.
+    """
     if doc is None and intent is None:
         err_console.print("[red]either --doc or --intent is required[/red]")
         raise typer.Exit(code=2)
@@ -163,8 +158,6 @@ def plan_submit(
             raise typer.Exit(code=2)
         if doc_content != original_content:
             console.print("  [dim]status: drafting → active[/dim]")
-            if dev:
-                doc.write_text(doc_content, encoding="utf-8")
 
     try:
         with _client() as client:
@@ -174,7 +167,6 @@ def plan_submit(
                 doc_path=doc_path,
                 doc_content=doc_content,
                 created_by=resolve_created_by(created_by),
-                dev=dev,
             )
             console.print(f"[green]plan created:[/green] [bold]{plan['id']}[/bold]")
             if plan.get("intent"):
@@ -183,9 +175,7 @@ def plan_submit(
                 console.print(f"  doc:    {plan['doc_path']}")
             console.print(f"  repo:   {plan['repo']}")
 
-            # Doc submissions always list spawned tasks; the --dev fast-path
-            # also spawns an implicit task, so list those too.
-            if doc_content is not None or (dev and intent is not None):
+            if doc_content is not None:
                 tasks = client.list_plan_tasks(plan["id"])
                 if tasks:
                     console.print(f"  tasks:  {len(tasks)} spawned")
@@ -434,38 +424,24 @@ def submit(
         "--workflow", "-w", help="Workflow slug for the spawned task.",
     )] = "wf-author",
     created_by: Annotated[str | None, typer.Option("--created-by")] = None,
-    dev: Annotated[bool, typer.Option(
-        "--dev",
-        help=(
-            "Local-only fast-path: in TREADMILL_LOCAL=true environments, "
-            "skips the wf-plan PR-merge gate and lets the API spawn the "
-            "implicit wf-author task in the same transaction as the plan. "
-            "Ignored in non-local environments."
-        ),
-    )] = False,
 ) -> None:
     """Submit a small change as an intent: creates an implicit one-task Plan
     plus a single Task under it. Per ADR-0010, every Task has a Plan; this
     command spares the user from authoring a plan doc for trivial work.
 
-    With ``--dev`` (D.10), the API spawns the implicit one-task wf-author
-    run itself in local mode — no follow-up POST /tasks is needed.
+    Requires a team to be configured for the repo: run
+    ``treadmill team up --repo <slug>`` first.
     """
     try:
         with _client() as client:
             plan = client.create_plan(
-                repo=repo, intent=intent, created_by=created_by, dev=dev,
+                repo=repo, intent=intent, created_by=created_by,
             )
-            if dev:
-                # API spawned the task implicitly; list to report it.
-                tasks = client.list_plan_tasks(plan["id"])
-                task = tasks[0] if tasks else None
-            else:
-                task = client.create_task(
-                    plan_id=plan["id"], title=intent[:200],
-                    workflow=workflow, description=intent,
-                    created_by=created_by,
-                )
+            task = client.create_task(
+                plan_id=plan["id"], title=intent[:200],
+                workflow=workflow, description=intent,
+                created_by=created_by,
+            )
             if task is not None:
                 console.print(
                     f"[green]submitted:[/green] plan=[bold]{plan['id']}[/bold] "

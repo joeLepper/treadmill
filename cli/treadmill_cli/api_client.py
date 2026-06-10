@@ -58,7 +58,6 @@ class ApiClient:
         doc_path: str | None = None,
         doc_content: str | None = None,
         created_by: str | None = None,
-        dev: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"repo": repo}
         if intent is not None:
@@ -69,8 +68,6 @@ class ApiClient:
             body["doc_content"] = doc_content
         if created_by is not None:
             body["created_by"] = created_by
-        if dev:
-            body["dev"] = True
         return self._request("POST", "/api/v1/plans", json=body)
 
     def get_plan(self, plan_id: str) -> dict[str, Any]:
