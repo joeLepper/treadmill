@@ -157,16 +157,24 @@ SELECT
             )
         ) THEN 'blocked'
 
-        -- 3. No task_execution: task awaiting coordinator dispatch.
-        WHEN lte.id IS NULL THEN 'registered'
-
-        -- 4. github.pr_merged is authoritative once present.
+        -- 3. github.pr_merged is authoritative once present. Checked
+        --    BEFORE the no-execution clause: pre-ADR-0087 tasks have
+        --    zero task_executions rows even when their PR merged long
+        --    ago — projecting those as 'registered' would make the
+        --    coordinator's startup replay re-dispatch already-merged
+        --    work on the first post-migration restart.
         WHEN EXISTS (
             SELECT 1 FROM events e
             WHERE e.task_id = t.id
               AND e.entity_type = 'github'
               AND e.action = 'pr_merged'
         ) THEN 'pr_merged'
+
+        -- 4. No task_execution: task awaiting coordinator dispatch.
+        --    (Unmerged pre-ADR-0087 in-flight tasks land here too and
+        --    re-enter the coordinator pool — correct transition
+        --    semantics, since the old pipeline driving them is dead.)
+        WHEN lte.id IS NULL THEN 'registered'
 
         -- 5. Most recent task_execution running.
         WHEN lte.status = 'running' THEN lte.worker_label || ': executing'
