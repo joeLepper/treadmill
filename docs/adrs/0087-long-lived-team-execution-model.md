@@ -246,7 +246,7 @@ sequenceDiagram
     end
 
     EVAL->>API: GET /task_executions (read-only)
-    EVAL->>ORCH: relay verdict [approve|rework]
+    EVAL->>COORD: relay verdict [approve|rework]
     COORD-->>COORD: receives verdict via treadmill-events
     alt approve
         COORD->>API: PATCH task_execution {status: completed}
