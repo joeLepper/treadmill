@@ -409,25 +409,23 @@ LIMIT :limit
 
 
 _ACCOUNTS_SQL = """
--- Per-account token rollup for the last 24h. Joins
--- ``workflow_run_steps`` → ``workflow_runs`` → ``tasks`` → ``repo_configs``
--- and sums input + output tokens. Accounts with no rows in the window
--- drop out — the operator strip only surfaces accounts currently
--- spending. Best-effort: rows pre-dating ADR-0020's token columns
--- contribute zero (NULLs coerced).
+-- Per-account token rollup for the last 24h (ADR-0087: ported from
+-- workflow_run_steps to llm_calls → task_executions → tasks →
+-- repo_configs). Accounts with no rows in the window drop out — the
+-- operator strip only surfaces accounts currently spending.
 SELECT
     COALESCE(rc.claude_account, 'default') AS name,
     COALESCE(SUM(
-        COALESCE(s.input_tokens, 0) + COALESCE(s.output_tokens, 0)
+        COALESCE(lc.input_tokens, 0) + COALESCE(lc.output_tokens, 0)
     ), 0)::bigint AS tokens_24h
-FROM workflow_run_steps s
-JOIN workflow_runs r ON r.id = s.run_id
-JOIN tasks t        ON t.id = r.task_id
+FROM llm_calls lc
+JOIN task_executions te ON te.id = lc.task_execution_id
+JOIN tasks t            ON t.id = te.task_id
 LEFT JOIN repo_configs rc ON rc.repo = t.repo
-WHERE s.completed_at >= :since
+WHERE lc.created_at >= :since
 GROUP BY COALESCE(rc.claude_account, 'default')
 HAVING COALESCE(SUM(
-    COALESCE(s.input_tokens, 0) + COALESCE(s.output_tokens, 0)
+    COALESCE(lc.input_tokens, 0) + COALESCE(lc.output_tokens, 0)
 ), 0) > 0
 ORDER BY tokens_24h DESC
 """

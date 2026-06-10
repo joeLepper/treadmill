@@ -52,14 +52,21 @@ class Event(Base):
     )
     run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("workflow_runs.id", ondelete="SET NULL"),
         nullable=True,
     )
+    """Historical reference to a pre-ADR-0087 workflow_run. The FK was
+    dropped with the table (Phase 4); the column survives as a plain
+    UUID so the events audit trail keeps its lineage. The ORM-level
+    ForeignKey had to go too — SQLAlchemy resolves FK targets against
+    Base.metadata at flush time and raises NoReferencedTableError once
+    the referenced model is gone (first surfaced as a 500 on every
+    events INSERT after the Phase 5 deploy)."""
     step_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("workflow_run_steps.id", ondelete="SET NULL"),
         nullable=True,
     )
+    """Historical reference to a pre-ADR-0087 workflow_run_step — same
+    plain-UUID treatment as ``run_id`` above."""
     payload: Mapped[dict] = mapped_column(
         JSONB,
         nullable=False,
