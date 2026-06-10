@@ -39,14 +39,11 @@ from treadmill_api.events.plan import (
     PlanRegistered,
     PlanSubmitted,
 )
-from treadmill_api.events.system import SystemAutoSeededStarters
 from treadmill_api.events.task import TaskRegistered
 from treadmill_api.models import (
     Plan,
     Task,
     TaskDependency,
-    Workflow,
-    WorkflowVersion,
 )
 from treadmill_api.parsers import (
     PlanDocFormatError,
