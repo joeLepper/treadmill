@@ -23,7 +23,7 @@ sequenceDiagram
     API-->>JOE: notification (Telegram relay / treadmill promote list)
     JOE->>API: treadmill promote approve <proposal_id>
     API->>API: validate (status=proposed, not expired, digest set intact)
-    API->>GH: workflow_dispatch promote-to-prod (proposal_id)
+    API->>GH: workflow_dispatch promote-to-prod (proposal_id) — firer is an ADR call, see Open items
     GH->>API: GET proposal — re-verify approved + digests match
     GH->>GH: deploy EXACTLY the approved digest set
     GH->>API: prod_promotion.succeeded | failed (sha, digests)
@@ -68,6 +68,13 @@ sequenceDiagram
 `diff_summary` is load-bearing: it is **what Joe is actually approving** —
 the human gate is only as good as the summary in front of the human.
 
+**Genesis anchor:** the FIRST promotion has no prior prod promotion to diff
+against. Its `diff_summary` anchors to the staging-stand-up baseline: every
+merge to main since the staging plan's first green `staging_smoke.passed`
+(the moment the digest set became evidence-bearing), with the bundle's
+`staging_evidence.sha` as the upper bound. Subsequent promotions diff from
+the last `prod_promotion.succeeded` sha.
+
 ## Operator command shape (what Joe types)
 
 ```bash
@@ -107,6 +114,11 @@ remains the single write path; Telegram is a lens, not a second surface.
 - Storage: dedicated `prod_promotions` table vs events-table projection — the
   contract only requires that `GET /api/v1/prod_promotions/{id}` returns
   current status + bundle; Alan picks the substrate.
+- **Who fires `workflow_dispatch`**: CLI-fires (operator machine, operator
+  GitHub creds) vs API-fires (App identity, post-approve hook). Invariant 1
+  already makes the dispatcher untrusted — the workflow re-verifies the
+  proposal against the API regardless — so the contract survives either
+  answer; the ADR picks.
 - Operator authz enforcement: v1 convention (CLI on operator's machine) vs a
   later authenticated-principal check.
 - The expiry sweep mechanism (lazy-on-read suffices for v1).
