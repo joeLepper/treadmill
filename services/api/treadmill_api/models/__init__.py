@@ -6,8 +6,6 @@ package registers every model on ``Base.metadata`` so alembic
 schema.
 """
 
-from treadmill_api.models.architect_gold import ArchitectGoldRow
-from treadmill_api.models.validator_gold import ValidatorGoldRow
 from treadmill_api.models.event import Event
 from treadmill_api.models.onboarding import (
     RepoConfigRow,
@@ -15,15 +13,12 @@ from treadmill_api.models.onboarding import (
     RepoProfileRow,
 )
 from treadmill_api.models.plan import Plan
-from treadmill_api.models.review_queue import ReviewQueueRowMixin
-from treadmill_api.models.review_dspy_variant_pr import ReviewDspyVariantPrRow
 from treadmill_api.models.run import WorkflowRun, WorkflowRunStep
 from treadmill_api.models.task import Task, TaskDependency, TaskPR, TaskValidation
 from treadmill_api.models.task_board import TASK_BOARD_STATUSES, TaskBoard
 from treadmill_api.models.task_execution import TaskExecution
 from treadmill_api.models.llm_call import LLMCall
 from treadmill_api.models.team_config import TeamConfig
-from treadmill_api.models.triage_finding import TriageFindingRow
 from treadmill_api.models.workflow import (
     EventTrigger,
     Hook,
@@ -42,8 +37,6 @@ from treadmill_api.models.system_status import SystemStatus
 from treadmill_api.models.workflow_dispatch_dedup import WorkflowDispatchDedup
 
 __all__ = [
-    "ArchitectGoldRow",
-    "ValidatorGoldRow",
     "Event",
     "EventTrigger",
     "Hook",
@@ -52,8 +45,6 @@ __all__ = [
     "RepoConfigRow",
     "RepoContextDocRow",
     "RepoProfileRow",
-    "ReviewQueueRowMixin",
-    "ReviewDspyVariantPrRow",
     "Role",
     "RoleHook",
     "RoleSkill",
@@ -70,7 +61,6 @@ __all__ = [
     "TaskPR",
     "TaskValidation",
     "TeamConfig",
-    "TriageFindingRow",
     "Workflow",
     "WorkflowDispatchDedup",
     "WorkflowRun",

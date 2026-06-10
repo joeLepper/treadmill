@@ -97,47 +97,11 @@ def _run_migrations(settings: Settings) -> None:
             delay = min(delay * 1.5, 5.0)
 
 
-def _auto_seed_starters(settings: Settings) -> None:
-    """Auto-seed roles + workflows + event_triggers when the DB is empty.
-
-    Per ADR-0028 Q28.a, the resolution is "(ii) auto-seed on first
-    API startup." This runs AFTER ``_run_migrations`` so the
-    ``alembic_version`` sentinel row exists for the SELECT FOR UPDATE
-    lock that serializes multi-replica startups.
-
-    Failures during seed propagate — a half-seeded DB is a worse
-    failure mode than crash-looping the API. If
-    ``TREADMILL_SKIP_AUTO_SEED=true``, this is a no-op (handy for
-    test fixtures that seed differently).
-    """
-    if settings.skip_auto_seed:
-        logging.getLogger(__name__).info(
-            "TREADMILL_SKIP_AUTO_SEED=true — skipping auto-seed",
-        )
-        return
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session
-
-    from treadmill_api.starters import seed_starters_if_empty
-
-    logger = logging.getLogger(__name__)
-    # Use the sync URL since the auto-seed runs before uvicorn starts
-    # the async event loop. Mirror ``database.py``'s URL-rewrite
-    # discipline: alembic uses sync URLs and so do we here.
-    sync_url = settings.database_url.replace("+asyncpg", "+psycopg")
-    engine = create_engine(sync_url)
-    try:
-        with Session(engine) as session:
-            seeded = seed_starters_if_empty(session)
-        if seeded > 0:
-            logger.info(
-                "auto-seed: seeded %d starter roles into fresh DB", seeded,
-            )
-        else:
-            logger.debug("auto-seed: DB already populated; no-op")
-    finally:
-        engine.dispose()
+# _auto_seed_starters removed per ADR-0087 Phase 4 (PR-F review B2): its
+# DB-empty gate was a SELECT on the dropped ``roles`` table, so the first
+# post-migration boot crash-looped on UndefinedTable. The roles/workflows
+# starter-seed concept dies with the tables (PR-G removes starters.py
+# itself alongside triggers.py).
 
 
 def _auto_seed_system_plan(settings: Settings) -> None:
@@ -149,11 +113,9 @@ def _auto_seed_system_plan(settings: Settings) -> None:
     gate (ADR-0010 / dispatch.py) lets synthetic-task runs publish + send
     to SQS immediately — see ``seed/system_plan.py``.
 
-    Runs AFTER ``_auto_seed_starters`` (roles/workflows must exist first
-    for any workflow resolution by dispatchers) and BEFORE
-    ``_auto_seed_schedules`` (the seeded schedules will start firing as
-    soon as the API serves traffic; if the system Plan isn't there yet
-    every tick will skip with a noisy missing-plan log).
+    Runs BEFORE ``_auto_seed_schedules`` (the seeded schedules will
+    start firing as soon as the API serves traffic; if the system Plan
+    isn't there yet every tick will skip with a noisy missing-plan log).
     """
     if settings.skip_auto_seed:
         logging.getLogger(__name__).info(
@@ -190,8 +152,7 @@ def _auto_seed_schedules(settings: Settings) -> None:
     automatically when the schedules table is empty. Idempotent: skipped when
     any schedule row already exists (covers multi-replica rollout safety).
 
-    Runs AFTER ``_auto_seed_starters`` so the roles/workflows layer is always
-    seeded first. If ``TREADMILL_SKIP_AUTO_SEED=true``, this is a no-op.
+    If ``TREADMILL_SKIP_AUTO_SEED=true``, this is a no-op.
     """
     if settings.skip_auto_seed:
         logging.getLogger(__name__).info(
@@ -234,7 +195,6 @@ def run() -> None:
     )
 
     _run_migrations(settings)
-    _auto_seed_starters(settings)
     _auto_seed_system_plan(settings)
     _auto_seed_schedules(settings)
 

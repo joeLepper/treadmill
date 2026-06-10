@@ -201,7 +201,7 @@ def test_no_unexpected_jsonb_columns():
     - events.payload (ADR-0011)
     - workflow_run_steps.output (ADR-0011)
     - schedules.payload_template (ADR-0035 exception)
-    - triage_findings.evidence_summary (ADR-0061 exception — a small
+    - (triage_findings.evidence_summary was an ADR-0061 exception — a small
       denormalized counts dict the labeling UI scans without S3 fetches;
       the keyset (console_errors / http_4xx / http_5xx / requestfailed)
       is open-ended as the bug taxonomy expands per the v1 prompt's
@@ -217,7 +217,6 @@ def test_no_unexpected_jsonb_columns():
         ("events", "payload"),
         ("workflow_run_steps", "output"),
         ("schedules", "payload_template"),
-        ("triage_findings", "evidence_summary"),
         ("repo_configs", "sensitive_strings"),
     }
     found = {

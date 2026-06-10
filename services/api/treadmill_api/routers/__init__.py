@@ -8,29 +8,21 @@ each one explicitly.
 from treadmill_api.routers import (
     escalations,
     event_triggers,
-    hooks,
     plans,
-    roles,
     schedules,
-    skills,
     system_status,
     tasks,
     webhooks,
-    workflow_triggers,
     workflows,
 )
 
 __all__ = [
     "escalations",
     "event_triggers",
-    "hooks",
     "plans",
-    "roles",
     "schedules",
-    "skills",
     "system_status",
     "tasks",
     "webhooks",
-    "workflow_triggers",
     "workflows",
 ]

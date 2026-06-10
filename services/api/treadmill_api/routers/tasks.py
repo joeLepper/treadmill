@@ -12,18 +12,9 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from treadmill_api.coordination.coordinator_overlay import (
-    CapOverlayDecision,
-    coordinator_overlay_decision,
-)
-from treadmill_api.coordination.triggers import (
-    _create_and_publish_run,
-    _is_capped,
-    infer_retry_workflow,
-)
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.dispatch import Dispatcher, get_dispatcher
 from treadmill_api.events.task import ArchitectEmitFailure, TaskRegistered, TaskRetry, TaskWorkerHintRequested
@@ -31,8 +22,6 @@ from treadmill_api.models import (
     Plan,
     Task,
     Workflow,
-    WorkflowDispatchDedup,
-    WorkflowRun,
     WorkflowVersion,
 )
 from treadmill_api.events.task import OperatorHintSet
@@ -105,7 +94,10 @@ class TaskRetryRequest(BaseModel):
 
 
 class TaskRetryResponse(BaseModel):
-    workflow_run_id: uuid.UUID
+    workflow_run_id: uuid.UUID | None = None
+    """Always null post-ADR-0087 — runs are gone; the coordinator
+    re-dispatches via task_executions. Field kept for wire-compat
+    one deprecation window."""
 
 
 def _row_to_response(row) -> TaskResponse:
@@ -333,122 +325,57 @@ async def retry_task(
     session: Annotated[AsyncSession, Depends(get_session)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
 ) -> TaskRetryResponse:
-    """Operator-driven retry of a stuck task's most-recent workflow (ADR-0046).
+    """Operator-driven retry of a stuck task (ADR-0046, reshaped by ADR-0087).
 
-    Clears the matching dedup row(s), emits a task.retry audit event, and
-    dispatches a fresh workflow run. Respects the per-workflow attempt cap
-    unless force_bypass_cap is set.
+    Pre-ADR-0087 this endpoint inferred the failed workflow, cleared
+    dispatch-dedup rows, checked the per-workflow cap, and created a
+    fresh WorkflowRun. All of that machinery is gone (Phase 4 dropped
+    the tables). The ADR-0087 shape: emit a ``task.retry`` audit event
+    plus a ``task.registered`` event; the repo's coordinator receives
+    ``task.registered`` over its WS subscription, re-evaluates the
+    task's dependencies, and re-dispatches a worker if unblocked (the
+    coordinator's CLAUDE.md §3.2 handler).
+
+    ``body.workflow_id`` and ``body.force_bypass_cap`` are accepted for
+    wire-compat but ignored — workflow selection and rework caps are
+    coordinator decisions now.
     """
-    # 1. 404 if task not found.
     task = await session.get(Task, task_id)
     if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="task not found",
         )
 
-    # 2. Resolve workflow_id (explicit or inferred).
-    workflow_id = body.workflow_id
-    if workflow_id is None:
-        workflow_id = await infer_retry_workflow(session, task_id)
-    if workflow_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="no retryable workflow found; pass workflow_id explicitly",
-        )
-
-    # Capture most-recent run id for the audit event before any mutations.
-    prev_result = await session.execute(
-        select(WorkflowRun.id)
-        .join(WorkflowVersion, WorkflowVersion.id == WorkflowRun.workflow_version_id)
-        .where(
-            WorkflowRun.task_id == task_id,
-            WorkflowVersion.workflow_id == workflow_id,
-        )
-        .order_by(WorkflowRun.created_at.desc())
-        .limit(1)
-    )
-    previous_run_id = prev_result.scalar_one_or_none()
-
-    # 3a. ADR-0084 Task 2B — coordinator overlay runs before the cap.
-    # When the plan has a blocked_operator task AND the coordinator is
-    # alive, manual retry is refused with a different 409 message so
-    # the operator sees why. ``force_bypass_cap`` overrides both gates
-    # (single bypass flag covers operator-knows-better escapes).
-    if not body.force_bypass_cap:
-        overlay = await coordinator_overlay_decision(session, task_id)
-        if overlay is CapOverlayDecision.BLOCK_BY_COORDINATOR:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "plan is in coordinator-blocked state "
-                    "(task_board status = blocked_operator); coordinator "
-                    "must release before retry, or pass "
-                    "force_bypass_cap=true to override"
-                ),
-            )
-
-    # 3b. Check cap; 409 if at cap and force_bypass_cap not set.
-    if await _is_capped(session, task_id, workflow_id) and not body.force_bypass_cap:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="cap reached; pass force_bypass_cap=true",
-        )
-
-    # 4. Clear matching workflow_dispatch_dedup rows for every run of the
-    # target workflow on this task (the rows that would block re-dispatch).
-    await session.execute(
-        delete(WorkflowDispatchDedup).where(
-            WorkflowDispatchDedup.workflow_run_id.in_(
-                select(WorkflowRun.id)
-                .join(
-                    WorkflowVersion,
-                    WorkflowVersion.id == WorkflowRun.workflow_version_id,
-                )
-                .where(
-                    WorkflowRun.task_id == task_id,
-                    WorkflowVersion.workflow_id == workflow_id,
-                )
-            )
-        )
-    )
-
-    # 5. Emit task.retry audit event.
     await dispatcher.persist_and_publish(
         session,
         entity_type="task",
         action="retry",
         payload=TaskRetry(
-            workflow_id=workflow_id,
+            workflow_id=body.workflow_id or "coordinator-routed",
             reason=body.reason,
             by_operator="operator",
             bypassed_cap=body.force_bypass_cap,
-            previous_run_id=str(previous_run_id) if previous_run_id else None,
+            previous_run_id=None,
         ),
         plan_id=task.plan_id,
         task_id=task_id,
     )
-
-    # 6. Create new workflow run + publish step.ready.
-    # Uses _create_and_publish_run (same path as the trigger evaluator) rather
-    # than dispatch_task — the latter has an idempotency guard that returns the
-    # existing run when step.ready already exists for the task.
-    run_id = await _create_and_publish_run(
+    await dispatcher.persist_and_publish(
         session,
-        dispatcher,
-        task=task,
-        workflow_id=workflow_id,
-        trigger="operator:task-retry",
+        entity_type="task",
+        action="registered",
+        payload=TaskRegistered(
+            repo=task.repo,
+            title=task.title,
+            workflow_version_id=task.workflow_version_id,
+            plan_id=task.plan_id,
+        ),
+        plan_id=task.plan_id,
+        task_id=task_id,
     )
-    if run_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"workflow {workflow_id!r} has no version or no steps",
-        )
-
     await session.commit()
 
-    # 7. Return 201 with the new run id.
-    return TaskRetryResponse(workflow_run_id=run_id)
+    return TaskRetryResponse(workflow_run_id=None)
 
 
 class OperatorNoteRequest(BaseModel):

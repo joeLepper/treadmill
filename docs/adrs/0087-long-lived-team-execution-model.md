@@ -268,8 +268,8 @@ intake path (ADR-0086 §12.4; unchanged):
 - Coordinator writes a `task.ci_result` event on each `check_run.completed` for auditable history.
 
 **Merge conflicts: `task_mergeability` VIEW**
-- The `task_mergeability` VIEW (existing, unchanged) exposes `mergeable: true | false | null`
-  per PR.
+- The `task_mergeability` VIEW (rewritten in Phase 4 — see §Schema changes / Keep
+  correction) exposes `mergeable: true | false | null` per PR.
 - Coordinator polls this VIEW after each push or on receiving `pull_request.synchronize`.
   `null` means GitHub is still computing — retry in 10 s, max 30 attempts (5 min total).
   After 30 attempts, escalate to orchestrator with reason `mergeability_undetermined`.
@@ -544,6 +544,15 @@ ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT;
 ### Keep (unchanged)
 `plans`, `tasks`, `task_dependency`, `task_prs`, `task_board`, `events`, `team_configs`,
 `escalations`, `schedules`, `repo_configs`, `task_status` VIEW, `task_mergeability` VIEW.
+
+**Correction (2026-06-11, PR-F):** "unchanged" was wrong for `task_mergeability` — the
+pre-ADR-0087 VIEW read wf-review / wf-validate decisions from `workflow_run_steps` +
+`workflow_runs` + `workflow_versions`, all dropped in Phase 4. The Phase 4 migration
+rewrites it: review decisions come from `task.evaluator_verdict` events (`approve` →
+'approved', `rework` → 'changes_requested') UNION `review.override` events; the validate
+branch is override-events-only (the evaluator's holistic judgment subsumes wf-validate).
+Evaluator verdicts are task-scoped, not SHA-pinned — the coordinator re-briefs the
+evaluator after any post-verdict push, and the fresh verdict wins by recency.
 
 **`task_status` VIEW during transition (Phase 3 → Phase 4):** while both `workflow_runs` and
 `task_executions` coexist, the VIEW returns `task_executions`-derived status when a row exists

@@ -222,8 +222,8 @@ SELECT
     -- back to the task's creation time. The dashboard's "age" column
     -- reads it directly.
     COALESCE(last_event.created_at, t.created_at) AS last_activity,
-    -- Tokens summed across every step in every run on this task. NULL
-    -- step columns count as zero (pre-token-tracking rows).
+    -- Tokens summed across every llm_call in every execution on this
+    -- task (ADR-0087 Option A attribution).
     COALESCE(token_rollup.tokens_total, 0)        AS tokens_total
 FROM tasks t
 LEFT JOIN task_status      ts ON ts.id      = t.id
@@ -231,11 +231,13 @@ LEFT JOIN repo_configs     rc ON rc.repo    = t.repo
 LEFT JOIN task_prs         tp ON tp.task_id = t.id
 LEFT JOIN task_mergeability tm ON tm.task_id = t.id
 LEFT JOIN LATERAL (
-    SELECT r.id AS run_id, wv.workflow_id, r.created_at AS started_at
-    FROM workflow_runs r
-    JOIN workflow_versions wv ON wv.id = r.workflow_version_id
-    WHERE r.task_id = t.id
-    ORDER BY r.created_at DESC
+    -- ADR-0087: task_executions replaced workflow_runs. Column aliases
+    -- preserved so the projection layer is unchanged; the "workflow_id"
+    -- slot now carries the dispatched worker_label.
+    SELECT te.id AS run_id, te.worker_label AS workflow_id, te.started_at
+    FROM task_executions te
+    WHERE te.task_id = t.id
+    ORDER BY te.started_at DESC
     LIMIT 1
 ) latest_run ON TRUE
 LEFT JOIN LATERAL (
@@ -244,13 +246,15 @@ LEFT JOIN LATERAL (
     WHERE e.task_id = t.id
 ) last_event ON TRUE
 LEFT JOIN LATERAL (
+    -- ADR-0087: per-subprocess tokens live in llm_calls, FK to
+    -- task_executions (one row per claude --print invocation).
     SELECT SUM(
-        COALESCE(s.input_tokens, 0)
-      + COALESCE(s.output_tokens, 0)
+        COALESCE(lc.input_tokens, 0)
+      + COALESCE(lc.output_tokens, 0)
     ) AS tokens_total
-    FROM workflow_run_steps s
-    JOIN workflow_runs r ON r.id = s.run_id
-    WHERE r.task_id = t.id
+    FROM llm_calls lc
+    JOIN task_executions te ON te.id = lc.task_execution_id
+    WHERE te.task_id = t.id
 ) token_rollup ON TRUE
 WHERE (
         ts.derived_status NOT IN ('done', 'pr_merged', 'validated', 'cancelled')
@@ -262,14 +266,17 @@ ORDER BY COALESCE(last_event.created_at, t.created_at) ASC
 
 
 _PIPELINE_SQL = """
+-- ADR-0087: workflow_run_steps is gone. One task_execution = one
+-- logical pipeline step; role carries the trigger so the dashboard
+-- distinguishes initial work from rework / review passes.
 SELECT
-    s.run_id   AS run_id,
-    s.role_id  AS role,
-    s.status   AS status,
-    s.step_index AS step_index
-FROM workflow_run_steps s
-WHERE s.run_id = ANY(:run_ids)
-ORDER BY s.run_id, s.step_index
+    te.id      AS run_id,
+    te.trigger AS role,
+    te.status  AS status,
+    0          AS step_index
+FROM task_executions te
+WHERE te.id = ANY(:run_ids)
+ORDER BY te.id
 """
 
 
@@ -470,8 +477,8 @@ async def get_overview(
     """
     raw_tasks = (await session.execute(text(_TASKS_SQL))).mappings().all()
 
-    # Bulk-load step rows for every live task's latest run in one query
-    # to avoid an N+1 against ``workflow_run_steps``.
+    # Bulk-load the latest execution row per live task in one query
+    # to avoid an N+1 against ``task_executions``.
     run_ids = [
         row["latest_run_id"]
         for row in raw_tasks
