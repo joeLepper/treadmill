@@ -167,30 +167,104 @@ worker-medicoder-3   (default count: 3; override with --workers N)
 Sessions are created fresh if they don't exist; the command is idempotent (re-running against
 an existing team config updates worker count without replacing running sessions).
 
+### Worker execution model
+
+**DECIDED (2026-06-10): subprocess-per-task with named session continuity.**
+
+Experimentally verified on Claude Code v2.1.170. Workers are not persistent interactive
+sessions — they are `--resume`-based subprocess chains: each task dispatch is a fresh
+`claude --print` invocation that resumes the same named session ID. The session accumulates
+conversation history and repo-specific CLAUDE.md context across tasks; the process exits and
+is re-spawned per task. This is the long-lived-team model: persistent *memory*, not
+persistent *process*.
+
+**Dispatch:**
+```
+claude --print \
+  --resume <worker-session-id> \
+  --output-format json \
+  --permission-mode bypassPermissions \
+  --settings <worker-settings.json> \
+  "<task brief + any pre-drained relay messages>"
+```
+
+**Two-way relay — both directions experimentally proven:**
+
+*Worker → Coordinator:* subprocess uses Bash tool to call `cc-relay.py`. Message lands in
+coordinator's relay inbox via treadmill-events MCP. Works in `--print` mode with
+`bypassPermissions`.
+
+*Coordinator → Worker (mid-execution):* worker's `settings.json` configures a `PostToolUse`
+hook on Bash. After each Bash tool call, the hook checks the worker's relay inbox. If a
+message is present, hook returns `{"decision": "block", "reason": "[COORDINATOR]: <msg>"}`.
+Claude Code injects this into Claude's context as a hook message; the worker sees it on the
+next LLM turn and can change course. Injection is at **tool-use boundaries**, not
+mid-LLM-turn — this is sufficient for all coordinator steering scenarios.
+
+*Coordinator → Worker (on re-spawn):* when a subprocess exits, the coordinator checks the
+worker's relay inbox. If messages are waiting (sent while the subprocess was running or after
+it exited), the coordinator pre-drains them and includes them in the next `--resume` prompt.
+The worker's CLAUDE.md declares coordinator-spawned prompts as trusted so it does not flag
+pre-drained relay content as injection.
+
+```
+sequenceDiagram
+    participant ORCH as orchestrator
+    participant API as API / events table
+    participant COORD as coordinator-<slug>
+    participant FS as relay inbox (filesystem)
+    participant W as worker-<slug>-N subprocess
+    participant EVAL as evaluator-<slug>
+
+    ORCH->>API: POST /plans → emits plan.submitted
+    API-->>COORD: WS push (or events-table drain on reconnect)
+    COORD->>API: POST /task_executions {trigger: initial}
+    COORD->>FS: pre-drain worker inbox (append to brief)
+    COORD->>W: spawn claude --print --resume <id> "task brief"
+
+    loop each Bash tool call
+        W->>W: executes tool
+        Note over W,FS: PostToolUse hook fires
+        FS-->>W: inject pending relay (decision:block+reason) if any
+    end
+
+    alt coordinator has mid-task steering message
+        COORD->>FS: write relay to worker inbox
+        Note over W,FS: picked up at next PostToolUse boundary
+    end
+
+    W->>FS: cc-relay "PR: #N opened"
+    COORD-->>COORD: receives via treadmill-events MCP
+    W->>W: subprocess exits; token JSON emitted
+
+    COORD->>FS: check worker inbox post-exit
+    alt pending messages in inbox
+        COORD->>W: re-spawn --resume <id> with drained inbox in prompt
+    else inbox empty
+        COORD->>API: POST /task_prs {task_id, pr_number}
+        COORD->>EVAL: relay "PR #N ready for evaluation"
+    end
+
+    EVAL->>API: GET /task_executions (read-only)
+    EVAL->>ORCH: relay verdict [approve|rework]
+    COORD-->>COORD: receives verdict via treadmill-events
+    alt approve
+        COORD->>API: PATCH task_execution {status: completed}
+    else rework
+        COORD->>API: POST /task_executions {trigger: evaluator-rework}
+        COORD->>W: re-spawn with rework brief
+    end
+```
+
 ### Token economics
 
-**[DEFERRED — pending empirical decision]**
+**DECIDED (2026-06-10): Option A — subprocess-per-task.**
 
-Two options under evaluation:
+Per-task token counts are captured from `--output-format json` at each subprocess exit.
+`llm_calls` table records one row per subprocess invocation, FK to `task_executions`.
+Multiple subprocesses per task execution (initial write + CI fix + rework) are all captured.
 
-**Option A — Subprocess-per-task (preserves clean attribution):**
-Workers dispatch each task as a `claude --print --output-format json` subprocess internally.
-Tokens are extracted at subprocess exit and tagged with `task_id`. The worker session process
-is long-lived (preserves repo memory, CLAUDE.md context, cc-relay channel connection); only
-the per-task LLM invocation is subprocess-scoped. The outer session continues to receive
-cc-relay messages from coordinator and peer workers between (and alongside) task subprocesses —
-two-way channel communication is unaffected by the subprocess model.
-
-**Option B — Aggregate tracking:**
-Workers run in fully interactive mode. Token attribution is per-session via Anthropic API
-usage reports. Per-task breakdown is unavailable; per-plan totals are approximated.
-
-Claude Code v2.1.170 only reports token usage at subprocess exit. No mid-session polling
-exists. Decision gates on which worker invocation model is chosen.
-
-**Token columns on `task_executions` are withheld from the schema until this is resolved.**
-
-**If Option A:** add `llm_calls` table FK to `task_executions`:
+Add `llm_calls` table FK to `task_executions`:
 
 ```sql
 CREATE TABLE llm_calls (
@@ -209,9 +283,6 @@ CREATE INDEX ix_llm_calls_task_execution_id ON llm_calls (task_execution_id);
 One row per Claude Code subprocess invocation. Many-to-one against `task_executions` because
 a single task may dispatch multiple subprocesses (initial code-write + CI-failure handling
 mid-task). Per-plan burn aggregates through the `tasks → task_executions → llm_calls` JOIN chain.
-
-**If Option B:** no `llm_calls` table. Per-task attribution is lost. Per-plan totals are
-approximated via date-range correlation against Anthropic API usage reports.
 
 ### Rework tracking
 
@@ -244,7 +315,6 @@ CREATE TABLE task_executions (
                     CHECK (status IN ('running','completed','failed')),
     started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
-    -- token columns added when Option A/B decision is made
     UNIQUE (task_id, started_at)  -- dedup guard
 );
 
@@ -277,9 +347,9 @@ fires. One-time SQS drain for orphaned messages.
 with actual worker session labels per repo. Run `treadmill team up` bootstrap for each
 active repo.
 
-**Phase 3** (schema migration): Create `task_executions`. Migrate `task_status` VIEW to
-read it. Update coordinator §12.2 path to write `task_executions` instead of `workflow_runs`.
-Token columns added once Option A/B is decided.
+**Phase 3** (schema migration): Create `task_executions` + `llm_calls`. Migrate `task_status`
+VIEW to read `task_executions`. Update coordinator §12.2 path to write `task_executions`.
+Install worker `settings.json` with PostToolUse relay-inject hook + `bypassPermissions`.
 
 **Phase 4**: Delete `workflow_runs`, `workflow_run_steps`, roles/skills/hooks machinery,
 task_validation, DSPy corpora tables. Alembic migration.
@@ -297,7 +367,8 @@ Remove starters.py role-seeding on API startup.
 - ~12 tables deleted; API surface shrinks; no autoscaler operational burden.
 
 **Negative / risks:**
-- Token attribution model is not yet decided. If Option B, per-task granularity is lost.
+- Worker subprocess exits after each task — coordinator must manage re-spawn lifecycle.
+  Session ID persistence and inbox drain logic add coordinator implementation complexity.
 - Three named sessions per repo (coordinator + evaluator + N workers) increases operational
   surface for session restarts and context recovery.
 - No UI plan for the new model. Task tracking surfaces need a separate pass.
@@ -306,7 +377,8 @@ Remove starters.py role-seeding on API startup.
 
 ## Open questions
 
-1. **Token path (A vs B):** Joe's call pending. Determines `task_executions` token columns.
+1. **Token path:** ~~Pending~~ — **CLOSED (2026-06-10).** Option A (subprocess-per-task).
+   Experimentally verified. `llm_calls` table added to schema.
 2. **Worker specialization:** ~~Generalist for now~~ — **CLOSED** (2026-06-10). Generalist is
    the permanent default. Specializations are expected to emerge naturally through task
    routing history (orchestrators tend to route to workers who last knew the area best).
@@ -329,8 +401,10 @@ Remove starters.py role-seeding on API startup.
   the sole writer of `task_executions` rows and lifecycle state. Evaluator reads only. Workers
   report outcomes via relay; coordinator transcribes into DB. No exceptions — multiple writers
   on lifecycle state produce races that are difficult to diagnose and replay.
-- 2026-06-10: **Subprocess-per-task framing preferred if feasible.** The existing
-  `claude_code.py` already emits `--output-format json` at subprocess exit and parses token
-  counts per step (line 432). Option A is the structurally cleaner path; token attribution
-  is clean-by-construction rather than inferred. If worker invocation model allows it, ship
-  Option A. Confirmed this framing before deferring the schema extension.
+- 2026-06-10: **Option A decided and experimentally verified.** Subprocess-per-task with
+  `--resume <session-id>` gives both per-task token attribution (via `--output-format json`)
+  and accumulated session context across tasks. Two-way relay works: worker→coordinator via
+  Bash tool; coordinator→worker mid-execution via PostToolUse hook `decision:block+reason`;
+  coordinator→worker on re-spawn via pre-drained inbox in prompt. `UserPromptSubmit`
+  additionalContext and Stop hook `continue:true` are both ignored in `--print` mode —
+  neither is needed given the above paths.
