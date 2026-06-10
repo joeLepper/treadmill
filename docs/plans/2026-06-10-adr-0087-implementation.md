@@ -75,15 +75,19 @@ Add a test for the 412 path (missing team_configs). AGENT.md for `routers/plans.
 they serve the scheduler synthetic-task path. Leave them wired; they become dead code after
 Phase 4 and will be removed then.*
 
-*Note on the dev fast-path (`body.dev and is_local`):* the 412 guard must be skipped in dev
-mode — local dev workflows don't require a team_configs row. The guard fires only when
-`body.dev` is false (or `is_local` is false). Verify the condition before landing.
+*Dev fast-path removal:* PR-A removes the `elif dev_active:` block entirely. The dev fast-path
+was an autoscaler-era convenience (spawning immediate `wf-author` to bypass the PR-merge gate).
+Under ADR-0087 all plans go through a coordinator; the fast-path's only function was to call
+`dispatch_task`, which no longer exists. Remove: `dev_active` variable, `body.dev` guard logic,
+the `elif dev_active:` block, and the `dev` field from `PlanCreateRequest` if it has no other
+consumers. Local dev requires `treadmill team up --repo <slug>` once; then plan submit works
+normally. Update AGENT.md + remove the `--dev` flag from `treadmill plan submit` CLI docs.
 
 **PR-B — Bert: team_configs schema + `treadmill team up` CLI**
-Alembic migration: `ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT; ALTER TABLE
-team_configs ADD COLUMN worker_labels TEXT[]` (both columns — evaluator_label for single
-evaluator session label, worker_labels for the full array of worker session labels). Update
-`models/team_config.py` ORM + Pydantic schemas. Update team_configs router to expose new fields.
+Alembic migration: `ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT` only.
+(`worker_labels TEXT[]` already exists from ADR-0085+0086 migration `20260609_1000_team_configs.py`;
+do NOT re-add or the migration fails with "column already exists".) Update `models/team_config.py`
+ORM + Pydantic schemas for `evaluator_label`. Update team_configs router to expose it.
 Add `treadmill team up --repo <slug> [--workers N]` CLI command (superseding `treadmill repo add`
 which becomes a deprecated alias) in `cli/treadmill_cli/commands/` that writes the team_configs
 row with deterministic labels (`coordinator-<slug>`, `evaluator-<slug>`, `worker-<slug>-1…N`).
@@ -92,10 +96,12 @@ Creates `~/.treadmill/teams/<slug>/` directory tree per session:
 - `~/.treadmill/teams/<slug>/<label>/.session-id` — empty file on creation; coordinator writes
   actual session ID on first subprocess exit; `--resume` reads from it on subsequent spawns
 - `~/.treadmill/teams/<slug>/<label>/<label>.env` — env vars for the session unit
-**Scale-down guard:** if `--workers N` reduces the worker count, check for `task_executions
-WHERE worker_label IN (to-be-removed labels) AND status='running'`; abort naming the offending
-labels if any exist. Accept `--force` to skip the check (operator's explicit acknowledgment
-that in-flight work is being abandoned).
+**Scale-down guard:** if `--workers N` reduces the worker count, check for in-flight work on
+the to-be-removed labels. Guard implementation must handle two states:
+- `task_executions` table exists (Phase 3+ state): query `WHERE worker_label IN (...) AND status='running'`; abort if any rows found.
+- `task_executions` table does not yet exist (Phase 1-2 transition window): skip the check — old execution model is still wired; scale-down cannot orphan task_executions-tracked work.
+Use `SELECT to_regclass('task_executions') IS NOT NULL` to test existence before querying.
+Accept `--force` to skip the guard entirely (operator's explicit acknowledgment).
 Enables + starts `treadmill-channel@<label>.service` units. Update `tests/test_routers_team_configs.py`.
 CLI test (assert directory tree + .session-id stub files created + scale-down guard fires).
 AGENT.md for team_configs component.
@@ -114,13 +120,18 @@ existing workflow_runs-derived status (additive — both tables live during tran
 task_executions when present). Add minimal CRUD endpoints:
 `POST /api/v1/task_executions`, `PATCH /api/v1/task_executions/{id}`,
 `GET /api/v1/task_executions?task_id=<id>`. Add `POST /api/v1/llm_calls`.
-New test file `tests/test_routers_task_executions.py`. AGENT.md.
+New test files: `tests/test_routers_task_executions.py` (task_executions CRUD) and
+`tests/test_routers_llm_calls.py` (llm_calls POST + FK relationship). AGENT.md.
 
 ---
 
 ### Wave 3 — parallel (PR-D ∥ PR-E, both after PR-B + PR-C merged)
 
 **PR-D — Bert: coordinator CLAUDE.md + evaluator_label wiring + failure recovery**
+Pre-work: locate the coordinator CLAUDE.md template in the repo (likely under
+`tools/coordinator/` or a session-templates directory — verify before coding; the live file
+lives at `~/.treadmill/teams/<slug>/coordinator-<slug>/CLAUDE.md` and is installed by
+`treadmill team up`). PR-D modifies the template, not the live file.
 Update the coordinator's CLAUDE.md to reflect the ADR-0087 lifecycle:
 - On `plan.submitted`: POST task_executions {trigger: initial}, cc-relay worker brief
 - Monitor CI via `check_run.completed` events; POST task_executions {trigger: coordinator-rework} on failure
@@ -138,7 +149,16 @@ Add §Startup recovery section to coordinator CLAUDE.md:
 - On start: drain own relay inbox (`~/.cc-channels/coordinator-<slug>/relay/`) before processing any new WS events
 - On start: re-poll `task_mergeability` VIEW for all open `task_prs` entries to catch state drift during the gap
 
+Add `task.registered` handler to coordinator CLAUDE.md: coordinator subscribes to `task.registered`
+events (in addition to `plan.submitted`). When a `task.registered` event arrives, coordinator
+queries `task_dependency` for that task, checks dependency satisfaction, and dispatches if
+unblocked. This covers manual-retry paths that emit `task.registered` instead of calling
+`dispatch_task` (PR-A).
+
 **PR-E — Alan: worker subprocess hook template + evaluator stub + team up deployment**
+Pre-work: verify the exact JSON field name that `claude --print --output-format json` uses for
+the session ID (likely `session_id` but confirm against the actual output before coding the
+.session-id write logic).
 Add worker settings.json template (PostToolUse hook on Bash: checks relay inbox, returns
 `{"decision": "block", "reason": "[COORDINATOR]: <msg>"}` if message found). Add worker
 CLAUDE.md template with: trust-coordinator-prompt declaration, cc-relay usage instructions,
@@ -150,21 +170,25 @@ Tests for hook script logic. AGENT.md for worker/evaluator template component.
 
 ---
 
-### Operator step — after PR-D merges (before PR-F)
+### Operator step — after BOTH PR-D AND PR-E merge (before PR-F)
 
-After PR-D merges, the coordinator CLAUDE.md instructs the session to write `task_executions`
-instead of `workflow_runs`. **Joe restarts each active coordinator session** (`treadmill team up`
-re-invoked, or `systemctl --user restart treadmill-channel@coordinator-<slug>.service`) so the
-live session picks up the updated CLAUDE.md. This must happen before PR-F drops `workflow_runs`
-— a live coordinator writing to a dropped table would lose work.
+After both PR-D and PR-E merge, **Joe restarts each active coordinator and worker session**
+(`systemctl --user restart treadmill-channel@coordinator-<slug>.service` etc.) so live sessions
+pick up the updated CLAUDE.md (PR-D) and the PostToolUse hook settings.json (PR-E). Do NOT
+restart before both PRs merge — a coordinator writing to `task_executions` with workers that
+lack the PostToolUse hook means mid-execution steering is absent for any task dispatched in
+that window. The restart must happen before PR-F drops `workflow_runs`.
 
 ### Wave 4 — sequential (PR-F → PR-G, after operator restart + PR-D merged)
 
 **PR-F — Bert: delete old execution tables (Phase 4)**
-Alembic migration includes precondition guard: check `SELECT MAX(created_at) FROM workflow_runs`;
-if within last 5 min (configurable `DEPRECATED_TABLE_QUIESCE_SECONDS`, default 300), abort with
-message naming coordinator sessions to restart. Fails loudly instead of dropping a table with
-an active writer.
+Alembic migration includes precondition guard: acquire `LOCK TABLE workflow_runs IN EXCLUSIVE
+MODE NOWAIT` before the SELECT check (fails immediately if an active coordinator holds a
+transaction, preventing the SELECT-vs-INSERT race). Then check `SELECT MAX(created_at) FROM
+workflow_runs`; if within last 5 min (configurable `DEPRECATED_TABLE_QUIESCE_SECONDS`, default
+300), abort naming coordinator sessions to restart. Lock is released when the migration
+transaction commits (or aborts). Fails loudly instead of silently dropping a table with an
+active writer.
 Drops: `workflow_runs`, `workflow_run_steps`, `roles`, `role_version`,
 `role_skill`, `role_hook`, `skills`, `hooks`, `output_kind`, `task_validation`,
 `architect_gold`, `validator_gold`, `review_dspy_variant_pr`, `triage_finding`,

@@ -25,6 +25,15 @@ model and the still-running autoscaler machinery. Joe directed a full rethink.
 Replace the ephemeral Docker worker model entirely with a **long-lived named-session team**
 per repo. All repos are coordinator-owned. No autoscaler. No SQS **worker dispatch** queue.
 
+**Terminology note — architect → evaluator.** Earlier ADRs (ADR-0022, ADR-0029, ADR-0032)
+used the term "architect" for the independent-audit role that reviewed PRs and returned
+verdicts. This ADR renames that role **evaluator** throughout. The rationale: "architect"
+connotes system design authority; the role's actual function is to evaluate completed work
+against standards. The label change is purely terminological — the session label
+(`evaluator-<slug>`), the WS filter parameter (`evaluator_label`), and the `team_configs`
+column all use "evaluator". Any existing reference to "architect" in session labels, config,
+or code should be treated as referring to this same role.
+
 The `events` table is the durable event log for all state transitions including `plan.submitted`.
 The WS subscription is the real-time delivery mechanism for online coordinators. On reconnect,
 a coordinator replays missed events by querying the `events` table for unprocessed
@@ -83,12 +92,20 @@ are executives who submit plans. They are never in `worker_labels`.
 
 2. Coordinator receives plan.submitted via WS (?coordinator_label=... filter) or events-table
    replay on reconnect (queries for plan.submitted events with no task_executions rows).
-   Reads tasks. For each unblocked task:
+   Reads tasks. Coordinator now owns dependency-satisfaction logic: it queries `task_dependency`
+   rows and dispatches only tasks whose dependencies are met (no upstream `task_executions` in
+   non-completed status, or whose `depends_on` expression is satisfied by existing pr_merged
+   events). On `task.pr_merged`, coordinator re-evaluates all tasks with depends_on expressions
+   and dispatches newly unblocked ones.
+   For each unblocked task:
    - POST /api/v1/task_executions {task_id, worker_label, trigger="initial"}
    - Briefs worker via cc-relay
-   If N unblocked tasks > N available workers, the coordinator queues excess tasks and spawns
-   them FIFO as workers free up (subprocess exits). No task is dropped; queueing is in-memory
-   within the coordinator session.
+   If N unblocked tasks > N available workers, the coordinator queues excess tasks FIFO and
+   dispatches as workers free up (subprocess exits). When the global queue selects a task,
+   coordinator's routing memory picks the best worker — if that worker is busy (in-flight
+   subprocess), the coordinator waits for that specific worker to free before dispatching
+   (per-worker serialization; coordinator does not skip to second-choice worker in v1).
+   No task is dropped; queueing is in-memory within the coordinator session.
 
 3. Worker executes task
    Writes code, opens PR on a dedicated branch.
@@ -148,11 +165,13 @@ are executives who submit plans. They are never in `worker_labels`.
    with the elapsed time. The audit trail distinguishes timeout escalations (no verdict) from
    rework escalations (verdict = rework, max cycles exceeded).
 
-   **Max-cycles cap:** if a task accumulates ≥ 3 `evaluator-rework` rows
+   **Max-cycles cap:** if a task cumulatively accumulates ≥ 3 `evaluator-rework` rows
    (i.e. `COUNT(*) WHERE trigger='evaluator-rework' AND task_id=X` ≥ 3), the coordinator
-   escalates to the submitting orchestrator instead of re-spawning the worker. The evaluator
-   may be misconfigured, the task brief may be ambiguous, or the work may require human
-   judgment. Orchestrator triages and either closes the task or re-briefs with a manual override.
+   escalates to the submitting orchestrator via cc-relay instead of re-spawning the worker.
+   The orchestrator triages and, in v1, recovers by merging the PR manually via GitHub UI;
+   the coordinator catches the resulting `github.pr_merged` webhook and marks the task
+   completed normally. No special API endpoint is needed — the standard merge-detection path
+   handles it. Future escalation tooling (§Open questions Q6) may add a dedicated escape hatch.
 
 7. On task complete (PR merged):
    Coordinator PATCH task_execution {status: completed, completed_at}
@@ -315,18 +334,21 @@ on first bootstrap (empty); the coordinator writes the ID on first subprocess ex
 it on all subsequent spawns. File-on-disk is operator-recoverable (delete to reset a worker's
 memory), requires no schema change, and is parallel to the existing env files.
 
-**Dispatch:**
-```
+**Dispatch** (executed by the coordinator as a Bash tool call):
+```bash
 # First spawn: .session-id is empty — omit --resume; Claude Code creates a new session.
 # Subsequent spawns: .session-id contains the session ID written on first exit.
 SESSION_ID=$(cat ~/.treadmill/teams/<slug>/<worker-label>/.session-id)
-claude --print \
+OUTPUT=$(claude --print \
   ${SESSION_ID:+--resume "$SESSION_ID"} \
   --output-format json \
   --permission-mode bypassPermissions \
   --settings ~/.treadmill/teams/<slug>/<worker-label>/settings.json \
-  "<task brief + any pre-drained relay messages>"
-# After exit: write .usage.session_id from JSON output to .session-id if not already set.
+  "<task brief + any pre-drained relay messages>")
+# After exit: extract session_id from JSON and persist if .session-id was empty.
+# (verify exact field name against claude --output-format json schema at PR-E coding time)
+NEW_ID=$(echo "$OUTPUT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('session_id',''))")
+[ -z "$SESSION_ID" ] && [ -n "$NEW_ID" ] && echo "$NEW_ID" > ~/.treadmill/teams/<slug>/<worker-label>/.session-id
 ```
 
 **Two-way relay — both directions experimentally proven:**
@@ -515,9 +537,8 @@ CREATE TABLE task_executions (
     UNIQUE (task_id, trigger, worker_label, started_at)  -- prevents duplicate spawns on coordinator restart
 );
 
--- team_configs gains evaluator_label + worker_labels
+-- team_configs gains evaluator_label (worker_labels already exists from ADR-0085+0086 migration)
 ALTER TABLE team_configs ADD COLUMN evaluator_label TEXT;
-ALTER TABLE team_configs ADD COLUMN worker_labels    TEXT[];
 ```
 
 ### Keep (unchanged)
