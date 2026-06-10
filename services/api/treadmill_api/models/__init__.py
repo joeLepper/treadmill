@@ -20,6 +20,8 @@ from treadmill_api.models.review_dspy_variant_pr import ReviewDspyVariantPrRow
 from treadmill_api.models.run import WorkflowRun, WorkflowRunStep
 from treadmill_api.models.task import Task, TaskDependency, TaskPR, TaskValidation
 from treadmill_api.models.task_board import TASK_BOARD_STATUSES, TaskBoard
+from treadmill_api.models.task_execution import TaskExecution
+from treadmill_api.models.llm_call import LLMCall
 from treadmill_api.models.team_config import TeamConfig
 from treadmill_api.models.triage_finding import TriageFindingRow
 from treadmill_api.models.workflow import (
@@ -60,8 +62,10 @@ __all__ = [
     "Skill",
     "SystemStatus",
     "TASK_BOARD_STATUSES",
+    "LLMCall",
     "Task",
     "TaskBoard",
+    "TaskExecution",
     "TaskDependency",
     "TaskPR",
     "TaskValidation",

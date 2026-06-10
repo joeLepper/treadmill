@@ -47,7 +47,9 @@ from treadmill_api.routers.skills import router as skills_router
 from treadmill_api.routers.steps import router as steps_router
 from treadmill_api.routers.system_status import router as system_status_router
 from treadmill_api.routers.task_board import router as task_board_router
+from treadmill_api.routers.task_executions import router as task_executions_router
 from treadmill_api.routers.tasks import router as tasks_router
+from treadmill_api.routers.llm_calls import router as llm_calls_router
 from treadmill_api.routers.team_configs import router as team_configs_router
 from treadmill_api.routers.review import router as review_router
 from treadmill_api.routers.triage import router as triage_router
@@ -303,6 +305,8 @@ def create_app() -> FastAPI:
     app.include_router(plans_router)
     app.include_router(tasks_router)
     app.include_router(task_board_router)
+    app.include_router(task_executions_router)
+    app.include_router(llm_calls_router)
     app.include_router(team_configs_router)
     app.include_router(steps_router)
     app.include_router(workflows_router)
