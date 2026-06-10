@@ -170,14 +170,14 @@ Tests for hook script logic. AGENT.md for worker/evaluator template component.
 
 ---
 
-### Operator step — after BOTH PR-D AND PR-E merge (before PR-F)
+### Between Wave 3 and Wave 4 — Alan restarts sessions (after BOTH PR-D AND PR-E merge)
 
-After both PR-D and PR-E merge, **Joe restarts each active coordinator and worker session**
-(`systemctl --user restart treadmill-channel@coordinator-<slug>.service` etc.) so live sessions
-pick up the updated CLAUDE.md (PR-D) and the PostToolUse hook settings.json (PR-E). Do NOT
-restart before both PRs merge — a coordinator writing to `task_executions` with workers that
-lack the PostToolUse hook means mid-execution steering is absent for any task dispatched in
-that window. The restart must happen before PR-F drops `workflow_runs`.
+After both PR-D and PR-E merge, **Alan runs `systemctl --user restart treadmill-channel@<label>.service`**
+for each active coordinator and worker session so live sessions pick up the updated CLAUDE.md
+(PR-D) and the PostToolUse hook settings.json (PR-E). Do NOT restart before both PRs merge —
+a coordinator writing to `task_executions` with workers that lack the PostToolUse hook means
+mid-execution steering is absent for any task dispatched in that window. The restart must
+happen before PR-F drops `workflow_runs`.
 
 ### Wave 4 — sequential (PR-F → PR-G, after operator restart + PR-D merged)
 
@@ -229,7 +229,33 @@ references in routers and tests. Final AGENT.md sweep.
 
 ## Decisions captured during execution
 
-*(populated as we work)*
+**2026-06-10: Wave 1–3 merged**
+
+PRs merged in order: PR-A (#289), PR-B (#288), PR-C (#290), PR-E (#291). PR-D (Bert) in flight
+(~80% done at 05:14Z, ETA 05:45Z). Session restarts gate on PR-D.
+
+**2026-06-10: PR-G pre-work audit — triggers.py is full-delete**
+
+`triggers.py` (3000+ lines) is entirely entangled with `WorkflowRun` / `WorkflowRunStep` /
+`WorkflowVersion` — every function either creates these rows directly or queries them. No function
+survives after PR-F drops those tables. Conclusion: delete the entire file in PR-G; no replacement
+needed because the coordinator's CLAUDE.md (PR-D) explicitly covers all the cases triggers.py
+handled (CI failure → coordinator-rework, conflict → coordinator-rework, evaluator rework,
+operator escalation).
+
+`redispatch.py`: queries `workflow_runs` directly in `_PENDING_TASKS_SQL`; also calls
+`Dispatcher.dispatch_task`. Delete in PR-F alongside `dispatch_dedup.py`.
+
+Sweep files (`auto_merge_loop.py`, `conflict_sweep.py`, `escalation_close_sweep.py`) are
+independent of workflow_runs and should survive. `coordinator_overlay.py` (provides
+`CapOverlayDecision`) is used only by triggers.py — delete with it in PR-G.
+
+**2026-06-10: install.py coordinator placeholder — PR-D fills it**
+
+Current `install.py:install_team()` has an explicit comment `# The coordinator's per-session
+config is NOT written by this function — PR-D owns coordinator-side CLAUDE.md content.`
+Bert is extending install.py in PR-D to render coordinator/CLAUDE.md.tmpl, folding in the
+CLI-wiring follow-up Carla flagged.
 
 ## Post-mortem
 
