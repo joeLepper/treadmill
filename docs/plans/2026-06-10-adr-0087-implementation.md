@@ -1,6 +1,6 @@
 # Plan: ADR-0087 implementation — long-lived team execution model
 
-- **Status:** active
+- **Status:** completed
 - **Date:** 2026-06-10
 - **Related ADRs:** ADR-0087
 - **Authors:** treadmill-alan, treadmill-bert, treadmill-carla
@@ -320,6 +320,58 @@ install pointed at Carla's worktree (repointed to the main repo).
 Verified post-restart: coordinator booted on the new ADR-0087 template (cites §2 startup
 checklist), evaluator clean, all sessions at per-label cwd. **PR-F is unblocked.**
 
+**2026-06-10: Wave 4 complete — PR-F (#297), PR-G (#298), hotfix (#299)**
+
+PR-F merged with two review fixes (B1: pr_merged clause precedence prevents re-dispatch of
+pre-ADR merged tasks; B2: boot-time starters auto-seed removed before its roles-table gate could
+crash-loop the post-migration boot). PR-G merged with both sibling co-signs: final four tables +
+`tasks.workflow_version_id` dropped, trigger evaluator + sweep family + workflow models deleted,
+dispatch.py reduced to the durable-event seam with the `DispatchPublishFailed` marker write moved
+into `persist_and_publish` (keeps the ReplayLoop genuinely load-bearing). Four deploy residuals followed,
+all the same class — surfaces that exist only at runtime, invisible to import-graph analysis and
+dispatcher-stubbed unit tests: (#299) the mergeability VIEW rewrite narrowed its column
+projection, breaking two consumers' SELECTs; (#299) `POST /api/v1/events` passed dict payloads
+into `model_dump` — broken since the route shipped, masked by stubbed tests; (#300) `Event.run_id`
+/`.step_id` still declared string-based ORM FKs to dropped tables — SQLAlchemy resolves them at
+flush, so every events INSERT 500'd; (#300) the dashboard accounts token rollup still joined
+`workflow_run_steps`. Detection guards added: a metadata-wide FK-resolution test
+(`sorted_tables`), a real-dispatcher events regression test, and a service-wide live-SQL grep
+(clean — the set is complete).
+
+Incident during the window: an uncommitted PR-G migration leaked into a dev image build
+(untracked files survive branch switches; docker copies the worktree) and ran against the dev DB,
+putting the schema ahead of deployed code — task-state endpoints 500'd until PR-G deployed; the
+live coordinator escalated the outage and was answered with the resolution path. Memory captured:
+never docker-build from a dirty worktree.
+
 ## Post-mortem
 
-*(filled when completed or abandoned)*
+- **What worked.** The wave structure with explicit KEPT-until-PR-G import-graph notes made an
+  ~25,000-line deletion reviewable in two PRs. Sibling co-sign caught real bugs at every step:
+  Bert's PR-C P0 (IntegrityError→409), Alan's PR-F B1/B2, Carla's PR-E trust-boundary tests.
+  The pre-restart on-disk audit (instead of trusting "templates merged") caught the PR-H layout
+  seam that would have made the restart a silent no-op.
+- **What surprised us.** Five integration seams that no unit test could see: (1) install-path vs
+  launcher-cwd vs Claude Code discovery (PR-H); (2) `$comment` keys wedging unattended boots
+  (#295); (3) killed pre-transcript sessions poisoning `--resume` into systemd crash-loops;
+  (4) the team-up slug derivation rewriting a hand-rolled team's identity; (5) the mergeability
+  VIEW's column contract (#299). All five share one shape: two halves built correctly against a
+  prose spec that never pinned the exact runtime contract.
+- **What should become an ADR, learning, or rule.** Learnings written:
+  template-install-layout-vs-launcher-cwd-mismatch, killed-prelaunch-session-orphans-resume-loop;
+  memories: no-docker-build-dirty-worktree, no-$comment-keys-in-unattended-settings,
+  cc-relay-use-file-for-backticks. Candidate rule: any artifact a runtime loads by convention
+  (CLAUDE.md, settings.json, VIEW columns, env files) gets one test that asserts the consumer's
+  exact contract, not the producer's output shape.
+- **Open follow-ups.** (1) Skip-gated integration tests still seed dropped tables for surviving
+  surfaces — rewrite against task_executions seeding as part of the e2e push. (2) Launcher should
+  validate a transcript exists before `--resume` (crashloop class). (3) Schedules are inert
+  (scheduler publishes ticks nobody consumes) pending ADR-0087 §Health bots. (4) `auto_merge`
+  plan frontmatter is inert — the coordinator merges on evaluator-approve; plan-skill doc should
+  drop the flag. (5) The wf-* workflow vocabulary in plan docs is ignored — plan-skill template
+  update.
+- **What this plan teaches us about future plans.** Operator-team direct implementation with
+  per-PR sibling co-sign sustained ~9 merged PRs in one session without operator intervention —
+  the consensus-merge model works. The costliest moments were all integration seams between
+  separately-authored halves; the cheapest fix was always one session doing an on-disk audit
+  before declaring a phase done.
