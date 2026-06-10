@@ -104,9 +104,12 @@ def test_coordinator_label_sources_coordinator_env(tmp_path: Path) -> None:
     assert "TREADMILL_COORDINATOR_PLANS=p-1,p-2" in recorded
 
 
-def test_coordinator_workdir_pinned_to_team_dir(tmp_path: Path) -> None:
-    """The launcher pins cwd to the team dir regardless of what argv[2]
-    supplied — coordinator workdir is canonical, not operator-overridable."""
+def test_coordinator_workdir_pinned_to_per_label_subdir(tmp_path: Path) -> None:
+    """ADR-0087 PR-H — coordinator cwd is the PER-LABEL subdir, not the
+    team root. The rendered ``CLAUDE.md`` lives at
+    ``<team>/<label>/CLAUDE.md``; pinning cwd to the subdir is what
+    makes Claude Code's auto-discovery read it. argv[2] is still
+    overridden (the per-label dir is canonical)."""
     home = tmp_path / "home"
     home.mkdir()
     misleading = tmp_path / "wrong-workdir"
@@ -119,7 +122,9 @@ def test_coordinator_workdir_pinned_to_team_dir(tmp_path: Path) -> None:
     )
 
     recorded = recorder.read_text()
-    expected_workdir = str(home / ".treadmill" / "teams" / "medicoder")
+    expected_workdir = str(
+        home / ".treadmill" / "teams" / "medicoder" / "coordinator-medicoder"
+    )
     assert f"CWD: {expected_workdir}" in recorded
 
 
@@ -177,7 +182,8 @@ def test_worker_label_does_not_create_team_dir(tmp_path: Path) -> None:
 def test_coordinator_repo_slug_with_dashes(tmp_path: Path) -> None:
     """Repo slugs can contain dashes (e.g. `my-internal-repo`). The strip
     of the `coordinator-` prefix must remove only the literal prefix, not
-    every dash-delimited segment."""
+    every dash-delimited segment. Per ADR-0087 PR-H, cwd is the per-label
+    subdir under the team dir."""
     home = tmp_path / "home"
     home.mkdir()
     env, recorder = _build_env(tmp_path, home=home)
@@ -187,10 +193,11 @@ def test_coordinator_repo_slug_with_dashes(tmp_path: Path) -> None:
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
-    expected_dir = home / ".treadmill" / "teams" / "my-internal-repo"
-    assert expected_dir.is_dir()
+    expected_team_dir = home / ".treadmill" / "teams" / "my-internal-repo"
+    expected_session_dir = expected_team_dir / "coordinator-my-internal-repo"
+    assert expected_session_dir.is_dir()
     recorded = recorder.read_text()
-    assert f"CWD: {expected_dir}" in recorded
+    assert f"CWD: {expected_session_dir}" in recorded
 
 
 def test_coordinator_workdir_override_logs_notice(tmp_path: Path) -> None:
@@ -209,3 +216,147 @@ def test_coordinator_workdir_override_logs_notice(tmp_path: Path) -> None:
 
     assert "overriding workdir" in result.stderr
     assert str(other) in result.stderr
+
+
+# ── ADR-0087 PR-H — per-label cwd for evaluator + worker roles ──────
+
+
+def test_evaluator_label_pins_cwd_to_per_label_subdir(tmp_path: Path) -> None:
+    """ADR-0087 PR-H — evaluator labels now get per-label workdir
+    handling. cwd lands at ``<team>/<label>/`` so the evaluator's
+    rendered CLAUDE.md is discovered."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env, recorder = _build_env(tmp_path, home=home)
+
+    subprocess.run(
+        [str(LAUNCHER), "evaluator-medicoder"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    expected_session_dir = (
+        home / ".treadmill" / "teams" / "medicoder" / "evaluator-medicoder"
+    )
+    assert expected_session_dir.is_dir()
+    recorded = recorder.read_text()
+    assert f"CWD: {expected_session_dir}" in recorded
+
+
+def test_worker_team_label_pins_cwd_to_per_label_subdir(tmp_path: Path) -> None:
+    """ADR-0087 PR-H — worker-<slug>-N labels now get per-label workdir
+    handling. cwd lands at ``<team>/<label>/`` so the worker's rendered
+    CLAUDE.md AND ``.claude/settings.json`` (which registers the
+    PostToolUse relay-inject hook) are discovered."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env, recorder = _build_env(tmp_path, home=home)
+
+    subprocess.run(
+        [str(LAUNCHER), "worker-medicoder-2"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    expected_session_dir = (
+        home / ".treadmill" / "teams" / "medicoder" / "worker-medicoder-2"
+    )
+    assert expected_session_dir.is_dir()
+    recorded = recorder.read_text()
+    assert f"CWD: {expected_session_dir}" in recorded
+
+
+def test_worker_repo_slug_with_dashes(tmp_path: Path) -> None:
+    """``worker-<slug>-N`` parsing must handle slugs containing dashes.
+    The regex ``^worker-(.+)-[0-9]+$`` captures the longest slug that
+    still leaves a trailing numeric index, so ``worker-my-repo-1`` →
+    slug ``my-repo`` + index ``1``, NOT slug ``my`` + index ``repo-1``."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env, recorder = _build_env(tmp_path, home=home)
+
+    subprocess.run(
+        [str(LAUNCHER), "worker-my-internal-repo-3"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    expected_session_dir = (
+        home / ".treadmill" / "teams" / "my-internal-repo"
+        / "worker-my-internal-repo-3"
+    )
+    assert expected_session_dir.is_dir()
+    recorded = recorder.read_text()
+    assert f"CWD: {expected_session_dir}" in recorded
+
+
+def test_orchestrator_label_does_not_trigger_team_role_handling(
+    tmp_path: Path,
+) -> None:
+    """Orchestrator labels (``treadmill-alan``, ``treadmill-bert``, etc.)
+    must NOT match any of the three role patterns. Verifies the per-
+    label cwd handling stays scoped to team-role labels only."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env, recorder = _build_env(tmp_path, home=home)
+
+    subprocess.run(
+        [str(LAUNCHER), "treadmill-alan"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    # No team dir created.
+    assert not (home / ".treadmill" / "teams").exists()
+    # CWD remained the launcher's invocation cwd (tmp_path).
+    recorded = recorder.read_text()
+    assert f"CWD: {tmp_path}" in recorded
+
+
+def test_per_label_env_file_sourced_when_present(tmp_path: Path) -> None:
+    """ADR-0087 PR-H — the per-label ``<label>/<label>.env`` file
+    written by ``treadmill team up`` is sourced for every team-role
+    session. Used to thread ``TREADMILL_ROLE`` / ``TREADMILL_LABEL`` /
+    ``TREADMILL_API_URL`` into the spawned process."""
+    home = tmp_path / "home"
+    home.mkdir()
+    session_dir = (
+        home / ".treadmill" / "teams" / "medicoder" / "worker-medicoder-1"
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / "worker-medicoder-1.env").write_text(
+        "TREADMILL_ROLE=worker\nTREADMILL_API_URL=http://from-env\n"
+    )
+    env, recorder = _build_env(tmp_path, home=home)
+
+    subprocess.run(
+        [str(LAUNCHER), "worker-medicoder-1"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    recorded = recorder.read_text()
+    assert "TREADMILL_ROLE=worker" in recorded
+
+
+def test_coordinator_env_sourced_before_cwd_change(tmp_path: Path) -> None:
+    """``<team>/coordinator.env`` is sourced from the team root BEFORE
+    the cwd changes to the per-label subdir. The env file's path
+    predates per-label dirs and the API's plan-id write-through
+    (ADR-0084 §3A) depends on it staying at <team>/coordinator.env."""
+    home = tmp_path / "home"
+    home.mkdir()
+    team_dir = home / ".treadmill" / "teams" / "medicoder"
+    team_dir.mkdir(parents=True)
+    (team_dir / "coordinator.env").write_text(
+        "TREADMILL_COORDINATOR_PLANS=plan-abc-123\n"
+    )
+    env, recorder = _build_env(tmp_path, home=home)
+
+    subprocess.run(
+        [str(LAUNCHER), "coordinator-medicoder"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    recorded = recorder.read_text()
+    # The env value lands in claude's environment despite cwd having
+    # moved to <team>/coordinator-medicoder/ before exec.
+    assert "TREADMILL_COORDINATOR_PLANS=plan-abc-123" in recorded
+    assert (
+        f"CWD: {team_dir / 'coordinator-medicoder'}" in recorded
+    )

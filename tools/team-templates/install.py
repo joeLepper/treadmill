@@ -21,7 +21,9 @@ Layout written:
     ~/.treadmill/teams/<slug>/evaluator-<slug>/
         CLAUDE.md                      # rendered from template
     ~/.treadmill/teams/<slug>/worker-<slug>-N/   (one per worker)
-        settings.json                  # rendered from template
+        .claude/settings.json          # rendered from template (PR-H —
+                                       #   Claude Code reads project
+                                       #   settings from cwd/.claude/)
         CLAUDE.md                      # rendered from template
 
 Path coordination with Bert (PR-B):
@@ -118,8 +120,10 @@ def install_team(spec: TeamSpec) -> None:
 
       ~/.treadmill/teams/<slug>/<label>/CLAUDE.md
           rendered from the corresponding role's CLAUDE.md.tmpl
-      ~/.treadmill/teams/<slug>/<label>/settings.json   (workers only)
-          rendered from settings.json.tmpl
+      ~/.treadmill/teams/<slug>/<label>/.claude/settings.json   (workers only)
+          rendered from settings.json.tmpl — under .claude/ because
+          Claude Code discovers project settings at
+          <cwd>/.claude/settings.json (PR-H)
 
     ADR-0087 PR-D extension: the coordinator's CLAUDE.md is now
     installed by this function alongside the evaluator + workers.
@@ -137,6 +141,16 @@ def install_team(spec: TeamSpec) -> None:
     install_shared_templates()
     team_dir = _TEAMS_ROOT / spec.repo_slug
     team_dir.mkdir(parents=True, exist_ok=True)
+
+    # Drop pre-ADR-0087 stale CLAUDE.md at the team-dir root. Claude
+    # reads CLAUDE.md hierarchically (cwd + parents); without this
+    # cleanup, the new per-label CLAUDE.md inherits the stale parent
+    # (ADR-0084 era, ~23KB on the existing medicoder team). See
+    # docs/learnings/2026-06-10-template-install-layout-vs-launcher-
+    # cwd-mismatch.md. Idempotent: no-op on second run.
+    stale_root_claude = team_dir / "CLAUDE.md"
+    if stale_root_claude.exists():
+        stale_root_claude.unlink()
 
     # Coordinator — rendered CLAUDE.md only (no settings.json; the
     # coordinator's session does not run with the worker's
@@ -156,16 +170,29 @@ def install_team(spec: TeamSpec) -> None:
     _render(eval_src, eval_dir / "CLAUDE.md", spec)
 
     # Workers — settings.json + CLAUDE.md per worker label.
+    #
+    # Layout: Claude Code's discovery is cwd-relative:
+    #   * CLAUDE.md from <cwd>/CLAUDE.md
+    #   * settings.json from <cwd>/.claude/settings.json
+    #
+    # The PR-E initial cut rendered settings.json to <label>/settings.json
+    # which meant the PostToolUse relay-inject hook never registered.
+    # See docs/learnings/2026-06-10-template-install-layout-vs-launcher-
+    # cwd-mismatch.md.
     worker_claude_src = _PACKAGE_ROOT / "worker" / "CLAUDE.md.tmpl"
     worker_settings_src = _PACKAGE_ROOT / "worker" / "settings.json.tmpl"
     for worker_label in spec.worker_labels:
         worker_dir = team_dir / worker_label
         worker_dir.mkdir(parents=True, exist_ok=True)
         _render(worker_claude_src, worker_dir / "CLAUDE.md", spec, worker_label=worker_label)
-        # settings.json doesn't carry per-worker placeholders today,
-        # but copy through the same render path so a future templating
-        # need (per-worker permission allowlists, e.g.) lands cleanly.
-        _render(worker_settings_src, worker_dir / "settings.json", spec, worker_label=worker_label)
+        worker_dot_claude = worker_dir / ".claude"
+        worker_dot_claude.mkdir(parents=True, exist_ok=True)
+        _render(
+            worker_settings_src,
+            worker_dot_claude / "settings.json",
+            spec,
+            worker_label=worker_label,
+        )
 
 
 def _render(

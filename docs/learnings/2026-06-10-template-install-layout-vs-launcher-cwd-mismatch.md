@@ -36,6 +36,39 @@ even moving a session's cwd into its per-label subdir would still inherit the st
 `<team>/CLAUDE.md` as a parent. The reconciliation has to remove/replace that root
 file too.
 
+The compound effect: a restart of `coordinator-medicoder` would re-load the stale
+ADR-0084 prompt from the root file (winning hierarchically over the un-read
+per-label new file) and worker spawns would have no relay-inject hook registered.
+
+## Root cause
+Three separate authors over three separate PRs each made a locally reasonable
+choice that did not compose:
+
+- PR-B (Bert, `treadmill team up`): created per-label subdirs `<team>/<label>/`
+  for the `.session-id` stub + per-label `.env` file. Operator-readable. Did not
+  move other artefacts.
+- PR-E (Carla, `tools/team-templates/install.py`): rendered per-session CLAUDE.md
+  and settings.json into the per-label subdirs PR-B created. Followed the
+  operator-readable layout from PR-B. Wrote `<label>/settings.json` because that's
+  the per-label dir, not knowing Claude Code reads `.claude/settings.json`
+  specifically.
+- PR-D (Bert, coordinator template + install extension): added
+  `coordinator/CLAUDE.md.tmpl` and extended `install.py` to render the
+  coordinator's CLAUDE.md into `<label>/`. Inherited the same layout assumption.
+
+The launcher (`launch-session.sh`) predates ADR-0087 entirely. Its coordinator-cwd
+branch (ADR-0084 §3A) was correct for the v1 coordinator model that put the prompt
+at `<team>/CLAUDE.md`. No PR touched the launcher because nobody noticed the layout
+mismatch — the rendered files existed, the launcher started a session in a related
+directory, the session ran. The disconnect was silent at runtime: Claude Code
+happily auto-discovered the OLD CLAUDE.md and ran without complaint.
+
+Each PR ran its own unit tests. None ran the end-to-end "render + launch + verify
+the rendered files are read" check, because that needs a Claude Code process AND a
+session restart AND a disk-state inspection — outside the usual unit-test loop. The
+first integration verification on disk was the pre-restart audit. That is the test
+that caught it.
+
 ## Generalization
 When two halves of a feature are built in parallel by different sessions against a
 prose spec ("install templates into the session tree" / "launch sessions from the
@@ -51,19 +84,52 @@ For any feature that renders config a runtime later loads by convention (CLAUDE.
 least one test must assert the file lands where the consumer actually reads it — not
 merely where the writer chose to put it.
 
-## Proposed remediation
-A wiring PR that reconciles install_team() output with launcher + Claude Code
-discovery. Leading option: launcher sets each session's cwd to its per-label subdir
-`<team>/<label>/`; install_team() writes `<label>/CLAUDE.md` + `<label>/.claude/settings.json`;
-the stale `<team>/CLAUDE.md` is removed; coordinator.env is read from the team dir
-regardless of cwd. HAZARD: changing the coordinator's cwd changes the
-`claude --resume` transcript slug (per
-`2026-06-04-systemd-default-cwd-breaks-claude-resume.md`), which would orphan the live
-coordinator-medicoder transcript — needs a migration step. Resolve via sibling review
-before implementing.
+## Remediation (shipped as PR-H, #293)
+A single wiring PR reconciles all three seams:
+
+1. **`tools/cc-channels/launch-session.sh`**: extends the per-label workdir
+   handling from coordinator-only to coordinator + evaluator + worker. All three
+   roles `cd` to `~/.treadmill/teams/<slug>/<label>/` so Claude Code's
+   auto-discovery reads the rendered files. The coordinator continues to source
+   `<team>/coordinator.env` from the team root BEFORE the cwd change (the env
+   file's path predates per-label dirs and the API's plan-id write-through
+   depends on it). All three roles also source the per-label `<label>/<label>.env`
+   written by `treadmill team up`.
+2. **`tools/team-templates/install.py`**: worker `settings.json` is rendered to
+   `<label>/.claude/settings.json` (creating `.claude/`). `install_team()` unlinks
+   the stale `<team>/CLAUDE.md` if present on every run — idempotent on the
+   second run.
+3. **Regression tests** (`tools/team-templates/tests/test_install.py` +
+   `tools/cc-channels/tests/test_coordinator_launch.py`): pin the
+   `.claude/settings.json` path, the stale-cleanup behaviour, and the per-label
+   cwd for every role family so a future refactor cannot reintroduce either bug.
+
+### Transcript migration
+Only `coordinator-medicoder` had a live transcript before PR-H. Its cwd changes
+from `<team>/` to `<team>/coordinator-medicoder/`, which changes the
+`claude --resume` transcript directory slug (see
+`2026-06-04-systemd-default-cwd-breaks-claude-resume.md`). The chosen migration is
+**option 3** (Bert + Alan + Carla consensus): accept the transcript loss; rely on
+the new template's §2 startup recovery (stale-row sweep + own-inbox drain +
+mergeability re-poll + events-table `plan.submitted` replay) to rebuild state.
+`memory.md` persists separately and is reloaded from cwd on first turn. No
+transcripts exist for any worker or evaluator session — they're brand new.
 
 ## Notes
 Surfaced during the ADR-0087 North Star push (get a plan driven to merge by the team
 with no Alan/Bert/Carla intervention). This is the gating work between "templates
 merged" and "team boots and self-drives." Relayed to Bert (owns launcher/CLI session
 wiring, PR-B/PR-D) and Carla (owns install.py, PR-E).
+
+Two further lessons beyond the proposed rule:
+
+1. **Integration tests cost what they save.** Three correct contributors over three
+   PRs reproduced this gap precisely BECAUSE each ran their own unit tests and
+   trusted the others'. The on-disk verification step is the cheap version of an
+   integration test; it should be a planned step in any subprocess-spawn-driven
+   track, not a pre-restart sanity check.
+2. **Launchers are shared infrastructure.** The launcher's coordinator-cwd handling
+   predates this track by 3+ ADRs and was correct for the old model. It became
+   wrong silently when the model changed. Any new role family added to the team
+   needs the launcher's per-label handling extended — PR-H makes that coupling
+   visible in the launcher comments.

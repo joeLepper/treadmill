@@ -37,36 +37,90 @@ fi
 STATE_ROOT="$HOME/.cc-channels/$LABEL"
 mkdir -p "$STATE_ROOT/telegram" "$STATE_ROOT/treadmill"
 
-# ── coordinator role detection (ADR-0084 §3A) ──────────────────────────────
-# Labels of the form `coordinator-<repo-slug>` mark a coordinator session.
-# Coordinator sessions:
-#   * source `~/.treadmill/teams/<repo-slug>/coordinator.env` so the API can
-#     hand them their assigned plan IDs by writing that file at plan-start
-#     (the v1 subscription model is startup-only — see tools/coordinator/
-#     README.md).
-#   * pin workdir to `~/.treadmill/teams/<repo-slug>/`. Any workdir passed
-#     as argv[2] is ignored with a notice; the team dir is the canonical
-#     coordinator workdir.
-#   * skip the dispatch-reminder print further below — coordinators do not
-#     dispatch their own work, they route signals for other workers' work.
+# ── per-label team-role detection (ADR-0084 §3A; ADR-0087 §Team bootstrap) ──
+# Labels of the form `<role>-<repo-slug>[-N]` mark a Treadmill team session:
+#   coordinator-<slug>     — single PM session for the repo
+#   evaluator-<slug>       — single PR-audit session for the repo (ADR-0087)
+#   worker-<slug>-N        — implementer session N for the repo (ADR-0087)
+#
+# All three roles pin workdir to the per-label subdir
+#   ~/.treadmill/teams/<repo-slug>/<label>/
+# so Claude Code auto-discovers the rendered CLAUDE.md from cwd AND the
+# rendered .claude/settings.json (which registers the worker's PostToolUse
+# relay-inject hook). Prior to ADR-0087 PR-H, the coordinator pinned to
+# the TEAM dir (one level up) and evaluator + worker sessions ran from the
+# default workdir entirely. Both meant install_team()-rendered per-label
+# files were never read — the stale root <team>/CLAUDE.md (or no CLAUDE.md
+# at all) won instead, and the PostToolUse hook never registered. Per-label
+# cwd lands every session at the files install_team() wrote for it. See
+# docs/learnings/2026-06-10-template-install-layout-vs-launcher-cwd-mismatch.md.
+#
+# Coordinator additionally sources <team>/coordinator.env. The env file
+# stays at the team root (not per-label) so the API's plan-id write-through
+# (ADR-0084 §3A) keeps working without per-label awareness. The source
+# MUST happen before the cwd is rewritten so any relative paths in the env
+# file resolve correctly (defensive — the current contract is absolute-only).
+#
+# All three role classes also source the per-label <label>.env file written
+# by `treadmill team up` (ADR-0087 PR-B). It carries TREADMILL_ROLE +
+# TREADMILL_LABEL + TREADMILL_API_URL.
+#
+# Coordinators skip the dispatch-reminder print further below — they do
+# not dispatch their own work, they route signals for other workers' work.
+
+_TREADMILL_ROLE=""
+_REPO_SLUG=""
 if [[ "$LABEL" == coordinator-* ]]; then
+  _TREADMILL_ROLE="coordinator"
   _REPO_SLUG="${LABEL#coordinator-}"
+elif [[ "$LABEL" == evaluator-* ]]; then
+  _TREADMILL_ROLE="evaluator"
+  _REPO_SLUG="${LABEL#evaluator-}"
+elif [[ "$LABEL" =~ ^worker-(.+)-[0-9]+$ ]]; then
+  _TREADMILL_ROLE="worker"
+  _REPO_SLUG="${BASH_REMATCH[1]}"
+fi
+
+if [[ -n "$_TREADMILL_ROLE" ]]; then
   _TEAM_DIR="$HOME/.treadmill/teams/$_REPO_SLUG"
-  mkdir -p "$_TEAM_DIR"
-  _COORD_ENV="$_TEAM_DIR/coordinator.env"
-  if [[ -f "$_COORD_ENV" ]]; then
-    # `set -a` auto-exports every variable assigned during the source so
-    # bare ``KEY=value`` lines in coordinator.env (the API-written form
-    # — no need for ``export`` per line) reach the spawned claude process.
+  _SESSION_DIR="$_TEAM_DIR/$LABEL"
+  mkdir -p "$_SESSION_DIR"
+
+  # Source coordinator.env from the TEAM root BEFORE relocating cwd — the
+  # env file's path predates per-label dirs; relocating it would break the
+  # API's plan-assignment write-through (ADR-0084 §3A). Only coordinators
+  # source this file today; evaluator + worker labels carry their config
+  # in the per-label <label>.env source'd below.
+  if [[ "$_TREADMILL_ROLE" == "coordinator" ]]; then
+    _COORD_ENV="$_TEAM_DIR/coordinator.env"
+    if [[ -f "$_COORD_ENV" ]]; then
+      # `set -a` auto-exports every variable assigned during the source so
+      # bare ``KEY=value`` lines in coordinator.env (the API-written form
+      # — no need for ``export`` per line) reach the spawned claude process.
+      set -a
+      # shellcheck disable=SC1090
+      source "$_COORD_ENV"
+      set +a
+    fi
+  fi
+
+  # Source the per-label <label>.env file written by `treadmill team up`.
+  # Sourced AFTER coordinator.env, so on overlapping keys the per-label
+  # file wins (later source overwrites). Intentional: the per-label file
+  # is the ADR-0087-era config surface; coordinator.env persists only for
+  # the API's plan-id write-through.
+  _LABEL_ENV="$_SESSION_DIR/$LABEL.env"
+  if [[ -f "$_LABEL_ENV" ]]; then
     set -a
     # shellcheck disable=SC1090
-    source "$_COORD_ENV"
+    source "$_LABEL_ENV"
     set +a
   fi
-  if [[ "$WORKDIR" != "$_TEAM_DIR" && "$WORKDIR" != "$PWD" ]]; then
-    echo "[launch-session] coordinator label — overriding workdir '$WORKDIR' with team dir '$_TEAM_DIR'" >&2
+
+  if [[ "$WORKDIR" != "$_SESSION_DIR" && "$WORKDIR" != "$PWD" ]]; then
+    echo "[launch-session] $_TREADMILL_ROLE label — overriding workdir '$WORKDIR' with session dir '$_SESSION_DIR'" >&2
   fi
-  WORKDIR="$_TEAM_DIR"
+  WORKDIR="$_SESSION_DIR"
 fi
 
 # Single-instance contract per ADR-0073: refuse to start if another launcher is
