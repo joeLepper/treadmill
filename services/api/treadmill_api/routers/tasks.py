@@ -25,7 +25,7 @@ from treadmill_api.coordination.triggers import (
     infer_retry_workflow,
 )
 from treadmill_api.dependencies_db import get_session
-from treadmill_api.dispatch import Dispatcher, DispatchError, get_dispatcher
+from treadmill_api.dispatch import Dispatcher, get_dispatcher
 from treadmill_api.events.task import ArchitectEmitFailure, TaskRegistered, TaskRetry, TaskWorkerHintRequested
 from treadmill_api.models import (
     Plan,
@@ -175,8 +175,7 @@ async def create_task(
     )
     session.add(task)
     await session.flush()
-    # A.6 — emit TaskRegistered before dispatch so the audit log carries
-    # the registration before the run is materialized.
+    # A.6 — emit TaskRegistered; coordinator picks up via task.registered WS event.
     await dispatcher.persist_and_publish(
         session,
         entity_type="task",
@@ -190,12 +189,6 @@ async def create_task(
         plan_id=plan.id,
         task_id=task.id,
     )
-    try:
-        await dispatcher.dispatch_task(session, task)
-    except DispatchError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
-        ) from exc
     await session.commit()
     await session.refresh(task)
 

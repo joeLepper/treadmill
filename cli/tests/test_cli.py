@@ -187,34 +187,6 @@ def test_plan_submit_doc_status_promoted_to_active(
     assert expected_in_body in body["doc_content"]
 
 
-def test_plan_submit_doc_drafting_writes_local_file_with_dev(
-    httpx_mock: HTTPXMock,
-    tmp_path: Path,
-) -> None:
-    """With --dev, flipping drafting → active also writes the updated content
-    back to the local file so the working copy stays in sync."""
-    plan = _plan_payload()
-    plan_id = plan["id"]
-
-    doc_file = tmp_path / "plan.md"
-    doc_file.write_text(_DOC_WITH_STATUS.format(status="drafting"))
-
-    httpx_mock.add_response(
-        method="POST", url="http://fake-api/api/v1/plans",
-        json=plan, status_code=201,
-    )
-    httpx_mock.add_response(
-        method="GET", url=f"http://fake-api/api/v1/plans/{plan_id}/tasks",
-        json=[_task_payload()],
-    )
-
-    result = runner.invoke(app, [
-        "plan", "submit", "-r", "test/repo", "-d", str(doc_file), "--dev",
-    ])
-    assert result.exit_code == 0, result.output
-    assert "status: active" in doc_file.read_text()
-
-
 def test_plan_submit_doc_drafting_no_local_write_without_dev(
     httpx_mock: HTTPXMock,
     tmp_path: Path,
@@ -268,70 +240,6 @@ def test_plan_submit_doc_with_abandoned_status_refuses(tmp_path: Path) -> None:
     ])
     assert result.exit_code == 2
     assert "abandoned" in result.output
-
-
-def test_plan_submit_with_dev_propagates_flag_in_body(httpx_mock: HTTPXMock) -> None:
-    """The --dev flag must travel as ``dev: true`` in the POST body so the
-    API can short-circuit the wf-plan PR-merge gate (D.10). After create,
-    the CLI lists the implicit wf-author task the API spawned."""
-    plan = _plan_payload()
-    httpx_mock.add_response(
-        method="POST", url="http://fake-api/api/v1/plans",
-        json=plan, status_code=201,
-    )
-    httpx_mock.add_response(
-        method="GET", url=f"http://fake-api/api/v1/plans/{plan['id']}/tasks",
-        json=[_task_payload(plan_id=plan["id"])],
-    )
-
-    result = runner.invoke(app, [
-        "plan", "submit", "-r", "test/repo", "-i", "fix the redirect", "--dev",
-    ])
-    assert result.exit_code == 0, result.output
-    # Locate the POST request and confirm the body carries dev: true.
-    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
-    assert posts, "expected a POST /plans request"
-    import json
-    body = json.loads(posts[0].content)
-    assert body.get("dev") is True
-    assert body.get("intent") == "fix the redirect"
-    # The CLI also lists tasks under the dev-spawned plan.
-    assert "1 spawned" in result.output
-
-
-def test_submit_shorthand_with_dev_skips_followup_task_post(
-    httpx_mock: HTTPXMock,
-) -> None:
-    """The ``submit`` shorthand normally POSTs /plans then POSTs /tasks
-    to create the implicit task. With --dev the API spawns the task
-    inline, so the CLI must skip the second POST and instead GET the
-    plan's tasks to report the result."""
-    plan = _plan_payload()
-    task = _task_payload(plan_id=plan["id"])
-    httpx_mock.add_response(
-        method="POST", url="http://fake-api/api/v1/plans",
-        json=plan, status_code=201,
-    )
-    httpx_mock.add_response(
-        method="GET", url=f"http://fake-api/api/v1/plans/{plan['id']}/tasks",
-        json=[task],
-    )
-
-    result = runner.invoke(app, [
-        "submit", "fix the redirect", "-r", "test/repo", "--dev",
-    ])
-    assert result.exit_code == 0, result.output
-    # Exactly one POST (the plan); no POST /tasks should have fired.
-    requests_by_method = {(r.method, r.url.path) for r in httpx_mock.get_requests()}
-    assert ("POST", "/api/v1/plans") in requests_by_method
-    assert ("POST", "/api/v1/tasks") not in requests_by_method
-    # Body propagates dev: true.
-    import json
-    [post_req] = [r for r in httpx_mock.get_requests() if r.method == "POST"]
-    assert json.loads(post_req.content).get("dev") is True
-    # Output shows the API-spawned task.
-    assert plan["id"] in result.output
-    assert task["id"] in result.output
 
 
 def test_plan_submit_surfaces_api_error(httpx_mock: HTTPXMock) -> None:

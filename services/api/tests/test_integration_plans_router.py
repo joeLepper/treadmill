@@ -120,6 +120,20 @@ def truncate(engine: Engine) -> Iterator[None]:
 
 
 @pytest.fixture
+def seed_team_config(engine: Engine) -> Iterator[None]:
+    """Seed a team_configs row for 'test/repo' so plan-submit passes the 412 guard."""
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO team_configs "
+                "(repo, coordinator_label, worker_labels) "
+                "VALUES ('test/repo', 'coordinator-test-repo', '{}')"
+            )
+        )
+    yield
+
+
+@pytest.fixture
 def seed_wf_author(engine: Engine) -> Iterator[None]:
     """Register a wf-author workflow + a v1 row + a single ``author`` step
     + a role-author role.
@@ -150,7 +164,7 @@ def seed_wf_author(engine: Engine) -> Iterator[None]:
 # ── POST /plans (Scenario 2: intent only) ─────────────────────────────────────
 
 
-def test_create_plan_with_intent_only(client: httpx.Client, truncate: None) -> None:
+def test_create_plan_with_intent_only(client: httpx.Client, truncate: None, seed_team_config: None) -> None:
     response = client.post(
         "/api/v1/plans",
         json={
@@ -210,6 +224,7 @@ def test_create_plan_with_doc_spawns_tasks(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
 ) -> None:
     response = client.post(
         "/api/v1/plans",
@@ -236,6 +251,7 @@ def test_create_plan_with_doc_reads_auto_merge_false_frontmatter(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
     """ADR-0031 Q31.c per-plan opt-out wires from frontmatter to Plan row."""
@@ -263,6 +279,7 @@ def test_create_plan_with_doc_no_frontmatter_leaves_auto_merge_null(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
     """No frontmatter → auto_merge stays NULL → enabled by default."""
@@ -288,6 +305,7 @@ def test_create_plan_with_doc_no_frontmatter_leaves_auto_merge_null(
 def test_create_plan_with_unknown_workflow_returns_400(
     client: httpx.Client,
     truncate: None,
+    seed_team_config: None,
 ) -> None:
     """No workflow registered → 400 with a clear message."""
     response = client.post(
@@ -408,46 +426,20 @@ def test_create_plan_when_team_config_exists_preserves_created_by_and_emits_subm
     assert payload["task_count"] == 0
 
 
-def test_create_plan_when_no_team_config_preserves_created_by_and_skips_submitted(
-    client: httpx.Client, engine: Engine, truncate: None,
+def test_create_plan_without_team_config_returns_412(
+    client: httpx.Client, truncate: None,
 ) -> None:
-    """ADR-0085+0086 Task D — a repo with NO team_configs row:
-    (a) preserves the request body's created_by verbatim (no auto-
-    override), and (b) does NOT emit a plan.submitted event. Repos
-    without a team config stay on the legacy lifecycle."""
-    # No team_configs row for this repo.
-    explicit_created_by = "user-explicit-author"
+    """ADR-0087 — a repo with no team_configs row returns 412 Precondition
+    Failed. Plans can only be submitted once a team is configured."""
     response = client.post(
         "/api/v1/plans",
         json={
-            "repo": "team-d/no-config",
-            "intent": "test the legacy path",
-            "created_by": explicit_created_by,
+            "repo": "no-team/repo",
+            "intent": "this should fail",
         },
     )
-    assert response.status_code == 201, response.text
-    body = response.json()
-    plan_id = body["id"]
-
-    # (a) created_by lands verbatim.
-    with engine.connect() as conn:
-        plan_row = conn.execute(
-            sa.text("SELECT created_by FROM plans WHERE id = :id"),
-            {"id": plan_id},
-        ).fetchone()
-    assert plan_row is not None
-    assert plan_row[0] == explicit_created_by
-
-    # (b) NO plan.submitted event landed.
-    with engine.connect() as conn:
-        submitted_event = conn.execute(
-            sa.text(
-                "SELECT COUNT(*) FROM events "
-                "WHERE plan_id = :id AND action = 'submitted'"
-            ),
-            {"id": plan_id},
-        ).scalar()
-    assert submitted_event == 0
+    assert response.status_code == 412, response.text
+    assert "treadmill team up" in response.json()["detail"]
 
 
 def test_create_plan_with_doc_and_team_config_includes_task_count(
@@ -510,7 +502,7 @@ sequence_of_work:
 # ── GET /plans/{id} ───────────────────────────────────────────────────────────
 
 
-def test_get_plan_returns_created_fields(client: httpx.Client, truncate: None) -> None:
+def test_get_plan_returns_created_fields(client: httpx.Client, truncate: None, seed_team_config: None) -> None:
     create = client.post(
         "/api/v1/plans",
         json={"repo": "test/repo", "intent": "x"},
@@ -540,14 +532,16 @@ def test_list_plan_tasks_includes_derived_status(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
 ) -> None:
-    """Per ADR-0010, the dispatcher auto-creates a WorkflowRun for each
-    spawned task; the task_status VIEW reports ``<workflow>: executing``
-    for tasks whose dependencies are satisfied, and ``blocked`` for tasks
-    whose ``depends_on`` is not yet met.
+    """ADR-0087 — coordinator picks up tasks; they stay in ``registered``
+    state until the coordinator dispatches them. The task_status VIEW reports
+    ``registered`` for tasks with no dependencies and no active execution,
+    and ``blocked`` for tasks whose ``depends_on`` is not yet met.
 
     The default plan-doc template makes ``t1`` depend on ``t0.pr_merged`` —
-    so ``t0`` is ``executing`` (no deps) and ``t1`` is ``blocked``.
+    so ``t0`` is ``registered`` (no deps, awaiting coordinator dispatch) and
+    ``t1`` is ``blocked``.
     """
     create = client.post(
         "/api/v1/plans",
@@ -562,13 +556,14 @@ def test_list_plan_tasks_includes_derived_status(
     tasks = tasks_resp.json()
     assert len(tasks) == 2
     by_title = {t["title"]: t for t in tasks}
-    assert by_title["First task"]["derived_status"] == "wf-author: executing"
+    assert by_title["First task"]["derived_status"] == "registered"
     assert by_title["Second task"]["derived_status"] == "blocked"
 
 
 def test_list_plan_tasks_returns_empty_for_intent_only_plan(
     client: httpx.Client,
     truncate: None,
+    seed_team_config: None,
 ) -> None:
     create = client.post(
         "/api/v1/plans",
@@ -586,6 +581,7 @@ def test_submit_doc_attaches_doc_and_spawns_tasks(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
 ) -> None:
     create = client.post(
         "/api/v1/plans",
@@ -607,6 +603,7 @@ def test_submit_doc_twice_returns_409(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
 ) -> None:
     create = client.post(
         "/api/v1/plans",
@@ -631,10 +628,11 @@ def test_submit_doc_twice_returns_409(
 def test_create_plan_persists_plan_registered_event(
     client: httpx.Client,
     truncate: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
-    """Scenario 2 (intent only) emits exactly one ``plan.registered`` row.
-    No ``plan.activated`` because the plan is still drafting."""
+    """Scenario 2 (intent only) emits ``plan.registered`` and
+    ``plan.submitted`` (no ``plan.activated`` — plan is still drafting)."""
     create = client.post(
         "/api/v1/plans",
         json={"repo": "test/repo", "intent": "Add a billing page"},
@@ -651,6 +649,7 @@ def test_create_plan_persists_plan_registered_event(
         ).all()
     actions = [(r.entity_type, r.action) for r in rows]
     assert ("plan", "registered") in actions
+    assert ("plan", "submitted") in actions
     registered = next(r for r in rows if r.action == "registered")
     assert registered.payload["repo"] == "test/repo"
     assert registered.payload["intent"] == "Add a billing page"
@@ -660,10 +659,11 @@ def test_create_plan_scenario_1_emits_plan_activated(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
-    """Scenario 1 (with doc_content) emits ``plan.registered`` AND
-    ``plan.activated`` in the same transaction (decision #4)."""
+    """Scenario 1 (with doc_content) emits ``plan.registered``,
+    ``plan.activated``, and ``plan.submitted`` in the same transaction."""
     create = client.post(
         "/api/v1/plans",
         json={
@@ -684,16 +684,18 @@ def test_create_plan_scenario_1_emits_plan_activated(
             {"id": plan_id},
         ).all()
     actions = [r.action for r in rows]
-    assert actions == ["registered", "activated"]
+    assert actions == ["registered", "activated", "submitted"]
 
 
 def test_create_plan_scenario_2_does_not_emit_plan_activated(
     client: httpx.Client,
     truncate: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
-    """Scenario 2 stays in ``drafting`` — no ``plan.activated`` until
-    the doc is submitted or ``wf-plan`` produces it."""
+    """Scenario 2 stays in ``drafting`` — ``plan.registered`` and
+    ``plan.submitted`` fire but no ``plan.activated`` until the doc
+    is attached via ``submit-doc``."""
     create = client.post(
         "/api/v1/plans",
         json={"repo": "test/repo", "intent": "x"},
@@ -710,6 +712,7 @@ def test_create_plan_scenario_2_does_not_emit_plan_activated(
             ).all()
         ]
     assert "registered" in actions
+    assert "submitted" in actions
     assert "activated" not in actions
 
 
@@ -717,6 +720,7 @@ def test_spawn_tasks_persists_task_registered_per_task(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
     """Scenario 1 spawns N tasks; expect N ``task.registered`` rows."""
@@ -787,6 +791,7 @@ def test_plan_with_depends_on_persists_task_dependencies(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
     """``t1`` declares one dependency on ``t0``; one row in
@@ -852,6 +857,7 @@ def test_plan_with_malformed_depends_on_returns_400(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
 ) -> None:
     """A depends_on expression outside the v0 grammar 400s with a
     clear detail message."""
@@ -886,6 +892,7 @@ def test_plan_with_unknown_sibling_in_depends_on_returns_400(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
 ) -> None:
     """``task.tX.pr_merged`` is grammatically valid but ``tX`` doesn't
     appear in this plan — 400 with detail."""
@@ -934,6 +941,7 @@ def test_plan_with_validations_persists_rows(
     client: httpx.Client,
     truncate: None,
     seed_wf_author: None,
+    seed_team_config: None,
     engine: Engine,
 ) -> None:
     """Two tasks each declaring two validation entries → 4 rows in
