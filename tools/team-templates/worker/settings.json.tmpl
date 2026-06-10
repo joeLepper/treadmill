@@ -1,7 +1,5 @@
 {
-  "$comment": "Worker session settings template — ADR-0087 §Worker execution model. Installed by `treadmill team up` into ~/.treadmill/teams/<slug>/<label>/settings.json. The PostToolUse hook on Bash polls the worker's relay inbox after each Bash invocation; if the coordinator has sent a steering message, the hook returns {decision:block, reason} which Claude Code injects into the worker's next LLM turn. `--permission-mode bypassPermissions` (set by the worker launcher, not by this file) is what makes the worker autonomous; this file scopes ambient hook behavior and a baseline permission allowlist for known-safe operations.",
   "permissions": {
-    "$comment": "Workers run with `--permission-mode bypassPermissions` for autonomy. This allow list is structurally redundant under bypassPermissions but kept for two reasons: (a) it documents the expected ambient surface for an operator reading the settings, (b) it survives a future tightening of permission-mode where the allow list becomes load-bearing again.",
     "allow": [
       "Bash(git *)",
       "Bash(gh *)",
@@ -20,7 +18,6 @@
     ]
   },
   "hooks": {
-    "$comment": "PostToolUse on Bash fires the relay-inject hook after every Bash tool call. The hook reads the worker's relay inbox; if a coordinator-authored message is waiting, it returns {decision:block, reason:'[COORDINATOR]: <msg>'} which Claude Code injects into the worker's next LLM turn. Messages from non-coordinator senders are left in place (data, not instructions; trust model enforced in worker CLAUDE.md). No Stop hook — workers exit between tasks per ADR-0087 §Worker execution model; the coordinator drives re-spawn lifecycle from the subprocess exit JSON, not from a worker broadcast.",
     "PostToolUse": [
       {
         "matcher": "Bash",
