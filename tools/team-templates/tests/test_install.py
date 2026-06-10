@@ -369,3 +369,44 @@ def test_install_team_root_claude_cleanup_idempotent(
     assert not (
         synthetic_home / ".treadmill" / "teams" / "medicoder" / "CLAUDE.md"
     ).exists()
+
+
+# ── settings.json.tmpl schema-validity (PR #295 regression) ──────────
+
+
+# Top-level keys Claude Code's settings schema accepts that this
+# template is allowed to use. Anything else (e.g. "$comment") raises an
+# interactive "values were skipped — Continue?" prompt at session boot,
+# which wedges an unattended worker until an operator presses Enter
+# (both medicoder workers wedged on the first ADR-0087 team boot —
+# 2026-06-10). Extend deliberately; never add documentation keys.
+_SETTINGS_ALLOWED_TOP_LEVEL = {"permissions", "hooks", "env", "model"}
+
+
+def test_settings_template_has_only_schema_keys() -> None:
+    """The rendered worker settings.json must be pure schema. Unknown
+    keys (at top level or inside permissions/hooks) trigger Claude
+    Code's boot-time settings-validation prompt and wedge unattended
+    sessions."""
+    template = (
+        Path(__file__).resolve().parent.parent
+        / "worker" / "settings.json.tmpl"
+    )
+    body = json.loads(template.read_text())
+    unknown = set(body) - _SETTINGS_ALLOWED_TOP_LEVEL
+    assert not unknown, (
+        f"non-schema top-level keys in settings.json.tmpl: {unknown} — "
+        "these wedge unattended worker boots (see PR #295)"
+    )
+    # The two nested surfaces that wedged before: permissions and hooks
+    # must not carry documentation keys either.
+    assert set(body.get("permissions", {})) <= {"allow", "deny", "ask"}
+    hooks = body.get("hooks", {})
+    known_hook_events = {
+        "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop",
+        "SubagentStop", "Notification", "PreCompact", "SessionStart",
+        "SessionEnd",
+    }
+    assert set(hooks) <= known_hook_events, (
+        f"unknown hook-event keys: {set(hooks) - known_hook_events}"
+    )
