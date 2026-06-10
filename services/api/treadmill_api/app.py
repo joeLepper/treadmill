@@ -23,7 +23,6 @@ from treadmill_api.config import DeploymentMode, Settings, get_settings
 from treadmill_api.database import make_engine
 from treadmill_api.github_auth import build_github_clients
 from treadmill_api.dependencies import (
-    CoordinationProbe,
     DependencyProbe,
     PostgresProbe,
     RedisProbe,
@@ -38,27 +37,17 @@ from treadmill_api.routers.escalations import router as escalations_router
 from treadmill_api.routers.event_triggers import router as event_triggers_router
 from treadmill_api.routers.events import router as events_router
 from treadmill_api.routers.github import router as github_router
-from treadmill_api.routers.hooks import router as hooks_router
 from treadmill_api.routers.onboarding import router as onboarding_router
 from treadmill_api.routers.plans import router as plans_router
-from treadmill_api.routers.roles import router as roles_router
 from treadmill_api.routers.schedules import router as schedules_router
-from treadmill_api.routers.skills import router as skills_router
-from treadmill_api.routers.steps import router as steps_router
 from treadmill_api.routers.system_status import router as system_status_router
 from treadmill_api.routers.task_board import router as task_board_router
 from treadmill_api.routers.task_executions import router as task_executions_router
 from treadmill_api.routers.tasks import router as tasks_router
 from treadmill_api.routers.llm_calls import router as llm_calls_router
 from treadmill_api.routers.team_configs import router as team_configs_router
-from treadmill_api.routers.review import router as review_router
-from treadmill_api.routers.triage import router as triage_router
 from treadmill_api.routers.webhooks import router as webhooks_router
 from treadmill_api.routers.task_prs import router as task_prs_router
-from treadmill_api.routers.workflow_runs import router as workflow_runs_router
-from treadmill_api.routers.workflow_triggers import (
-    router as workflow_triggers_router,
-)
 from treadmill_api.routers.workflows import router as workflows_router
 
 logger = logging.getLogger(__name__)
@@ -77,13 +66,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from treadmill_api.coordination import (
-        CoordinationConsumer,
         NotificationFanout,
         ReplayLoop,
         WebhookInboxPoller,
         make_notification_fanout,
     )
-    from treadmill_api.dispatch import Dispatcher
     from treadmill_api.eventbus import make_publisher, set_publisher
 
     settings: Settings = get_settings()
@@ -125,41 +112,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     publisher = make_publisher(settings, sns_client)
     set_publisher(publisher)
 
-    # Coordination consumer — only started when the events queue is wired
-    # AND the engine exists (the consumer is the sole writer of step
-    # status; without a DB, there's nothing for it to do).
-    consumer: CoordinationConsumer | None = None
+    # CoordinationConsumer removed per ADR-0087 Phase 4 — the step-event
+    # SQS pipeline projected worker step.* events onto workflow_run_steps;
+    # both the events and the table are gone. Coordinators write
+    # task_executions over HTTP (single-writer per ADR-0087 §Decision).
+    #
+    # Replay loop heals persist_and_publish SNS failures (A.8/A.10) — it
+    # predates and survives the consumer; it needs only a sessionmaker +
+    # the publisher.
     replay_loop: ReplayLoop | None = None
-    if (
-        settings.events_queue_url is not None
-        and sqs_client is not None
-        and engine is not None
-    ):
+    if engine is not None:
         sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-        # Construct a background-callable Dispatcher for the consumer's
-        # re-evaluation pass (D.6). It shares the same publisher + SQS
-        # client as the HTTP-path dispatcher so dispatched runs travel
-        # the same publish path.
-        bg_dispatcher = Dispatcher(
-            publisher=publisher,
-            sqs_client=sqs_client,
-            work_queue_url=settings.work_queue_url,
-        )
-        consumer = CoordinationConsumer(
-            sqs_client=sqs_client,
-            queue_url=settings.events_queue_url,
-            sessionmaker=sessionmaker,
-            redis_client=redis,
-            publisher=publisher,
-            dispatcher=bg_dispatcher,
-            github_client=github_client,
-            settings=settings,
-        )
-        await consumer.start()
-        # Replay loop heals dispatch-publish failures (A.8/A.10). Shares
-        # the same sessionmaker as the consumer; uses the configured
-        # publisher so a healed re-issue goes through the same SNS path
-        # as the original dispatcher attempt.
         replay_loop = ReplayLoop(
             publisher=publisher,
             sessionmaker=sessionmaker,
@@ -179,10 +142,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         and engine is not None
         and sqs_client is not None
     ):
-        # The consumer block above already built a sessionmaker iff its
-        # own preconditions were met. The poller can start independently
-        # (it doesn't depend on the events queue) so we build one here if
-        # the consumer block didn't.
+        # The replay-loop block above already built a sessionmaker iff
+        # the engine exists. The poller can start independently so we
+        # build one here if that block didn't.
         try:
             poller_sessionmaker = sessionmaker  # type: ignore[has-type]
         except NameError:
@@ -225,21 +187,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # to roughly one mint per installation per refresh window (2026-06-04 fix).
     app.state.installation_token_cache = github_clients.installation_cache
     app.state.publisher = publisher
-    app.state.consumer = consumer
     app.state.replay_loop = replay_loop
     app.state.webhook_inbox_poller = webhook_inbox_poller
     app.state.notification_fanout = notification_fanout
     app.state.probes = _build_probes(
-        engine, redis, consumer, webhook_inbox_poller,
+        engine, redis, webhook_inbox_poller=webhook_inbox_poller,
     )
 
     logger.info(
         "Treadmill API ready (postgres=%s, redis=%s, events_topic=%s, "
-        "consumer=%s, webhook_inbox_poller=%s)",
+        "webhook_inbox_poller=%s)",
         "wired" if engine is not None else "unconfigured",
         "wired" if redis is not None else "unconfigured",
         "wired" if settings.events_topic_arn else "log-fallback",
-        "running" if consumer is not None else "unconfigured",
         "running" if webhook_inbox_poller is not None else "unconfigured",
     )
 
@@ -248,13 +208,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            # Replay loop stops first — it shares the sessionmaker with the
-            # consumer, and we want it idle before the consumer (and engine)
-            # tear down so an in-flight tick can't double-write on shutdown.
+            # Replay loop stops first so an in-flight tick can't
+            # double-write while the engine tears down.
             if replay_loop is not None:
                 await replay_loop.stop()
-            if consumer is not None:
-                await consumer.stop()
             if webhook_inbox_poller is not None:
                 await webhook_inbox_poller.stop()
             await notification_fanout.stop()
@@ -267,19 +224,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def _build_probes(
-    engine, redis, consumer=None, webhook_inbox_poller=None,
+    engine, redis, webhook_inbox_poller=None,
 ) -> list[DependencyProbe]:
     """Construct the readiness-probe list from the wired clients.
 
-    The ``CoordinationProbe`` only joins the list when a consumer was
-    actually constructed (env vars set, engine wired). Without one,
-    skipping the probe keeps ``/health/ready`` honest — the consumer is
-    not configured, so nothing to check. Same pattern for the
-    ``WebhookInboxProbe`` per ADR-0017.
+    The ``WebhookInboxProbe`` only joins the list when the poller was
+    actually constructed (env vars set, engine wired) — skipping it
+    keeps ``/health/ready`` honest per ADR-0017. (The old
+    ``CoordinationProbe`` left with the step-event consumer in
+    ADR-0087 Phase 4.)
     """
     probes: list[DependencyProbe] = [PostgresProbe(engine), RedisProbe(redis)]
-    if consumer is not None:
-        probes.append(CoordinationProbe(consumer))
     if webhook_inbox_poller is not None:
         probes.append(WebhookInboxProbe(webhook_inbox_poller))
     return probes
@@ -308,16 +263,10 @@ def create_app() -> FastAPI:
     app.include_router(task_executions_router)
     app.include_router(llm_calls_router)
     app.include_router(team_configs_router)
-    app.include_router(steps_router)
     app.include_router(workflows_router)
-    app.include_router(workflow_runs_router)
-    app.include_router(workflow_triggers_router)
     app.include_router(task_prs_router)
-    app.include_router(roles_router)
     app.include_router(schedules_router)
-    app.include_router(skills_router)
     app.include_router(system_status_router)
-    app.include_router(hooks_router)
     app.include_router(event_triggers_router)
     app.include_router(events_router)
     app.include_router(github_router)
@@ -327,8 +276,6 @@ def create_app() -> FastAPI:
     app.include_router(claude_credentials_router)
     app.include_router(dashboard_router)
     app.include_router(escalations_router)
-    app.include_router(triage_router)
-    app.include_router(review_router)
     return app
 
 

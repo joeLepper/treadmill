@@ -4,7 +4,7 @@ The coordination layer intercepts scheduled ticks and event triggers, routing th
 
 ## Deterministic sweeps
 
-Four scheduled sweeps run on the coordination consumer without materialized workflow runs:
+Four scheduled sweeps run as scheduler-direct callbacks (the step-event consumer was deleted in ADR-0087 Phase 4) without materialized runs:
 
 - **``stuck_task_sweep.py``** — every 10 minutes, detects tasks whose most recent event is older than 30 minutes and whose latest step is ``step.completed`` with no later ``step.ready`` (the downstream step never dispatched). Emits ``task.escalated_to_operator`` with ``reason='stuck_task_sweep'``.
 
@@ -21,7 +21,7 @@ All four sweeps:
 
 ## Recent changes
 
-- **ADR-0083** — `ArchitectEmitFailure` event + relay-drop trigger. When the architect role fails to emit a structured verdict via `--json-schema`, the worker POSTs to `POST /api/v1/tasks/{id}/architect_emit_failure`. The consumer calls `maybe_drop_relay_on_architect_emit_failure` (triggers.py) which writes a markdown file to `~/.cc-channels/<created_by>/relay/` so the dispatching orchestrator session learns about the failure. The relay dir is configurable via `TREADMILL_CC_CHANNELS_DIR`; a volume mount is required when the API runs in Docker. Production-split deployments need a remote-drop mechanism — out of v1 scope. Rollback: remove the `architect_emit_failure` endpoint and handler; the event type stays in the registry for audit-log compatibility.
+- **ADR-0083** — `ArchitectEmitFailure` event + relay-drop trigger. When the architect role fails to emit a structured verdict via `--json-schema`, the worker POSTs to `POST /api/v1/tasks/{id}/architect_emit_failure`. The endpoint calls `maybe_drop_relay_on_architect_emit_failure` (triggers.py; the consumer that used to route this was deleted in ADR-0087 Phase 4) which writes a markdown file to `~/.cc-channels/<created_by>/relay/` so the dispatching orchestrator session learns about the failure. The relay dir is configurable via `TREADMILL_CC_CHANNELS_DIR`; a volume mount is required when the API runs in Docker. Production-split deployments need a remote-drop mechanism — out of v1 scope. Rollback: remove the `architect_emit_failure` endpoint and handler; the event type stays in the registry for audit-log compatibility.
 
 - **ADR-0079** — Dispatcher short-circuits `step.ready` on terminal task status. When a task reaches a terminal status (`pr_merged`, `cancelled`, `superseded`, `escalation_closed`) and an action-class workflow (`wf-author`, `wf-feedback`, `wf-architecture-resolve`) has a pending step, `dispatch_next_step()` in `cross_step.py` emits `StepSkipped` event instead of `StepReady` and skips SQS work-queue assignment. New event payload `StepSkipped` (events/step.py) carries `reason` and `terminal_status` fields. Consumer projection in `_dispatch_step()` updates step status to `'skipped'`.
 

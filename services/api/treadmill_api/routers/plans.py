@@ -45,7 +45,6 @@ from treadmill_api.models import (
     Plan,
     Task,
     TaskDependency,
-    TaskValidation,
     Workflow,
     WorkflowVersion,
 )
@@ -212,21 +211,15 @@ async def _spawn_tasks_from_specs(
         sibling_id_to_uuid[spec.id] = task.id
         spec_by_task_id[task.id] = spec
 
-    # Pass 2: persist validations + dependencies, and emit lifecycle events.
+    # Pass 2: persist dependencies + emit lifecycle events.
+    #
+    # task_validations INSERTs removed per ADR-0087 Phase 4 — the table
+    # is dropped; the evaluator's holistic PR judgment replaces per-task
+    # validation gates (ADR-0029 superseded). Plan-doc ``validation:``
+    # blocks still parse (the spec shape is unchanged) and flow to the
+    # worker via the coordinator's brief; they are no longer persisted.
     for task in tasks:
         spec = spec_by_task_id[task.id]
-        # D.3 — task_validations. Parse now provides script/prompt.
-        for index, check in enumerate(spec.validation):
-            session.add(
-                TaskValidation(
-                    task_id=task.id,
-                    position=index,
-                    kind=check.kind,
-                    description=check.description,
-                    script=check.script,
-                    prompt=check.prompt,
-                )
-            )
         # D.1 — task_dependencies (grammar-validate + substitute sibling UUIDs)
         for expr in spec.depends_on:
             substituted = _validate_and_substitute_dep_expr(

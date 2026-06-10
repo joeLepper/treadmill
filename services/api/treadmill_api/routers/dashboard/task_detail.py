@@ -154,11 +154,12 @@ LEFT JOIN repo_configs     rc ON rc.repo    = t.repo
 LEFT JOIN task_prs         tp ON tp.task_id = t.id
 LEFT JOIN task_mergeability tm ON tm.task_id = t.id
 LEFT JOIN LATERAL (
-    SELECT r.id AS run_id, wv.workflow_id, r.created_at AS started_at
-    FROM workflow_runs r
-    JOIN workflow_versions wv ON wv.id = r.workflow_version_id
-    WHERE r.task_id = t.id
-    ORDER BY r.created_at DESC
+    -- ADR-0087: task_executions replaced workflow_runs. Aliases kept;
+    -- "workflow_id" carries the dispatched worker_label.
+    SELECT te.id AS run_id, te.worker_label AS workflow_id, te.started_at
+    FROM task_executions te
+    WHERE te.task_id = t.id
+    ORDER BY te.started_at DESC
     LIMIT 1
 ) latest_run ON TRUE
 LEFT JOIN LATERAL (
@@ -168,25 +169,25 @@ LEFT JOIN LATERAL (
 ) last_event ON TRUE
 LEFT JOIN LATERAL (
     SELECT SUM(
-        COALESCE(s.input_tokens, 0)
-      + COALESCE(s.output_tokens, 0)
+        COALESCE(lc.input_tokens, 0)
+      + COALESCE(lc.output_tokens, 0)
     ) AS tokens_total
-    FROM workflow_run_steps s
-    JOIN workflow_runs r ON r.id = s.run_id
-    WHERE r.task_id = t.id
+    FROM llm_calls lc
+    JOIN task_executions te ON te.id = lc.task_execution_id
+    WHERE te.task_id = t.id
 ) token_rollup ON TRUE
 WHERE t.id = :task_id
 """
 
 
 _PIPELINE_SQL = """
+-- ADR-0087: one task_execution = one logical pipeline step.
 SELECT
-    s.role_id    AS role,
-    s.status     AS status,
-    s.step_index AS step_index
-FROM workflow_run_steps s
-WHERE s.run_id = :run_id
-ORDER BY s.step_index
+    te.trigger   AS role,
+    te.status    AS status,
+    0            AS step_index
+FROM task_executions te
+WHERE te.id = :run_id
 """
 
 
@@ -220,33 +221,45 @@ WHERE la.created_at IS NULL OR la.created_at < le.created_at
 
 
 _RUNS_SQL = """
+-- ADR-0087: execution history replaces run history. "workflow_id"
+-- carries the worker label so the detail page's run list shows who
+-- did each cycle.
 SELECT
-    r.id::text          AS id,
-    wv.workflow_id      AS workflow_id,
-    r.created_at        AS created_at
-FROM workflow_runs r
-JOIN workflow_versions wv ON wv.id = r.workflow_version_id
-WHERE r.task_id = :task_id
-ORDER BY r.created_at ASC
+    te.id::text         AS id,
+    te.worker_label     AS workflow_id,
+    te.started_at       AS created_at
+FROM task_executions te
+WHERE te.task_id = :task_id
+ORDER BY te.started_at ASC
 """
 
 
 _RUN_STEPS_SQL = """
+-- ADR-0087: the per-execution "steps" view synthesizes one row per
+-- execution (trigger as role, failure_reason as error) + sums its
+-- llm_calls tokens. Output payloads live in events, not here.
 SELECT
-    s.id::text          AS id,
-    s.run_id::text      AS run_id,
-    s.role_id           AS role_id,
-    s.status            AS status,
-    s.started_at        AS started_at,
-    s.completed_at      AS completed_at,
-    s.output            AS output,
-    s.error             AS error,
-    s.input_tokens      AS input_tokens,
-    s.output_tokens     AS output_tokens,
-    s.step_index        AS step_index
-FROM workflow_run_steps s
-WHERE s.run_id = ANY(:run_ids)
-ORDER BY s.run_id, s.step_index
+    te.id::text         AS id,
+    te.id::text         AS run_id,
+    te.trigger          AS role_id,
+    te.status           AS status,
+    te.started_at       AS started_at,
+    te.completed_at     AS completed_at,
+    NULL::jsonb         AS output,
+    te.failure_reason   AS error,
+    tok.input_tokens    AS input_tokens,
+    tok.output_tokens   AS output_tokens,
+    0                   AS step_index
+FROM task_executions te
+LEFT JOIN LATERAL (
+    SELECT
+        SUM(lc.input_tokens)  AS input_tokens,
+        SUM(lc.output_tokens) AS output_tokens
+    FROM llm_calls lc
+    WHERE lc.task_execution_id = te.id
+) tok ON TRUE
+WHERE te.id = ANY(:run_ids)
+ORDER BY te.id
 """
 
 

@@ -83,11 +83,14 @@ class _StubSession:
             return _StubResult([self.task] if self.task else [])
         if "last_escalation" in sql:
             return _StubResult([self.escalation] if self.escalation else [])
-        if "FROM workflow_run_steps s" in sql and ":run_id" in sql and "ANY" not in sql:
+        # ADR-0087: task_executions replaced workflow_runs/_steps; the
+        # three queries keep their distinguishing params (:run_id single,
+        # :task_id history, :run_ids bulk).
+        if "FROM task_executions te" in sql and ":run_id" in sql and "ANY" not in sql:
             return _StubResult(self.pipeline)
-        if "FROM workflow_runs r" in sql and "WHERE r.task_id = :task_id" in sql:
+        if "FROM task_executions te" in sql and "WHERE te.task_id = :task_id" in sql:
             return _StubResult(self.runs)
-        if "FROM workflow_run_steps s" in sql and ":run_ids" in sql:
+        if "FROM task_executions te" in sql and ":run_ids" in sql:
             return _StubResult(self.run_steps)
         raise AssertionError(f"unexpected SQL passed to stub session:\n{sql}")
 

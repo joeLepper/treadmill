@@ -86,7 +86,8 @@ class _StubSession:
 
         if "FROM tasks t" in sql and "task_status" in sql and "WHERE" in sql:
             return _StubResult(self.tasks)
-        if "FROM workflow_run_steps s" in sql and ":run_ids" in sql:
+        if "FROM task_executions te" in sql and ":run_ids" in sql:
+            # ADR-0087: one task_execution = one pipeline step.
             return _StubResult(self.pipelines)
         # ADR-0062 Step 5: closed-escalations query is identified by its
         # CTE name (``closed_event``); check it BEFORE the open-escalations
