@@ -34,6 +34,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.dml import Insert
 
 from treadmill_api.dependencies_db import get_session
@@ -199,13 +200,15 @@ class _HarvestStubSession:
         self,
         *,
         known_execution_ids: list[uuid.UUID] | None = None,
-        inserted_ids: list[uuid.UUID] | None = None,
+        insert_outcomes: list[bool] | None = None,
         cursor_rows: list[object] | None = None,
         report_rows: list[object] | None = None,
         malformed_total: int = 0,
     ) -> None:
         self._known_execution_ids = known_execution_ids or []
-        self._inserted_ids = inserted_ids or []
+        # One bool per posted call: the harvest INSERT's RETURNING
+        # ``(xmax = 0)`` — True = fresh insert, False = conflict-update.
+        self._insert_outcomes = insert_outcomes or []
         self._cursor_rows = cursor_rows or []
         self._report_rows = report_rows or []
         self._malformed_total = malformed_total
@@ -218,7 +221,7 @@ class _HarvestStubSession:
         if isinstance(stmt, Insert):
             if stmt.table.name == "llm_calls":
                 self.call_inserts.append(stmt)
-                result.scalars.return_value.all.return_value = self._inserted_ids
+                result.scalars.return_value.all.return_value = self._insert_outcomes
             else:
                 assert stmt.table.name == "llm_harvest_cursors"
                 self.cursor_upserts.append(stmt)
@@ -285,7 +288,7 @@ class TestHarvestIngest:
         ex_id = uuid.uuid4()
         session = _HarvestStubSession(
             known_execution_ids=[ex_id],
-            inserted_ids=[uuid.uuid4(), uuid.uuid4()],
+            insert_outcomes=[True, True],
         )
         client = TestClient(_harvest_app(session))
 
@@ -294,7 +297,7 @@ class TestHarvestIngest:
             json={
                 "transcript_path": "/x/a.jsonl",
                 "byte_offset": 4096,
-                "malformed_lines_delta": 1,
+                "malformed_lines": 1,
                 "calls": [
                     _harvest_call(task_execution_id=str(ex_id)),
                     _harvest_call(),
@@ -303,14 +306,17 @@ class TestHarvestIngest:
         )
 
         assert resp.status_code == 201, resp.text
-        assert resp.json() == {"inserted": 2, "duplicates": 0, "byte_offset": 4096}
+        assert resp.json() == {"inserted": 2, "updated": 0, "byte_offset": 4096}
         assert len(session.call_inserts) == 1
         assert len(session.cursor_upserts) == 1
         assert session.committed
 
-    def test_duplicates_counted_not_errored(self) -> None:
-        """ON CONFLICT DO NOTHING: one of two calls already exists."""
-        session = _HarvestStubSession(inserted_ids=[uuid.uuid4()])
+    def test_straddled_resend_updates_in_place(self) -> None:
+        """ON CONFLICT DO UPDATE (last-write-wins): a re-sent straddled
+        requestId reports as updated, not inserted, and the statement
+        overwrites the usage columns with the excluded (re-sent) values
+        rather than dropping the correction (peer-review item 2)."""
+        session = _HarvestStubSession(insert_outcomes=[True, False])
         client = TestClient(_harvest_app(session))
 
         resp = client.post(
@@ -323,7 +329,13 @@ class TestHarvestIngest:
         )
 
         assert resp.status_code == 201, resp.text
-        assert resp.json() == {"inserted": 1, "duplicates": 1, "byte_offset": 100}
+        assert resp.json() == {"inserted": 1, "updated": 1, "byte_offset": 100}
+        sql = str(
+            session.call_inserts[0].compile(dialect=postgresql.dialect())
+        )
+        assert "ON CONFLICT" in sql and "DO UPDATE" in sql
+        assert "output_tokens = excluded.output_tokens" in sql
+        assert "(xmax = 0)" in sql
 
     def test_404_unknown_execution_in_batch(self) -> None:
         session = _HarvestStubSession(known_execution_ids=[])
@@ -351,15 +363,23 @@ class TestHarvestIngest:
             json={
                 "transcript_path": "/x/a.jsonl",
                 "byte_offset": 2048,
-                "malformed_lines_delta": 3,
+                "malformed_lines": 3,
                 "calls": [],
             },
         )
 
         assert resp.status_code == 201, resp.text
-        assert resp.json() == {"inserted": 0, "duplicates": 0, "byte_offset": 2048}
+        assert resp.json() == {"inserted": 0, "updated": 0, "byte_offset": 2048}
         assert not session.call_inserts
         assert len(session.cursor_upserts) == 1
+        # Retry-idempotent: the cursor upsert OVERWRITES the cumulative
+        # malformed count; a `+ excluded` add would inflate on retries
+        # (peer-review item 3).
+        sql = str(
+            session.cursor_upserts[0].compile(dialect=postgresql.dialect())
+        )
+        assert "malformed_lines = excluded.malformed_lines" in sql
+        assert "+ excluded.malformed_lines" not in sql
 
 
 class TestTokenReport:

@@ -23,9 +23,15 @@ Per-plan burn remains the JOIN chain:
 ``llm_harvest_cursors`` is the harvester's idempotency cursor: one row
 per transcript file, recording the byte offset consumed so far and the
 cumulative count of unparseable lines (ADR-0089: counted and reported,
-never silently skipped). The (transcript_path, request_id) partial
-UNIQUE index on ``llm_calls`` backstops the cursor against a response
-that was still streaming when a harvest run snapshotted the file.
+never silently skipped). The harvester sends the absolute
+cumulative malformed count and the API overwrites it, so retries cannot
+inflate it. The (transcript_path, request_id) partial UNIQUE index on
+``llm_calls`` backstops the cursor against a response that was still
+streaming when a harvest run snapshotted the file — the conflict
+resolves last-write-wins (usage updated in place), since the earlier row
+holds a mid-stream undercount. ``transcript_path`` keys are canonicalized
+by the harvester (``Path.resolve()``); a spelling change would otherwise
+fork both idempotency layers.
 """
 
 from __future__ import annotations

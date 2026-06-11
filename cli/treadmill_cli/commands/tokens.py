@@ -13,11 +13,16 @@ calls to ``POST /api/v1/llm_calls/harvest``:
   parser keeps the last line per requestId within the parsed span.
 * The byte cursor only ever advances past *complete* lines; a partial
   trailing line waits for the next run. A response still streaming when
-  the file is snapshotted can straddle the cursor — the API's
-  (transcript_path, request_id) unique index drops the re-sent call.
+  the file is snapshotted can straddle the cursor — the re-sent call
+  hits the API's (transcript_path, request_id) unique index and UPDATES
+  the earlier row's usage in place (last-write-wins, the cross-run
+  analogue of the in-span last-line-wins rule: the first write was a
+  mid-stream undercount). Paths are canonicalized (``resolve()``) so a
+  path-spelling change can't fork the cursor/index keys.
 * Unparseable lines are never silently skipped (ADR-0089): each run
-  counts them, the API accumulates the count per transcript, and both
-  ``harvest`` output and ``report`` surface the totals.
+  counts them and sends the cumulative per-file total (which the API
+  overwrites — retry-idempotent); both ``harvest`` output and ``report``
+  surface them.
 
 Attribution is two-step: the transcript's project dir name yields the
 session label (team sessions live under
@@ -209,22 +214,28 @@ def harvest(
     if not projects_dir.is_dir():
         err_console.print(f"[red]not a directory: {projects_dir}[/red]")
         raise typer.Exit(code=2)
+    # Canonicalize: the cursor key AND the (transcript_path, request_id)
+    # unique index both key on this string — a relative path, symlinked
+    # home, or cron-vs-interactive spelling difference would defeat both
+    # idempotency layers at once and double-count every call.
+    projects_dir = projects_dir.resolve()
 
     files_harvested = 0
     inserted = 0
-    duplicates = 0
+    updated = 0
     malformed = 0
     executions_by_label: dict[str, list[dict[str, Any]]] = {}
 
     try:
         with _client() as client:
             cursors = {
-                c["transcript_path"]: c["byte_offset"]
-                for c in client.list_harvest_cursors()
+                c["transcript_path"]: c for c in client.list_harvest_cursors()
             }
             for transcript in sorted(projects_dir.glob("*/*.jsonl")):
                 transcript_path = str(transcript)
-                start_offset = cursors.get(transcript_path, 0)
+                cursor = cursors.get(transcript_path)
+                start_offset = cursor["byte_offset"] if cursor else 0
+                prior_malformed = cursor["malformed_lines"] if cursor else 0
                 if transcript.stat().st_size <= start_offset:
                     continue
                 span = parse_transcript_span(transcript, start_offset)
@@ -250,19 +261,22 @@ def harvest(
                 result = client.harvest_llm_calls(
                     transcript_path=transcript_path,
                     byte_offset=span.new_offset,
-                    malformed_lines_delta=span.malformed,
+                    # Cumulative per-file count: the server overwrites this
+                    # absolute value, so re-sending the same span (lost
+                    # response, retry) cannot inflate the metric.
+                    malformed_lines=prior_malformed + span.malformed,
                     calls=calls_payload,
                 )
                 files_harvested += 1
                 inserted += result["inserted"]
-                duplicates += result["duplicates"]
+                updated += result["updated"]
                 malformed += span.malformed
     except ApiError as exc:
         _handle_api_error(exc)
 
     console.print(
         f"harvested {files_harvested} transcript(s): "
-        f"{inserted} call(s) inserted, {duplicates} duplicate(s) skipped, "
+        f"{inserted} call(s) inserted, {updated} straddled call(s) updated, "
         f"{malformed} malformed line(s) counted"
     )
 

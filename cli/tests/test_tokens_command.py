@@ -131,11 +131,11 @@ def _mock_executions(httpx_mock: HTTPXMock, executions: list[dict]) -> None:
     )
 
 
-def _mock_harvest(httpx_mock: HTTPXMock, *, inserted: int, duplicates: int = 0) -> None:
+def _mock_harvest(httpx_mock: HTTPXMock, *, inserted: int, updated: int = 0) -> None:
     httpx_mock.add_response(
         url=f"{API}/api/v1/llm_calls/harvest",
         status_code=201,
-        json={"inserted": inserted, "duplicates": duplicates, "byte_offset": 0},
+        json={"inserted": inserted, "updated": updated, "byte_offset": 0},
     )
 
 
@@ -202,7 +202,7 @@ def test_harvest_happy_path(
     body = _harvest_request_body(httpx_mock)
     assert body["transcript_path"] == str(transcript)
     assert body["byte_offset"] == transcript.stat().st_size
-    assert body["malformed_lines_delta"] == 0
+    assert body["malformed_lines"] == 0
     assert len(body["calls"]) == 2
     by_request = {c["request_id"]: c for c in body["calls"]}
     assert set(by_request) == {"req_1", "req_2"}
@@ -304,7 +304,7 @@ def test_harvest_counts_malformed_lines(
 
     assert result.exit_code == 0, result.output
     body = _harvest_request_body(httpx_mock)
-    assert body["malformed_lines_delta"] == 4
+    assert body["malformed_lines"] == 4
     assert len(body["calls"]) == 1
     assert "4 malformed line(s) counted" in _plain(result.output)
 
@@ -436,3 +436,86 @@ def test_report_renders_rollup_and_malformed_total(httpx_mock: HTTPXMock) -> Non
 def test_report_rejects_non_iso_since(httpx_mock: HTTPXMock) -> None:
     result = runner.invoke(app, ["tokens", "report", "--since", "yesterday"])
     assert result.exit_code == 2
+
+
+# ── Rework items (PR #311 peer review) ──────────────────────────────────
+
+
+def test_harvest_canonicalizes_projects_dir(
+    tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    """The cursor key and the (transcript_path, request_id) unique index
+    both key on the posted path string: a symlinked/relative spelling of
+    the projects dir must resolve to the same canonical path, or every
+    re-run double-counts (peer-review item 1)."""
+    real_projects = tmp_path / "real-projects"
+    transcript = _write_transcript(real_projects, [_usage_line("req_1")])
+    symlink = tmp_path / "projects-symlink"
+    symlink.symlink_to(real_projects)
+    _mock_cursors(httpx_mock, [])
+    _mock_executions(httpx_mock, [])
+    _mock_harvest(httpx_mock, inserted=1)
+
+    result = runner.invoke(
+        app, ["tokens", "harvest", "--projects-dir", str(symlink)]
+    )
+
+    assert result.exit_code == 0, result.output
+    body = _harvest_request_body(httpx_mock)
+    assert body["transcript_path"] == str(transcript.resolve())
+    assert "projects-symlink" not in body["transcript_path"]
+
+
+def test_harvest_sends_cumulative_malformed_count(
+    tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    """The POST carries cursor.malformed_lines + this span's new count —
+    an absolute value the server overwrites, so a lost-response retry of
+    the same span cannot inflate the metric (peer-review item 3)."""
+    transcript = _write_transcript(tmp_path, [_usage_line("req_old")])
+    old_size = transcript.stat().st_size
+    with transcript.open("a") as fh:
+        fh.write("{not json\n")
+        fh.write(_usage_line("req_new") + "\n")
+    _mock_cursors(
+        httpx_mock,
+        [
+            {
+                "transcript_path": str(transcript),
+                "byte_offset": old_size,
+                "malformed_lines": 3,
+            }
+        ],
+    )
+    _mock_executions(httpx_mock, [])
+    _mock_harvest(httpx_mock, inserted=1)
+
+    result = runner.invoke(
+        app, ["tokens", "harvest", "--projects-dir", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    body = _harvest_request_body(httpx_mock)
+    # 3 already on the cursor + 1 new in this span.
+    assert body["malformed_lines"] == 4
+    # Per-run output reports only THIS run's new malformed lines.
+    assert "1 malformed line(s) counted" in _plain(result.output)
+
+
+def test_harvest_reports_straddle_updates(
+    tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    """A re-sent straddled requestId updates the existing row in place;
+    the summary line surfaces it as updated, not inserted (item 2)."""
+    _write_transcript(tmp_path, [_usage_line("req_1")])
+    _mock_cursors(httpx_mock, [])
+    _mock_executions(httpx_mock, [])
+    _mock_harvest(httpx_mock, inserted=0, updated=1)
+
+    result = runner.invoke(
+        app, ["tokens", "harvest", "--projects-dir", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0 call(s) inserted" in _plain(result.output)
+    assert "1 straddled call(s) updated" in _plain(result.output)

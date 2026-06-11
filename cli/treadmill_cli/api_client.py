@@ -158,16 +158,18 @@ class ApiClient:
         *,
         transcript_path: str,
         byte_offset: int,
-        malformed_lines_delta: int,
+        malformed_lines: int,
         calls: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        """``malformed_lines`` is the CUMULATIVE per-file count (overwritten
+        server-side), keeping the POST retry-idempotent."""
         return self._request(
             "POST",
             "/api/v1/llm_calls/harvest",
             json={
                 "transcript_path": transcript_path,
                 "byte_offset": byte_offset,
-                "malformed_lines_delta": malformed_lines_delta,
+                "malformed_lines": malformed_lines,
                 "calls": calls,
             },
         )

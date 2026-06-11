@@ -28,8 +28,10 @@ New ``llm_calls`` columns (all nullable — pre-harvest rows written via
   UNIQUE index is the idempotency backstop: a response that was still
   streaming when a harvest run snapshotted the file straddles the byte
   cursor, and the cursor alone would re-insert its requestId on the
-  next run. ``ON CONFLICT DO NOTHING`` on this index makes the overlap
-  harmless.
+  next run. The harvest endpoint resolves the conflict with
+  ``ON CONFLICT DO UPDATE`` (last-write-wins): the colliding row was
+  recorded from a mid-stream line with undercounted usage, and the
+  re-send carries the completed response's true totals.
 
 New table ``llm_harvest_cursors`` — the primary idempotency mechanism:
 one row per transcript file recording how far harvesting has consumed
