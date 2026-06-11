@@ -30,6 +30,12 @@ Per repo: coordinator / evaluator / workers with session liveness
 (running task_execution: task title, trigger, started_at), per-worker
 counts today (executions by trigger, reviews done). The "is the system
 alive" view.
+SEMANTICS (Alan fold, from the 2026-06-10 false-stall lesson):
+task_executions rows span until PR MERGE, not subprocess exit — a
+worker legitimately carries TWO running rows (one awaiting merge, one
+active subprocess). "Current" = most-recent-started running row;
+awaiting-merge rows render as their own visual state, never as a
+double-booked worker.
 DATA: team_configs; task_executions (status='running' join tasks);
 events recency per label. Liveness needs one new tiny surface: a
 session-heartbeat (systemd state exporter or last-WS-activity per
@@ -44,6 +50,11 @@ loop-backs on the same strip (cycle count badge per stage), not as
 separate runs. The v1 task-detail "runs" list becomes the execution
 history (trigger, worker, duration, tokens per cycle).
 DATA: all exists — task_executions + the five event actions.
+Two stage-rendering semantics (Alan folds): (1) a held-at-merge state
+on the strip, distinct from executing (same await-merge semantics as
+S1); (2) the merged stamp badges Path-B backfilled merges (payload
+carries backfill:true + backfilled_by + reason) — the audit
+distinction exists in the data and the UI must not flatten it.
 
 ### S3 — Cost per outcome (HEADLINE — Joe directive 2026-06-11)
 The company-facing economics signal, two levels:
@@ -108,7 +119,9 @@ environment protection. The UI links OUT to the GitHub run/environment
 page; it never hosts an approve button. (CLAUDE.md §System boundary.)
 
 ## Open questions for the design pass
-1. S1+S5 composition: one "mission control" landing page or two screens?
+1. S1+S5 composition: one "mission control" landing page or two
+   screens? (Alan votes one landing — "is it alive" + "what is it
+   doing" are one glance; Donna's lane pending, then decide.)
 2. S3 granularity: is per-cycle cost a drill-down or front-and-center?
 3. S4 cross-repo: one ledger with a repo facet, or per-repo tabs?
 4. v1's operator buckets (blocked/inflight/hopper) — ANSWERED in
