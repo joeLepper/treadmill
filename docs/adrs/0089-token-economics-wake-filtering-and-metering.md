@@ -63,7 +63,12 @@ Telegram verbosity) — this governs whether the session wakes.
 - Config: `TREADMILL_WAKE_ACTIONS` (comma-separated `entity.action`
   globs) with **role-based defaults**:
   - `orchestrator` default: `github.pr_merged`, `task.*_verdict`,
-    `task.escalat*`, `task.registered`, `task.cancelled`,
+    `task.escalat*`, `task.evaluator_timeout`, `task.rework_exhausted`
+    (escalation-CLASS actions whose names escape the `escalat*` glob are
+    enumerated explicitly — a filtered-away escalation is the one failure
+    mode this design must never have; audit any new escalation-class
+    action into this list at introduction), `task.registered`,
+    `task.cancelled`,
     `prod_promotion.*`, `deploy.failed`, `staging_smoke.failed`,
     `datamigration.*` (ADR-0092's first-success validation gates are
     alerted-class by design), relay messages (always), reconcile frames
@@ -76,6 +81,13 @@ Telegram verbosity) — this governs whether the session wakes.
   that never wakes can never relay. The channel server WARNs at startup
   when the configured pair violates the superset, keeping the two knobs
   one layered family rather than two drifting ones.
+- **Max-suppression-age (bounded blindness):** the digest normally rides
+  the next delivered wake — but if suppressed events are pending and no
+  allowlisted wake has fired for `TREADMILL_MAX_SUPPRESSION_AGE` (default
+  60 min), the channel emits ONE self-originated digest wake. The digest
+  is thereby bounded-latency rather than passive; the quietest hours are
+  exactly when an unbounded window would hide a stall (Bert's #305
+  review).
 - Suppressed events are not dropped: the server keeps a per-session
   **digest counter** and prepends a one-line summary to the next delivered
   wake (`suppressed since last wake: 47 check_run_completed, 3
