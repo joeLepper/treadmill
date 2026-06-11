@@ -14,6 +14,7 @@ Command groups:
   treadmill task list    [--repo REPO] [--plan PLAN_ID] [--status STATUS]
   treadmill status       # API + dependencies
   treadmill observe ...  # read-only Grafana access layer (ADR-0020)
+  treadmill tokens ...   # ADR-0089 token meter: harvest transcripts, report burn
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from treadmill_cli.commands.learnings import learnings_app
 from treadmill_cli.commands.onboarding import onboarding_app
 from treadmill_cli.commands.repo import repo_app
 from treadmill_cli.commands.team import team_app
+from treadmill_cli.commands.tokens import tokens_app
 from treadmill_cli.commands.schedules import schedules_app
 from treadmill_cli.config import load_config
 from treadmill_cli.identity import resolve_created_by
@@ -68,6 +70,7 @@ app.add_typer(team_app)
 app.add_typer(repo_app)
 app.add_typer(escalations_app)
 app.add_typer(corpus_app)
+app.add_typer(tokens_app)
 
 console = Console()
 err_console = Console(stderr=True)

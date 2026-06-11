@@ -143,6 +143,42 @@ class ApiClient:
         body: dict[str, Any] = {"note": note}
         return self._request("POST", f"/api/v1/tasks/{task_id}/operator_note", json=body)
 
+    # ── Token meter (ADR-0089) ────────────────────────────────────────────────
+
+    def list_task_executions(self, *, worker_label: str) -> list[dict[str, Any]]:
+        return self._request(
+            "GET", "/api/v1/task_executions", params={"worker_label": worker_label},
+        )
+
+    def list_harvest_cursors(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/api/v1/llm_calls/harvest_cursors")
+
+    def harvest_llm_calls(
+        self,
+        *,
+        transcript_path: str,
+        byte_offset: int,
+        malformed_lines: int,
+        calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """``malformed_lines`` is the CUMULATIVE per-file count (overwritten
+        server-side), keeping the POST retry-idempotent."""
+        return self._request(
+            "POST",
+            "/api/v1/llm_calls/harvest",
+            json={
+                "transcript_path": transcript_path,
+                "byte_offset": byte_offset,
+                "malformed_lines": malformed_lines,
+                "calls": calls,
+            },
+        )
+
+    def token_report(self, *, since: str) -> dict[str, Any]:
+        return self._request(
+            "GET", "/api/v1/llm_calls/report", params={"since": since},
+        )
+
     # ── Workflows ─────────────────────────────────────────────────────────────
 
     def trigger_workflow(
