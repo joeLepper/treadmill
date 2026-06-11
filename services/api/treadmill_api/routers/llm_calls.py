@@ -50,6 +50,13 @@ from treadmill_api.models import LLMCall, LLMHarvestCursor, TaskExecution
 
 router = APIRouter(prefix="/api/v1", tags=["llm_calls"])
 
+# asyncpg refuses statements with more than 32,767 bound arguments. The
+# harvest INSERT binds 10 per call, so a first-harvest span of a
+# long-lived session (>3,276 calls in one file) blew the limit as one
+# multi-row VALUES — the 2026-06-11 harvest 500. Chunking keeps every
+# batch size legal; all chunks share the request's single transaction.
+_INSERT_CHUNK_ROWS = 1000
+
 
 # ── Pydantic schemas ─────────────────────────────────────────────────────
 
@@ -228,7 +235,8 @@ async def harvest_llm_calls(
 
     inserted = 0
     updated = 0
-    if body.calls:
+    for chunk_start in range(0, len(body.calls), _INSERT_CHUNK_ROWS):
+        chunk = body.calls[chunk_start : chunk_start + _INSERT_CHUNK_ROWS]
         insert_stmt = pg_insert(LLMCall).values(
             [
                 {
@@ -243,7 +251,7 @@ async def harvest_llm_calls(
                     "cache_creation_tokens": c.cache_creation_tokens,
                     "cache_read_tokens": c.cache_read_tokens,
                 }
-                for c in body.calls
+                for c in chunk
             ]
         )
         insert_stmt = insert_stmt.on_conflict_do_update(
@@ -264,8 +272,9 @@ async def harvest_llm_calls(
             },
         ).returning(literal_column("(xmax = 0)"))
         outcomes = (await session.execute(insert_stmt)).scalars().all()
-        inserted = sum(1 for was_insert in outcomes if was_insert)
-        updated = len(outcomes) - inserted
+        chunk_inserted = sum(1 for was_insert in outcomes if was_insert)
+        inserted += chunk_inserted
+        updated += len(outcomes) - chunk_inserted
 
     cursor_stmt = pg_insert(LLMHarvestCursor).values(
         transcript_path=body.transcript_path,

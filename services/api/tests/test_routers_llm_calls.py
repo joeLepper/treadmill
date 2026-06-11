@@ -216,12 +216,22 @@ class _HarvestStubSession:
         self.cursor_upserts: list[Insert] = []
         self.committed = False
 
+    @staticmethod
+    def _insert_row_count(stmt: Insert) -> int:
+        # Multi-row VALUES land in ``stmt._multi_values`` (one tuple of
+        # row dicts) — internal but stable, and the only way a stub can
+        # answer per-chunk.
+        return len(stmt._multi_values[0])
+
     async def execute(self, stmt):  # noqa: ANN001
         result = MagicMock()
         if isinstance(stmt, Insert):
             if stmt.table.name == "llm_calls":
                 self.call_inserts.append(stmt)
-                result.scalars.return_value.all.return_value = self._insert_outcomes
+                take = self._insert_row_count(stmt)
+                outcomes = self._insert_outcomes[:take]
+                self._insert_outcomes = self._insert_outcomes[take:]
+                result.scalars.return_value.all.return_value = outcomes
             else:
                 assert stmt.table.name == "llm_harvest_cursors"
                 self.cursor_upserts.append(stmt)
@@ -438,3 +448,65 @@ class TestTokenReport:
         resp = client.get("/api/v1/llm_calls/report")
 
         assert resp.status_code == 422
+
+
+class TestHarvestChunking:
+    def test_oversized_batch_is_chunked_under_asyncpg_bind_limit(self) -> None:
+        """The 2026-06-11 harvest 500: one multi-row INSERT for a
+        first-harvest span of 3,300 calls binds 33,000 arguments —
+        past asyncpg's 32,767 cap. The endpoint must chunk (≤1000 rows
+        per INSERT, same transaction) and sum the per-chunk outcomes;
+        oversized transcript families must never 500."""
+        n_calls = 3_300
+        session = _HarvestStubSession(insert_outcomes=[True] * n_calls)
+        client = TestClient(_harvest_app(session))
+
+        resp = client.post(
+            "/api/v1/llm_calls/harvest",
+            json={
+                "transcript_path": "/x/huge.jsonl",
+                "byte_offset": 10_000_000,
+                "calls": [
+                    _harvest_call(request_id=f"req_{i}") for i in range(n_calls)
+                ],
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json() == {
+            "inserted": n_calls,
+            "updated": 0,
+            "byte_offset": 10_000_000,
+        }
+        assert len(session.call_inserts) == 4  # 1000 + 1000 + 1000 + 300
+        for stmt in session.call_inserts:
+            rows = _HarvestStubSession._insert_row_count(stmt)
+            assert rows <= 1000
+            # 10 bound args per row — every chunk stays far below 32,767.
+            assert rows * 10 < 32_767
+        # One cursor upsert + one commit for the whole file, chunks or not.
+        assert len(session.cursor_upserts) == 1
+        assert session.committed
+
+    def test_chunked_outcomes_sum_across_inserts(self) -> None:
+        """Mixed insert/update outcomes spanning chunk boundaries
+        aggregate correctly into the response counts."""
+        n_calls = 1_500
+        outcomes = [True] * 900 + [False] * 600  # straddles the 1000 split
+        session = _HarvestStubSession(insert_outcomes=outcomes)
+        client = TestClient(_harvest_app(session))
+
+        resp = client.post(
+            "/api/v1/llm_calls/harvest",
+            json={
+                "transcript_path": "/x/big.jsonl",
+                "byte_offset": 1,
+                "calls": [
+                    _harvest_call(request_id=f"req_{i}") for i in range(n_calls)
+                ],
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json() == {"inserted": 900, "updated": 600, "byte_offset": 1}
+        assert len(session.call_inserts) == 2
