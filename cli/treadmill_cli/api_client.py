@@ -179,19 +179,6 @@ class ApiClient:
             "GET", "/api/v1/llm_calls/report", params={"since": since},
         )
 
-    # ── Workflows ─────────────────────────────────────────────────────────────
-
-    def trigger_workflow(
-        self,
-        workflow_slug: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/api/v1/workflows/{workflow_slug}/trigger",
-            json={"payload": payload},
-        )
-
     # ── Onboarding ───────────────────────────────────────────────────────────
 
     def get_repo_config(self, repo: str) -> dict[str, Any]:

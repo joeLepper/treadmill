@@ -6,8 +6,8 @@ The Treadmill CLI (`treadmill`) is the operator's interface to the Treadmill API
 
 ## Key surfaces
 
-- `treadmill_cli/cli.py` — main entrypoint; registers all command groups and defines plan/task/workflow/role subcommands inline.
-- `treadmill_cli/api_client.py` — thin `ApiClient` wrapper over `httpx`; all API calls go through `_request`. Covers plans, tasks, workflows, onboarding repos, and health endpoints.
+- `treadmill_cli/cli.py` — main entrypoint; registers all command groups and defines plan/task/status subcommands inline (the workflow/role groups were removed with the ADR-0087 Phase 4/5 server-side deletions — see Recent changes).
+- `treadmill_cli/api_client.py` — thin `ApiClient` wrapper over `httpx`; all API calls go through `_request`. Covers plans, tasks, task_executions, llm_calls, onboarding repos, and health endpoints.
 - `treadmill_cli/commands/learnings.py` — `treadmill learnings crystallize` (ADR-0034).
 - `treadmill_cli/commands/schedules.py` — `treadmill schedules list|create|pause|resume|delete` (ADR-0035).
 - `treadmill_cli/commands/onboarding.py` — `treadmill onboarding update <repo>` for managing per-repo worker deps (ADR-0059 Step 5): `--worker-deps-python`, `--worker-deps-node`, `--binary name=URL=SHA256@TARGET`, `--clear-worker-deps`.
@@ -20,6 +20,8 @@ The Treadmill CLI (`treadmill`) is the operator's interface to the Treadmill API
 - `treadmill_cli/config.py` — config loading from env vars (`TREADMILL_API_URL`, `TREADMILL_API_KEY`).
 
 ## Recent changes
+
+- **Dead-surface sweep completed (the follow-up #312 flagged)**: the `role` group (`show`/`update`/`versions`, ADR-0028) is REMOVED — ADR-0087 Phase 4 deleted the roles/role_versions tables and the roles router, so every invocation 404'd; session prompts live in `tools/team-templates` now. Same class, same sweep: `workflows trigger` (ADR-0053 Wave 3; the workflow routers + synthetic-task dispatch path died in Phase 4/5) and the `corpus` group (`commands/corpus.py`; the dashboard corpus-export router + DSPy gold-row models died in Phase 4) are removed with their tests (`test_cli_workflows_trigger.py`, the role-group block in `test_cli.py`) and the `ApiClient.trigger_workflow` method. KEPT deliberately: `learnings crystallize` and the `--workflow` options on `submit`/`task retry` ride live `/api/v1/plans` + `/api/v1/tasks` endpoints whose `workflow` fields are accepted-and-ignored wire-compat (PR-G deprecation window) — they rewire themselves when that window closes; `task retry`'s `workflow_run=None` output line is wire-compat residue of the same window. Grep gate: zero references to the deleted endpoint families anywhere under `cli/` (tombstone comments use prose, not paths, so the gate stays clean).
 
 - **ADR-0087 Phase 5 residue swept from the cli (stale starters surface)**: `treadmill workflows seed-starters` deleted — it imported `treadmill_api.starters` (removed in PR-G) and seeded the dropped `roles`/`workflows`/`event_triggers` tables, so every invocation died with `ModuleNotFoundError`; its two unit tests and the skip-gated `test_integration_cli_seed.py` went with it (deleted-behavior class). `test_onboarding_update.py::test_update_python_adds_additively` was the third clean-main failure but a DIFFERENT root cause: surviving behavior with a stale output assertion (`"updated worker_deps"` vs the command's actual `updated <repo>: python=N node=N binaries=N` message) — assertion rewritten, behavior untouched. Full cli suite green after sweep (292 passed). Known residue NOT touched (observation for a follow-up): the `role` command group still PATCHes `/api/v1/roles/*`, whose router was deleted in PR-F — commands run but 404 against a current API.
 
