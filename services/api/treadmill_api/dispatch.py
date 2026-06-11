@@ -67,17 +67,23 @@ class Dispatcher:
         task_id: uuid.UUID | None = None,
         run_id: uuid.UUID | None = None,
         step_id: uuid.UUID | None = None,
+        commit_sha: str | None = None,
     ) -> Event:
         """INSERT an Event row, flush, and publish it on the bus.
 
         The Event row is the source of truth. A publish failure is
         logged and recorded as a ``DispatchPublishFailed`` marker so the
         ``ReplayLoop`` re-publishes it — callers never see the failure.
+
+        ``commit_sha`` stamps the ADR-0014 column the mergeability VIEW
+        joins on — pass it for any github.* event keyed to a head SHA
+        (e.g. the lazy ``pr_conflict`` resolver, task 536bf319).
         """
         event = await self._persist_event(
             session,
             entity_type=entity_type, action=action, payload=payload,
             plan_id=plan_id, task_id=task_id, run_id=run_id, step_id=step_id,
+            commit_sha=commit_sha,
         )
         try:
             await self.publisher.publish(event, payload)
