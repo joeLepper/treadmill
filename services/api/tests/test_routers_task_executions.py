@@ -333,3 +333,22 @@ class TestListTaskExecutions:
         resp = client.get(f"/api/v1/task_executions?task_id={uuid.uuid4()}")
         assert resp.status_code == 200, resp.text
         assert resp.json() == []
+
+    def test_returns_rows_for_worker_label(self) -> None:
+        """ADR-0089: the token harvester's window join lists by label."""
+        ex = _stub_execution(task_id=uuid.uuid4(), worker_label="worker-team1-1")
+        session = _StubSession(scalars_returns=[ex])
+        client = TestClient(_app(session))
+
+        resp = client.get("/api/v1/task_executions?worker_label=worker-team1-1")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["worker_label"] == "worker-team1-1"
+
+    def test_422_when_no_filter_given(self) -> None:
+        session = _StubSession(scalars_returns=[])
+        client = TestClient(_app(session))
+
+        resp = client.get("/api/v1/task_executions")
+        assert resp.status_code == 422
