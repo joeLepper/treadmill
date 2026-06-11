@@ -20,18 +20,15 @@ from treadmill_api.models.onboarding import (
     RepoProfileRow,
 )
 from treadmill_api.models.plan import Plan
-from treadmill_api.models.prod_promotion import PROD_PROMOTION_STATUSES, ProdPromotion
 from treadmill_api.models.task import Task, TaskDependency, TaskPR
 from treadmill_api.models.task_board import TASK_BOARD_STATUSES, TaskBoard
 from treadmill_api.models.task_execution import TaskExecution
-from treadmill_api.models.llm_call import LLMCall
+from treadmill_api.models.llm_call import LLMCall, LLMHarvestCursor
 from treadmill_api.models.team_config import TeamConfig
 from treadmill_api.models.schedule import Schedule
 from treadmill_api.models.system_status import SystemStatus
 
 __all__ = [
-    "ProdPromotion",
-    "PROD_PROMOTION_STATUSES",
     "Event",
     "Plan",
     "RepoConfigRow",
@@ -41,6 +38,7 @@ __all__ = [
     "SystemStatus",
     "TASK_BOARD_STATUSES",
     "LLMCall",
+    "LLMHarvestCursor",
     "Task",
     "TaskBoard",
     "TaskExecution",

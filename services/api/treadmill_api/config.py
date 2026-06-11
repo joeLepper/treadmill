@@ -110,14 +110,6 @@ class Settings(BaseSettings):
     # and rejects webhooks with missing/invalid signatures.
     github_webhook_secret: str | None = Field(default=None, alias="GITHUB_WEBHOOK_SECRET")
 
-    # ── Prod-promotion operator key (ADR-0088) ────────────────────────────────
-    # Gates POST /prod_promotions/{id}/approve|reject. The key lives in
-    # exactly one place: the operator's shell on the operator's machine.
-    # Coordinator/worker sessions never hold it, so a confused or
-    # prompt-injected session structurally cannot approve a prod deploy.
-    # Unset → the gate fails CLOSED (503 on decision endpoints).
-    # env: TREADMILL_OPERATOR_KEY
-    operator_key: str | None = Field(default=None)
 
     # ── GitHub webhook secret name in Secrets Manager (ADR-0017) ──────────────
     # In dev_local / fully_remote the webhook secret lives in Secrets Manager

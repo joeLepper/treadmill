@@ -70,8 +70,7 @@ sequence_of_work:
          task.evaluator_timeout, task.rework_exhausted (escalation-CLASS
          actions that escape the glob are ENUMERATED — a filtered-away
          escalation is the one forbidden failure mode), task.registered,
-         task.cancelled, prod_promotion.*, deploy.failed,
-         staging_smoke.failed, datamigration.*; relay messages and
+         task.cancelled, deploy.failed, staging_smoke.failed, datamigration.*; relay messages and
          reconcile frames ALWAYS wake. coordinator/evaluator/worker =
          unfiltered.
       3. Suppression digest: count suppressed events per action; prepend a
