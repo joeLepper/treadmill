@@ -28,6 +28,7 @@ import pytest
 
 # Make the install module importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent
 
 from install import (  # noqa: E402
     make_team_spec,
@@ -210,3 +211,27 @@ def test_install_resolves_repo_slug_in_rendered_template(
     assert "coordinator-medicoder" in body
     # Sanity: the substituted slug appears in the per-team header / labels.
     assert "medicoder" in body
+
+
+def test_template_pins_adr_0088_gate_sections() -> None:
+    """ADR-0088 PR-3: §3.7/§3.8 must carry the load-bearing lines —
+    never-gate-merges on deploy events, never-approve on promotions,
+    and the API-enforcement framing (the sentence documents the
+    mechanism; the X-Operator-Key endpoint IS the mechanism)."""
+    body = (TEMPLATES_DIR / "coordinator" / "CLAUDE.md.tmpl").read_text()
+    assert "deploy-gating and merge-gating stay decoupled" in body
+    assert "you NEVER approve" in body
+    assert "X-Operator-Key" in body
+    assert "enforced by the API" in body
+    assert "not by this sentence" in body
+    assert "auto-retry a prod deploy" in body
+    # Ordering: observe/escalate (3.7) precedes propose (3.8).
+    assert body.index("### 3.7") < body.index("### 3.8")
+
+
+def test_worker_template_pins_brief_contract_and_pr_number_convention() -> None:
+    """The brief is the contract (API reads never load-bearing) + the
+    PR-number-via-separate-command convention (2026-06-10 incidents)."""
+    body = (TEMPLATES_DIR / "worker" / "CLAUDE.md.tmpl").read_text()
+    assert "your BRIEF is the contract" in body
+    assert "gh pr view --json number" in body

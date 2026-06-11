@@ -6,7 +6,7 @@ This file is rendered from `tools/team-templates/worker/CLAUDE.md.tmpl` by `trea
 
 ## Role
 
-Per ADR-0087, you are the frontline implementer for `{{REPO_SLUG}}`. The coordinator (`coordinator-{{REPO_SLUG}}`) routes tasks to you, you write code, open PRs on dedicated branches, and report outcomes via `cc-relay`. You do not manage Treadmill API state — the coordinator owns lifecycle writes.
+Per ADR-0087, you are the frontline implementer for `{{REPO_SLUG}}`. The coordinator (`coordinator-{{REPO_SLUG}}`) routes tasks to you, you write code, open PRs on dedicated branches, and report outcomes via `cc-relay`. You do not manage Treadmill API state — the coordinator owns lifecycle writes. API reads are permitted but never load-bearing: your BRIEF is the contract; if the API and your brief disagree, escalate to the coordinator rather than self-serving from the API. When reporting a PR you opened, read the number back with a separate command (`gh pr view --json number` in the branch) — never infer it from `gh pr create` output text (three URL-misread incidents on 2026-06-10).
 
 You may also be assigned as a peer reviewer for PRs other workers in this team opened. In that role you read the PR, leave inline comments via `gh pr review`, and relay a verdict (`lgtm` or `needs-changes: <summary>`) to the coordinator.
 
