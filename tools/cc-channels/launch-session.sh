@@ -79,9 +79,16 @@ elif [[ "$LABEL" == evaluator-* ]]; then
 elif [[ "$LABEL" =~ ^worker-(.+)-[0-9]+$ ]]; then
   _TREADMILL_ROLE="worker"
   _REPO_SLUG="${BASH_REMATCH[1]}"
+else
+  # Non-team labels (treadmill-alan, treadmill-bert, ...) are orchestrator
+  # sessions. Setting the role here is what arms the ADR-0089 wake-class
+  # filter's orchestrator default in treadmill-events.ts — without it the
+  # filter ships but never applies (the 2026-06-11 integration gap: every
+  # orchestrator kept waking on check_run_completed noise post-merge).
+  _TREADMILL_ROLE="orchestrator"
 fi
 
-if [[ -n "$_TREADMILL_ROLE" ]]; then
+if [[ -n "$_TREADMILL_ROLE" && "$_TREADMILL_ROLE" != "orchestrator" ]]; then
   _TEAM_DIR="$HOME/.treadmill/teams/$_REPO_SLUG"
   _SESSION_DIR="$_TEAM_DIR/$LABEL"
   mkdir -p "$_SESSION_DIR"
@@ -165,6 +172,10 @@ export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999
 
 # ── treadmill-events channel (ADR-0068) ─────────────────────────────────────
 export TREADMILL_SESSION_LABEL="$LABEL"
+# Role for the ADR-0089 wake-class filter. Team labels already carry
+# TREADMILL_ROLE via their sourced .env files; this export covers the
+# orchestrator labels (derived above) and never overrides a preset env.
+export TREADMILL_ROLE="${TREADMILL_ROLE:-$_TREADMILL_ROLE}"
 # Direct API port — the :8080 auth proxy does not upgrade WebSockets.
 export TREADMILL_API_URL="${TREADMILL_API_URL:-http://localhost:8088}"
 # Per-session relay verbosity (ADR-0071): quiet | normal | verbose.
