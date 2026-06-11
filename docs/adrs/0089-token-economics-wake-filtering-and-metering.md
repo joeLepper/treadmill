@@ -21,7 +21,7 @@ the schema and never wired a writer. The day's totals across 8 sessions:
 | **cache-read tokens** | **7,494M** |
 | cache hit rate | 99% (96% evaluator) |
 
-Three findings drive this decision:
+Four findings drive this decision:
 
 1. **Cache reads dominate the bill.** At API-equivalent prices the day is
    ~85% cache reads — even at their 10× discount, 7.5B read tokens dwarf
@@ -35,7 +35,13 @@ Three findings drive this decision:
    coordinator's bookkeeping, but for orchestrators they carry no decision
    in ≥95% of firings (terminal events — merges, verdicts, escalations —
    carry the decisions).
-3. **We cannot manage what we re-derive by hand.** The transcript harvest
+3. **The tier differential compounds both findings.** Orchestrator
+   sessions run a premium model tier; the worker cluster runs a cheaper
+   tier (operator decision, 2026-06-11). Every noise wake and every
+   implementation task held at the orchestrator layer is paid at the
+   premium rate — wake filtering and dispatch-to-workers are the same
+   economic move at two different layers.
+4. **We cannot manage what we re-derive by hand.** The transcript harvest
    that produced the table above took an evening and is already stale; the
    meter must be standing infrastructure or economics will never inform
    routine decisions.
