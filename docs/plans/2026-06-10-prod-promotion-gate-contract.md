@@ -98,9 +98,15 @@ REAL backends (no stubs, no emulators):
    from health).
 2. **Per-service contribution** — every chain stage's output present
    (the dead-MAR lesson: health endpoints lie).
-3. **Consumer idle-wake** — pull consumers process an event from the
-   scaled-to-zero state (the min-instances=0 stall class: a warm-only
-   smoke proves nothing about idle prod).
+3. **Consumer idle-wake** — a message published to an IDLE chain is
+   processed within the smoke's settle budget. Outcome-based, not
+   instance-count-based: under always-on consumers (medicoder #1348,
+   minInstances=1) idle means warm-but-quiescent; under backlog
+   autoscaling (medicoder #143) zero instances on an empty queue is
+   CORRECT, and the evidence must distinguish empty-queue-zero from
+   dead-consumer-zero by publishing and observing processing — never by
+   counting instances. (The min-instances=0 stall class: a warm-only
+   smoke proves nothing about idle prod.)
 
 `Ready=True` alone is never promotion evidence. Basis: the 2026-06-11
 staging e2e caught three prod-breaking configs (medicoder #141 dead
