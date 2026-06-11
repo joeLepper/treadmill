@@ -29,6 +29,17 @@
  *   TREADMILL_API_KEY        default: BUNKHOUSE_API_KEY (Bearer for REST + WS)
  *   TREADMILL_RELAY_LEVEL    default: quiet — ADR-0071 relay verbosity;
  *                            one of {quiet, normal, verbose}; invalid → quiet
+ *   TREADMILL_WAKE_ACTIONS   ADR-0089 wake filter — comma-separated
+ *                            entity.action globs deciding which events wake
+ *                            the session at all. Unset → role default
+ *                            (TREADMILL_ROLE=orchestrator gets the ADR-0089
+ *                            allowlist; every other role is unfiltered).
+ *                            Relay messages and reconcile frames ALWAYS wake.
+ *   TREADMILL_MAX_SUPPRESSION_AGE
+ *                            minutes, default 60 — bounded blindness: if
+ *                            suppressed events are pending and no wake was
+ *                            delivered for this long, emit ONE
+ *                            self-originated digest wake.
  *
  * Tested against Claude Code 2.1.161 (channels research preview — the
  * --channels / --dangerously-load-development-channels contract may drift).
@@ -39,6 +50,13 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import {
+  RELAY_LEVELS,
+  WakeGate,
+  parseWakeActions,
+  wakeSetViolations,
+  type RelayLevel,
+} from './wake-filter.ts'
 
 const LABEL = process.env.TREADMILL_SESSION_LABEL ?? ''
 // Default to the API container's direct port. Do NOT fall back to
@@ -65,13 +83,40 @@ const COORDINATOR_PLAN_IDS: ReadonlySet<string> = new Set(
 // ADR-0071 per-session relay verbosity. The level governs WHICH events the
 // session relays to its Telegram operator chat; the event-class mapping is
 // pinned to the ADR-0062 escalation taxonomy (do not invent a new one).
-const RELAY_LEVELS = ['quiet', 'normal', 'verbose'] as const
-type RelayLevel = (typeof RELAY_LEVELS)[number]
+// RELAY_LEVELS / RelayLevel live in wake-filter.ts so the ADR-0089
+// wake ⊇ relay superset check shares the same level taxonomy.
 const RELAY_LEVEL: RelayLevel = (RELAY_LEVELS as readonly string[]).includes(
   process.env.TREADMILL_RELAY_LEVEL ?? '',
 )
   ? (process.env.TREADMILL_RELAY_LEVEL as RelayLevel)
   : 'quiet'
+
+// ADR-0089 wake-class filtering. The wake gate decides which events become
+// notifications/claude/channel wakes AT ALL (one layer below ADR-0071's
+// relay levels, which select from events that already woke the session).
+// Relay messages and reconcile frames bypass the gate — they always wake.
+// Suppressed events are counted, never dropped silently: the digest line
+// rides the next delivered EVENT or RECONCILE wake — deliberately not
+// relay wakes, whose bodies are sender-attributed content that must not
+// get server text prepended (so a suppressed-only stream with chatty
+// relays still digests via max-suppression-age; blindness stays bounded).
+// max-suppression-age bounds how long a suppressed-only stream can go
+// without ONE self-originated digest wake. Digest delivery is two-phase
+// (peekDigest → notify → markDelivered) so a failed notification retains
+// the counts instead of silently losing them. Digest state is in-memory;
+// a server restart loses suppressed counts — acceptable, the events table
+// is the record (ADR-0089 plan, risks).
+const WAKE_PATTERNS = parseWakeActions(process.env.TREADMILL_WAKE_ACTIONS, ROLE)
+const MAX_SUPPRESSION_AGE_MIN = (() => {
+  const v = Number(process.env.TREADMILL_MAX_SUPPRESSION_AGE ?? '60')
+  return Number.isFinite(v) && v > 0 ? v : 60
+})()
+const wakeGate = new WakeGate(WAKE_PATTERNS, {
+  maxSuppressionAgeMs: MAX_SUPPRESSION_AGE_MIN * 60_000,
+})
+// How often the bounded-blindness check runs; the digest therefore lands
+// within max-suppression-age + one period of the suppressing event.
+const SUPPRESSION_CHECK_PERIOD_MS = 60_000
 
 // No exit on a missing label. This server is registered user-scope, so Claude
 // Code spawns it in EVERY session — but it's only a channel in sessions the
@@ -163,21 +208,33 @@ async function reconcile(reason: string, emit = true): Promise<void> {
   }
   if (!emit) return
   const active = mine.filter(t => !isTerminal(String(t['derived_status'] ?? '')))
+  // Reconcile frames ALWAYS wake (ADR-0089: never filtered) and, as a
+  // delivered wake, carry any pending suppression digest. Peek now,
+  // commit only after the notification succeeds — a failed send must not
+  // lose the digest (PR #310 review hardening).
+  const digest = wakeGate.peekDigest()
+  const meta: Record<string, string> = {
+    catch_up: 'true',
+    active_count: String(active.length),
+  }
+  if (digest) meta['suppressed_digest'] = digest
   // One synthetic catch-up event per (re)connect: a restarted session must
   // not trust silence (ADR-0068 — reconcile-on-connect).
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
       content:
-        active.length === 0
+        (digest ? `${digest}\n` : '') +
+        (active.length === 0
           ? `reconcile (${reason}): no active dispatched tasks for label "${LABEL}"`
           : `reconcile (${reason}): ${active.length} active task(s) for label "${LABEL}":\n` +
             active
               .map(t => `  ${String(t['id']).slice(0, 8)}  ${t['derived_status']}  ${String(t['title'] ?? '').slice(0, 60)}`)
-              .join('\n'),
-      meta: { catch_up: 'true', active_count: String(active.length) },
+              .join('\n')),
+      meta,
     },
   })
+  wakeGate.markDelivered()
 }
 
 /** Client-side ownership check; re-reconciles (throttled) on unknown ids so
@@ -282,16 +339,29 @@ function connect(): void {
       if (task) meta['task_id'] = task
       if (plan) meta['plan_id'] = plan
       if (eventId) meta['event_id'] = eventId
+      // ADR-0089 wake gate: suppressed events are counted into the digest
+      // and do NOT wake the session. The events table keeps the record.
+      // Only real task ids feed the digest's "across N tasks" figure —
+      // plan-scoped events count per-action but not as tasks.
+      const entityAction = `${meta.entity_type}.${meta.action}`
+      if (!wakeGate.shouldDeliver(entityAction, task || null)) return
+      // Delivered wake: prepend any pending digest line so suppressed
+      // state stays reconcilable. Peek now, commit after the notification
+      // succeeds — a failed send must not lose the digest.
+      const digest = wakeGate.peekDigest()
+      if (digest) meta['suppressed_digest'] = digest
       await mcp.notification({
         method: 'notifications/claude/channel',
         params: {
           content:
+            (digest ? `${digest}\n` : '') +
             `${meta.entity_type}.${meta.action}` +
             (task ? ` task=${task.slice(0, 8)}` : '') +
             (plan ? ` plan=${plan.slice(0, 8)}` : ''),
           meta,
         },
       })
+      wakeGate.markDelivered()
     })().catch(err => console.error(`treadmill-events: forward failed: ${err}`))
   }
 
@@ -393,10 +463,60 @@ async function startRelayWatcher(): Promise<void> {
 // label (set by tools/cc-channels/launch-session.sh). Otherwise stay a
 // connected-but-inert MCP server.
 if (LABEL) {
+  // Name the RESOLVED wake set so a typo'd TREADMILL_WAKE_ACTIONS (which
+  // falls back to the role default) is self-diagnosing from the log.
+  console.error(
+    `treadmill-events: wake set = ` +
+      (WAKE_PATTERNS === null
+        ? `unfiltered (role '${ROLE || 'unset'}')`
+        : WAKE_PATTERNS.join(', ')) +
+      `; relay level = ${RELAY_LEVEL}`,
+  )
+  // ADR-0089 wake ⊇ relay layering invariant: a relay-significant event
+  // that never wakes can never relay — the two knobs must stay one
+  // layered family. WARN (don't die) so a misconfigured pair still runs,
+  // visibly.
+  const violations = wakeSetViolations(WAKE_PATTERNS, RELAY_LEVEL)
+  if (violations.length > 0) {
+    console.error(
+      `treadmill-events: WARN wake set is not a superset of the ` +
+        `'${RELAY_LEVEL}' relay set (ADR-0089 wake⊇relay invariant): ` +
+        `relay-significant action(s) that would never wake: ` +
+        `${violations.join(', ')}; ` +
+        `wake set: ${(WAKE_PATTERNS ?? []).join(', ')}`,
+    )
+  }
   connect()
   startRelayWatcher().catch(err =>
     console.error(`treadmill-events: relay watcher setup failed: ${err}`),
   )
+  // ADR-0089 bounded blindness: when suppressed events are pending and no
+  // wake has been delivered for max-suppression-age, emit ONE
+  // self-originated digest wake. Only armed when a filter is active — an
+  // unfiltered gate never suppresses.
+  if (wakeGate.filtered) {
+    setInterval(() => {
+      // Peek → notify → commit: a failed digest wake leaves the counts
+      // and the age window untouched, so the next tick retries instead
+      // of silently dropping the digest.
+      const digest = wakeGate.peekOverdueDigest()
+      if (!digest) return
+      mcp
+        .notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content:
+              `suppression digest (no allowlisted wake for ` +
+              `≥${MAX_SUPPRESSION_AGE_MIN}min): ${digest}`,
+            meta: { suppression_digest: 'true' },
+          },
+        })
+        .then(() => wakeGate.markDelivered())
+        .catch(err =>
+          console.error(`treadmill-events: digest wake failed: ${err}`),
+        )
+    }, SUPPRESSION_CHECK_PERIOD_MS)
+  }
 } else {
   console.error(
     'treadmill-events: TREADMILL_SESSION_LABEL unset — idle ' +

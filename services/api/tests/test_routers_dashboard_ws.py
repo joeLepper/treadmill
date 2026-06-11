@@ -699,3 +699,228 @@ def test_coordinator_label_lookup_failure_drops_event(monkeypatch) -> None:
     # The failing-lookup event was dropped; the socket survived and
     # delivered the next event.
     assert frame["plan_id"] == plan_ok
+
+
+# ── task 9b7c1286: plan.submitted pickup loss (publish-before-commit race) ─────
+
+
+def test_plan_submitted_matches_payload_coordinator_label_without_db(
+    monkeypatch,
+) -> None:
+    """``plan.submitted`` carries ``coordinator_label`` in its payload; the
+    filter must match on it directly, BEFORE any DB lookup.
+
+    This is the regression test for the live pickup loss: the event is
+    broadcast in-process from inside the still-open ``POST /plans``
+    transaction, so a plan → repo → team_configs lookup from the WS
+    handler's separate session cannot see the plan row yet and returns
+    None — dropping the one event the coordinator_label branch exists to
+    deliver. The stub raises to prove the payload path never consults
+    the DB.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    async def stub_lookup(plan_id, session_factory=None):
+        raise AssertionError(
+            "payload coordinator_label match must not hit the DB"
+        )
+
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
+
+    plan_new = str(uuid.uuid4())
+    rec = _make_record(
+        plan_id=plan_new, entity_type="plan", action="submitted",
+    )
+    rec["payload"] = {
+        "repo": "joeLepper/treadmill",
+        "coordinator_label": "coordinator-treadmill",
+        "task_count": 3,
+    }
+
+    with TestClient(_build_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events"
+            "?coordinator_label=coordinator-treadmill"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec)
+            frame = ws.receive_json()
+
+    assert frame["type"] == "event"
+    assert frame["entity_type"] == "plan"
+    assert frame["action"] == "submitted"
+    assert frame["plan_id"] == plan_new
+
+
+def test_payload_coordinator_label_mismatch_still_falls_through(
+    monkeypatch,
+) -> None:
+    """A payload naming a DIFFERENT coordinator does not match; the DB
+    path still runs and can match on its own merits."""
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    plan_id = str(uuid.uuid4())
+
+    async def stub_lookup(pid, session_factory=None):
+        return "coordinator-mine"
+
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
+
+    rec = _make_record(plan_id=plan_id, entity_type="plan", action="submitted")
+    rec["payload"] = {"coordinator_label": "coordinator-other"}
+
+    with TestClient(_build_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?coordinator_label=coordinator-mine"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec)
+            frame = ws.receive_json()
+
+    # Delivered via the DB branch, not the (mismatching) payload branch.
+    assert frame["plan_id"] == plan_id
+
+
+def test_negative_created_by_lookup_is_not_cached_forever(monkeypatch) -> None:
+    """A ``None`` owner resolution must not permanently blind the socket:
+    once the negative TTL lapses, the next event for the same plan
+    re-resolves and is delivered. With the TTL shrunk to 0 the second
+    lookup happens immediately.
+
+    Guards the second half of the pickup-loss bug: the old permanent
+    ``_owner_cache[key] = None`` meant a single lookup racing the
+    emitter's commit silenced that plan for the socket's lifetime.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    monkeypatch.setattr(ws_module, "_NEGATIVE_TTL_S", 0.0)
+
+    plan_id = str(uuid.uuid4())
+    results = iter([None, "lbl-a"])  # first lookup races the commit
+    call_count = 0
+
+    async def stub_lookup(pid, task_id, session_factory=None):
+        nonlocal call_count
+        call_count += 1
+        return next(results)
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_lookup)
+
+    rec1 = _make_record(plan_id=plan_id)
+    rec2 = _make_record(plan_id=plan_id)
+
+    with TestClient(_build_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?created_by=lbl-a"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec1)  # resolves None → dropped
+            _broadcast_local(rec2)  # re-resolves → delivered
+            frame = ws.receive_json()
+
+    assert frame["plan_id"] == plan_id
+    assert call_count == 2
+
+
+def test_negative_coordinator_lookup_is_not_cached_forever(monkeypatch) -> None:
+    """Same negative-TTL contract for the ``coordinator_label`` DB path."""
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    monkeypatch.setattr(ws_module, "_NEGATIVE_TTL_S", 0.0)
+
+    plan_id = str(uuid.uuid4())
+    results = iter([None, "coordinator-mine"])
+
+    async def stub_lookup(pid, session_factory=None):
+        return next(results)
+
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
+
+    rec1 = _make_record(plan_id=plan_id)
+    rec2 = _make_record(plan_id=plan_id)
+
+    with TestClient(_build_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?coordinator_label=coordinator-mine"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec1)
+            _broadcast_local(rec2)
+            frame = ws.receive_json()
+
+    assert frame["plan_id"] == plan_id
+
+
+def test_negative_lookup_within_ttl_uses_cache(monkeypatch) -> None:
+    """Inside the negative TTL the cache absorbs repeat lookups — the
+    per-event DB cost on a busy unfiltered feed stays bounded."""
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    # Default TTL (30s) is far longer than the test run.
+    plan_id = str(uuid.uuid4())
+    plan_sentinel = str(uuid.uuid4())
+    call_count = 0
+
+    async def stub_lookup(pid, task_id, session_factory=None):
+        nonlocal call_count
+        call_count += 1
+        return "lbl-a" if pid == plan_sentinel else None
+
+    monkeypatch.setattr(ws_module, "_lookup_created_by", stub_lookup)
+
+    with TestClient(_build_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?created_by=lbl-a"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            for _ in range(5):
+                _broadcast_local(_make_record(plan_id=plan_id))
+            _broadcast_local(_make_record(plan_id=plan_sentinel))
+            frame = ws.receive_json()
+
+    assert frame["plan_id"] == plan_sentinel
+    # 1 negative resolution (cached for the next 4) + 1 for the sentinel.
+    assert call_count == 2
+
+
+def test_payload_coordinator_label_only_matches_plan_submitted(
+    monkeypatch,
+) -> None:
+    """The payload fast path is gated to ``plan.submitted`` (PR #310
+    review): a non-plan.submitted event carrying a matching
+    ``coordinator_label`` payload key (possible via the manual-event
+    surface, which passes caller JSON through unchanged) must NOT bypass
+    DB verification — it falls through to the lookup, which here refuses
+    it. Sentinel: a real plan.submitted afterwards proves the socket
+    stayed alive and the payload path still works.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    async def stub_lookup(plan_id, session_factory=None):
+        return None  # DB does not vouch for this plan
+
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
+
+    plan_spoof = str(uuid.uuid4())
+    plan_real = str(uuid.uuid4())
+    rec_spoof = _make_record(
+        plan_id=plan_spoof, entity_type="task", action="registered",
+    )
+    rec_spoof["payload"] = {"coordinator_label": "coordinator-mine"}
+    rec_real = _make_record(
+        plan_id=plan_real, entity_type="plan", action="submitted",
+    )
+    rec_real["payload"] = {"coordinator_label": "coordinator-mine"}
+
+    with TestClient(_build_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?coordinator_label=coordinator-mine"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec_spoof)
+            _broadcast_local(rec_real)
+            frame = ws.receive_json()
+
+    # The spoofed task event was dropped; only plan.submitted matched.
+    assert frame["plan_id"] == plan_real
+    assert frame["entity_type"] == "plan"
