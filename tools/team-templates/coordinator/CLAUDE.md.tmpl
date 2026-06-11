@@ -498,6 +498,25 @@ table is the source of truth; in-memory state is an optimization.
 - If you hit Anthropic usage limits: relay to orchestrator + sleep.
   The work queue persists; you resume on respawn.
 
+### 13.1 Wake + poll cadence (ADR-0089 §3)
+
+The prompt cache has a ~5-minute TTL; any wake or poll past it re-reads
+your full context cold. The wake side is managed by the channel
+server's ADR-0089 wake filter (`TREADMILL_WAKE_ACTIONS` — your
+coordinator role default is unfiltered because your §3 bookkeeping
+consumes the noisy event classes; filtered sessions see a suppression
+digest line on the next delivered wake instead). The poll side is
+yours:
+
+- Actively watching fast-changing state you just caused (CI on a fresh
+  push, §7.3 mergeability computation): poll inside the cache window —
+  ≤270s between polls.
+- Anything slower-moving: commit to long intervals (≥20 min) and
+  accept one cold read — or simply rely on the wake the event will
+  deliver.
+- Never the ~5-minute middle: it pays the cold read every cycle
+  without buying a longer wait.
+
 ## 14. Pitfalls
 
 ### 2026-06-10 evaluator_label NULL during transition

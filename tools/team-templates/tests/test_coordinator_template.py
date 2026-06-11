@@ -232,3 +232,38 @@ def test_worker_template_pins_brief_contract_and_pr_number_convention() -> None:
     body = (TEMPLATES_DIR / "worker" / "CLAUDE.md.tmpl").read_text()
     assert "your BRIEF is the contract" in body
     assert "gh pr view --json number" in body
+
+
+# ── ADR-0089 §3: cache-aware cadence convention (task 4fce76d5) ──────
+
+
+@pytest.mark.parametrize("role", ["coordinator", "worker", "evaluator"])
+def test_templates_pin_cadence_convention(role: str) -> None:
+    """Every session template carries the ADR-0089 §3 cadence rule with
+    its three load-bearing numbers — poll inside the ~5-min prompt-cache
+    window when actively watching, long intervals otherwise, never the
+    worst-of-both middle — and cites the live wake-filter mechanism
+    (#310) it layers under."""
+    # Whitespace-normalized so a phrase spanning a hard line wrap in
+    # the template prose still pins.
+    body = " ".join(
+        (TEMPLATES_DIR / role / "CLAUDE.md.tmpl").read_text().split()
+    )
+    assert "ADR-0089" in body
+    assert "poll inside the cache window" in body
+    assert "≤270s" in body
+    assert "long intervals (≥20 min)" in body
+    assert "~5-minute middle" in body
+    # The convention text cites the live ADR-0089 wake-filter mechanism.
+    assert "TREADMILL_WAKE_ACTIONS" in body
+    assert "suppression digest" in body
+
+
+def test_evaluator_template_pins_batch_per_wake() -> None:
+    """The bursty-but-rare role's half of the convention: batch the
+    queue per wake instead of waking per PR (ADR-0089 §3)."""
+    body = " ".join(
+        (TEMPLATES_DIR / "evaluator" / "CLAUDE.md.tmpl").read_text().split()
+    )
+    assert "batch work when woken" in body
+    assert "every queued PR in one wake" in body
