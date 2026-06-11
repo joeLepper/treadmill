@@ -175,7 +175,8 @@ def test_update_python_adds_additively(httpx_mock: HTTPXMock) -> None:
         "--worker-deps-python", "aws-cdk-lib==2.214.0",
     ])
     assert result.exit_code == 0, result.output
-    assert "updated worker_deps" in result.output
+    # The command reports "updated <repo>: python=N node=N binaries=N".
+    assert f"updated {_REPO}" in result.output
     assert "python=2" in result.output
 
     post = next(r for r in httpx_mock.get_requests() if r.method == "POST")

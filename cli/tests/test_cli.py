@@ -348,82 +348,9 @@ def test_task_list_passes_filters(httpx_mock: HTTPXMock) -> None:
     assert result.exit_code == 0
 
 
-# ── workflows seed-starters ──────────────────────────────────────────────────
-
-
-def test_workflows_seed_starters_invokes_seed(httpx_mock: HTTPXMock) -> None:
-    """Smoke: the command runs ``seed`` against a fake API. Each POST
-    (role, workflow, version, event-trigger) returns 201 — first-time install path."""
-    from treadmill_api.starters import STARTERS, _DEFAULT_EVENT_TRIGGERS, _all_roles
-
-    # Every role POST returns 201.
-    for _ in _all_roles():
-        httpx_mock.add_response(
-            method="POST", url="http://fake-api/api/v1/roles",
-            json={"id": "role-x"}, status_code=201,
-        )
-    # Every workflow POST + GET + version POST returns 201 / 200.
-    for wf in STARTERS:
-        httpx_mock.add_response(
-            method="POST", url="http://fake-api/api/v1/workflows",
-            json={"id": wf["id"]}, status_code=201,
-        )
-        httpx_mock.add_response(
-            method="GET",
-            url=f"http://fake-api/api/v1/workflows/{wf['id']}",
-            json={"id": wf["id"], "latest_version": None},
-        )
-        httpx_mock.add_response(
-            method="POST",
-            url=f"http://fake-api/api/v1/workflows/{wf['id']}/versions",
-            json={"id": "v1"}, status_code=201,
-        )
-    # Every default event-trigger POST returns 201.
-    for _ in _DEFAULT_EVENT_TRIGGERS:
-        httpx_mock.add_response(
-            method="POST", url="http://fake-api/api/v1/event-triggers",
-            json={"id": "et-x"}, status_code=201,
-        )
-
-    result = runner.invoke(app, ["workflows", "seed-starters"])
-    assert result.exit_code == 0, result.output
-    assert "seeded" in result.output
-    # All seven created on a fresh install.
-    assert f"{len(STARTERS)} new of {len(STARTERS)}" in result.output
-
-
-def test_workflows_seed_starters_idempotent_on_409(httpx_mock: HTTPXMock) -> None:
-    """Every POST returns 409 (already-seeded). The GETs report a
-    latest_version, so no fresh version POSTs fire. Command exits 0 with
-    a ``0 new`` message."""
-    from treadmill_api.starters import STARTERS, _DEFAULT_EVENT_TRIGGERS, _all_roles
-
-    for _ in _all_roles():
-        httpx_mock.add_response(
-            method="POST", url="http://fake-api/api/v1/roles",
-            json={"detail": "exists"}, status_code=409,
-        )
-    for wf in STARTERS:
-        httpx_mock.add_response(
-            method="POST", url="http://fake-api/api/v1/workflows",
-            json={"detail": "exists"}, status_code=409,
-        )
-        httpx_mock.add_response(
-            method="GET",
-            url=f"http://fake-api/api/v1/workflows/{wf['id']}",
-            json={"id": wf["id"], "latest_version": 1},
-        )
-        # No version POST expected — GET says latest_version=1 already.
-    # Default event-trigger POSTs also already exist.
-    for _ in _DEFAULT_EVENT_TRIGGERS:
-        httpx_mock.add_response(
-            method="POST", url="http://fake-api/api/v1/event-triggers",
-            json={"detail": "exists"}, status_code=409,
-        )
-
-    result = runner.invoke(app, ["workflows", "seed-starters"])
-    assert result.exit_code == 0, result.output
-    assert "0 new of" in result.output
+# The two ``workflows seed-starters`` tests were deleted with the command
+# itself (ADR-0087 Phase 5 / PR-G removed ``treadmill_api.starters`` and
+# the tables it seeded — the tests exercised deleted behavior).
 
 
 # ── status ───────────────────────────────────────────────────────────────────
