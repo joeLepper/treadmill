@@ -81,7 +81,11 @@ merges, escalations, deploy/staging telemetry (observe-only), and the
 ADR-0089 suppressed-wake digests. Filterable by repo/team/action.
 This is v1's event list upgraded from audit-log to nervous-system view.
 DATA: events table + the existing WS; wake-filter digests via the
-channel server.
+channel server. Deploy/smoke rows deep-link via the `run_url` field
+Carla's G3 workflows emit in the event payload ({repo, sha, digest,
+env, services[], run_url}) — every telemetry row anchors to its actual
+GitHub run/environment page, making the links-OUT principle concrete
+per event rather than a generic repo link.
 
 ### S6 — Escalations (kept, vocabulary widened)
 v1's escalation flow (open/ack/close + MTTR) survives intact; widen the
@@ -107,8 +111,11 @@ page; it never hosts an approve button. (CLAUDE.md §System boundary.)
 1. S1+S5 composition: one "mission control" landing page or two screens?
 2. S3 granularity: is per-cycle cost a drill-down or front-and-center?
 3. S4 cross-repo: one ledger with a repo facet, or per-repo tabs?
-4. v1's operator buckets (blocked/inflight/hopper) — keep as the task
-   triage frame inside S2's list view, or retire for loop-stage facets?
+4. v1's operator buckets (blocked/inflight/hopper) — ANSWERED in
+   sibling review (Carla, adopted): keep the buckets INSIDE S2 as the
+   triage frame, nested with loop-stage facets. The buckets answer
+   "is anything stuck?"; the stages answer "where is it stuck?" —
+   different questions, both needed, nested not either/or.
 
 ## Non-goals
 Story points (deferred); deploy controls (boundary); coordinator chat /
