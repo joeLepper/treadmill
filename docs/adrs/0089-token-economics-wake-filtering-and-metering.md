@@ -68,8 +68,7 @@ Telegram verbosity) — this governs whether the session wakes.
     enumerated explicitly — a filtered-away escalation is the one failure
     mode this design must never have; audit any new escalation-class
     action into this list at introduction), `task.registered`,
-    `task.cancelled`,
-    `prod_promotion.*`, `deploy.failed`, `staging_smoke.failed`,
+    `task.cancelled`, `deploy.failed`, `staging_smoke.failed`,
     `datamigration.*` (ADR-0092's first-success validation gates are
     alerted-class by design), relay messages (always), reconcile frames
     (always).

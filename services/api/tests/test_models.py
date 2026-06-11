@@ -179,9 +179,6 @@ def test_no_unexpected_jsonb_columns():
         ("events", "payload"),
         ("schedules", "payload_template"),
         ("repo_configs", "sensitive_strings"),
-        # prod_promotions.bundle (ADR-0088 — the propose bundle is an
-        # opaque contract document; payload classes validate its shape)
-        ("prod_promotions", "bundle"),
     }
     found = {
         (table.name, col.name)

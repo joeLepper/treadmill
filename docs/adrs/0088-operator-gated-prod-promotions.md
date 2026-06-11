@@ -1,6 +1,14 @@
 # ADR-0088: Operator-gated prod promotions — API-enforced approval
 
-- **Status:** proposed
+- **Status:** superseded (2026-06-11, operator directive) — deploy
+  approval uses **GitHub environment protection with required
+  reviewers** (medicoder's incumbent system, which this ADR failed to
+  evaluate as an alternative); Treadmill is team orchestration, not a
+  deploy control plane. See
+  `docs/learnings/2026-06-11-check-the-incumbent-before-designing.md`.
+  The implementation (PRs #304/#306/#307-§3.8) was reverted the same
+  night; the deploy/staging_smoke observe vocabulary (§3.7) survives as
+  team telemetry.
 - **Date:** 2026-06-10
 - **Related:** ADR-0086 (coordinator owns task lifecycle), ADR-0087 (team
   execution model), `docs/plans/2026-06-10-prod-promotion-gate-contract.md`

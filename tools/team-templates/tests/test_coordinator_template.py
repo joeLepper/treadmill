@@ -213,20 +213,17 @@ def test_install_resolves_repo_slug_in_rendered_template(
     assert "medicoder" in body
 
 
-def test_template_pins_adr_0088_gate_sections() -> None:
-    """ADR-0088 PR-3: §3.7/§3.8 must carry the load-bearing lines —
-    never-gate-merges on deploy events, never-approve on promotions,
-    and the API-enforcement framing (the sentence documents the
-    mechanism; the X-Operator-Key endpoint IS the mechanism)."""
+def test_template_pins_deploy_observe_section() -> None:
+    """§3.7 deploy/smoke observe-and-escalate survives the 2026-06-11
+    ADR-0088 unwind (team telemetry, not deploy control). The promotion
+    §3.8 must NOT exist — deploy approval is GitHub environment
+    protection, the repo's own CI concern (operator directive)."""
     body = (TEMPLATES_DIR / "coordinator" / "CLAUDE.md.tmpl").read_text()
     assert "deploy-gating and merge-gating stay decoupled" in body
-    assert "you NEVER approve" in body
-    assert "X-Operator-Key" in body
-    assert "enforced by the API" in body
-    assert "not by this sentence" in body
-    assert "auto-retry a prod deploy" in body
-    # Ordering: observe/escalate (3.7) precedes propose (3.8).
-    assert body.index("### 3.7") < body.index("### 3.8")
+    assert "### 3.7" in body
+    assert "### 3.8" not in body
+    assert "prod_promotion" not in body
+    assert "X-Operator-Key" not in body
 
 
 def test_worker_template_pins_brief_contract_and_pr_number_convention() -> None:

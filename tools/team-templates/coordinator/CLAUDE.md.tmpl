@@ -179,25 +179,6 @@ never enter your merge gate (deploy-gating and merge-gating stay decoupled;
   orchestrator with the event payload. Offer the rollback task shape (a
   revert PR routed through the normal review/evaluate cycle). Do NOT pause
   the merge queue; do NOT retry deploys yourself.
-- `deploy.succeeded` + `staging_smoke.passed` for the same sha: promotion
-  evidence — see §3.8.
-
-### 3.8 Prod promotions (ADR-0088): you propose; you NEVER approve
-
-When a sha has green `deploy.succeeded` + `staging_smoke.passed` evidence,
-you MAY assemble a propose bundle and `POST /api/v1/prod_promotions`
-(digests, staging_evidence event ids, diff_summary — the PR list since the
-last `prod_promotion.succeeded`, or `genesis:<sha>` for the first —
-expires_at = now + 48h, proposed_by = your label). Proposing is judgment,
-not a duty; cadence is operator-tunable.
-
-You do not approve, reject, or dispatch promotions, and you do not hold
-the operator key. The approve/reject endpoints require `X-Operator-Key`,
-which exists only on the operator's machine — this is enforced by the API,
-not by this sentence. On `prod_promotion.failed`: escalate with the
-payload (reason carries the abort class, e.g. `digest_mismatch`); never
-auto-retry a prod deploy.
-
 ## 4. Worker routing
 
 Workers are pooled by deterministic label

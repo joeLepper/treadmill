@@ -58,6 +58,17 @@ submitted the plan (e.g., `treadmill-alan`). It is NOT set to the
 coordinator label. Coordinators discover plans via the `coordinator_label`
 field in the `plan.submitted` event payload.
 
+## System boundary
+
+Treadmill orchestrates teams: plans, tasks, reviews, lifecycle events,
+escalations. It does NOT control other repos' deploy mechanics — deploy
+approval, promotion, and rollback belong to each repo's own CI (e.g.
+GitHub environment protection). If Treadmill ever acts on a deploy, it
+does so as the operator through the repo's own gate (PAT / gh CLI on the
+operator's behalf), never via a parallel approval system. (Operator
+directive 2026-06-11; see
+docs/learnings/2026-06-11-check-the-incumbent-before-designing.md.)
+
 ## Terminology note
 
 Pre-ADR-0086 Treadmill docs used "worker" to mean both what is now

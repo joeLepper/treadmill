@@ -1,6 +1,11 @@
 # Contract: prod-promotion human gate — interface spec
 
-- **Status:** drafting (contract-first; consumers hold to this before drafting deep)
+- **Status:** superseded (2026-06-11, operator directive) — prod
+  approval is GitHub environment protection with required reviewers.
+  Preserved as the historical record; the Evidence semantic floor
+  section's REQUIREMENTS survive as workflow preconditions in the
+  medicoder promote pipeline (the smoke gates the environment-protected
+  deploy job), not as a Treadmill bundle.
 - **Date:** 2026-06-10
 - **Consumers:** Alan's human-gate ADR (API + coordinator-template mechanics) and
   Carla's prod-promotion plan (medicoder `promote-to-prod.yml` + pipeline)

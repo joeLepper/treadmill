@@ -42,17 +42,10 @@ from treadmill_api.events.step import (
     StepSkipped,
     StepStarted,
 )
-from treadmill_api.events.prod_promotion import (
+from treadmill_api.events.deploy import (
     DeployFailed,
     DeployStarted,
     DeploySucceeded,
-    ProdPromotionApproved,
-    ProdPromotionExpired,
-    ProdPromotionFailed,
-    ProdPromotionProposed,
-    ProdPromotionRejected,
-    ProdPromotionStarted,
-    ProdPromotionSucceeded,
     StagingSmokeFailed,
     StagingSmokePassed,
 )
@@ -126,15 +119,8 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     # architect's accept-as-is on a validate-fail deadlock flips
     # validate_decision via the mergeability VIEW's validate LATERAL.
     ValidateOverride,
-    # Prod-promotion gate (ADR-0088) + deploy/staging-smoke companion
-    # vocabulary (staging plan §Treadmill-side). All audit-class.
-    ProdPromotionProposed,
-    ProdPromotionApproved,
-    ProdPromotionRejected,
-    ProdPromotionExpired,
-    ProdPromotionStarted,
-    ProdPromotionSucceeded,
-    ProdPromotionFailed,
+    # Deploy/staging-smoke observe vocabulary (staging plan
+    # §Treadmill-side; coordinator §3.7). Audit-class.
     DeployStarted,
     DeploySucceeded,
     DeployFailed,
