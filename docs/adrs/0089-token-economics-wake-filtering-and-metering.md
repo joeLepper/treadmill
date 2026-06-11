@@ -58,10 +58,18 @@ Telegram verbosity) — this governs whether the session wakes.
   globs) with **role-based defaults**:
   - `orchestrator` default: `github.pr_merged`, `task.*_verdict`,
     `task.escalat*`, `task.registered`, `task.cancelled`,
-    `prod_promotion.*`, `deploy.failed`, `staging_smoke.failed`, relay
-    messages (always), reconcile frames (always).
+    `prod_promotion.*`, `deploy.failed`, `staging_smoke.failed`,
+    `datamigration.*` (ADR-0092's first-success validation gates are
+    alerted-class by design), relay messages (always), reconcile frames
+    (always).
   - `coordinator` / `evaluator` / `worker` default: unfiltered (their
     bookkeeping consumes the noisy classes today).
+- **Layering invariant (wake ⊇ relay):** the ADR-0071 relay level
+  selects from events that already woke the session, so a session's wake
+  filter must be a superset of its relay set — a relay-significant event
+  that never wakes can never relay. The channel server WARNs at startup
+  when the configured pair violates the superset, keeping the two knobs
+  one layered family rather than two drifting ones.
 - Suppressed events are not dropped: the server keeps a per-session
   **digest counter** and prepends a one-line summary to the next delivered
   wake (`suppressed since last wake: 47 check_run_completed, 3
