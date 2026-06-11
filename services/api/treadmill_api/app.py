@@ -31,6 +31,7 @@ from treadmill_api.dependencies import (
 from treadmill_api.observability import get_tracer
 from treadmill_api.health import router as health_router
 from treadmill_api.routers.claude_credentials import router as claude_credentials_router
+from treadmill_api.routers.prod_promotions import router as prod_promotions_router
 from treadmill_api.routers.context_docs import router as context_docs_router
 from treadmill_api.routers.dashboard import router as dashboard_router
 from treadmill_api.routers.escalations import router as escalations_router
@@ -270,6 +271,7 @@ def create_app() -> FastAPI:
     app.include_router(onboarding_router)
     app.include_router(context_docs_router)
     app.include_router(claude_credentials_router)
+    app.include_router(prod_promotions_router)
     app.include_router(dashboard_router)
     app.include_router(escalations_router)
     return app
