@@ -15,8 +15,15 @@ preconditions hold:
 - ``TREADMILL_SESSION_LABEL`` must be set (labeled session).
 - The label must NOT start with ``coordinator-`` (coordinators don't
   broadcast availability).
-- The last broadcast must be at least 300s old (cooldown). Fast
-  multi-turn responses don't flood coordinator inboxes.
+- The last broadcast must be at least 3600s (1h) old. The original
+  300s cooldown shipped in PR #264 was sized for fast-turn workers,
+  but during long-haul autonomous-loop idle (30-min ScheduleWakeup
+  ticks), every tick crossed the 300s window and fired a broadcast.
+  Coordinator-medicoder flagged the noise after ~16 broadcasts in
+  one overnight quiet period. A 1-hour floor suppresses tick-driven
+  re-broadcasts while still letting a worker that genuinely just
+  became available signal once. A proper edge-only protocol
+  (broadcast only on busy → idle transitions) is the v2 fix.
 
 State on disk:
 - ``~/.treadmill/session-state/<label>/last-idle-broadcast`` — unix
@@ -47,7 +54,7 @@ import sys
 import time
 from pathlib import Path
 
-_COOLDOWN_SECONDS = 300
+_COOLDOWN_SECONDS = 3600
 
 
 def _now_unix() -> int:
