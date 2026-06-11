@@ -88,6 +88,33 @@ Telegram convenience (optional, later): the orchestrator relays `promote list`
 output and runs the approve command on Joe's typed instruction — the CLI
 remains the single write path; Telegram is a lens, not a second surface.
 
+## Evidence semantic floor (2026-06-11 amendment)
+
+`staging_smoke.passed` may only be emitted by a smoke that attests, against
+REAL backends (no stubs, no emulators):
+
+1. **Real inference** — the LLM-calling services (MAR, NTA) made live
+   model calls and produced output (call count > 0 asserted, not inferred
+   from health).
+2. **Per-service contribution** — every chain stage's output present
+   (the dead-MAR lesson: health endpoints lie).
+3. **Consumer idle-wake** — a message published to an IDLE chain is
+   processed within the smoke's settle budget. Outcome-based, not
+   instance-count-based: under always-on consumers (medicoder #1348,
+   minInstances=1) idle means warm-but-quiescent; under backlog
+   autoscaling (medicoder #143) zero instances on an empty queue is
+   CORRECT, and the evidence must distinguish empty-queue-zero from
+   dead-consumer-zero by publishing and observing processing — never by
+   counting instances. (The min-instances=0 stall class: a warm-only
+   smoke proves nothing about idle prod.)
+
+`Ready=True` alone is never promotion evidence. Basis: the 2026-06-11
+staging e2e caught three prod-breaking configs (medicoder #141 dead
+Bedrock default, #142 zero-pull idle stall, SQL bootstrap mismatches)
+on a chain that was 8/8 green by readiness — a bundle assembled from
+readiness-only evidence would have promoted a system producing zero
+inference and zero idle processing.
+
 ## Safety properties (the contract's invariants)
 
 1. **Digest-pinned approval (TOCTOU-proof).** Approval binds to the exact
