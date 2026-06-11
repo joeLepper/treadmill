@@ -30,14 +30,22 @@ frames whose owning plan or task matches the label are forwarded.
 Ownership is resolved via ``plans.created_by`` (preferred) or
 ``tasks.created_by``; ownerless events are dropped on filtered
 connections. Heartbeat and hello frames bypass the filter entirely.
-Resolution is cached per-connection so each plan/task is queried at most
-once per socket lifetime.
+Positive resolutions are cached per-connection; negative resolutions
+expire after ``_NEGATIVE_TTL_S`` because the in-process broadcast runs
+inside the emitter's still-open transaction, so a lookup can race the
+commit (see the cache comment in ``events_socket``).
+
+``?coordinator_label=<label>`` additionally matches on the event
+payload's own ``coordinator_label`` field before any DB lookup —
+``plan.submitted`` carries it, and the payload path is the only one
+that cannot lose the race against the submitting transaction's commit.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -63,6 +71,14 @@ _SEND_TIMEOUT_S = 1.0
 # trips inside most idle-connection windows (60 s on common load
 # balancers).
 _DEFAULT_HEARTBEAT_S = 25.0
+
+# How long a NEGATIVE owner-lookup result (no row resolved) stays cached.
+# Events are broadcast in-process from inside the emitter's still-open
+# transaction, so a lookup can race the commit and legitimately miss a row
+# that exists milliseconds later — a permanent negative cache would blind
+# the socket to that plan/task for its whole lifetime. Positive results
+# still cache forever. Tests shrink this to 0 to exercise re-resolution.
+_NEGATIVE_TTL_S = 30.0
 
 
 def _now_iso() -> str:
@@ -267,9 +283,37 @@ async def events_socket(
         else None
     )
     # Per-connection owner cache: ``"plan:<id>"`` / ``"task:<id>"`` → label.
-    # Populated on first lookup; never evicted (connections are
-    # short-lived relative to plan/task lifetimes).
+    # Positive results never evict (connections are short-lived relative
+    # to plan/task lifetimes). Negative results (``None``) expire after
+    # ``_NEGATIVE_TTL_S``: events are broadcast in-process from INSIDE the
+    # emitter's still-open transaction (``persist_and_publish`` runs before
+    # the router commits), so a lookup racing that commit legitimately sees
+    # no row yet — caching that ``None`` forever would permanently blind
+    # the socket to the plan/task (the plan.submitted pickup loss,
+    # task 9b7c1286).
     _owner_cache: dict[str, str | None] = {}
+    _negative_deadline: dict[str, float] = {}
+
+    async def _resolve_cached(key: str, lookup: Any) -> str | None:
+        """Owner-cache wrapper around an async ``lookup()`` thunk.
+
+        Lookup exceptions propagate to the caller (which drops the event
+        and keeps the socket alive) without poisoning the cache.
+        """
+        if key in _owner_cache:
+            cached = _owner_cache[key]
+            if cached is not None:
+                return cached
+            if time.monotonic() < _negative_deadline.get(key, 0.0):
+                return None
+            # Negative entry expired — re-resolve below.
+        value = await lookup()
+        _owner_cache[key] = value
+        if value is None:
+            _negative_deadline[key] = time.monotonic() + _NEGATIVE_TTL_S
+        else:
+            _negative_deadline.pop(key, None)
+        return value
 
     # Coordinator plan-id subscription (ADR-0084). Parsed once at connect
     # time; subsequent reconnects re-parse from the new query string.
@@ -353,29 +397,49 @@ async def events_socket(
                     # plan-pickup gap: new plans carry
                     # created_by=<submitting-orchestrator>, so a
                     # coordinator subscribed only on created_by + plan_ids
-                    # never sees plan.submitted for its own plans. Resolves
-                    # plan → repo → coordinator_label per event.
+                    # never sees plan.submitted for its own plans.
+                    #
+                    # 2a. Payload fast path — ``plan.submitted`` carries
+                    # ``coordinator_label`` in its payload (the emitter
+                    # resolved team_configs inside the submitting
+                    # transaction), so match on it directly: no DB, and —
+                    # the correctness half — no read racing the emitter's
+                    # still-open transaction. ``plan.submitted`` is
+                    # broadcast BEFORE ``POST /plans`` commits, so a DB
+                    # lookup from this (separate) session cannot see the
+                    # plan row yet and would drop the one event this
+                    # filter branch exists to deliver (task 9b7c1286).
+                    if not matched and coordinator_label is not None:
+                        _payload = record.get("payload")
+                        if (
+                            isinstance(_payload, dict)
+                            and _payload.get("coordinator_label")
+                            == coordinator_label
+                        ):
+                            matched = True
+
+                    # 2b. DB path for events that don't carry the label:
+                    # resolves plan → repo → coordinator_label per event.
                     if (
                         not matched
                         and coordinator_label is not None
                         and plan_id is not None
                     ):
-                        cl_key = f"coordinator:{plan_id}"
-                        if cl_key not in _owner_cache:
-                            try:
-                                _owner_cache[cl_key] = (
-                                    await _lookup_coordinator_label(
-                                        plan_id, _session_factory
-                                    )
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "coordinator_label lookup failed "
-                                    "for plan %s; dropping event",
-                                    plan_id,
-                                )
-                                continue  # drop; socket stays alive
-                        if _owner_cache.get(cl_key) == coordinator_label:
+                        try:
+                            resolved = await _resolve_cached(
+                                f"coordinator:{plan_id}",
+                                lambda pid=plan_id: _lookup_coordinator_label(
+                                    pid, _session_factory
+                                ),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "coordinator_label lookup failed "
+                                "for plan %s; dropping event",
+                                plan_id,
+                            )
+                            continue  # drop; socket stays alive
+                        if resolved == coordinator_label:
                             matched = True
 
                     # 3. created_by. Resolves plan → plans.created_by or
@@ -389,21 +453,21 @@ async def events_socket(
                             cache_key = f"task:{task_id}"
                         else:
                             continue  # defensive — already guarded above
-                        if cache_key not in _owner_cache:
-                            try:
-                                _owner_cache[cache_key] = (
-                                    await _lookup_created_by(
-                                        plan_id, task_id, _session_factory
-                                    )
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "created_by lookup failed for %s; "
-                                    "dropping event",
-                                    cache_key,
-                                )
-                                continue  # drop; socket stays alive
-                        if _owner_cache.get(cache_key) == created_by:
+                        try:
+                            resolved = await _resolve_cached(
+                                cache_key,
+                                lambda p=plan_id, t=task_id: _lookup_created_by(
+                                    p, t, _session_factory
+                                ),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "created_by lookup failed for %s; "
+                                "dropping event",
+                                cache_key,
+                            )
+                            continue  # drop; socket stays alive
+                        if resolved == created_by:
                             matched = True
 
                     if not matched:
