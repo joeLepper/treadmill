@@ -5,6 +5,15 @@ name: CI
 # auto-merge layers on top of — task-intent validation (wf-validate)
 # is necessary but not sufficient; existing-test-suite still has to
 # pass before mergeability flips to mergeable.
+#
+# The matrix is an allowlist, not auto-discovery: a component suite runs
+# in CI only if it has a row below (the cli suite sat outside CI until
+# task 97a10402 — green PRs were merging over red cli tests; the same
+# sweep then added every other test directory in the repo, per
+# orchestrator ruling). When adding a component with a test suite, add
+# its row here — pytest suites join the matrix; non-pytest runners get a
+# sibling job (see channel-server-bun). As of task 97a10402 every test
+# directory in the repo is covered.
 
 on:
   pull_request:
@@ -27,6 +36,24 @@ jobs:
           - component: workers/agent
           - component: tools/local-adapter
           - component: infra
+          # cli imports treadmill_api (plan_validate, adr_api_coverage,
+          # tokens) — resolved by the workspace sync below, which installs
+          # services/api into the shared env; no PYTHONPATH needed. This
+          # mirrors how the suite passes locally (task 97a10402).
+          - component: cli
+          - component: services/egress-proxy
+          # Not itself a uv project: `uv run` from this dir resolves the
+          # workspace root env (the infra row runs infra/tests only, so
+          # the lambda suite needs its own row).
+          - component: infra/lambdas/webhook_receiver
+          # The tools/* dirs below are NOT workspace members; `uv run`
+          # from each resolves the workspace root env, whose
+          # --all-packages sync carries pytest. Stdlib-only suites —
+          # verified to pass exactly this way (task 97a10402).
+          - component: tools/cc-channels
+          - component: tools/coordinator
+          - component: tools/dev-hooks
+          - component: tools/team-templates
 
     steps:
       - uses: actions/checkout@v4
@@ -76,6 +103,26 @@ jobs:
           uv run --project cli python -m treadmill_cli.cli \
             plan check-migration-chain \
             --versions-dir services/api/alembic/versions
+
+  # The treadmill-events channel server is Bun/TypeScript — outside the
+  # uv matrix above. `bun test` exits 1 when it finds no test files, so
+  # this job is itself guarded against the never-executes class: deleting
+  # the last test file turns it red rather than silently green.
+  channel-server-bun:
+    name: tools/cc-channel-treadmill (bun)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install deps
+        working-directory: tools/cc-channel-treadmill
+        run: bun install --frozen-lockfile
+
+      - name: Run bun tests
+        working-directory: tools/cc-channel-treadmill
+        run: bun test
 
   # The pytest job runs in the uv workspace, whose env carries transitive deps
   # a component may import without declaring. The container image installs only
