@@ -42,8 +42,13 @@ does NOT fix this class — it reuses the stale layer (confirmed; same crash).
 
 ## Follow-ups
 
-- [ ] Identify the 06:52:50Z recreation actor (docker events / journald /
-      deploy-watcher logs) — owner: first sibling with cycles.
+- [ ] Identify the 06:52:50Z recreation actor — owner: first sibling with
+      cycles. ELIMINATED so far (carla, 16:0xZ): user-level journal (empty
+      for the window), user systemd timers (only launchpadlib-cache-clean,
+      daily at 12:46), user crontab (none). REMAINING trails: dockerd
+      journal (needs sudo), the removed container's Created metadata
+      (gone with the rm — Alan saw 06:52:50Z before removal, source?),
+      any root-level cron/timer.
 - [ ] Restart policy + recreate-convention for treadmill-api: crash-looping
       on a missing migration should page/relay loudly, not retry silently
       into a 9-hour gap (op-readiness class: a dead API is a never-fired
