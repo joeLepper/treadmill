@@ -166,26 +166,13 @@ async def update_task_execution(
     response_model=list[TaskExecutionRow],
 )
 async def list_task_executions(
+    task_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    task_id: uuid.UUID | None = None,
-    worker_label: str | None = None,
 ) -> list[TaskExecutionRow]:
-    """List executions by task or by worker label.
-
-    ``worker_label`` serves the ADR-0089 token harvester's window join
-    (label + started_at..completed_at → call attribution). At least one
-    filter is required — the unfiltered table is unbounded.
-    """
-    if task_id is None and worker_label is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="provide at least one of task_id, worker_label",
-        )
-    query = select(TaskExecution).order_by(TaskExecution.started_at)
-    if task_id is not None:
-        query = query.where(TaskExecution.task_id == task_id)
-    if worker_label is not None:
-        query = query.where(TaskExecution.worker_label == worker_label)
-    result = await session.execute(query)
+    result = await session.execute(
+        select(TaskExecution)
+        .where(TaskExecution.task_id == task_id)
+        .order_by(TaskExecution.started_at)
+    )
     rows = result.scalars().all()
     return [TaskExecutionRow.model_validate(r, from_attributes=True) for r in rows]
