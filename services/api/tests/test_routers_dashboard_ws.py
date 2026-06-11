@@ -881,3 +881,46 @@ def test_negative_lookup_within_ttl_uses_cache(monkeypatch) -> None:
     assert frame["plan_id"] == plan_sentinel
     # 1 negative resolution (cached for the next 4) + 1 for the sentinel.
     assert call_count == 2
+
+
+def test_payload_coordinator_label_only_matches_plan_submitted(
+    monkeypatch,
+) -> None:
+    """The payload fast path is gated to ``plan.submitted`` (PR #310
+    review): a non-plan.submitted event carrying a matching
+    ``coordinator_label`` payload key (possible via the manual-event
+    surface, which passes caller JSON through unchanged) must NOT bypass
+    DB verification — it falls through to the lookup, which here refuses
+    it. Sentinel: a real plan.submitted afterwards proves the socket
+    stayed alive and the payload path still works.
+    """
+    from treadmill_api.routers.dashboard import ws as ws_module
+
+    async def stub_lookup(plan_id, session_factory=None):
+        return None  # DB does not vouch for this plan
+
+    monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
+
+    plan_spoof = str(uuid.uuid4())
+    plan_real = str(uuid.uuid4())
+    rec_spoof = _make_record(
+        plan_id=plan_spoof, entity_type="task", action="registered",
+    )
+    rec_spoof["payload"] = {"coordinator_label": "coordinator-mine"}
+    rec_real = _make_record(
+        plan_id=plan_real, entity_type="plan", action="submitted",
+    )
+    rec_real["payload"] = {"coordinator_label": "coordinator-mine"}
+
+    with TestClient(_build_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/dashboard/ws/events?coordinator_label=coordinator-mine"
+        ) as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _broadcast_local(rec_spoof)
+            _broadcast_local(rec_real)
+            frame = ws.receive_json()
+
+    # The spoofed task event was dropped; only plan.submitted matched.
+    assert frame["plan_id"] == plan_real
+    assert frame["entity_type"] == "plan"

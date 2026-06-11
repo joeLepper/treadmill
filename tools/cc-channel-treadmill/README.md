@@ -74,18 +74,24 @@ channel wakes at all (the relay level then selects from events that woke the
 session). Orchestrator sessions default to the decision-class allowlist —
 `github.pr_merged`, `task.*_verdict`, `task.escalat*` plus the enumerated
 escalation-class actions `task.evaluator_timeout` / `task.rework_exhausted`,
-`task.registered`, `task.cancelled`, `deploy.failed`, `staging_smoke.failed`,
-`datamigration.*` — every other role is unfiltered (their bookkeeping consumes
-the noisy classes). Relay messages and reconcile frames ALWAYS wake.
+`task.registered`, `task.cancelled`, the terminal plan outcomes
+`plan.completed` / `plan.abandoned` (enumerated by name; the lifecycle echoes
+`plan.registered`/`activated`/`submitted` stay filtered), `deploy.failed`,
+`staging_smoke.failed`, `datamigration.*` — every other role is unfiltered
+(their bookkeeping consumes the noisy classes). Relay messages and reconcile
+frames ALWAYS wake. The resolved wake set is logged at startup; the explicit
+unfiltered escape hatch is `TREADMILL_WAKE_ACTIONS='*'`.
 
 Suppressed events are counted, not dropped: a one-line digest
 (`suppressed since last wake: 47 github.check_run_completed … across 2 tasks`)
-rides the next delivered wake, and a suppressed-only stream emits one
+rides the next delivered event/reconcile wake (deliberately not relay wakes,
+whose bodies are sender-attributed), and a suppressed-only stream emits one
 self-originated digest wake within `TREADMILL_MAX_SUPPRESSION_AGE` (+ one
-60 s check period). At startup the server WARNs when the wake set is not a
-superset of the active relay level's significant set (wake ⊇ relay — a
-relay-significant event that never wakes can never relay). Filter logic
-lives in `wake-filter.ts`; `bun test` covers it.
+60 s check period). Digest delivery is two-phase (peek → notify → commit) so
+a failed notification retains the counts. At startup the server WARNs when
+the wake set is not a superset of the active relay level's significant set
+(wake ⊇ relay — a relay-significant event that never wakes can never relay).
+Filter logic lives in `wake-filter.ts`; `bun test` covers it.
 
 ## Relay verbosity (ADR-0071)
 

@@ -26,10 +26,13 @@ the session at all, with suppressed events digested rather than dropped.
   file header for the full table.
 - `wake-filter.ts` — pure ADR-0089 logic, no I/O: `entity.action` glob
   parsing (`parseWakeActions`, role defaults — orchestrator gets
-  `ORCHESTRATOR_DEFAULT_WAKE_ACTIONS`, every other role unfiltered), the
-  `WakeGate` suppression state machine (per-action digest counters,
-  max-suppression-age bounded blindness, injectable clock), and
-  `wakeSetViolations` for the wake ⊇ relay superset invariant.
+  `ORCHESTRATOR_DEFAULT_WAKE_ACTIONS` incl. the enumerated terminal plan
+  outcomes `plan.completed`/`plan.abandoned`, every other role
+  unfiltered), the `WakeGate` suppression state machine (per-action
+  digest counters; two-phase peek → notify → `markDelivered()` commit so
+  a failed notification never loses the digest; max-suppression-age
+  bounded blindness; injectable clock), and `wakeSetViolations` for the
+  wake ⊇ relay superset invariant.
 - `wake-filter.test.ts` — the `bun test` suite pinning role defaults
   (incl. the two ENUMERATED escalation-class actions
   `task.evaluator_timeout` / `task.rework_exhausted`), glob semantics,
@@ -47,7 +50,13 @@ the session at all, with suppressed events digested rather than dropped.
   `wake-filter.ts` + `bun test` suite. Companion server-side fix in
   `services/api/.../routers/dashboard/ws.py`: `plan.submitted` now matches
   the payload's `coordinator_label` (no DB race) and negative owner
-  lookups expire instead of blinding the socket forever.
+  lookups expire instead of blinding the socket forever. Review-cycle
+  hardenings (same PR): quiet relay set enumerates
+  `task.evaluator_timeout`/`task.rework_exhausted` so custom wake sets
+  can't silently mute them; digest delivery is peek → commit (failed
+  notifications retain counts); the ws payload fast path is gated to
+  `plan.submitted`; `plan.completed`/`plan.abandoned` added to the
+  orchestrator defaults (orchestrator ruling + ADR-0089 amendment).
 - ADR-0086 — `plan.submitted` client pass-through for coordinators and
   `?coordinator_label=` on the WS URL so a coordinator picks up new
   plans in-session.

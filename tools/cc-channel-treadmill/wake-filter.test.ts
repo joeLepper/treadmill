@@ -97,6 +97,17 @@ describe('orchestrator default wake set', () => {
     expect(gate.wakes('datamigration.first_success')).toBe(true)
   })
 
+  test('terminal plan outcomes wake; lifecycle echoes stay suppressed (orchestrator ruling)', () => {
+    // plan.completed / plan.abandoned are decision-carrying and
+    // ENUMERATED BY NAME (not plan.*); registered/activated/submitted
+    // are the orchestrator's own submits echoed back — the noise class.
+    expect(gate.wakes('plan.completed')).toBe(true)
+    expect(gate.wakes('plan.abandoned')).toBe(true)
+    expect(gate.wakes('plan.registered')).toBe(false)
+    expect(gate.wakes('plan.activated')).toBe(false)
+    expect(gate.wakes('plan.submitted')).toBe(false)
+  })
+
   test('noise classes are suppressed', () => {
     expect(gate.wakes('github.check_run_completed')).toBe(false)
     expect(gate.wakes('github.pr_synchronize')).toBe(false)
@@ -123,28 +134,45 @@ describe('suppression digest', () => {
     expect(gate.shouldDeliver('github.pr_synchronize', 'task-b')).toBe(false)
     expect(gate.pendingCount).toBe(4)
 
-    // The next delivered wake claims the digest line…
+    // The next delivered wake carries the digest line (peek is pure)…
     expect(gate.shouldDeliver('github.pr_merged', 'task-a')).toBe(true)
-    expect(gate.takeDigest()).toBe(
+    expect(gate.peekDigest()).toBe(
       'suppressed since last wake: 3 github.check_run_completed, ' +
         '1 github.pr_synchronize across 2 tasks',
     )
 
-    // …and the window resets.
+    // …and the window resets only on the post-delivery commit.
+    expect(gate.pendingCount).toBe(4)
+    gate.markDelivered()
     expect(gate.pendingCount).toBe(0)
-    expect(gate.takeDigest()).toBeNull()
+    expect(gate.peekDigest()).toBeNull()
   })
 
   test('digest omits the task suffix when no suppressed event carried a task id', () => {
     const gate = new WakeGate(['github.pr_merged'])
     gate.shouldDeliver('deploy.succeeded', null)
-    expect(gate.takeDigest()).toBe('suppressed since last wake: 1 deploy.succeeded')
+    expect(gate.peekDigest()).toBe('suppressed since last wake: 1 deploy.succeeded')
   })
 
   test('nothing suppressed → no digest line on delivery', () => {
     const gate = new WakeGate(['github.pr_merged'])
     expect(gate.shouldDeliver('github.pr_merged')).toBe(true)
-    expect(gate.takeDigest()).toBeNull()
+    expect(gate.peekDigest()).toBeNull()
+  })
+
+  test('a failed delivery retains the digest (peek without commit)', () => {
+    // PR #310 review hardening: takeDigest()-before-await silently lost
+    // the digest when the notification rejected. Peek is pure — only a
+    // successful delivery's markDelivered() clears the counters.
+    const gate = new WakeGate(['github.pr_merged'])
+    gate.shouldDeliver('github.check_run_completed', 'task-a')
+    const first = gate.peekDigest()
+    expect(first).toBe('suppressed since last wake: 1 github.check_run_completed across 1 task')
+    // Notification failed → no markDelivered() → digest still pending.
+    expect(gate.peekDigest()).toBe(first)
+    expect(gate.pendingCount).toBe(1)
+    gate.markDelivered()
+    expect(gate.peekDigest()).toBeNull()
   })
 })
 
@@ -166,16 +194,22 @@ describe('max-suppression-age', () => {
     // Inside the window: nothing fires (the caller's periodic check
     // returns empty-handed).
     nowMs = AGE - 1
-    expect(gate.takeOverdueDigest()).toBeNull()
+    expect(gate.peekOverdueDigest()).toBeNull()
 
     // Past the window (age + the caller's next poll tick): one digest.
     nowMs = AGE + 1
-    expect(gate.takeOverdueDigest()).toBe(
+    expect(gate.peekOverdueDigest()).toBe(
       'suppressed since last wake: 2 github.check_run_completed across 1 task',
     )
 
-    // ONE wake: the take reset the window, so the next tick is silent.
-    expect(gate.takeOverdueDigest()).toBeNull()
+    // A FAILED digest wake (no commit) retries on the next tick…
+    expect(gate.peekOverdueDigest()).toBe(
+      'suppressed since last wake: 2 github.check_run_completed across 1 task',
+    )
+
+    // …and ONE successful wake commits: the next tick is silent.
+    gate.markDelivered()
+    expect(gate.peekOverdueDigest()).toBeNull()
   })
 
   test('no overdue digest when nothing is suppressed, however old the window', () => {
@@ -185,7 +219,7 @@ describe('max-suppression-age', () => {
       now: () => nowMs,
     })
     nowMs = AGE * 10
-    expect(gate.takeOverdueDigest()).toBeNull()
+    expect(gate.peekOverdueDigest()).toBeNull()
   })
 
   test('a delivered wake re-arms the age window', () => {
@@ -197,12 +231,12 @@ describe('max-suppression-age', () => {
     gate.shouldDeliver('github.check_run_completed')
     nowMs = AGE - 1000
     gate.shouldDeliver('github.pr_merged') // delivered…
-    gate.takeDigest() // …claims digest, stamps delivery
+    gate.markDelivered() // …successful delivery commits + stamps
     gate.shouldDeliver('github.pr_synchronize')
     nowMs = AGE + 1000 // only ~2s since the delivery — not overdue
-    expect(gate.takeOverdueDigest()).toBeNull()
+    expect(gate.peekOverdueDigest()).toBeNull()
     nowMs = AGE - 1000 + AGE + 1 // a full age after the delivery
-    expect(gate.takeOverdueDigest()).toBe(
+    expect(gate.peekOverdueDigest()).toBe(
       'suppressed since last wake: 1 github.pr_synchronize',
     )
   })
@@ -213,7 +247,25 @@ describe('max-suppression-age', () => {
 describe('wakeSetViolations', () => {
   test('violating pair: a wake set missing relay-significant actions is named', () => {
     const violations = wakeSetViolations(['github.pr_merged'], 'quiet')
-    expect(violations).toEqual(['task.escalated_to_operator', 'task.cancelled'])
+    expect(violations).toEqual([
+      'task.escalated_to_operator',
+      'task.evaluator_timeout',
+      'task.rework_exhausted',
+      'task.cancelled',
+    ])
+  })
+
+  test('quiet relay set pins the ENUMERATED escalation-class actions (muting guard)', () => {
+    // PR #310 blocking finding: a custom wake set that covers the
+    // escalated_to_operator action but drops the two enumerated
+    // escalation-class wire actions must FAIL the superset check —
+    // otherwise the WARN silently passes a config that mutes an
+    // escalation class (the one forbidden failure mode).
+    const violations = wakeSetViolations(
+      ['github.pr_merged', 'task.escalated_to_operator', 'task.cancelled'],
+      'quiet',
+    )
+    expect(violations).toEqual(['task.evaluator_timeout', 'task.rework_exhausted'])
   })
 
   test('orchestrator defaults satisfy the quiet relay set', () => {

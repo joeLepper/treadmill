@@ -96,10 +96,16 @@ const RELAY_LEVEL: RelayLevel = (RELAY_LEVELS as readonly string[]).includes(
 // relay levels, which select from events that already woke the session).
 // Relay messages and reconcile frames bypass the gate — they always wake.
 // Suppressed events are counted, never dropped silently: the digest line
-// rides the next delivered wake, and max-suppression-age bounds how long a
-// suppressed-only stream can go without ONE self-originated digest wake.
-// Digest state is in-memory; a server restart loses suppressed counts —
-// acceptable, the events table is the record (ADR-0089 plan, risks).
+// rides the next delivered EVENT or RECONCILE wake — deliberately not
+// relay wakes, whose bodies are sender-attributed content that must not
+// get server text prepended (so a suppressed-only stream with chatty
+// relays still digests via max-suppression-age; blindness stays bounded).
+// max-suppression-age bounds how long a suppressed-only stream can go
+// without ONE self-originated digest wake. Digest delivery is two-phase
+// (peekDigest → notify → markDelivered) so a failed notification retains
+// the counts instead of silently losing them. Digest state is in-memory;
+// a server restart loses suppressed counts — acceptable, the events table
+// is the record (ADR-0089 plan, risks).
 const WAKE_PATTERNS = parseWakeActions(process.env.TREADMILL_WAKE_ACTIONS, ROLE)
 const MAX_SUPPRESSION_AGE_MIN = (() => {
   const v = Number(process.env.TREADMILL_MAX_SUPPRESSION_AGE ?? '60')
@@ -203,8 +209,10 @@ async function reconcile(reason: string, emit = true): Promise<void> {
   if (!emit) return
   const active = mine.filter(t => !isTerminal(String(t['derived_status'] ?? '')))
   // Reconcile frames ALWAYS wake (ADR-0089: never filtered) and, as a
-  // delivered wake, carry any pending suppression digest.
-  const digest = wakeGate.takeDigest()
+  // delivered wake, carry any pending suppression digest. Peek now,
+  // commit only after the notification succeeds — a failed send must not
+  // lose the digest (PR #310 review hardening).
+  const digest = wakeGate.peekDigest()
   const meta: Record<string, string> = {
     catch_up: 'true',
     active_count: String(active.length),
@@ -226,6 +234,7 @@ async function reconcile(reason: string, emit = true): Promise<void> {
       meta,
     },
   })
+  wakeGate.markDelivered()
 }
 
 /** Client-side ownership check; re-reconciles (throttled) on unknown ids so
@@ -332,11 +341,14 @@ function connect(): void {
       if (eventId) meta['event_id'] = eventId
       // ADR-0089 wake gate: suppressed events are counted into the digest
       // and do NOT wake the session. The events table keeps the record.
+      // Only real task ids feed the digest's "across N tasks" figure —
+      // plan-scoped events count per-action but not as tasks.
       const entityAction = `${meta.entity_type}.${meta.action}`
-      if (!wakeGate.shouldDeliver(entityAction, task || plan || null)) return
-      // Delivered wake: claim any pending digest and prepend its one-line
-      // summary so suppressed state stays reconcilable.
-      const digest = wakeGate.takeDigest()
+      if (!wakeGate.shouldDeliver(entityAction, task || null)) return
+      // Delivered wake: prepend any pending digest line so suppressed
+      // state stays reconcilable. Peek now, commit after the notification
+      // succeeds — a failed send must not lose the digest.
+      const digest = wakeGate.peekDigest()
       if (digest) meta['suppressed_digest'] = digest
       await mcp.notification({
         method: 'notifications/claude/channel',
@@ -349,6 +361,7 @@ function connect(): void {
           meta,
         },
       })
+      wakeGate.markDelivered()
     })().catch(err => console.error(`treadmill-events: forward failed: ${err}`))
   }
 
@@ -450,6 +463,15 @@ async function startRelayWatcher(): Promise<void> {
 // label (set by tools/cc-channels/launch-session.sh). Otherwise stay a
 // connected-but-inert MCP server.
 if (LABEL) {
+  // Name the RESOLVED wake set so a typo'd TREADMILL_WAKE_ACTIONS (which
+  // falls back to the role default) is self-diagnosing from the log.
+  console.error(
+    `treadmill-events: wake set = ` +
+      (WAKE_PATTERNS === null
+        ? `unfiltered (role '${ROLE || 'unset'}')`
+        : WAKE_PATTERNS.join(', ')) +
+      `; relay level = ${RELAY_LEVEL}`,
+  )
   // ADR-0089 wake ⊇ relay layering invariant: a relay-significant event
   // that never wakes can never relay — the two knobs must stay one
   // layered family. WARN (don't die) so a misconfigured pair still runs,
@@ -474,7 +496,10 @@ if (LABEL) {
   // unfiltered gate never suppresses.
   if (wakeGate.filtered) {
     setInterval(() => {
-      const digest = wakeGate.takeOverdueDigest()
+      // Peek → notify → commit: a failed digest wake leaves the counts
+      // and the age window untouched, so the next tick retries instead
+      // of silently dropping the digest.
+      const digest = wakeGate.peekOverdueDigest()
       if (!digest) return
       mcp
         .notification({
@@ -486,6 +511,7 @@ if (LABEL) {
             meta: { suppression_digest: 'true' },
           },
         })
+        .then(() => wakeGate.markDelivered())
         .catch(err =>
           console.error(`treadmill-events: digest wake failed: ${err}`),
         )

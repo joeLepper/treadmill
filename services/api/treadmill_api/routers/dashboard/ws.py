@@ -35,10 +35,23 @@ expire after ``_NEGATIVE_TTL_S`` because the in-process broadcast runs
 inside the emitter's still-open transaction, so a lookup can race the
 commit (see the cache comment in ``events_socket``).
 
-``?coordinator_label=<label>`` additionally matches on the event
-payload's own ``coordinator_label`` field before any DB lookup —
-``plan.submitted`` carries it, and the payload path is the only one
-that cannot lose the race against the submitting transaction's commit.
+``?coordinator_label=<label>`` additionally matches ``plan.submitted``
+events on the payload's own ``coordinator_label`` field before any DB
+lookup — that payload path is the only one that cannot lose the race
+against the submitting transaction's commit. The match is deliberately
+gated to ``plan.submitted``: the manual-event surface passes arbitrary
+caller JSON through, so an event-type-agnostic payload match would
+forward unverified events to coordinator sockets.
+
+Race inventory: any event published pre-commit by its emitter (e.g.
+``plan.registered``/``plan.activated`` in ``POST /plans``,
+``task.registered`` during submit) can lose its FIRST delivery on a
+``created_by``-filtered socket — the lookup misses, the event drops,
+and the negative-TTL cache bounds further blindness to
+``_NEGATIVE_TTL_S``. Subscribers recover via reconcile-on-connect and
+the channel client's throttled ownership refresh; ``plan.submitted`` is
+the one event whose first delivery is itself load-bearing (coordinator
+pickup), hence its payload fast path.
 """
 
 from __future__ import annotations
@@ -409,7 +422,20 @@ async def events_socket(
                     # lookup from this (separate) session cannot see the
                     # plan row yet and would drop the one event this
                     # filter branch exists to deliver (task 9b7c1286).
-                    if not matched and coordinator_label is not None:
+                    # Gated to plan.submitted (the documented carrier):
+                    # the manual-event surface (POST /api/v1/events,
+                    # ADR-0086 §12.4 Path B) passes caller-supplied JSON
+                    # through unchanged, and an unconstrained payload-key
+                    # match would let any such payload steer events onto
+                    # a coordinator socket without DB verification
+                    # (PR #310 review). Other carriers extend this gate
+                    # deliberately, not by accident.
+                    if (
+                        not matched
+                        and coordinator_label is not None
+                        and record.get("entity_type") == "plan"
+                        and record.get("action") == "submitted"
+                    ):
                         _payload = record.get("payload")
                         if (
                             isinstance(_payload, dict)
