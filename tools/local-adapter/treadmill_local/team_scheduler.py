@@ -332,6 +332,25 @@ class TeamScheduler:
 # ── real-world wiring ────────────────────────────────────────────────────────
 
 
+def default_team_control_path() -> Path:
+    """The in-repo location of ``treadmill-team-control``, resolved from
+    this module's own path: ``tools/local-adapter/treadmill_local/`` →
+    ``parents[2]`` is ``tools/`` → ``tools/cc-channels/systemd/``.
+
+    Task 1518598a regression note: the original wiring used
+    ``parents[3]`` (the REPO ROOT), which resolves to
+    ``<repo>/cc-channels/systemd`` — missing the ``tools/`` segment —
+    so the daemon exited 1 unless ``TREADMILL_TEAM_CONTROL`` overrode
+    it. The plan's coarse grep gate never stat'd the path; the suite
+    now asserts this function resolves to an EXISTING file on the real
+    tree.
+    """
+    return (
+        Path(__file__).resolve().parents[2]
+        / "cc-channels" / "systemd" / "treadmill-team-control"
+    )
+
+
 def _real_fetch_decision(api_url: str) -> dict | None:
     try:
         with urllib.request.urlopen(
@@ -451,11 +470,7 @@ def main() -> int:
     if control_env:
         control_script = Path(control_env)
     else:
-        # tools/local-adapter/treadmill_local/ -> repo root -> the script.
-        control_script = (
-            Path(__file__).resolve().parents[3]
-            / "cc-channels" / "systemd" / "treadmill-team-control"
-        )
+        control_script = default_team_control_path()
     if not control_script.exists():
         logger.error(
             "treadmill-team-control not found at %s — set "
