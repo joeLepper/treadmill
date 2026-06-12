@@ -100,3 +100,51 @@
 .tm-pulse { animation: tm-pulse-soft 1.6s ease-in-out infinite; }
 
 .tm ::selection { background: var(--tm-info-bg); color: var(--tm-t1); }
+
+/* ─── Markdown prose (drafts doc reader) ─────────────────────────────── */
+.tm-md { color: var(--tm-t2); font-size: 13px; line-height: 1.62; }
+.tm-md > *:first-child { margin-top: 0; }
+.tm-md h1, .tm-md h2, .tm-md h3, .tm-md h4 {
+  font-family: var(--tm-mono); color: var(--tm-t1); font-weight: 500;
+  letter-spacing: 0.3px; margin: 26px 0 10px; line-height: 1.3;
+}
+.tm-md h1 { font-size: 19px; }
+.tm-md h2 {
+  font-size: 14.5px; text-transform: uppercase; letter-spacing: 0.8px;
+  color: var(--tm-t1); padding-bottom: 7px; border-bottom: 1px solid var(--tm-border);
+}
+.tm-md h3 { font-size: 13px; color: var(--tm-t2); text-transform: uppercase; letter-spacing: 0.6px; }
+.tm-md h4 { font-size: 12px; color: var(--tm-t3); }
+.tm-md p { margin: 0 0 12px; }
+.tm-md strong { color: var(--tm-t1); font-weight: 600; }
+.tm-md em { color: var(--tm-t1); font-style: italic; }
+.tm-md a { color: var(--tm-info-fg); text-decoration: none; border-bottom: 1px solid var(--tm-info-edge); }
+.tm-md a:hover { background: var(--tm-info-bg); }
+.tm-md ul, .tm-md ol { margin: 0 0 12px; padding-left: 22px; }
+.tm-md li { margin: 3px 0; }
+.tm-md li::marker { color: var(--tm-t4); }
+.tm-md code {
+  font-family: var(--tm-mono); font-size: 11.5px; background: var(--tm-surface-2);
+  border: 1px solid var(--tm-border); border-radius: 3px; padding: 0.5px 5px; color: var(--tm-warn-fg);
+}
+.tm-md pre {
+  background: var(--tm-surface); border: 1px solid var(--tm-border); border-radius: 3px;
+  padding: 12px 14px; overflow-x: auto; margin: 0 0 14px;
+}
+.tm-md pre code { background: none; border: none; padding: 0; color: var(--tm-t2); font-size: 11.5px; line-height: 1.55; }
+.tm-md blockquote {
+  margin: 0 0 14px; padding: 8px 14px; border-left: 3px solid var(--tm-info-edge);
+  background: var(--tm-surface); color: var(--tm-t3); font-style: italic;
+}
+.tm-md hr { border: none; border-top: 1px solid var(--tm-border); margin: 22px 0; }
+.tm-md table {
+  border-collapse: collapse; width: 100%; margin: 0 0 14px; font-size: 12px;
+  font-family: var(--tm-mono);
+}
+.tm-md th {
+  text-align: left; padding: 7px 10px; border: 1px solid var(--tm-border);
+  background: var(--tm-surface); color: var(--tm-t3); font-weight: 500;
+  text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;
+}
+.tm-md td { padding: 7px 10px; border: 1px solid var(--tm-border); color: var(--tm-t2); vertical-align: top; }
+.tm-md tr:nth-child(even) td { background: var(--tm-surface); }

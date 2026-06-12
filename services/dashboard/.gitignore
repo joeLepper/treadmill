@@ -7,3 +7,8 @@ dist
 coverage
 .vite
 *.tsbuildinfo
+
+# Real ADR/plan + transcript snapshots — local only, never commit to the
+# public repo (RAMJAC confidentiality). The doc reader + transcript drawer
+# load these via import.meta.glob; absent on a clean clone → empty state.
+src/fixtures/

@@ -33,7 +33,7 @@ Adopt this verbatim for Treadmill's `/tasks/:id` (and apply the same idea, with 
 
 **Reference:** `src/pages/Tasks.tsx:60-86`, `src/pages/WorkflowRuns.tsx:33-37`, `src/pages/Kanban.tsx:29-41`.
 
-`?repo=…&status=…&task=…` lives in the URL on every list page. The back button works. Bookmarks work. Cross-page links can pre-filter (the RepoDetail page's `View Tasks` link in `src/pages/RepoDetail.tsx:155-161`). It's also a prerequisite for sharing operator views in Slack/chat. Bunkhouse's `UI_CONSISTENCY_PLAN.md:22-26` elevated this and the code honored it. Copy it.
+`?repo=…&status=…&task=…` lives in the URL on every list page. The back button works. Bookmarks work. Cross-page links can pre-filter (the RepoDetail page's `View Tasks` link in `src/pages/RepoDetail.tsx:155-161`). It's also a prerequisite for sharing operator views in Slack/chat. Bunkhouse's `UI_CONSISTENCY_PLAN.md:22-26` elevated this and the code honored it. Copy it. **Treadmill generalizes this beyond filters to *all* view state — see "Standing conventions → Convention 1" below.**
 
 ### 3. Adaptive refresh — WebSocket-first with polling fallback, and *show* which mode you're in
 
@@ -196,6 +196,40 @@ These are the rules that prevent the bunkhouse antipatterns from recurring.
 8. **Connection / freshness affordance visible on every live page** — operator must always know if they're seeing live or stale data.
 9. **One affordance class per row** — either inline edit (no detail page) or detail page (no inline edit), never both.
 10. **No commented-out routes, no phantom pages, no vestigial state.** Feature flags or nothing.
+11. **The URL is the source of truth for all view state.** If the UI can render a state, that state must be reproducible from the URL alone. Use the `useViewState` hook. See the convention below.
+12. **Every visual encoding is self-documenting and inspectable.** Any mark that encodes data through width, length, color, or position carries a legend stating the encoding *and* reveals the underlying datum on hover. No mystery bars. See the convention below.
+
+---
+
+## Standing conventions
+
+The mandatory rules above are the *what*; these two conventions are load-bearing enough to spell out in full, because they recur on every page and are the easiest to erode one well-meaning `useState` at a time.
+
+### Convention 1 — URL-addressable view state ("if it renders, it's linkable")
+
+This generalizes the bunkhouse lineage rule (#2 above), which scoped URL-as-truth to *list filters*. In Treadmill it is the rule for **all** view state, not just filters.
+
+**The principle.** Any state that changes what is on screen must be reproducible from the URL alone. Copy-paste the address bar, refresh the page, or paste the link into a chat, and the recipient sees exactly the screen you saw. The back button steps through view changes. Escalation events and briefs can deep-link to the precise drilled-in state that needs attention.
+
+**The split.**
+- **Identity → the path.** Which plan, which doc, which task: `/plans/:planId`, `/adrs/:docId`.
+- **View state → the query string.** Which tab is active, which row is expanded, which drawer/modal is open, which filter is selected, which time window, which sort. `/plans/repo-hygiene?tab=execution&task=nightly-matrix&step=<id>`.
+
+**The mechanism.** Use `useViewState` (`src/design/useViewState.ts`) — never raw `useState` for view state. It wraps the router's query string with merge-preserving `get` / `set` / `toggle` / `is`, so flipping one param never clobbers another, and a param sitting at its default value is dropped from the URL (so the clean state is the clean URL: `/plans/x`, not `/plans/x?tab=execution`).
+
+**The boundary.** Not *every* boolean belongs in the URL. The line is whether the state is **navigational/inspection state** (worth sharing, bookmarking, or returning to) versus **local micro-interaction state** (transient, per-element, uninteresting to a recipient). In the URL: active tab, expanded row, open drawer/modal, selected item, filter, sort, time window. Stays in component state: hover, a single hovered tooltip, per-line expand/collapse inside a 300-row log, and in-progress uncommitted form text. When in doubt, ask "would a teammate want this in the link I send them?" — if yes, it's a URL param.
+
+### Convention 2 — self-documenting, inspectable visual encodings
+
+Bars, strips, steppers, and sparklines compress data into geometry. The operator must never have to *guess* what a width or a color means, and must always be able to recover the exact value behind a mark.
+
+**Two obligations for every encoded visual.**
+1. **A legend states the encoding, near the mark.** What does segment width mean? What does each color mean? Stated in words adjacent to the chart — not left for the reader to infer from the picture. The reader should be able to decode the chart *without hovering anything*.
+2. **Hover reveals the underlying datum.** Hovering any segment yields the specific row behind it — its label, its value (duration / cost / count), its outcome, and any failure/verdict detail. A bare native `title` is the floor, not the finish; a real popover is preferred where the detail is more than one line.
+
+**Distinct encodings must look distinct — or be labelled as distinct.** Width-as-duration (a proportional timeline, e.g. the plan-detail journey bar) and width-as-current-position (a discrete stepper, e.g. the ADR-ledger pipeline dots) are different chart grammars that can look superficially alike. Each legend must make its own grammar explicit so the operator never carries one chart's reading onto another.
+
+**Color stays semantic.** Encoding color obeys rule #6 — red is "needs attention," amber is "in flight," green is "good outcome," muted gray is "explicit stop." A chart never repurposes those tones decoratively.
 
 ---
 
