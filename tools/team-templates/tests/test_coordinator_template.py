@@ -344,8 +344,11 @@ def test_per_check_advance_rework_block_is_gone() -> None:
     assert "last required check" not in body
     assert "Write a `task.ci_result` event via `POST /api/v1/events`" not in body
     # check_run survives ONLY as the never-re-derive rule + the
-    # transition note (no handler steps attached).
-    assert "They require NO action" in body
+    # post-#340 filtered-wake note (no handler steps attached). The
+    # pre-#340 "still wake you until the wake-filter task lands"
+    # transition prose is gone (task fb3d593f).
+    assert "they require NO action" in body
+    assert "until the ADR-0090 wake-filter task lands" not in body
 
 
 def test_ci_result_handler_pins_payload_and_decisions() -> None:
@@ -419,3 +422,29 @@ def test_merge_step_reads_auto_merge_and_holds_when_false() -> None:
     )
     # The hold resumes on the orchestrator's own merge webhook.
     assert "when the `github.pr_merged` webhook arrives from THEIR merge" in body
+
+
+def test_pr_synchronize_handler_is_marked_filtered_by_default() -> None:
+    """§3.6 became a DEAD HANDLER when the ADR-0090 wake filter (#340)
+    dropped `github.pr_synchronize` from the coordinator default set —
+    the wake never arrives, so handler steps attached to it are
+    unreachable instructions (task fb3d593f). The section survives as
+    a filtered-by-default marker redirecting to where the intent
+    actually lives: the §8.5 gate-time mergeability re-poll.
+    Whitespace-normalized per the #313 pattern (phrases span hard line
+    wraps in the template)."""
+    body = _coordinator_plain()
+    assert (
+        "### 3.6 `github.pull_request.synchronize` — FILTERED BY DEFAULT "
+        "(no handler)" in body
+    )
+    assert "This wake DOES NOT ARRIVE" in body
+    assert "Do not poll mergeability per push" in body
+    # The intent's real home, named explicitly.
+    assert "§8.5 post-review mergeability re-poll" in body
+    # The old per-push handler steps must not survive: §3.6 carried its
+    # own 10s/30-attempt re-poll instruction; the only remaining
+    # polling-bound reference outside §7/§8.5 would be a regression.
+    assert "Re-poll `task_mergeability` for that PR" not in body
+    # Widened-allowlist sessions get the noise-tolerance rule.
+    assert "harmless but redundant" in body

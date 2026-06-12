@@ -47,11 +47,12 @@
  * --channels / --dangerously-load-development-channels contract may drift).
  */
 import { watch } from 'node:fs'
-import { mkdir, readdir, readFile, unlink } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { RelayInbox } from './relay-inbox.ts'
 import {
   RELAY_LEVELS,
   WakeGate,
@@ -392,42 +393,35 @@ const RELAY_DIR = join(homedir(), '.cc-channels', LABEL, 'relay')
 const RELAY_SUBFOLDERS = ['coord', 'worker'] as const
 type RelaySubfolder = (typeof RELAY_SUBFOLDERS)[number]
 
-async function processRelayFile(
-  fpath: string,
-  subfolder: RelaySubfolder | null,
-): Promise<void> {
-  let content: string
-  try {
-    content = await readFile(fpath, 'utf-8')
-    await unlink(fpath)
-  } catch {
-    return // already consumed (duplicate fs.watch event) or unreadable
-  }
-  const meta: Record<string, string> = { source: 'relay' }
-  if (subfolder) meta.subfolder = subfolder
-  await mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content,
-      meta,
-    },
-  })
-}
+// Transactional relay delivery (task ecd6d6eb — the 2026-06-12
+// drain-without-delivery race). The inbox unlinks a file only AFTER its
+// notification resolves, and the startup drain is GATED on the MCP
+// `initialized` handshake (stdio connect alone does not mean the client
+// is consuming — notifications written into the resume window land
+// nowhere; that is exactly how worker-3's countermand drained to zero
+// files without ever reaching the session). Files retained by a failed
+// send are retried by the resweep below and by the next start's drain.
+const relayInbox = new RelayInbox(
+  RELAY_DIR,
+  async (content, meta) => {
+    await mcp.notification({
+      method: 'notifications/claude/channel',
+      params: { content, meta },
+    })
+  },
+  { subfolders: RELAY_SUBFOLDERS },
+)
+
+// How often retained (failed-send) relay files are retried. fs.watch
+// never re-fires for an existing file, so without this sweep a retained
+// file would wait for the next restart.
+const RELAY_RESWEEP_PERIOD_MS = 60_000
 
 async function startRelayWatcher(): Promise<void> {
   await mkdir(RELAY_DIR, { recursive: true })
-  // Drain messages that arrived while the session was down — base dir first,
-  // then each subfolder. The drain order matters less than that every queued
-  // file gets surfaced before the watcher arms (a watch event firing during
-  // drain would double-deliver because both paths call processRelayFile,
-  // which is idempotent only by way of unlink-before-notify).
-  const pending = (await readdir(RELAY_DIR)).filter(f => f.endsWith('.md'))
-  for (const fname of pending) {
-    await processRelayFile(join(RELAY_DIR, fname), null)
-  }
   watch(RELAY_DIR, (_event, filename) => {
     if (!filename?.endsWith('.md')) return
-    processRelayFile(join(RELAY_DIR, filename), null).catch(err =>
+    relayInbox.processFile(join(RELAY_DIR, filename), null).catch(err =>
       console.error(`treadmill-events: relay forward failed: ${err}`),
     )
   })
@@ -440,25 +434,41 @@ async function startRelayWatcher(): Promise<void> {
       console.error(`treadmill-events: subfolder mkdir failed for ${sub}: ${err}`)
       continue
     }
-    let subPending: string[] = []
-    try {
-      subPending = (await readdir(subPath)).filter(f => f.endsWith('.md'))
-    } catch {
-      // Directory was unreadable for a transient reason; skip the drain but
-      // still arm the watcher below so subsequent files do land.
-    }
-    for (const fname of subPending) {
-      await processRelayFile(join(subPath, fname), sub)
-    }
     watch(subPath, (_event, filename) => {
       if (!filename?.endsWith('.md')) return
-      processRelayFile(join(subPath, filename), sub).catch(err =>
+      relayInbox.processFile(join(subPath, filename), sub).catch(err =>
         console.error(
           `treadmill-events: relay forward failed (${sub}): ${err}`,
         ),
       )
     })
   }
+
+  // Gate the startup drain on the session being ATTACHED. The MCP
+  // `initialized` notification is the only client-readiness signal the
+  // server has; `getClientVersion()` doubles as the already-initialized
+  // probe in case the handshake won the race against this setup code.
+  const attach = () => {
+    relayInbox.markAttached().catch(err =>
+      console.error(`treadmill-events: relay startup drain failed: ${err}`),
+    )
+  }
+  if (mcp.getClientVersion() !== undefined) {
+    attach()
+  } else {
+    const prev = mcp.oninitialized
+    mcp.oninitialized = () => {
+      prev?.()
+      attach()
+    }
+  }
+
+  // Resweep: retry anything a failed notification retained on disk.
+  setInterval(() => {
+    relayInbox.drain().catch(err =>
+      console.error(`treadmill-events: relay resweep failed: ${err}`),
+    )
+  }, RELAY_RESWEEP_PERIOD_MS)
 }
 
 // Launch-time gate: only become an active channel when this session carries a
