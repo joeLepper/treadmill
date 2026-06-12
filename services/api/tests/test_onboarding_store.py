@@ -72,20 +72,18 @@ def test_onboarding_models_and_store_shape() -> None:
 
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
+TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
 integration = pytest.mark.skipif(
-    not INTEGRATION,
-    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up`",
+    not (INTEGRATION and TEST_DB_URL),
+    reason="set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_DATABASE_URL (a DEDICATED test database) to run; requires `treadmill-local up`",
 )
 
 
-DEFAULT_DATABASE_URL = (
-    "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill"
-)
 
 
 @pytest.fixture(scope="module")
 def database_url() -> str:
-    return os.environ.get("TREADMILL_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
+    return TEST_DB_URL
 
 
 @pytest.fixture(scope="module")
@@ -102,7 +100,7 @@ def engine(database_url: str) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def migrations_applied(database_url: str) -> None:
-    if not INTEGRATION:
+    if not (INTEGRATION and TEST_DB_URL):
         return
     services_api_dir = Path(__file__).resolve().parent.parent
     env = {**os.environ, "DATABASE_URL": database_url}
@@ -477,8 +475,12 @@ async def test_repo_config_git_author_override_check_constraint_rejects_name_wit
         git_author_email=None,
     )
     async with session_factory() as session:
-        await store.upsert_repo_config(session, config)
+        # The store's upsert executes its INSERT immediately, so the
+        # CHECK violation surfaces there, not at commit — the raises
+        # context covers both points (raise-point drift fixed for
+        # task 9200ef54; the constraint pin itself is unchanged).
         with pytest.raises(sqlalchemy.exc.IntegrityError):
+            await store.upsert_repo_config(session, config)
             await session.commit()
 
 

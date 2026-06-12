@@ -34,21 +34,19 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
+TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not INTEGRATION,
-    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up`",
+    not (INTEGRATION and TEST_DB_URL),
+    reason="set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_DATABASE_URL (a DEDICATED test database) to run; requires `treadmill-local up`",
 )
 
 
-DEFAULT_DATABASE_URL = (
-    "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill"
-)
 DEFAULT_API_URL = "http://localhost:8088"
 
 
 @pytest.fixture(scope="module")
 def database_url() -> str:
-    return os.environ.get("TREADMILL_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
+    return TEST_DB_URL
 
 
 @pytest.fixture(scope="module")

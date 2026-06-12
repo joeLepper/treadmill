@@ -59,14 +59,15 @@ from sqlalchemy.engine import Engine
 
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
+TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
 REAL_CLAUDE = os.environ.get("TREADMILL_REAL_CLAUDE") == "1"
 USE_HARNESS = os.environ.get("TREADMILL_LOCAL_HARNESS") == "1"
 
 
 pytestmark = pytest.mark.skipif(
-    not INTEGRATION,
+    not (INTEGRATION and TEST_DB_URL),
     reason=(
-        "set TREADMILL_INTEGRATION=1 to run the two-step workflow smoke; "
+        "set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_DATABASE_URL (a DEDICATED test database) to run the two-step workflow smoke; "
         "requires `treadmill-local up` (or TREADMILL_LOCAL_HARNESS=1 to "
         "use the bring-up fixture)"
     ),
@@ -74,9 +75,6 @@ pytestmark = pytest.mark.skipif(
 
 
 DEFAULT_API_URL = "http://localhost:8088"
-DEFAULT_DATABASE_URL = (
-    "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill"
-)
 DEFAULT_AWS_ENDPOINT = "http://localhost:5001"
 
 AGENT_IMAGE = "treadmill-agent:dev"
@@ -101,7 +99,7 @@ def api_url() -> str:
 
 @pytest.fixture(scope="module")
 def database_url() -> str:
-    return os.environ.get("TREADMILL_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
+    return TEST_DB_URL
 
 
 @pytest.fixture(scope="module")

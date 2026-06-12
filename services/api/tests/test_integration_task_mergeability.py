@@ -1,17 +1,36 @@
-"""Integration tests for the task_mergeability VIEW (ADR-0013).
+"""Integration tests for the task_mergeability VIEW — current (post-ADR-0087) shape.
 
-Fixture-driven: each test seeds events + workflow_run_steps + task_prs
-in shapes that exercise one priority slot in the VIEW's CASE-WHEN. The
-twelve required cases mirror ADR-0013 §"Derived states" plus the
-per-commit invalidation case (push new HEAD → mergeable falls back to
-pending).
+REWRITTEN for task 9200ef54. The original file tested the pre-Phase-5
+VIEW through tables ADR-0087 dropped (``roles``, ``workflow_runs``,
+``workflow_run_steps``, ``event_triggers``, …): its fixture builder
+INSERTed into them and its ``truncate_all`` named them, so on a current
+schema every test errored at setup — and its module-scope default
+pointed at the LIVE database. Classification of the old coverage:
 
-Also includes a router smoke for ``GET /api/v1/tasks/{id}/mergeability``.
+  * wf-review / wf-validate step-row arms + ADR-0029 severity
+    machinery — DEAD: the VIEW's review/validate branches read
+    ``task.evaluator_verdict`` / ``review.override`` /
+    ``validate.override`` events now (ADR-0087 supersession map).
+  * conflict arms — SUPERSEDED by
+    ``test_integration_conflict_staleness.py`` (both polarities +
+    staleness + the blocked-on-conflict round trip).
+  * router smokes — covered by the unit suites
+    (``test_routers_tasks_mergeability_resolve.py`` + the tasks-router
+    tests); they also defaulted to a LIVE API URL — the same hazard
+    class this task removes.
+  * review / validate / ci arms + priority + per-commit invalidation
+    on the CURRENT view — covered nowhere live. That is what this file
+    now tests.
 
-Skipped by default. To run:
+Run requirements (task 9200ef54 safety rule — no live-DB default):
 
-  treadmill-local up
-  TREADMILL_INTEGRATION=1 uv run pytest services/api/tests/test_integration_task_mergeability.py
+  TREADMILL_INTEGRATION=1
+  TREADMILL_TEST_DATABASE_URL=postgresql+psycopg://.../<DEDICATED TEST DB>
+
+Skipped unless BOTH are set. This suite truncates ``plans``/``tasks``/
+``task_prs``/``task_dependencies``/``events`` between tests — the events
+table is live coordination state, so pointing at the live stack must be
+an explicit, conscious act.
 """
 
 from __future__ import annotations
@@ -19,818 +38,359 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
 import uuid
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import httpx
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Engine
 
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
+TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not INTEGRATION,
-    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up`",
+    not (INTEGRATION and TEST_DB_URL),
+    reason=(
+        "set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_DATABASE_URL "
+        "(a DEDICATED test database — this suite truncates events)"
+    ),
 )
 
-
-DEFAULT_DATABASE_URL = (
-    "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill"
-)
-DEFAULT_API_URL = "http://localhost:8088"
-
-
-@pytest.fixture(scope="module")
-def database_url() -> str:
-    return os.environ.get("TREADMILL_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
+REPO = "test/merge"
+PR = 42
+HEAD = "a" * 40
+NEW_HEAD = "b" * 40
+T0 = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
 
 
-@pytest.fixture(scope="module")
-def api_url() -> str:
-    return os.environ.get("TREADMILL_API_URL", DEFAULT_API_URL)
+def _at(minutes: int) -> datetime:
+    return T0 + timedelta(minutes=minutes)
 
 
 @pytest.fixture(scope="module")
-def engine(database_url: str) -> Engine:
-    eng = sa.create_engine(database_url, pool_pre_ping=True)
+def engine() -> Iterator[Engine]:
+    services_api_dir = Path(__file__).resolve().parent.parent
+    subprocess.run(
+        ["uv", "run", "alembic", "upgrade", "head"],
+        cwd=services_api_dir,
+        env={**os.environ, "DATABASE_URL": TEST_DB_URL},
+        check=True,
+    )
+    eng = sa.create_engine(TEST_DB_URL, pool_pre_ping=True)
     yield eng
     eng.dispose()
 
 
-@pytest.fixture(scope="module", autouse=True)
-def migrations_applied(database_url: str) -> None:
-    services_api_dir = Path(__file__).resolve().parent.parent
-    env = {**os.environ, "DATABASE_URL": database_url}
-    subprocess.run(
-        ["uv", "run", "alembic", "upgrade", "head"],
-        cwd=services_api_dir,
-        env=env,
-        check=True,
-    )
-
-
-_TEST_TABLES = (
-    "plans",
-    "workflows",
-    "workflow_versions",
-    "workflow_version_steps",
-    "tasks",
-    "task_prs",
-    "task_dependencies",
-    "workflow_runs",
-    "workflow_run_steps",
-    "events",
-    "roles",
-    "skills",
-    "hooks",
-    "role_skills",
-    "role_hooks",
-    "event_triggers",
-)
-
-
 @pytest.fixture
-def fixtures(engine: Engine) -> Iterator["MergeabilityFixtureBuilder"]:
-    builder = MergeabilityFixtureBuilder(engine)
-    builder.truncate_all()
-    try:
-        yield builder
-    finally:
-        builder.truncate_all()
-
-
-class MergeabilityFixtureBuilder:
-    """Seeds the minimum schema each mergeability test needs.
-
-    The VIEW reads four signal kinds at HEAD:
-
-      * ``head_sha`` from the latest ``github.pr_opened`` /
-        ``pr_synchronize`` for ``(repo, pr_number)``.
-      * ``wf-review`` latest completed step at HEAD (envelope's
-        ``commit_sha`` matches ``head_sha``).
-      * ``wf-validate`` latest completed step at HEAD.
-      * ``github.check_run_completed`` events at HEAD (aggregated).
-      * ``github.pr_conflict`` latest event at HEAD with
-        ``is_conflicting`` payload.
-
-    Each helper writes one of these surfaces deterministically.
-    """
-
-    DEFAULT_REPO = "test/merge"
-    DEFAULT_PR = 42
-
-    def __init__(self, engine: Engine) -> None:
-        self.engine = engine
-
-    def truncate_all(self) -> None:
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa.text(
-                    "TRUNCATE TABLE "
-                    + ", ".join(_TEST_TABLES)
-                    + " RESTART IDENTITY CASCADE"
-                )
-            )
-
-    # ── basic schema setup ───────────────────────────────────────────
-
-    def make_plan(self, repo: str = DEFAULT_REPO) -> uuid.UUID:
-        with self.engine.begin() as conn:
-            row = conn.execute(
-                sa.text("INSERT INTO plans (repo) VALUES (:repo) RETURNING id"),
-                {"repo": repo},
-            ).one()
-        return row.id
-
-    def make_workflow_version(self, conn: Connection, slug: str) -> uuid.UUID:
-        existing = conn.execute(
-            sa.text(
-                "SELECT id FROM workflow_versions "
-                "WHERE workflow_id = :s AND version = 1"
-            ),
-            {"s": slug},
-        ).first()
-        if existing:
-            return existing.id
+def task_id(engine: Engine) -> Iterator[uuid.UUID]:
+    tid = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    with engine.begin() as conn:
         conn.execute(
             sa.text(
-                "INSERT INTO workflows (id) VALUES (:id) "
-                "ON CONFLICT (id) DO NOTHING"
-            ),
-            {"id": slug},
+                "TRUNCATE plans, tasks, task_prs, task_dependencies, "
+                "events CASCADE"
+            )
         )
-        return conn.execute(
-            sa.text(
-                "INSERT INTO workflow_versions (workflow_id, version) "
-                "VALUES (:s, 1) RETURNING id"
-            ),
-            {"s": slug},
-        ).scalar()
-
-    def make_role(self, conn: Connection, role_id: str = "role-author") -> str:
         conn.execute(
             sa.text(
-                "INSERT INTO roles (id, model, system_prompt, output_kind) "
-                "VALUES (:id, 'claude', '', 'code') ON CONFLICT (id) DO NOTHING"
+                "INSERT INTO plans (id, repo, intent) "
+                "VALUES (:p, :r, 'mergeability test')"
             ),
-            {"id": role_id},
+            {"p": plan_id, "r": REPO},
         )
-        return role_id
-
-    def make_task(
-        self,
-        plan_id: uuid.UUID,
-        workflow_slug: str = "wf-author",
-        repo: str = DEFAULT_REPO,
-        title: str = "merge-test task",
-    ) -> uuid.UUID:
-        with self.engine.begin() as conn:
-            wv_id = self.make_workflow_version(conn, workflow_slug)
-            self.make_role(conn)
-            task_id = conn.execute(
-                sa.text(
-                    "INSERT INTO tasks "
-                    "(plan_id, repo, title, workflow_version_id) "
-                    "VALUES (:p, :r, :t, :wv) RETURNING id"
-                ),
-                {"p": plan_id, "r": repo, "t": title, "wv": wv_id},
-            ).scalar()
-        return task_id
-
-    def add_task_pr(
-        self,
-        task_id: uuid.UUID,
-        repo: str = DEFAULT_REPO,
-        pr_number: int = DEFAULT_PR,
-    ) -> None:
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa.text(
-                    "INSERT INTO task_prs (repo, pr_number, task_id) "
-                    "VALUES (:r, :p, :t)"
-                ),
-                {"r": repo, "p": pr_number, "t": task_id},
+        conn.execute(
+            sa.text(
+                "INSERT INTO tasks (id, plan_id, repo, title) "
+                "VALUES (:t, :p, :r, 'mergeability test task')"
+            ),
+            {"t": tid, "p": plan_id, "r": REPO},
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO task_prs (repo, pr_number, task_id) "
+                "VALUES (:r, :n, :t)"
+            ),
+            {"r": REPO, "n": PR, "t": tid},
+        )
+    yield tid
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "TRUNCATE plans, tasks, task_prs, task_dependencies, "
+                "events CASCADE"
             )
-
-    # ── signal: head ─────────────────────────────────────────────────
-
-    def add_pr_opened(
-        self,
-        head_sha: str,
-        repo: str = DEFAULT_REPO,
-        pr_number: int = DEFAULT_PR,
-    ) -> None:
-        payload = {
-            "repo": repo,
-            "pr_number": pr_number,
-            "sender": "tester",
-            "title": "x",
-            "head_branch": "feat/x",
-            "head_sha": head_sha,
-        }
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa.text(
-                    "INSERT INTO events "
-                    "(entity_type, action, commit_sha, payload) "
-                    "VALUES ('github', 'pr_opened', :sha, CAST(:p AS jsonb))"
-                ),
-                {"sha": head_sha, "p": json.dumps(payload)},
-            )
-
-    def add_pr_synchronize(
-        self,
-        head_sha: str,
-        before_sha: str | None = None,
-        repo: str = DEFAULT_REPO,
-        pr_number: int = DEFAULT_PR,
-    ) -> None:
-        payload = {
-            "repo": repo,
-            "pr_number": pr_number,
-            "sender": "tester",
-            "head_sha": head_sha,
-            "before_sha": before_sha,
-        }
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa.text(
-                    "INSERT INTO events "
-                    "(entity_type, action, commit_sha, payload) "
-                    "VALUES ('github', 'pr_synchronize', :sha, "
-                    "CAST(:p AS jsonb))"
-                ),
-                {"sha": head_sha, "p": json.dumps(payload)},
-            )
-
-    # ── signal: review / validate (workflow step envelopes) ──────────
-
-    def add_step_envelope(
-        self,
-        task_id: uuid.UUID,
-        workflow_slug: str,
-        decision: str,
-        commit_sha: str,
-        role_id: str = "role-author",
-        checks: list[dict] | None = None,
-    ) -> uuid.UUID:
-        """Insert a completed workflow_run_step with a StepOutput envelope.
-
-        The VIEW's LATERAL join filters on the envelope's top-level
-        ``commit_sha`` (ADR-0012 promotion). We persist exactly the
-        envelope shape — ``summary`` + ``decision`` + ``commit_sha`` —
-        and fill in empty defaults for the rest.
-
-        ``checks`` is the per-rule array consumed by the severity-aware
-        validate aggregate in ADR-0029 Q29.f / ADR-0036 / migration 0013.
-        When omitted, ``payload`` stays empty and the VIEW falls through
-        to the legacy ``decision`` field (severity-blind). Pass a list of
-        dicts each carrying at least ``{verdict, severity}`` to exercise
-        the severity-aware path.
-        """
-        payload: dict = {}
-        if checks is not None:
-            payload["checks"] = checks
-        envelope = {
-            "summary": f"{workflow_slug} at {commit_sha}",
-            "decision": decision,
-            "commit_sha": commit_sha,
-            "artifacts": [],
-            "payload": payload,
-            "metadata": {},
-        }
-        with self.engine.begin() as conn:
-            wv_id = self.make_workflow_version(conn, workflow_slug)
-            self.make_role(conn, role_id)
-            run_id = conn.execute(
-                sa.text(
-                    "INSERT INTO workflow_runs "
-                    "(task_id, workflow_version_id, trigger) "
-                    "VALUES (:t, :wv, 'webhook:test') RETURNING id"
-                ),
-                {"t": task_id, "wv": wv_id},
-            ).scalar()
-            step_id = conn.execute(
-                sa.text(
-                    "INSERT INTO workflow_run_steps "
-                    "(run_id, step_index, step_name, role_id, status, "
-                    " output, started_at, completed_at) "
-                    "VALUES (:r, 0, :n, :role, 'completed', "
-                    "CAST(:o AS jsonb), now(), now()) "
-                    "RETURNING id"
-                ),
-                {
-                    "r": run_id,
-                    "n": workflow_slug,
-                    "role": role_id,
-                    "o": json.dumps(envelope),
-                },
-            ).scalar()
-        return step_id
-
-    # ── signal: ci ───────────────────────────────────────────────────
-
-    def add_check_run(
-        self,
-        head_sha: str,
-        conclusion: str,
-        check_name: str = "ci",
-        repo: str = DEFAULT_REPO,
-        pr_number: int = DEFAULT_PR,
-    ) -> None:
-        """Insert a ``github.check_run_completed`` event at HEAD.
-
-        ADR-0014 promotes ``commit_sha`` to a real column on
-        ``events``; the VIEW joins on the column, not the payload.
-        """
-        payload = {
-            "repo": repo,
-            "pr_number": pr_number,
-            "check_name": check_name,
-            "conclusion": conclusion,
-            "head_sha": head_sha,
-        }
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa.text(
-                    "INSERT INTO events "
-                    "(entity_type, action, commit_sha, payload) "
-                    "VALUES ('github', 'check_run_completed', "
-                    ":sha, CAST(:p AS jsonb))"
-                ),
-                {"sha": head_sha, "p": json.dumps(payload)},
-            )
-
-    # ── signal: conflict ─────────────────────────────────────────────
-
-    def add_pr_conflict(
-        self,
-        head_sha: str,
-        is_conflicting: bool,
-        repo: str = DEFAULT_REPO,
-        pr_number: int = DEFAULT_PR,
-    ) -> None:
-        """Insert a ``github.pr_conflict`` event at HEAD.
-
-        Agent 3 (Phase B.3) ships the ``GithubPrConflict`` event class
-        + the sweep that emits it. For these tests we seed the row
-        shape ADR-0013 commits to: ``commit_sha`` column populated +
-        ``is_conflicting`` boolean in the payload.
-        """
-        payload = {
-            "repo": repo,
-            "pr_number": pr_number,
-            "is_conflicting": is_conflicting,
-        }
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa.text(
-                    "INSERT INTO events "
-                    "(entity_type, action, commit_sha, payload) "
-                    "VALUES ('github', 'pr_conflict', :sha, "
-                    "CAST(:p AS jsonb))"
-                ),
-                {"sha": head_sha, "p": json.dumps(payload)},
-            )
+        )
 
 
-def _mergeability_row(engine: Engine, task_id: uuid.UUID) -> sa.Row | None:
+def _insert_event(
+    engine: Engine,
+    *,
+    entity_type: str,
+    action: str,
+    payload: dict,
+    commit_sha: str | None,
+    created_at: datetime,
+    task_id: uuid.UUID | None = None,
+) -> None:
+    """Explicit created_at — the review branch resolves by recency and
+    the conflict branch by the staleness boundary, so tests own the
+    clock."""
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO events "
+                "(entity_type, action, task_id, commit_sha, payload, created_at) "
+                "VALUES (:e, :a, :t, :sha, CAST(:p AS jsonb), :ts)"
+            ),
+            {
+                "e": entity_type,
+                "a": action,
+                "t": task_id,
+                "sha": commit_sha,
+                "p": json.dumps(payload),
+                "ts": created_at,
+            },
+        )
+
+
+def _open_pr(engine: Engine, head_sha: str = HEAD, at: datetime | None = None) -> None:
+    _insert_event(
+        engine,
+        entity_type="github",
+        action="pr_opened",
+        payload={"repo": REPO, "pr_number": PR, "head_sha": head_sha},
+        commit_sha=head_sha,
+        created_at=at or _at(0),
+    )
+
+
+def _push(engine: Engine, head_sha: str, at: datetime) -> None:
+    _insert_event(
+        engine,
+        entity_type="github",
+        action="pr_synchronize",
+        payload={"repo": REPO, "pr_number": PR, "head_sha": head_sha},
+        commit_sha=head_sha,
+        created_at=at,
+    )
+
+
+def _evaluator_verdict(
+    engine: Engine, task_id: uuid.UUID, verdict: str, at: datetime,
+) -> None:
+    _insert_event(
+        engine,
+        entity_type="task",
+        action="evaluator_verdict",
+        payload={"verdict": verdict, "pr_number": PR},
+        commit_sha=None,
+        created_at=at,
+        task_id=task_id,
+    )
+
+
+def _review_override(
+    engine: Engine, task_id: uuid.UUID, head_sha: str, at: datetime,
+) -> None:
+    _insert_event(
+        engine,
+        entity_type="review",
+        action="override",
+        payload={"commit_sha": head_sha},
+        commit_sha=head_sha,
+        created_at=at,
+        task_id=task_id,
+    )
+
+
+def _validate_override(
+    engine: Engine, task_id: uuid.UUID, head_sha: str, at: datetime,
+) -> None:
+    _insert_event(
+        engine,
+        entity_type="validate",
+        action="override",
+        payload={"commit_sha": head_sha},
+        commit_sha=head_sha,
+        created_at=at,
+        task_id=task_id,
+    )
+
+
+def _check_run(
+    engine: Engine, head_sha: str, conclusion: str, at: datetime,
+) -> None:
+    _insert_event(
+        engine,
+        entity_type="github",
+        action="check_run_completed",
+        payload={"repo": REPO, "pr_number": PR, "conclusion": conclusion},
+        commit_sha=head_sha,
+        created_at=at,
+    )
+
+
+def _row(engine: Engine, task_id: uuid.UUID) -> dict:
     with engine.connect() as conn:
-        return conn.execute(
-            sa.text("SELECT * FROM task_mergeability WHERE task_id = :id"),
-            {"id": task_id},
-        ).one_or_none()
+        result = conn.execute(
+            sa.text("SELECT * FROM task_mergeability WHERE task_id = :t"),
+            {"t": task_id},
+        ).mappings().one()
+        return dict(result)
 
 
-def _derived(engine: Engine, task_id: uuid.UUID) -> str:
-    """Convenience: get the derived_mergeability for a task.
-
-    The VIEW joins ``task_prs``, so a task with no PR row has no
-    mergeability row at all. Callers expect a string — we surface that
-    case as the literal ``'pending'`` to mirror the endpoint's behavior
-    (the endpoint defaults missing rows to ``'pending'``)."""
-    row = _mergeability_row(engine, task_id)
-    if row is None:
-        return "pending"
-    return row.derived_mergeability
+# ── pending baseline ─────────────────────────────────────────────────
 
 
-# ── Derived-state tests ───────────────────────────────────────────────
-
-
-def test_mergeability_pending_when_no_pr(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+def test_pending_when_pr_opened_but_no_signals(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    """Task exists, no ``task_prs`` row → VIEW has no row → ``pending``."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    assert _mergeability_row(engine, task_id) is None
-    assert _derived(engine, task_id) == "pending"
+    _open_pr(engine)
+    row = _row(engine, task_id)
+    assert row["head_sha"] == HEAD
+    assert row["derived_mergeability"] == "pending"
 
 
-def test_mergeability_pending_when_pr_opened_but_no_checks(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+# ── review branch: task.evaluator_verdict (ADR-0087 step 6) ──────────
+
+
+def test_evaluator_rework_blocks_on_review(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    """PR opened, HEAD known, but no review / validate / ci / conflict
-    signals yet → falls through to the trailing ``else 'pending'``."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.head_sha == "sha-1"
-    assert row.review_decision is None
-    assert row.validate_decision is None
-    assert row.ci_conclusion is None
-    assert row.pr_conflicting is None
-    assert row.derived_mergeability == "pending"
+    _open_pr(engine)
+    _evaluator_verdict(engine, task_id, "rework", _at(1))
+    row = _row(engine, task_id)
+    assert row["review_decision"] == "changes_requested"
+    assert row["derived_mergeability"] == "blocked-on-review"
 
 
-def test_mergeability_blocked_on_review_changes_requested(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+def test_evaluator_approve_with_green_ci_is_mergeable(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="changes_requested", commit_sha="sha-1",
-    )
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.review_decision == "changes_requested"
-    assert row.derived_mergeability == "blocked-on-review"
+    _open_pr(engine)
+    _check_run(engine, HEAD, "success", _at(1))
+    _evaluator_verdict(engine, task_id, "approve", _at(2))
+    row = _row(engine, task_id)
+    assert row["review_decision"] == "approved"
+    assert row["ci_conclusion"] == "success"
+    assert row["derived_mergeability"] == "mergeable"
 
 
-def test_mergeability_blocked_on_review_needs_more_info(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+def test_evaluator_verdicts_resolve_by_recency(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    """``needs-more-info`` also resolves to ``blocked-on-review`` per
-    ADR-0013 §"Derived states", but the underlying ``review_decision``
-    field preserves the distinction."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="needs-more-info", commit_sha="sha-1",
-    )
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.review_decision == "needs-more-info"
-    assert row.derived_mergeability == "blocked-on-review"
+    """Rework then approve (the rework loop converging): latest wins."""
+    _open_pr(engine)
+    _evaluator_verdict(engine, task_id, "rework", _at(1))
+    _evaluator_verdict(engine, task_id, "approve", _at(2))
+    row = _row(engine, task_id)
+    assert row["review_decision"] == "approved"
+    assert row["derived_mergeability"] == "mergeable"
 
 
-def test_mergeability_blocked_on_validate_fail(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+def test_review_override_pinned_to_head_approves(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id, "wf-validate", decision="fail", commit_sha="sha-1",
-    )
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.validate_decision == "fail"
-    assert row.derived_mergeability == "blocked-on-validate"
+    """The orchestrator's manual review.override is commit_sha-pinned."""
+    _open_pr(engine)
+    _review_override(engine, task_id, HEAD, _at(1))
+    row = _row(engine, task_id)
+    assert row["review_decision"] == "approved"
+    assert row["derived_mergeability"] == "mergeable"
 
 
-def test_mergeability_severity_warning_fail_does_not_block(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+def test_review_override_for_stale_head_does_not_approve(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    """ADR-0029 Q29.f / ADR-0036 / migration 0013: a wf-validate run
-    where the only failing check is ``severity=warning`` must NOT flip
-    ``validate_decision`` to ``'fail'``. The aggregate is computed
-    from the per-check array, considering blocking severity only."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id,
-        "wf-validate",
-        decision="fail",  # worker's severity-blind aggregate
-        commit_sha="sha-1",
-        checks=[
-            {"check_id": "blocking-ok", "verdict": "pass", "severity": "blocking"},
-            {"check_id": "warn-fail", "verdict": "fail", "severity": "warning"},
-        ],
-    )
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    # VIEW's severity-aware aggregate ignores the warning fail.
-    assert row.validate_decision == "pass"
+    """An override pinned to a superseded head must not approve the new
+    head (per-SHA pinning is the override branch's contract)."""
+    _open_pr(engine)
+    _review_override(engine, task_id, HEAD, _at(1))
+    _push(engine, NEW_HEAD, _at(2))
+    row = _row(engine, task_id)
+    assert row["head_sha"] == NEW_HEAD
+    assert row["review_decision"] is None
+    assert row["derived_mergeability"] == "pending"
 
 
-def test_mergeability_severity_blocking_fail_blocks(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+# ── validate branch: validate.override (operator recovery) ──────────
+
+
+def test_validate_override_reads_pass_at_head(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    """Blocking-severity verdict=fail must propagate to the aggregate
-    and block merge — the inverse of the warning test above."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id,
-        "wf-validate",
-        decision="pass",  # worker's severity-blind aggregate disagrees
-        commit_sha="sha-1",
-        checks=[
-            {"check_id": "blocking-bad", "verdict": "fail", "severity": "blocking"},
-            {"check_id": "warn-ok", "verdict": "pass", "severity": "warning"},
-        ],
-    )
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.validate_decision == "fail"
-    assert row.derived_mergeability == "blocked-on-validate"
+    _open_pr(engine)
+    _validate_override(engine, task_id, HEAD, _at(1))
+    _evaluator_verdict(engine, task_id, "approve", _at(2))
+    row = _row(engine, task_id)
+    assert row["validate_decision"] == "pass"
+    assert row["derived_mergeability"] == "mergeable"
 
 
-def test_mergeability_severity_blocking_error_does_not_block(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+# ── ci branch ────────────────────────────────────────────────────────
+
+
+def test_check_run_failure_blocks_on_ci(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    """Per ADR-0039, a ``verdict='error'`` from a blocking check does
-    not flip the aggregate — errors indicate the validator failed, not
-    the code. Only ``verdict='fail'`` gates merge."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id,
-        "wf-validate",
-        decision="pass",
-        commit_sha="sha-1",
-        checks=[
-            {"check_id": "blocking-judge", "verdict": "error", "severity": "blocking"},
-        ],
-    )
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.validate_decision == "pass"
+    _open_pr(engine)
+    _check_run(engine, HEAD, "failure", _at(1))
+    row = _row(engine, task_id)
+    assert row["ci_conclusion"] == "failure"
+    assert row["derived_mergeability"] == "blocked-on-ci"
 
 
-def test_mergeability_blocked_on_ci_failure(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+def test_ci_failure_outranks_approval(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_check_run(head_sha="sha-1", conclusion="failure")
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.ci_conclusion == "failure"
-    assert row.derived_mergeability == "blocked-on-ci"
+    """Priority: blocked-on-ci wins over an approved review."""
+    _open_pr(engine)
+    _check_run(engine, HEAD, "failure", _at(1))
+    _evaluator_verdict(engine, task_id, "approve", _at(2))
+    row = _row(engine, task_id)
+    assert row["review_decision"] == "approved"
+    assert row["derived_mergeability"] == "blocked-on-ci"
 
 
-def test_mergeability_blocked_on_conflict(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+def test_any_failed_check_blocks_even_with_later_success(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_pr_conflict(head_sha="sha-1", is_conflicting=True)
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.pr_conflicting is True
-    assert row.derived_mergeability == "blocked-on-conflict"
+    """The ci LATERAL is EXISTS-based: one failure at HEAD blocks even
+    when another check succeeded."""
+    _open_pr(engine)
+    _check_run(engine, HEAD, "failure", _at(1))
+    _check_run(engine, HEAD, "success", _at(2))
+    row = _row(engine, task_id)
+    assert row["ci_conclusion"] == "failure"
+    assert row["derived_mergeability"] == "blocked-on-ci"
 
 
-def test_mergeability_mergeable_when_all_green(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
+# ── per-commit invalidation ──────────────────────────────────────────
+
+
+def test_new_head_invalidates_sha_pinned_signals(
+    engine: Engine, task_id: uuid.UUID,
 ) -> None:
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="approved", commit_sha="sha-1",
-    )
-    fixtures.add_step_envelope(
-        task_id, "wf-validate", decision="pass", commit_sha="sha-1",
-    )
-    fixtures.add_check_run(head_sha="sha-1", conclusion="success")
-    fixtures.add_pr_conflict(head_sha="sha-1", is_conflicting=False)
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.review_decision == "approved"
-    assert row.validate_decision == "pass"
-    assert row.ci_conclusion == "success"
-    assert row.pr_conflicting is False
-    assert row.derived_mergeability == "mergeable"
+    """A push moves head_sha: commit-pinned CI signals stop applying.
 
-
-def test_mergeability_mergeable_when_no_ci_configured(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
-) -> None:
-    """ADR-0013 §"Derived states" #6: NULL CI is treated as "no CI
-    configured" and does not block mergeability when review + validate
-    are green and there's no conflict."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="approved", commit_sha="sha-1",
-    )
-    fixtures.add_step_envelope(
-        task_id, "wf-validate", decision="pass", commit_sha="sha-1",
-    )
-    # No check_run_completed at all → ci.conclusion IS NULL.
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.ci_conclusion is None
-    assert row.derived_mergeability == "mergeable"
-
-
-def test_mergeability_invalidates_on_new_head(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
-) -> None:
-    """ADR-0013 §"Per-commit invalidation by construction": land
-    approved review + passing validate at SHA X, assert ``mergeable``;
-    push ``pr_synchronize`` with new SHA Y; assert ``pending`` (the
-    VIEW's filter no longer matches the old SHA, so review / validate
-    become NULL until fresh thumbs land at Y)."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-X")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="approved", commit_sha="sha-X",
-    )
-    fixtures.add_step_envelope(
-        task_id, "wf-validate", decision="pass", commit_sha="sha-X",
-    )
-    assert _derived(engine, task_id) == "mergeable"
-
-    # Tiny sleep so the synchronize event sorts strictly after the
-    # pr_opened event by ``created_at DESC``. ``now()`` returns txn-start
-    # time but separate txns differ at the µs level; padding makes the
-    # assertion robust under load.
-    time.sleep(0.01)
-    fixtures.add_pr_synchronize(head_sha="sha-Y", before_sha="sha-X")
-
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.head_sha == "sha-Y"
-    # The old SHA's thumbs are now invisible to the VIEW.
-    assert row.review_decision is None
-    assert row.validate_decision is None
-    assert row.derived_mergeability == "pending"
-
-
-def test_mergeability_priority_conflict_wins_over_ci(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
-) -> None:
-    """ADR-0013 priority order: conflict (#2) beats CI (#3)."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_pr_conflict(head_sha="sha-1", is_conflicting=True)
-    fixtures.add_check_run(head_sha="sha-1", conclusion="failure")
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.pr_conflicting is True
-    assert row.ci_conclusion == "failure"
-    assert row.derived_mergeability == "blocked-on-conflict"
-
-
-def test_mergeability_priority_ci_wins_over_review(
-    engine: Engine, fixtures: MergeabilityFixtureBuilder,
-) -> None:
-    """ADR-0013 priority order: CI failure (#3) beats review
-    changes_requested (#4)."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_check_run(head_sha="sha-1", conclusion="failure")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="changes_requested", commit_sha="sha-1",
-    )
-    row = _mergeability_row(engine, task_id)
-    assert row is not None
-    assert row.ci_conclusion == "failure"
-    assert row.review_decision == "changes_requested"
-    assert row.derived_mergeability == "blocked-on-ci"
-
-
-# ── Router smoke ──────────────────────────────────────────────────────
-
-
-@pytest.fixture(scope="module")
-def wait_for_api(api_url: str) -> None:
-    """Module-scoped (not autouse): only the router-smoke tests below
-    request this fixture. The VIEW-only tests don't depend on the API
-    being up — they hit the database directly."""
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            r = httpx.get(f"{api_url}/health", timeout=2.0)
-            if r.status_code == 200:
-                return
-        except Exception:
-            time.sleep(0.5)
-    raise RuntimeError(f"API not reachable at {api_url}")
-
-
-def test_get_task_mergeability_endpoint_returns_row(
-    engine: Engine,
-    fixtures: MergeabilityFixtureBuilder,
-    api_url: str,
-    wait_for_api: None,
-) -> None:
-    """``GET /api/v1/tasks/{id}/mergeability`` returns a 200 + the
-    full mergeability projection (ADR-0013 §"Surfaces")."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="approved", commit_sha="sha-1",
-    )
-    fixtures.add_step_envelope(
-        task_id, "wf-validate", decision="pass", commit_sha="sha-1",
-    )
-
-    resp = httpx.get(
-        f"{api_url}/api/v1/tasks/{task_id}/mergeability", timeout=5.0,
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["task_id"] == str(task_id)
-    assert body["repo"] == MergeabilityFixtureBuilder.DEFAULT_REPO
-    assert body["pr_number"] == MergeabilityFixtureBuilder.DEFAULT_PR
-    assert body["head_sha"] == "sha-1"
-    assert body["review_decision"] == "approved"
-    assert body["validate_decision"] == "pass"
-    assert body["ci_conclusion"] is None
-    assert body["pr_conflicting"] is None
-    assert body["derived_mergeability"] == "mergeable"
-
-
-def test_get_task_mergeability_404_on_unknown_task(
-    api_url: str, wait_for_api: None,
-) -> None:
-    resp = httpx.get(
-        f"{api_url}/api/v1/tasks/{uuid.uuid4()}/mergeability", timeout=5.0,
-    )
-    assert resp.status_code == 404
-
-
-def test_get_task_mergeability_defaults_pending_when_no_pr(
-    engine: Engine,
-    fixtures: MergeabilityFixtureBuilder,
-    api_url: str,
-    wait_for_api: None,
-) -> None:
-    """A task with no PR has no row in the VIEW; the endpoint surfaces
-    ``derived_mergeability='pending'`` with every other field NULL."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-
-    resp = httpx.get(
-        f"{api_url}/api/v1/tasks/{task_id}/mergeability", timeout=5.0,
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["task_id"] == str(task_id)
-    assert body["repo"] is None
-    assert body["pr_number"] is None
-    assert body["head_sha"] is None
-    assert body["derived_mergeability"] == "pending"
-
-
-def test_get_task_includes_mergeability_field(
-    engine: Engine,
-    fixtures: MergeabilityFixtureBuilder,
-    api_url: str,
-    wait_for_api: None,
-) -> None:
-    """``GET /api/v1/tasks/{id}`` LEFT-JOINs the VIEW and surfaces
-    ``mergeability`` on the task response."""
-    plan_id = fixtures.make_plan()
-    task_id = fixtures.make_task(plan_id)
-    fixtures.add_task_pr(task_id)
-    fixtures.add_pr_opened(head_sha="sha-1")
-    fixtures.add_step_envelope(
-        task_id, "wf-review", decision="approved", commit_sha="sha-1",
-    )
-    fixtures.add_step_envelope(
-        task_id, "wf-validate", decision="pass", commit_sha="sha-1",
-    )
-
-    resp = httpx.get(f"{api_url}/api/v1/tasks/{task_id}", timeout=5.0)
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["mergeability"] == "mergeable"
+    Documents a deliberate asymmetry of the current view: evaluator
+    verdicts are TASK-scoped, not SHA-pinned, so a standing approval
+    survives the push and — with CI unknown at the new head admitted by
+    the ``ci IS NULL`` arm — the row still reads ``mergeable``. The
+    coordinator's contract is to re-brief the evaluator after any
+    post-verdict push (a fresh verdict wins by recency); the VIEW does
+    not enforce that re-review by itself.
+    """
+    _open_pr(engine)
+    _check_run(engine, HEAD, "success", _at(1))
+    _evaluator_verdict(engine, task_id, "approve", _at(2))
+    assert _row(engine, task_id)["derived_mergeability"] == "mergeable"
+    _push(engine, NEW_HEAD, _at(3))
+    row = _row(engine, task_id)
+    assert row["head_sha"] == NEW_HEAD
+    assert row["ci_conclusion"] is None  # SHA-pinned: invalidated
+    assert row["review_decision"] == "approved"  # task-scoped: survives
+    assert row["derived_mergeability"] == "mergeable"
