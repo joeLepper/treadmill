@@ -27,7 +27,12 @@ Notable recent changes with PR links. Answer: what has shifted recently that an 
 FRAGMENT FILES, never in-file prepends. Add
 `<component>/agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside the
 AGENT.md — one entry per file, same content shape as above (what
-changed, PR link). Newest-first falls out of filename sort. Prepending
+changed, PR link). Newest-first falls out of filename sort. The slug
+MUST begin with the dispatching task-id short form (8 hex chars, e.g.
+`986c5cf6-…`) or the PR number (e.g. `341-…`): path uniqueness is
+inherited from the allocator, so two same-day same-component PRs
+cannot choose a colliding filename (a freeform slug would reopen the
+add/add conflict this convention exists to kill). Prepending
 entries directly into AGENT.md is the conflict factory that stacked
 three same-day rework cascades on 2026-06-12: every in-flight PR
 inserts at the same anchor, so every merge re-conflicts every open PR

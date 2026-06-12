@@ -39,7 +39,11 @@ New Recent-changes entries are files, not prepends:
     <component>/agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md
 
 One entry per file, same content shape as before (what changed, PR
-link). Newest-first falls out of filename sort. The `## Recent
+link). Newest-first falls out of filename sort. The slug must BEGIN
+with the task-id short form (8 hex) or the PR number — uniqueness
+inherited from the allocator, so same-day same-component PRs cannot
+pick a colliding path (worker-1's #349 review: a freeform slug would
+reopen the add/add class on an identical filename). The `## Recent
 changes` section in each AGENT.md becomes a pointer to the directory;
 entries that predate the convention stay frozen in place until
 gardening folds them into the prose sections above. Gardening a

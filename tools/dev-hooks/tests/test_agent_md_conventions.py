@@ -25,7 +25,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 # whitespace-normalized comparison so hard line wraps don't matter.
 POINTER_PHRASE = "New entries are PER-PR FRAGMENT FILES, not prepends"
 
-FRAGMENT_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*\.md$")
+# Slug must BEGIN with the task-id short form (8 hex) or the PR number
+# so path uniqueness is inherited from the allocator — a freeform slug
+# lets two same-day same-component PRs add/add-collide on an identical
+# path (worker-1's #349 review). NOTE: a bare digit-after-date check
+# would reject letter-leading hex task ids (e.g. fb3d593f), so the pin
+# accepts exactly the two mandated forms.
+FRAGMENT_NAME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}-(?:[0-9a-f]{8}|\d{1,6})(?:-[a-z0-9][a-z0-9-]*)?\.md$"
+)
 
 _SKIP_PARTS = {"node_modules", ".git", ".venv", "__pycache__"}
 
@@ -64,8 +72,10 @@ def test_every_recent_changes_section_points_at_fragments() -> None:
 
 def test_agent_changes_fragments_are_well_formed() -> None:
     """Every file in any ``agent-changes/`` directory must match
-    ``YYYY-MM-DD-<slug>.md`` so newest-first ordering falls out of the
-    filename sort and attribution stays greppable."""
+    ``YYYY-MM-DD-<task-short-or-pr-number>[-slug].md`` so newest-first
+    ordering falls out of the filename sort, attribution stays
+    greppable, and the allocator-unique prefix makes same-day
+    same-component path collisions impossible."""
     bad = []
     fragments = []
     for d in _repo_files("agent-changes"):
@@ -78,11 +88,13 @@ def test_agent_changes_fragments_are_well_formed() -> None:
     # The convention dogfoods itself: the fragment describing this very
     # change exists and is the floor for the walk being alive.
     assert any(
-        f.name == "2026-06-12-recent-changes-fragments.md" for f in fragments
+        f.name == "2026-06-12-986c5cf6-recent-changes-fragments.md"
+        for f in fragments
     ), "the convention's own dogfood fragment is missing"
     assert not bad, (
         f"malformed agent-changes fragment names: {bad} — use "
-        "YYYY-MM-DD-<task-or-pr-slug>.md"
+        "YYYY-MM-DD-<task-short-or-pr-number>[-slug].md (prefix must be "
+        "the 8-hex task-id short form or the PR number)"
     )
 
 
