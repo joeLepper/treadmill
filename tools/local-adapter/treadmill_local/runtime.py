@@ -75,6 +75,8 @@ SCHEDULER_PID_FILE = STATE_DIR / "scheduler.pid"
 SCHEDULER_LOG_FILE = STATE_DIR / "scheduler.log"
 DEPLOY_WATCHER_PID_FILE = STATE_DIR / "deploy-watcher.pid"
 DEPLOY_WATCHER_LOG_FILE = STATE_DIR / "deploy-watcher.log"
+TEAM_SCHEDULER_PID_FILE = STATE_DIR / "team-scheduler.pid"
+TEAM_SCHEDULER_LOG_FILE = STATE_DIR / "team-scheduler.log"
 
 # Observability stack (ADR-0043) — five containers managed by docker
 # compose, not by a host subprocess. There's no PID file because the
@@ -268,6 +270,7 @@ class LocalRuntime:
         start_scheduler: bool = True,
         start_deploy_watcher: bool = True,
         start_observability: bool = True,
+        start_team_scheduler: bool = False,
     ) -> None:
         """Construct a LocalRuntime.
 
@@ -322,6 +325,14 @@ class LocalRuntime:
                 without observability, or when laptop memory matters
                 more than dashboards. Ignored in fully-local (moto)
                 mode: ADR-0020 keeps fully-local OTLP-free.
+            start_team_scheduler: When True, dev-local ``up`` spawns
+                the ADR-0091 team-scheduler daemon (task 9d6c0658) —
+                the reconcile loop that keeps exactly one software
+                team's units active per the API's scheduler decision.
+                DEFAULT OFF (the plan ships it disabled): the operator
+                enables it explicitly after a manual dry-run, so a bad
+                reconcile can never pause the fleet unattended.
+                Ignored in fully-local (moto) mode.
         """
         self.infra_dir = infra_dir.resolve()
         self.docker = docker.from_env()
@@ -332,6 +343,7 @@ class LocalRuntime:
         self.start_scheduler = start_scheduler
         self.start_deploy_watcher = start_deploy_watcher
         self.start_observability = start_observability
+        self.start_team_scheduler = start_team_scheduler
         # Per ADR-0019: dev-local credentials are fetched on the host and
         # injected into containers as env vars. The fetched values live in
         # memory on the runtime for the lifetime of the up-process; we
@@ -429,6 +441,13 @@ class LocalRuntime:
         else:
             console.print(
                 "[yellow]• Deploy watcher suppressed (--no-deploy-watcher).[/yellow]"
+            )
+        if self.start_team_scheduler:
+            self._start_team_scheduler_dev_local()
+        else:
+            console.print(
+                "[dim]• Team scheduler not enabled (ADR-0091 ships "
+                "default-off until the operator dry-runs it).[/dim]"
             )
         self._report_up_dev_local(cfg)
 
@@ -1064,6 +1083,7 @@ class LocalRuntime:
         self._stop_autoscaler()
         self._stop_scheduler()
         self._stop_deploy_watcher()
+        self._stop_team_scheduler()
         self._stop_observability()
         self._stop_managed_containers()
         self._remove_network()
@@ -2403,6 +2423,110 @@ class LocalRuntime:
             if self._pid_alive(pid) and self._watcher_identity_ok(pid):
                 return True
         return False
+
+    # ── ADR-0091 team scheduler (task 9d6c0658) ──────────────────────────────
+
+    def _start_team_scheduler_dev_local(self) -> None:
+        """Spawn the team-scheduler daemon subprocess (ADR-0091).
+
+        Mirrors ``_start_deploy_watcher_dev_local`` but drives
+        ``treadmill_local.team_scheduler`` — the reconcile loop that
+        polls ``GET /api/v1/scheduler/decision`` and keeps exactly one
+        software team active via ``treadmill-team-control``. DEFAULT
+        OFF; only runs when the operator passes
+        ``start_team_scheduler=True`` (plan 992d65b7 ships it disabled
+        until a manual dry-run). The daemon acquires its own
+        host-global flock (#333 class) so a second ``up`` cannot race
+        a second reconciler; this starter's pid-alive check is a
+        cheap courtesy skip, not the guard.
+        """
+        if self._team_scheduler_pid_alive():
+            console.print(
+                "• Team scheduler already running (host-global pidfile "
+                "+ flock — exactly one reconciler per host)."
+            )
+            return
+        STATE_DIR.mkdir(exist_ok=True)
+        env = {
+            **os.environ,
+            "TREADMILL_TEAM_SCHEDULER_LOG_FILE": str(TEAM_SCHEDULER_LOG_FILE),
+        }
+        process = subprocess.Popen(
+            [sys.executable, "-m", "treadmill_local.team_scheduler"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        TEAM_SCHEDULER_PID_FILE.write_text(str(process.pid))
+        console.print(
+            f"• Team scheduler started (pid={process.pid}, "
+            f"log={TEAM_SCHEDULER_LOG_FILE})."
+        )
+
+    @staticmethod
+    def _team_scheduler_identity_ok(pid: int) -> bool:
+        """True iff ``/proc/<pid>/cmdline`` names the team-scheduler
+        module — the #330 recycled-pid lesson, same as the watcher's."""
+        try:
+            cmdline = (
+                Path(f"/proc/{pid}/cmdline")
+                .read_bytes()
+                .replace(b"\0", b" ")
+                .decode(errors="replace")
+            )
+        except OSError:
+            return False
+        return "team_scheduler" in cmdline
+
+    def _team_scheduler_pid_files(self) -> list[Path]:
+        from treadmill_local.team_scheduler import scheduler_pid_path
+
+        return [scheduler_pid_path(), TEAM_SCHEDULER_PID_FILE]
+
+    def _team_scheduler_pid_alive(self) -> bool:
+        for pid_file in self._team_scheduler_pid_files():
+            if not pid_file.exists():
+                continue
+            try:
+                pid = int(pid_file.read_text().strip())
+            except ValueError:
+                continue
+            if self._pid_alive(pid) and self._team_scheduler_identity_ok(pid):
+                return True
+        return False
+
+    def _stop_team_scheduler(self) -> None:
+        for pid_file in self._team_scheduler_pid_files():
+            if not pid_file.exists():
+                continue
+            try:
+                pid = int(pid_file.read_text().strip())
+            except ValueError:
+                pid_file.unlink(missing_ok=True)
+                continue
+            alive = self._pid_alive(pid)
+            if alive and not self._team_scheduler_identity_ok(pid):
+                console.print(
+                    f"• Team scheduler pidfile {pid_file} points at pid "
+                    f"{pid}, which is not a team-scheduler (recycled "
+                    "pid); dropping the stale file without killing."
+                )
+                pid_file.unlink(missing_ok=True)
+                continue
+            if alive:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(20):
+                        if not self._pid_alive(pid):
+                            break
+                        time.sleep(0.1)
+                    if self._pid_alive(pid):
+                        os.kill(pid, signal.SIGKILL)
+                    console.print(f"• Team scheduler stopped (pid={pid}).")
+                except ProcessLookupError:
+                    pass
+            pid_file.unlink(missing_ok=True)
 
     # ── ADR-0069 accelerator ──────────────────────────────────────────────────
 
