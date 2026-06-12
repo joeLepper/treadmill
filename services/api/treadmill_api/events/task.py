@@ -162,6 +162,34 @@ class TaskEscalationAcknowledged(EventPayload):
     ACTION: ClassVar[str] = "escalation_acknowledged"
 
 
+class TaskCiResult(EventPayload):
+    """ONE per completed check SUITE at a task's PR head (ADR-0090).
+
+    Emitted by the API-side CI-observer (``treadmill_api/ci_observer.py``)
+    when a ``github.check_run.completed`` ingest observes its embedded
+    check-suite snapshot reach ``completed``. Replaces N per-check wakes
+    with one rollup the coordinator can key advance/rework decisions on.
+
+    ``conclusion`` is GitHub's own suite rollup (a mixed suite with one
+    failed check reads ``failure``). ``app_slug`` distinguishes suites by
+    the app that owns them (``github-actions`` vs ``netlify`` — the
+    2026-06-12 distinction: netlify suites on this repo park in
+    ``queued`` forever and never produce a ci_result).
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "ci_result"
+
+    repo: str
+    pr_number: int | None = None
+    head_sha: str
+    check_suite_id: int
+    conclusion: str
+    """GitHub suite conclusion: ``success`` | ``failure`` | ``neutral`` |
+    ``cancelled`` | ``timed_out`` | ``action_required`` | ``stale``."""
+    app_slug: str = ""
+
+
 class TaskRegistered(EventPayload):
     """Emitted when a task is created via the API.
 
