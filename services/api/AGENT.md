@@ -39,6 +39,15 @@ This directory contains the Treadmill API, the event-driven control plane that c
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - **No live `TREADMILL_API_URL` defaults in tests (task 3aaba5e7 — the #331 residue, same hazard class as the DB sweep)**: nine integration files (6 services/api, 1 cli, 2 workers/agent) defaulted their `api_url` fixture to `os.environ.get("TREADMILL_API_URL", "http://localhost:8088")` — doubly hazardous because `localhost:8088` IS the live stack on the operator host AND `TREADMILL_API_URL` is ambient in every team-session env, so "require the env var" alone would still resolve to production. All nine now require the DEDICATED `TREADMILL_TEST_API_URL` (mirroring `TREADMILL_TEST_DATABASE_URL`) and skip without it, with the reason naming all required vars. KEPT with rationale: `monkeypatch.setenv(..., "http://fake-api")` unit-test pins (mock URLs, the safe pattern), the CLI/team/channel-server/vite operational defaults (the tools' purpose is talking to the local deployment — ADR-0010), and the API's own listen-port config. Run log in the PR: control on main shows 25 tests collecting with the fixture resolving to the live deployment via ambient env; the head skips 45 across three files without the dedicated var and re-selects with it.
 
 - **`auto_merge` exposed on the plan read surface (task e477a4a0 — the 2026-06-12 #335 merge-race fix)**: the column has existed since migration 0012 and the submit path has persisted frontmatter `auto_merge` all along (live proof: plan cb3d0c29's row carried `false` during the race) — what was missing was the READ: `PlanResponse` had no `auto_merge` field, so the coordinator's §9.3 merged an `auto_merge:false` PR it could not know about. `PlanResponse.auto_merge` is now a plain bool coalesced at the API boundary (`plan.auto_merge is not False` — NULL/unspecified → enabled per ADR-0031), per the coordinator's one-branch/no-tri-state consumer requirement. No migration needed (the spec's "presumably" hedge resolved: column already nullable-bool). Tests in `test_plans_submit_minimal_doc.py` (+2, throwaway-DB end-to-end: frontmatter false → false on POST + GET; unspecified → true) with a surgical control run (new tests vs main's plans.py fail at the missing key) in the PR.

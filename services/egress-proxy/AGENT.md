@@ -95,6 +95,15 @@ wheel. `EXPOSE 3128` matches the autoscaler's spawn assumption.
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - ADR-0065 Step 2 — `autoscaler_smoke.yml` removed 2026-06-05. The
   workflow had never passed in its 4-run history (the CDK app returns
   no stacks in fully-local mode and the runtime calls `cdk synth`

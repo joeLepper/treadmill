@@ -15,6 +15,15 @@ This directory is the durable knowledge base for Treadmill, holding the architec
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - [#39](https://github.com/anthropics/treadmill/pull/39) — /decide and /plan skills carry ADR-0004 checklist + diagram-type guidance table.
 - [#38](https://github.com/anthropics/treadmill/pull/38) — AGENT.md schema document (docs/agent-md-schema.md) and validation rules.
 - ADR-0030 + plan — federated in-repo agent context (mermaid diagrams + AGENT.md files at component roots).

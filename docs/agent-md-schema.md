@@ -17,11 +17,31 @@ Load-bearing files and their roles. Answer: if an agent lands here to make a cha
 > - `infra/services/api/handler.py` — Lambda@Edge handler for request routing; changes here affect deployed request paths.
 
 ### Recent changes
-Last three notable changes with PR links. Answer: what has shifted recently that an agent touching this component should know? For example:
+Notable recent changes with PR links. Answer: what has shifted recently that an agent touching this component should know? For example:
 
 > - [#42](https://github.com/org/repo/pull/42) — Migrated autoscaler to ECS Scheduled Tasks (was cron Lambda).
 > - [#38](https://github.com/org/repo/pull/38) — Added VPC endpoint for S3 to reduce NAT costs.
 > - [#35](https://github.com/org/repo/pull/35) — Refactored service construct to use mixins (was copy-paste subclasses).
+
+**Authoring flow (2026-06-12, task 986c5cf6):** new entries are PER-PR
+FRAGMENT FILES, never in-file prepends. Add
+`<component>/agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside the
+AGENT.md — one entry per file, same content shape as above (what
+changed, PR link). Newest-first falls out of filename sort. The slug
+MUST begin with the dispatching task-id short form (8 hex chars, e.g.
+`986c5cf6-…`) or the PR number (e.g. `341-…`): path uniqueness is
+inherited from the allocator, so two same-day same-component PRs
+cannot choose a colliding filename (a freeform slug would reopen the
+add/add conflict this convention exists to kill). Prepending
+entries directly into AGENT.md is the conflict factory that stacked
+three same-day rework cascades on 2026-06-12: every in-flight PR
+inserts at the same anchor, so every merge re-conflicts every open PR
+(see `docs/learnings/2026-06-12-agent-md-recent-changes-is-a-conflict-factory.md`).
+The `## Recent changes` section in each AGENT.md is a pointer to the
+directory; entries written before the convention stay frozen in place.
+Gardening a fragment = fold any load-bearing fact into the prose
+sections above and delete the file (a deletion cannot conflict with
+concurrent additions).
 
 ### Pitfalls
 Gotchas, latent bugs, surprising behaviors, or traps that aren't obvious from reading the code. Answer: what does an agent need to know to avoid breaking this component? For example:
