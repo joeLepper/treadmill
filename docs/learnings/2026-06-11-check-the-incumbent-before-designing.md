@@ -1,7 +1,8 @@
 ---
 date: 2026-06-11
 trigger: correction
-status: captured
+status: crystallized-into-rule-alternatives-lead-with-the-incumbent
+crystallized_into: .claude/skills/decide/SKILL.md
 related: ADR-0088 (superseded same night), docs/plans/2026-06-10-prod-promotion-gate-contract.md
 ---
 

@@ -53,7 +53,9 @@ What we are deciding to do, stated plainly. One paragraph, sometimes one sentenc
 
 ## Alternatives considered
 
-For each serious alternative, include:
+LEAD WITH THE INCUMBENT. The FIRST entry is always the incumbent/native solution — "what do we do today / what does the platform already provide" — with a stated reason it is insufficient. If no convincing insufficiency exists, stop: adopt the incumbent instead of writing this ADR. An ADR without an incumbent-first Alternatives section is incomplete; reviewers reject on that basis (docs/learnings/2026-06-11-check-the-incumbent-before-designing.md — four sessions designed, reviewed, and merged a deploy-approval gate in one night without anyone asking how the previous pipeline handled approval; the answer was a platform-native feature already in use, and the whole surface was reverted).
+
+- **Incumbent: <what exists today>** — the current behavior, the platform's native feature, or the project's own prior art. **Why insufficient:** the concrete gap, stated so a reviewer can disagree.
 - **Option name** — one-line description.
 - **Why rejected** — the actual reason, not a strawman. If we'd happily reconsider it later under different conditions, say so.
 
@@ -123,6 +125,16 @@ sequenceDiagram
 - **Default to under 800 words.** Long ADRs hide the decision. If a single ADR seems to need more, it's probably two ADRs.
 - **One decision per ADR.** If you find yourself writing "we also decided" — that's a separate ADR.
 - **Avoid forward references to future ADRs that don't exist yet.** Instead, list the open questions in a `## Follow-ups` section so a reader sees what's still undecided.
+- **Alternatives leads with the incumbent.** Before designing anything, ask "what does the existing system do, and why isn't that sufficient?" — and write the answer down as the first Alternatives entry. Same-frame review never asks this question on its own; the template forces it (docs/learnings/2026-06-11-check-the-incumbent-before-designing.md).
+
+## Reviewer checklist
+
+A reviewer of an ADR (sibling orchestrator, peer worker, or the operator) checks, before anything inside the chosen frame:
+
+- Does the Alternatives section name the incumbent, and is the rejection reason convincing?
+- Does the diagram (when present) pass the conformance checklist above?
+
+The first question exists because same-frame review converges within the proposer's frame — it catches flaws inside the design while never challenging the design's premise (docs/learnings/2026-06-11-check-the-incumbent-before-designing.md). Reject ADRs that fail either check; an unconvincing incumbent rejection is a design smell, not a wording nit.
 
 ## Status transitions
 
