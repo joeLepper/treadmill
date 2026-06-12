@@ -57,9 +57,22 @@ def _tmux_log(tmp_path: Path) -> str:
     return log.read_text() if log.exists() else ""
 
 
-def _spawn_orphan(tmp_path: Path, *, trap_term: bool = False) -> subprocess.Popen:
+def _spawn_orphan(
+    tmp_path: Path,
+    *,
+    trap_term: bool = False,
+    label: str | None = LABEL,
+) -> subprocess.Popen:
     """A live process whose cmdline contains ``claude`` (like the real
-    lock-holder, which is the launcher post-exec)."""
+    lock-holder, which is the launcher post-exec).
+
+    ``label`` lands in the orphan's environment as
+    ``TREADMILL_SESSION_LABEL`` — the launcher exports it before exec'ing
+    claude, and the reap script's PID-recycling identity guard
+    (task f9cb6ce3) reads it back from ``/proc/<pid>/environ``. ``None``
+    spawns a holder with no label at all (a recycled PID that happens to
+    run something claude-named but is not a session launcher).
+    """
     script = tmp_path / "claude"
     body = "#!/usr/bin/env bash\n"
     if trap_term:
@@ -67,7 +80,10 @@ def _spawn_orphan(tmp_path: Path, *, trap_term: bool = False) -> subprocess.Pope
     body += "sleep 60\n"
     script.write_text(body)
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return subprocess.Popen([str(script)])
+    env = {k: v for k, v in os.environ.items() if k != "TREADMILL_SESSION_LABEL"}
+    if label is not None:
+        env["TREADMILL_SESSION_LABEL"] = label
+    return subprocess.Popen([str(script)], env=env)
 
 
 def _run(env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -189,3 +205,103 @@ def test_unit_template_wires_execstoppost() -> None:
     # Still restart-on-failure: ExecStopPost must run between failed
     # attempts for the self-healing property.
     assert "Restart=on-failure" in body
+
+
+# ── PID-recycling identity guard + gated pidfile rm (task f9cb6ce3) ──────────
+
+
+def test_recycled_pid_other_label_not_killed(tmp_path: Path) -> None:
+    """THE f9cb6ce3 case: the pidfile PID was recycled onto a SIBLING
+    session's claude process — cmdline passes the old guard, but the
+    environ label names another session. Must not kill it; the stale
+    lock still clears."""
+    env = _env(tmp_path)
+    sibling = _spawn_orphan(tmp_path, label="some-other-label")
+    try:
+        _pidfile(env).write_text(str(sibling.pid))
+
+        result = _run(env)
+
+        assert result.returncode == 0, result.stderr
+        time.sleep(0.3)  # give a wrong kill time to land before asserting
+        assert sibling.poll() is None, "sibling session's process was killed"
+        assert not _pidfile(env).exists()
+        assert "label mismatch" in result.stderr
+        assert "some-other-label" in result.stderr
+    finally:
+        sibling.kill()
+        sibling.wait()
+
+
+def test_claude_named_process_without_label_not_killed(tmp_path: Path) -> None:
+    """A claude-named process with NO session label in its environment is
+    not a launcher-descendant — recycled PID, leave alive, clear lock."""
+    env = _env(tmp_path)
+    impostor = _spawn_orphan(tmp_path, label=None)
+    try:
+        _pidfile(env).write_text(str(impostor.pid))
+
+        result = _run(env)
+
+        assert result.returncode == 0, result.stderr
+        time.sleep(0.3)
+        assert impostor.poll() is None, "label-less process was killed"
+        assert not _pidfile(env).exists()
+        assert "label mismatch" in result.stderr
+    finally:
+        impostor.kill()
+        impostor.wait()
+
+
+def test_kill_surviving_holder_keeps_pidfile(tmp_path: Path) -> None:
+    """The D-state edge (f9cb6ce3 secondary): a holder that survives
+    KILL must KEEP the pidfile so the ADR-0073 singleton guard blocks a
+    double instance on the next start.
+
+    ``kill`` is a bash BUILTIN, so a PATH stub can't intercept it; we
+    inject a no-op ``kill`` shell FUNCTION via BASH_ENV (sourced by
+    non-interactive bash), which makes every liveness probe report
+    "alive" and every signal a no-op — exactly how an unkillable D-state
+    holder looks to the script."""
+    env = _env(tmp_path)
+    holder = _spawn_orphan(tmp_path)  # matching label; never actually signalled
+    try:
+        _pidfile(env).write_text(str(holder.pid))
+        bash_env = tmp_path / "bash_env.sh"
+        bash_env.write_text("kill() { return 0; }\n")
+        env = {**env, "BASH_ENV": str(bash_env)}
+
+        result = _run(env)
+
+        assert result.returncode == 0, result.stderr
+        assert _pidfile(env).exists(), "pidfile removed despite live holder"
+        assert "survived KILL" in result.stderr
+        assert holder.poll() is None  # the stubbed kill really sent nothing
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_reaped_holder_carries_matching_label(tmp_path: Path) -> None:
+    """Positive control for the identity guard: the happy-path orphan in
+    the incident-shape tests carries OUR label and IS reaped — proven
+    here explicitly so the guard tests can't all pass via a guard that
+    simply never kills."""
+    env = _env(tmp_path)
+    orphan = _spawn_orphan(tmp_path, label=LABEL)
+    try:
+        _pidfile(env).write_text(str(orphan.pid))
+
+        result = _run(env)
+
+        assert result.returncode == 0, result.stderr
+        for _ in range(20):
+            if orphan.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert orphan.poll() is not None, "matching-label holder not reaped"
+        assert not _pidfile(env).exists()
+    finally:
+        if orphan.poll() is None:
+            orphan.kill()
+        orphan.wait()
