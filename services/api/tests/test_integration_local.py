@@ -8,12 +8,14 @@ and the real network wiring — not the FastAPI TestClient.
 Skipped by default. To run:
 
   treadmill-local up      # bring up moto + postgres + redis + api locally
-  TREADMILL_INTEGRATION=1 uv run pytest services/api/tests/test_integration_local.py
+  TREADMILL_INTEGRATION=1 TREADMILL_TEST_API_URL=http://localhost:<port> \\
+      uv run pytest services/api/tests/test_integration_local.py
   treadmill-local down
 
-When ``TREADMILL_API_URL`` is set, the tests target that URL; otherwise
-they default to ``http://localhost:8088`` (the local-adapter's host port
-mapping for the API service per ADR-0010 and the spike CDK).
+The tests target ``TREADMILL_TEST_API_URL`` and skip without it (task
+3aaba5e7 — no live-API default: the ambient ``TREADMILL_API_URL`` points
+at the live deployment, so hitting an API must be an explicit act via
+the dedicated test var, mirroring ``TREADMILL_TEST_DATABASE_URL``).
 """
 
 from __future__ import annotations
@@ -25,15 +27,24 @@ import httpx
 import pytest
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
+# Task 3aaba5e7: NO live-API default. TREADMILL_API_URL is ambient in
+# every team-session env (pointing at the LIVE deployment) and
+# localhost:8088 IS the live stack on the operator host — a dedicated
+# test var makes hitting an API an explicit act.
+TEST_API_URL = os.environ.get("TREADMILL_TEST_API_URL")
 pytestmark = pytest.mark.skipif(
-    not INTEGRATION,
-    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up`",
+    not (INTEGRATION and TEST_API_URL),
+    reason=(
+        "set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_API_URL (a test "
+        "API instance, never the live one) to run; requires a dedicated "
+        "`treadmill-local up`-style stack"
+    ),
 )
 
 
 @pytest.fixture(scope="module")
 def api_url() -> str:
-    return os.environ.get("TREADMILL_API_URL", "http://localhost:8088")
+    return TEST_API_URL
 
 
 @pytest.fixture(scope="module")

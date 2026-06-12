@@ -26,18 +26,24 @@ from sqlalchemy.engine import Engine
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
 TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
+# Task 3aaba5e7: NO live-API default. TREADMILL_API_URL is ambient in
+# every team-session env (it points at the LIVE deployment), so a
+# fallback to it — or to localhost:8088, which IS the live stack on
+# the operator host — silently sends this file's writes to
+# production state. A DEDICATED test var makes that an explicit act,
+# mirroring TREADMILL_TEST_DATABASE_URL.
+TEST_API_URL = os.environ.get("TREADMILL_TEST_API_URL")
 pytestmark = pytest.mark.skipif(
-    not (INTEGRATION and TEST_DB_URL),
-    reason="set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_DATABASE_URL (a DEDICATED test database) to run; requires `treadmill-local up`",
+    not (INTEGRATION and TEST_DB_URL and TEST_API_URL),
+    reason="set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_DATABASE_URL (a DEDICATED test database) and TREADMILL_TEST_API_URL (a test API instance, never the live one) to run; requires `treadmill-local up`",
 )
 
 
-DEFAULT_API_URL = "http://localhost:8088"
 
 
 @pytest.fixture(scope="module")
 def api_url() -> str:
-    return os.environ.get("TREADMILL_API_URL", DEFAULT_API_URL)
+    return TEST_API_URL
 
 
 @pytest.fixture(scope="module")
