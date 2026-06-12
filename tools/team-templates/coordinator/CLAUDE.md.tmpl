@@ -461,8 +461,9 @@ On receipt: write `task.evaluator_verdict` event via
    orchestrator, exactly this shape:
    `cleared-for-merge: <repo> PR #<n> task=<task_id> — evaluator
    approved; auto_merge:false, merge is yours`. Mark nothing
-   completed — §9.3 resumes at step 3 when the `github.pr_merged`
-   webhook arrives from THEIR merge. (This read is the durable fix
+   completed — §9.3 resumes at step 4 (the PATCH; the PR is already
+   merged, never re-run step 3) when the `github.pr_merged` webhook
+   arrives from THEIR merge. (This read is the durable fix
    for the 2026-06-12 #335 race: the policy lived only in plan-doc
    frontmatter, the coordinator could not see it, and the default
    flow merged an `auto_merge:false` PR.)
