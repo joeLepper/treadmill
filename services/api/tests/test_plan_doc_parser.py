@@ -190,8 +190,12 @@ def test_parse_plan_doc_rejects_empty_validation_list():
       files: [a.py]
     validation: []
 """
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as exc_info:
         parse_plan_doc(_wrap_plan_md(yaml_body))
+    # PR #327 review item B: the rejection must steer authors to OMIT the
+    # deprecated key — pydantic's generic min-length text would steer
+    # them toward ADDING a dead entry instead.
+    assert "omit the deprecated 'validation:' key" in str(exc_info.value)
 
 
 def test_parse_plan_doc_rejects_unknown_validation_kind():
@@ -564,3 +568,50 @@ def test_parse_plan_doc_frontmatter_invalid_yaml_raises_format_error() -> None:
     md = "---\nauto_merge: [unclosed\n---\n\n# Plan: Test\n"
     with pytest.raises(PlanDocFormatError, match="failed to parse"):
         parse_plan_doc_frontmatter(md)
+
+
+# ── Optional workflow:/validation: (task 56c0b353, post-ADR-0087 Phase 5) ─────
+
+
+def test_parse_plan_doc_accepts_doc_without_workflow_and_validation():
+    """Regression for task 56c0b353: both fields are inert post-PR-F/G,
+    so a doc that omits them must parse — submitters were including dead
+    fields just to pass parsing (medicoder #1329 workaround)."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "Modern minimal task"
+    intent: |
+      Post-Phase-5 plan doc with no dead fields.
+    scope:
+      files: [a.py]
+"""
+    specs = parse_plan_doc(_wrap_plan_md(yaml_body))
+    assert len(specs) == 1
+    assert specs[0].workflow is None
+    assert specs[0].validation is None
+
+
+def test_parse_plan_doc_still_accepts_doc_with_legacy_fields():
+    """Back-compat: present values are accepted (and shape-validated)
+    exactly as before — older docs parse unchanged."""
+    specs = parse_plan_doc(_wrap_plan_md(_VALID_YAML))
+    assert specs[0].workflow == "wf-author"
+    assert specs[0].validation is not None
+    assert len(specs[0].validation) == 2
+
+
+def test_parse_plan_doc_still_shape_validates_present_validation_block():
+    """A PRESENT validation block keeps full shape validation — only
+    absence became legal."""
+    yaml_body = """sequence_of_work:
+  - id: t0
+    title: "x"
+    intent: x
+    scope:
+      files: [a.py]
+    validation:
+      - kind: deterministic
+        description: "missing script — still an authoring error"
+"""
+    with pytest.raises(ValidationError):
+        parse_plan_doc(_wrap_plan_md(yaml_body))

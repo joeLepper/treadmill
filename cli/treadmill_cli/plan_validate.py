@@ -201,7 +201,10 @@ def _validate_task(spec: "TaskSpec", known_task_ids: set[str]) -> list[Violation
                 citation="SKILL.md — scope discipline (paths are repo-relative)",
             )
         )
-    for idx, check in enumerate(spec.validation):
+    # ``validation:`` is optional post-ADR-0087 (task 56c0b353) — the
+    # shared TaskSpec shape allows None; a doc without the block simply
+    # has no validation-script rules to check.
+    for idx, check in enumerate(spec.validation or []):
         if check.kind != "deterministic":
             continue
         script = check.script or ""
