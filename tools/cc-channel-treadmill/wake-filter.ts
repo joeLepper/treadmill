@@ -10,10 +10,12 @@
  *   * Pattern parsing + glob matching — `TREADMILL_WAKE_ACTIONS` is a
  *     comma-separated list of `entity.action` globs (`*` matches any run
  *     of characters, all other characters literal). When unset, role
- *     defaults apply: `orchestrator` gets `ORCHESTRATOR_DEFAULT_WAKE_ACTIONS`;
- *     every other role (coordinator / evaluator / worker / unset) is
- *     unfiltered — their event consumption is bookkeeping-load-bearing
- *     (ADR-0089 "measure first").
+ *     defaults apply: `orchestrator` gets `ORCHESTRATOR_DEFAULT_WAKE_ACTIONS`
+ *     (ADR-0089); `coordinator` / `evaluator` get their ADR-0090 sets
+ *     (task fe98030f — `task.ci_result` replaces the ~13 per-PR
+ *     `check_run_completed` wakes, and `pr_synchronize` push-noise is
+ *     dropped); `worker` / unset stay unfiltered (a worker's wakes are
+ *     its task briefs — measure before filtering, ADR-0089).
  *   * `WakeGate` — the suppression state machine: counts suppressed
  *     events per `entity.action` (plus distinct task ids), hands the
  *     digest line to the next delivered wake, and implements
@@ -68,6 +70,73 @@ export const ORCHESTRATOR_DEFAULT_WAKE_ACTIONS: readonly string[] = [
 ]
 
 /**
+ * ADR-0090 coordinator default (task fe98030f): every decision /
+ * lifecycle / escalation class the coordinator template acts on —
+ * keyed to the §3 handlers — with the two noise classes EXCLUDED BY
+ * DESIGN: `github.check_run_completed` (replaced by the API observer's
+ * one-per-suite `task.ci_result` rollup, #336/#337) and
+ * `github.pr_synchronize` (push noise; mergeability re-polling rides
+ * §8.5 and the ci_result arrival, not per-push wakes). Escalation-class
+ * actions are ENUMERATED, never globbed away (#310 invariant). Relay
+ * messages and reconcile frames always wake (gate built-in).
+ */
+export const COORDINATOR_DEFAULT_WAKE_ACTIONS: readonly string[] = [
+  'github.pr_merged',
+  'github.pr_opened',
+  'github.pr_review_submitted',
+  // ADR-0090: the one-per-suite CI rollup — the coordinator's §3.5.
+  'task.ci_result',
+  'task.*_verdict',
+  'task.escalat*',
+  // -- enumerated escalation-class actions (escape the escalat* glob) --
+  'task.evaluator_timeout',
+  'task.rework_exhausted',
+  // -------------------------------------------------------------------
+  'task.registered',
+  'task.completed',
+  'task.retry',
+  'task.cancelled',
+  // plan.submitted is the coordinator's PICKUP signal (the #310 lost-wake
+  // class) — load-bearing here, unlike the orchestrator set where it is
+  // the session's own submit echoed back.
+  'plan.submitted',
+  'plan.completed',
+  'plan.abandoned',
+  'deploy.failed',
+  'staging_smoke.failed',
+  'datamigration.*',
+]
+
+/**
+ * ADR-0090 evaluator default (task fe98030f): the decision/escalation
+ * core + `task.ci_result` + the review-handoff family. Same two
+ * exclusions as the coordinator. Evaluator BRIEFS arrive via relay
+ * (always wakes), so lifecycle bookkeeping classes
+ * (task.registered/retry, plan.submitted) stay out — the evaluator is
+ * bursty-by-design (ADR-0089 §3 cadence).
+ */
+export const EVALUATOR_DEFAULT_WAKE_ACTIONS: readonly string[] = [
+  'github.pr_merged',
+  'github.pr_opened',
+  'github.pr_review_submitted',
+  'task.ci_result',
+  'task.*_verdict',
+  // review-handoff family (override lineage, ADR-0038/0042).
+  'review.*',
+  'task.escalat*',
+  // -- enumerated escalation-class actions (escape the escalat* glob) --
+  'task.evaluator_timeout',
+  'task.rework_exhausted',
+  // -------------------------------------------------------------------
+  'task.cancelled',
+  'plan.completed',
+  'plan.abandoned',
+  'deploy.failed',
+  'staging_smoke.failed',
+  'datamigration.*',
+]
+
+/**
  * Concrete wire actions the ADR-0071 relay levels treat as significant,
  * used by the wake ⊇ relay superset check. Most ADR-0062 escalation
  * reasons (terminal_step_failure, cap_reached, gate_broken, …) are
@@ -92,14 +161,17 @@ export const RELAY_SIGNIFICANT_ACTIONS: Record<RelayLevel, readonly string[]> = 
     ...quiet,
     'github.pr_opened',
     'github.pr_review_submitted',
-    // a failed check is what enters the ci-fix loop
-    'github.check_run_completed',
+    // ADR-0090 (task fe98030f): the ci-fix loop now enters on the
+    // one-per-suite rollup, not per-check noise — check_run_completed
+    // left the relay vocabulary with the wake vocabulary.
+    'task.ci_result',
   ]
   const verbose = [
     ...normal,
     'step.started',
     'step.completed',
-    'github.pr_synchronize',
+    // github.pr_synchronize dropped with ADR-0090: push noise carries
+    // no relay-worthy decision at any level.
   ]
   return { quiet, normal, verbose }
 })()
@@ -140,8 +212,15 @@ export function parseWakeActions(
       .filter(s => s.length > 0)
     if (patterns.length > 0) return patterns
   }
-  if (role.trim().toLowerCase() === 'orchestrator') {
+  const normalized = role.trim().toLowerCase()
+  if (normalized === 'orchestrator') {
     return [...ORCHESTRATOR_DEFAULT_WAKE_ACTIONS]
+  }
+  if (normalized === 'coordinator') {
+    return [...COORDINATOR_DEFAULT_WAKE_ACTIONS]
+  }
+  if (normalized === 'evaluator') {
+    return [...EVALUATOR_DEFAULT_WAKE_ACTIONS]
   }
   return null
 }

@@ -15,6 +15,8 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  COORDINATOR_DEFAULT_WAKE_ACTIONS,
+  EVALUATOR_DEFAULT_WAKE_ACTIONS,
   ORCHESTRATOR_DEFAULT_WAKE_ACTIONS,
   RELAY_SIGNIFICANT_ACTIONS,
   WakeGate,
@@ -68,10 +70,15 @@ describe('parseWakeActions', () => {
     ])
   })
 
-  test('coordinator / evaluator / worker / unset roles are unfiltered', () => {
-    for (const role of ['coordinator', 'evaluator', 'worker', '']) {
-      expect(parseWakeActions(undefined, role)).toBeNull()
-    }
+  test('worker / unset roles stay unfiltered; coordinator + evaluator get ADR-0090 sets', () => {
+    expect(parseWakeActions(undefined, 'worker')).toBeNull()
+    expect(parseWakeActions(undefined, '')).toBeNull()
+    expect(parseWakeActions(undefined, 'coordinator')).toEqual([
+      ...COORDINATOR_DEFAULT_WAKE_ACTIONS,
+    ])
+    expect(parseWakeActions(undefined, 'evaluator')).toEqual([
+      ...EVALUATOR_DEFAULT_WAKE_ACTIONS,
+    ])
   })
 })
 
@@ -290,5 +297,97 @@ describe('wakeSetViolations', () => {
     const { quiet, normal, verbose } = RELAY_SIGNIFICANT_ACTIONS
     for (const a of quiet) expect(normal).toContain(a)
     for (const a of normal) expect(verbose).toContain(a)
+  })
+})
+
+// ── ADR-0090 role defaults (task fe98030f) ───────────────────────────
+
+describe('coordinator default wake set (ADR-0090)', () => {
+  const gate = new WakeGate([...COORDINATOR_DEFAULT_WAKE_ACTIONS])
+
+  test('the two noise classes are EXCLUDED by design', () => {
+    expect(gate.wakes('github.check_run_completed')).toBe(false)
+    expect(gate.wakes('github.pr_synchronize')).toBe(false)
+  })
+
+  test('the ci_result rollup wakes — the replacement for per-check noise', () => {
+    expect(gate.wakes('task.ci_result')).toBe(true)
+  })
+
+  test('EVERY escalation-class action still wakes (forbidden-failure-mode guard)', () => {
+    expect(gate.wakes('task.escalated_to_operator')).toBe(true)
+    expect(gate.wakes('task.escalation_acknowledged')).toBe(true)
+    expect(gate.wakes('task.evaluator_timeout')).toBe(true)
+    expect(gate.wakes('task.rework_exhausted')).toBe(true)
+  })
+
+  test('decision + lifecycle classes the §3 handlers key on all wake', () => {
+    for (const a of [
+      'github.pr_merged', 'github.pr_opened', 'github.pr_review_submitted',
+      'task.evaluator_verdict', 'task.registered', 'task.completed',
+      'task.retry', 'task.cancelled', 'plan.submitted', 'plan.completed',
+      'plan.abandoned', 'deploy.failed', 'staging_smoke.failed',
+    ]) {
+      expect(gate.wakes(a)).toBe(true)
+    }
+  })
+
+  test('plan.submitted wakes the coordinator — the #310 pickup signal', () => {
+    expect(gate.wakes('plan.submitted')).toBe(true)
+  })
+})
+
+describe('evaluator default wake set (ADR-0090)', () => {
+  const gate = new WakeGate([...EVALUATOR_DEFAULT_WAKE_ACTIONS])
+
+  test('the two noise classes are EXCLUDED by design', () => {
+    expect(gate.wakes('github.check_run_completed')).toBe(false)
+    expect(gate.wakes('github.pr_synchronize')).toBe(false)
+  })
+
+  test('ci_result + review-handoff family wake', () => {
+    expect(gate.wakes('task.ci_result')).toBe(true)
+    expect(gate.wakes('review.override')).toBe(true)
+    expect(gate.wakes('task.evaluator_verdict')).toBe(true)
+  })
+
+  test('EVERY escalation-class action still wakes (forbidden-failure-mode guard)', () => {
+    expect(gate.wakes('task.escalated_to_operator')).toBe(true)
+    expect(gate.wakes('task.evaluator_timeout')).toBe(true)
+    expect(gate.wakes('task.rework_exhausted')).toBe(true)
+  })
+
+  test('coordinator bookkeeping classes stay out (briefs arrive via relay)', () => {
+    expect(gate.wakes('task.registered')).toBe(false)
+    expect(gate.wakes('plan.submitted')).toBe(false)
+  })
+})
+
+describe('wake ⊇ relay for the ADR-0090 role sets', () => {
+  test('coordinator satisfies quiet AND normal', () => {
+    expect(wakeSetViolations([...COORDINATOR_DEFAULT_WAKE_ACTIONS], 'quiet')).toEqual([])
+    expect(wakeSetViolations([...COORDINATOR_DEFAULT_WAKE_ACTIONS], 'normal')).toEqual([])
+  })
+
+  test('evaluator satisfies quiet AND normal', () => {
+    expect(wakeSetViolations([...EVALUATOR_DEFAULT_WAKE_ACTIONS], 'quiet')).toEqual([])
+    expect(wakeSetViolations([...EVALUATOR_DEFAULT_WAKE_ACTIONS], 'normal')).toEqual([])
+  })
+
+  test('verbose violations are step.* only — the documented accepted WARN tier', () => {
+    expect(wakeSetViolations([...COORDINATOR_DEFAULT_WAKE_ACTIONS], 'verbose')).toEqual([
+      'step.started', 'step.completed',
+    ])
+    expect(wakeSetViolations([...EVALUATOR_DEFAULT_WAKE_ACTIONS], 'verbose')).toEqual([
+      'step.started', 'step.completed',
+    ])
+  })
+
+  test('relay vocabulary dropped the two noise classes with the wake vocabulary', () => {
+    for (const level of ['quiet', 'normal', 'verbose'] as const) {
+      expect(RELAY_SIGNIFICANT_ACTIONS[level]).not.toContain('github.check_run_completed')
+      expect(RELAY_SIGNIFICANT_ACTIONS[level]).not.toContain('github.pr_synchronize')
+    }
+    expect(RELAY_SIGNIFICANT_ACTIONS.normal).toContain('task.ci_result')
   })
 })

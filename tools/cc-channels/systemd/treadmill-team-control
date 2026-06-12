@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Usage: treadmill-team-control <activate|pause> <repo-slug>
+#
+# ADR-0091 (task 92365367): start (activate) or stop (pause) the
+# systemd --user units for a TEAM's labels — coordinator-<slug>,
+# evaluator-<slug>, worker-<slug>-N — using the orphan-safe path:
+# `stop` reaps the whole session tree via the deployed ExecStopPost
+# (#326/#330), `start` resumes via the launcher, which persists the
+# per-label session id (ADR-0073) so context survives the pause.
+#
+# NEVER touches orchestrator/operator units — by construction: the
+# label set is enumerated from the team's install directory
+# (~/.treadmill/teams/<slug>/), and only directory names matching the
+# three team-label shapes are accepted. Orchestrator labels
+# (treadmill-alan, ...) live outside the teams root and can never match.
+#
+# PAUSE IS FAIL-CLOSED (plan 992d65b7 fail-safe rule): the script
+# refuses to pause unless GET /api/v1/scheduler/decision AFFIRMATIVELY
+# lists the team in `quiescent_teams`. API unreachable, endpoint
+# missing (the decision API ships in a sibling task), or a malformed
+# response all read as "cannot prove quiescent" → refuse. Quiescence
+# itself (no executing task, no await-CI/await-merge PR, no
+# half-registered PR) is the API's decision — this script stays thin.
+#
+# Env:
+#   TREADMILL_API_URL     default http://localhost:8088 (same convention
+#                         as the channel server — the direct API port)
+#   TREADMILL_TEAMS_ROOT  default ~/.treadmill/teams (tests point this
+#                         at a sandbox)
+set -euo pipefail
+
+usage() {
+  echo "usage: treadmill-team-control <activate|pause> <repo-slug>" >&2
+  exit 2
+}
+
+VERB="${1:-}"
+SLUG="${2:-}"
+[ -n "$VERB" ] && [ -n "$SLUG" ] || usage
+case "$VERB" in
+  activate|pause) ;;
+  *) usage ;;
+esac
+# Slug shape guard: team slugs are kebab-case (also keeps a hostile or
+# typo'd argument from globbing anything unexpected below).
+case "$SLUG" in
+  *[!a-z0-9-]*|"") echo "treadmill-team-control: invalid repo-slug '$SLUG'" >&2; exit 2 ;;
+esac
+
+TEAMS_ROOT="${TREADMILL_TEAMS_ROOT:-$HOME/.treadmill/teams}"
+API="${TREADMILL_API_URL:-http://localhost:8088}"
+TEAM_DIR="$TEAMS_ROOT/$SLUG"
+
+if [ ! -d "$TEAM_DIR" ]; then
+  echo "treadmill-team-control: no team installed at $TEAM_DIR" \
+    "(run: treadmill team up)" >&2
+  exit 1
+fi
+
+# The team's labels, from the install layout (one dir per label).
+# Only the three team shapes pass; anything else in the dir is ignored.
+team_labels() {
+  local d base
+  for d in "$TEAM_DIR"/*/; do
+    [ -d "$d" ] || continue
+    base=$(basename "$d")
+    case "$base" in
+      "coordinator-$SLUG"|"evaluator-$SLUG") echo "$base" ;;
+      "worker-$SLUG"-*)
+        case "${base#worker-$SLUG-}" in
+          *[!0-9]*|"") ;;  # not worker-<slug>-N — ignore
+          *) echo "$base" ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+LABELS=$(team_labels)
+if [ -z "$LABELS" ]; then
+  echo "treadmill-team-control: $TEAM_DIR contains no team labels" >&2
+  exit 1
+fi
+
+refuse_pause() {
+  echo "treadmill-team-control: REFUSING to pause '$SLUG' — $1" \
+    "(fail-safe: a team is only paused when the decision API" \
+    "affirmatively reports it quiescent)" >&2
+  exit 1
+}
+
+if [ "$VERB" = "pause" ]; then
+  DECISION=$(curl -fsS -m 10 "$API/api/v1/scheduler/decision" 2>/dev/null) \
+    || refuse_pause "decision API unavailable at $API"
+  QUIESCENT=$(printf '%s' "$DECISION" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    teams = d.get("quiescent_teams")
+    print("yes" if isinstance(teams, list) and sys.argv[1] in teams else "no")
+except Exception:
+    print("malformed")
+' "$SLUG" 2>/dev/null) || QUIESCENT="malformed"
+  case "$QUIESCENT" in
+    yes) ;;
+    no) refuse_pause "decision API does not list it in quiescent_teams" ;;
+    *) refuse_pause "decision API response unparseable" ;;
+  esac
+fi
+
+ACTION="start"
+[ "$VERB" = "pause" ] && ACTION="stop"
+
+RC=0
+for label in $LABELS; do
+  unit="treadmill-channel@${label}.service"
+  if systemctl --user "$ACTION" "$unit"; then
+    echo "treadmill-team-control: $ACTION $unit"
+  else
+    echo "treadmill-team-control: $ACTION FAILED for $unit" >&2
+    RC=1
+  fi
+done
+
+exit $RC
