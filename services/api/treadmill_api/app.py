@@ -44,6 +44,7 @@ from treadmill_api.routers.task_board import router as task_board_router
 from treadmill_api.routers.task_executions import router as task_executions_router
 from treadmill_api.routers.tasks import router as tasks_router
 from treadmill_api.routers.llm_calls import router as llm_calls_router
+from treadmill_api.routers.scheduler import router as scheduler_router
 from treadmill_api.routers.team_configs import router as team_configs_router
 from treadmill_api.routers.webhooks import router as webhooks_router
 from treadmill_api.routers.task_prs import router as task_prs_router
@@ -260,6 +261,7 @@ def create_app() -> FastAPI:
     app.include_router(task_board_router)
     app.include_router(task_executions_router)
     app.include_router(llm_calls_router)
+    app.include_router(scheduler_router)
     app.include_router(team_configs_router)
     app.include_router(task_prs_router)
     app.include_router(schedules_router)

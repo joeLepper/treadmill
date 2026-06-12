@@ -81,10 +81,12 @@ elif [[ "$LABEL" =~ ^worker-(.+)-[0-9]+$ ]]; then
   _REPO_SLUG="${BASH_REMATCH[1]}"
 else
   # Non-team labels (treadmill-alan, treadmill-bert, ...) are orchestrator
-  # sessions. Setting the role here is what arms the ADR-0089 wake-class
-  # filter's orchestrator default in treadmill-events.ts — without it the
-  # filter ships but never applies (the 2026-06-11 integration gap: every
-  # orchestrator kept waking on check_run_completed noise post-merge).
+  # sessions. Setting the role here is what arms the wake-class filter's
+  # role default in treadmill-events.ts — without it the filter ships but
+  # never applies (the 2026-06-11 integration gap: every orchestrator kept
+  # waking on check_run_completed noise post-merge). The same TREADMILL_ROLE
+  # export below arms the ADR-0090 coordinator + evaluator defaults
+  # (task fe98030f) for team labels, whose role comes from their .env files.
   _TREADMILL_ROLE="orchestrator"
 fi
 
