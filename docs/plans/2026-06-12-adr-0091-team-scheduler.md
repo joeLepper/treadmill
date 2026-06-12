@@ -24,11 +24,14 @@ the active team make full progress.
 - The active team is the one owning the highest-priority active plan with
   pending work; a starved team eventually wins (aging), and the active team
   doesn't flip more than once per hysteresis window.
-- A team is paused only at a safe point — no task `executing` AND no PR in
-  await-merge AND its coordinator inbox drained — and resumes with full
-  context (`--resume`) + a `catch_up` reconcile, so nothing merged during a
-  pause is stranded.
+- A team is paused only at a safe point — no task `executing`, no PR in
+  **await-CI** or await-merge, and its coordinator inbox drained — and
+  resumes with full context (`--resume`) + a `catch_up` reconcile, so
+  nothing in flight during a pause is stranded.
 - An intentional pause never lands a unit in `failed` state.
+- **Fail-safe:** if the scheduler decision is unavailable (API unreachable,
+  error, or null), the daemon holds the current active set — it never pauses
+  fleet-wide on a missing decision.
 
 ## Constraints / scope
 
@@ -64,16 +67,20 @@ sequence_of_work:
         ACTIVE plan that has PENDING (non-terminal) work. Apply AGING so a
         team waiting longest gains priority over time (document the formula;
         a simple wait-weighted score is fine) — no team starves.
-      - quiescent_teams = teams safe to pause: NO task in ``executing`` AND
-        NO task_pr in await-merge AND no half-registered PR for that repo
-        (mirror the ADR-0091 safe-point definition). Pure read over plans /
-        tasks / task_prs.
+      - quiescent_teams = teams safe to pause: NO task ``executing`` AND NO
+        task_pr in await-CI OR await-merge AND no half-registered PR for that
+        repo. (Carla #342: a PR awaiting CI after a rework push — worker
+        pushed + exited, not yet await-merge — otherwise reads quiescent and
+        gets paused mid-CI; await-CI MUST count as non-quiescent.) Pure read
+        over plans / tasks / task_prs.
       - null desired_team when no team has pending work.
+      - aging time-constant MUST be >= the daemon's hysteresis dwell so
+        aging can't out-pace anti-flap (Carla #342); document the value.
       Keep the decision a PURE function over fetched rows so it is fully
       unit-tested; the endpoint is a thin wrapper.
       Tests (services/api): two teams with pending work -> higher-priority
-      wins; aging flips a long-starved team; a team mid-execute or
-      mid-await-merge is NOT quiescent; empty queue -> null.
+      wins; aging flips a long-starved team; a team mid-execute, mid-await-CI,
+      OR mid-await-merge is NOT quiescent; empty queue -> null.
       Update services/api/AGENT.md.
     scope:
       files:
@@ -132,8 +139,14 @@ sequence_of_work:
       into ``treadmill-local up`` (dev-local) as an opt-in subprocess
       (default OFF until the operator enables it, mirroring
       start_deploy_watcher). Decision logic is NOT duplicated here — the
-      daemon only enacts the API's decision. Update
-      tools/local-adapter/AGENT.md.
+      daemon only enacts the API's decision.
+      LOAD-BEARING FAIL-SAFE (Carla #342): if ``GET /scheduler/decision`` is
+      unreachable, errors, or returns null desired_team, the daemon HOLDS the
+      current active set and pauses NOTHING — never a fleet-wide pause on a
+      missing decision. The API is a SPOF (a ~9h outage occurred 2026-06-12);
+      the scheduler must degrade to "leave things as they are," not "stop
+      everything." Pin with a test: unreachable / error / null -> zero
+      team-control pause calls. Update tools/local-adapter/AGENT.md.
     scope:
       files:
         - tools/local-adapter/treadmill_local/runtime.py
