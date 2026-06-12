@@ -148,8 +148,11 @@ dependents the same way.
 
 ONE event per completed check SUITE at a task's PR head, emitted by
 the API-side CI-observer (ADR-0090). You do NOT write this event —
-the observer owns it; a coordinator-written ci_result would collide
-with the observer's idempotency key.
+the observer owns it. (Mechanism, precisely: the manual events
+surface carries no commit_sha field, so a coordinator-written
+ci_result would BYPASS the observer's (head_sha, suite, conclusion)
+idempotency key and create duplicates; the manual surface's own
+guard is only its (entity_type, action, task_id) 409 triple.)
 
 Payload: `{repo, pr_number, head_sha, check_suite_id, conclusion,
 app_slug}`. `conclusion` is GitHub's own suite rollup ∈ {`success`,
@@ -181,8 +184,9 @@ Dedup caveat: same-conclusion redeliveries are collapsed UPSTREAM by
 the observer's idempotency key (head_sha, check_suite_id,
 conclusion) — a guarantee that holds only while API ingest stays
 serialized. If ingest ever goes concurrent, expect rare duplicates:
-keep this handler idempotent (acting twice on the same green rollup
-must be harmless — peer review is already registered, §8.1 no-ops).
+keep this handler idempotent — acting twice on the same green rollup
+must be harmless, which the §8 IDEMPOTENCY GUARD provides (an
+in-flight or collated review cycle for this head is never reopened).
 
 Repo case-matching intent: the observer's fallback attribution is
 case-insensitive, but the #335 resolver fast path matches
@@ -318,7 +322,8 @@ When §3.5 fires with `conclusion != 'success'` (the suite rollup):
 
 1. Compose the rework brief: include the failing checks
    (`gh pr checks <pr>` names them), the suite conclusion, and the
-   relevant CI log (`gh run view <run_id>`).
+   relevant CI log (`gh run view <run_id>` — the run_id now comes
+   from the `gh pr checks` output, not from a per-check payload).
 2. Dispatch via §5 with `trigger='coordinator-rework'`. Same
    author worker (continuity bias keeps the same `--resume`
    session).
@@ -345,6 +350,15 @@ attempts: escalate to orchestrator with reason
 After CI green AND branch clean (mergeability=true), open peer
 review BEFORE briefing the evaluator. Peer review is the inner
 quality loop; the evaluator does the holistic outer pass.
+
+IDEMPOTENCY GUARD: if a review cycle is already in flight or
+completed for this PR head (peer-review task_executions exist for
+the task at this head, or you already collated a verdict for it),
+do NOT open a second cycle — log
+`peer_review: task_id=<task_id> head=<sha> already in
+flight/collated; skipping duplicate open` and stop. This is the
+guard that makes a duplicate `task.ci_result` (the §3.5 dedup
+caveat) harmless.
 
 ### 8.1 Reviewer assignment
 

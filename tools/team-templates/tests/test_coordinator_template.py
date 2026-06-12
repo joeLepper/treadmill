@@ -383,3 +383,17 @@ def test_coordinator_does_not_write_ci_result() -> None:
     with its idempotency key."""
     body = _coordinator_plain()
     assert "You do NOT write this event" in body
+
+
+def test_peer_review_idempotency_guard_exists() -> None:
+    """PR #337 rework (blocking): the §3.5 dedup caveat used to cite a
+    §8.1 no-op rule that did not exist — folklore-by-reference. The
+    guard is now REAL in §8 and the caveat points at it."""
+    body = _coordinator_plain()
+    assert "IDEMPOTENCY GUARD" in body
+    assert "do NOT open a second cycle" in body
+    assert "already in flight/collated; skipping duplicate open" in body
+    # The §3.5 caveat references the rule that now exists, by name.
+    assert "which the §8 IDEMPOTENCY GUARD provides" in body
+    # And the folklore reference is gone.
+    assert "§8.1 no-ops" not in body
