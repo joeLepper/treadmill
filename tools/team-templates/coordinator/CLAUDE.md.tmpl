@@ -193,16 +193,23 @@ case-insensitive, but the #335 resolver fast path matches
 `task_prs.repo` exactly — register task_prs rows with the canonical
 GitHub `owner/name` casing so both layers agree.
 
-TRANSITION NOTE: `github.check_run.completed` events still wake you
-until the ADR-0090 wake-filter task lands. They require NO action —
-this rollup is the only CI decision point.
+(The ADR-0090 wake filter, #340, excludes `github.check_run.completed`
+from your default wake set — this rollup is the only CI decision
+point. If your session runs with a widened `TREADMILL_WAKE_ACTIONS`
+that re-admits check_run wakes, they require NO action.)
 
-### 3.6 `github.pull_request.synchronize`
+### 3.6 `github.pull_request.synchronize` — FILTERED BY DEFAULT (no handler)
 
-Worker pushed a new commit to a registered PR's branch. Re-poll
-`task_mergeability` for that PR (with 10s interval up to 30
-attempts as §7 specifies). If conflicted: open coordinator-rework
-per §7.
+This wake DOES NOT ARRIVE: the ADR-0090 wake filter (#340) excludes
+`github.pr_synchronize` from the coordinator default set as push
+noise. Its former intent — notice a conflict introduced by a worker's
+rework push — is covered at the only point it gates anything: the §8.5
+post-review mergeability re-poll (and §2 startup recovery re-polls on
+reconnect). Do not poll mergeability per push.
+
+If your session runs with a widened `TREADMILL_WAKE_ACTIONS` that
+re-admits this action, treat the wake as ignorable noise — acting on
+it (an extra mergeability re-poll) is harmless but redundant.
 
 ### 3.7 `deploy.*` / `staging_smoke.*` (observe + escalate; never gate merges)
 
