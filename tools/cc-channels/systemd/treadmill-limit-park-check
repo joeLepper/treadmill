@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Usage: treadmill-limit-park-check <label>
+#
+# Detector for the Claude usage-limit park (task b561910d, learning
+# 2026-06-11-usage-limit-park-freezes-fleet-silently): the interactive
+# limit modal produces NO exit and NO relay, so health must read the
+# SESSION SURFACE — the tmux pane — not the exit code.
+#
+# Parked = the pane shows the limit-prompt signature AND the pane is
+# FROZEN (byte-identical across two consecutive checks ~30s apart).
+# The freeze requirement is the false-positive guard: a busy worker
+# whose transcript merely MENTIONS the signature keeps redrawing, so
+# its pane hash changes; the real modal blocks on stdin and renders a
+# static screen.
+#
+# Exit codes: 0 = park CONFIRMED; 1 = not parked (or first sighting —
+# state recorded, confirm on the next check). Never crashes the caller.
+set -u
+
+LABEL="${1:-}"
+[ -n "$LABEL" ] || exit 1
+
+STATE_ROOT="$HOME/.cc-channels/$LABEL"
+STATE_FILE="$STATE_ROOT/limit-park.state"
+SIGNATURE="limit to reset"
+
+# Bottom-anchored (PR #328 review note): the live modal renders in the
+# pane's BOTTOM lines; dismissed-modal residue higher up in a frozen
+# idle pane must not re-trigger detection. Hash the same window we
+# match against.
+PANE=$(tmux capture-pane -t "$LABEL" -p 2>/dev/null | tail -n 15 || true)
+if [ -z "$PANE" ] || ! printf '%s' "$PANE" | grep -qi "$SIGNATURE"; then
+  rm -f "$STATE_FILE"
+  exit 1
+fi
+
+HASH=$(printf '%s' "$PANE" | sha256sum | cut -d' ' -f1)
+PREV=$(cat "$STATE_FILE" 2>/dev/null || true)
+printf '%s' "$HASH" > "$STATE_FILE"
+
+if [ -n "$PREV" ] && [ "$PREV" = "$HASH" ]; then
+  exit 0  # signature + frozen pane, twice in a row: parked
+fi
+exit 1

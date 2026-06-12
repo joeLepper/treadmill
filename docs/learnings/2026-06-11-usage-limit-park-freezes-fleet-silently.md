@@ -1,7 +1,8 @@
 ---
 date: 2026-06-11
 trigger: surprise
-status: captured
+status: crystallized-into-rule-limit-park-detected-and-recovered
+crystallized_into: tools/cc-channels/systemd/treadmill-limit-park-check
 related: ADR-0055 (per-account creds), ADR-0066 (usage-limit fallback), ADR-0087 (team execution)
 ---
 

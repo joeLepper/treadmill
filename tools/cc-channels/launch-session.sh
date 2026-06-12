@@ -256,4 +256,9 @@ echo "$WORKDIR" > "$STATE_ROOT/workdir"
 # unlink the file (it would not fire across exec) — stale entries are detected
 # on next start via the kill -0 check above.
 echo $$ > "$PIDFILE"
+# Per-session Claude account (task b561910d): resolves CLAUDE_CONFIG_DIR
+# from $STATE_ROOT/claude-account when set — the limit-park recovery's
+# failover surface. Default stays ~/.claude.
+# shellcheck disable=SC1091
+source "$_HERE/claude-account-env.sh"
 exec claude "${CHANNEL_ARGS[@]}" "${SESSION_ARGS[@]}" "$@"
