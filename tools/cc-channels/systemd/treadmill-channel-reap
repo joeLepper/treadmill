@@ -18,6 +18,28 @@
 # already-wedged crashloop self-heals: the first restart cycle after
 # deploy reaps the orphan, and the next attempt starts clean.
 #
+# Identity guard (task f9cb6ce3, hardening the #326 review finding):
+# the pidfile PID can be RECYCLED between our read and our kill — and a
+# cmdline check alone passes for ANY label's claude process, so a
+# recycled PID landing on a sibling session's launcher would reap the
+# wrong session. Before killing we therefore require BOTH:
+#   1. cmdline names claude/launch-session (cheap, catches arbitrary
+#      unrelated processes), AND
+#   2. /proc/<pid>/environ carries TREADMILL_SESSION_LABEL equal to OUR
+#      label (the launcher exports it before exec'ing claude, so every
+#      legitimate holder has it; same-user /proc makes it readable).
+# Any mismatch = treat the PID as recycled: clear the stale lock, kill
+# nothing.
+#
+# Pidfile removal is gated on the holder being CONFIRMED GONE
+# (task f9cb6ce3 secondary): rm-ing the lock while a KILL-surviving
+# (e.g. D-state) holder is still alive would let the next start spawn a
+# second instance against the ADR-0073 singleton. If the holder
+# survives KILL we KEEP the pidfile — the launcher's live-PID refusal
+# then blocks the next start, which is the safe failure (no double
+# instance; the next stop/restart cycle retries the reap). Stale locks
+# (dead PID, garbage, recycled PID) are still removed as before.
+#
 # NEVER exits non-zero — a failed reap must not wedge stop/restart.
 set -u
 
@@ -31,27 +53,70 @@ PIDFILE="$STATE_ROOT/launcher.pid"
 #    (claude + its channel server). Safe when absent.
 tmux kill-session -t "$LABEL" 2>/dev/null || true
 
-# 2. Reap the lock-holding process if it survived the pane teardown.
-#    The pidfile PID is the launcher which exec'd into claude, so its
-#    cmdline names claude or launch-session — anything else means PID
-#    reuse by an unrelated process: leave it alive (just drop the stale
-#    lock) rather than kill an innocent.
+# TREADMILL_SESSION_LABEL from /proc/<pid>/environ (NUL-separated).
+# Empty output = var absent, environ unreadable, or process gone.
+holder_label() {
+  tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null \
+    | sed -n 's/^TREADMILL_SESSION_LABEL=//p' | head -n 1
+}
+
+# Alive FOR LOCK PURPOSES: the process exists and is not a zombie.
+# kill -0 is the wrong probe here — it succeeds on zombies, and a
+# zombie holds no lock-relevant resources (it cannot double-instance),
+# so treating one as alive would wedge the pidfile forever. Parse the
+# state field from /proc/<pid>/stat, stripping through the LAST ')' so
+# a comm containing spaces/parens can't shift the field.
+holder_alive() {
+  local stat state
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  state=${stat##*) }
+  state=${state%% *}
+  [ -n "$state" ] || return 1
+  case "$state" in
+    Z|X|x) return 1 ;;
+  esac
+  return 0
+}
+
+# 2. Reap the lock-holding process if it survived the pane teardown,
+#    subject to the identity guard documented in the header.
 if [ -f "$PIDFILE" ]; then
   PID=$(cat "$PIDFILE" 2>/dev/null || true)
   case "$PID" in
     *[!0-9]*|"") PID="" ;;
   esac
-  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+  REMOVE_PIDFILE=1
+  if [ -n "$PID" ] && holder_alive "$PID"; then
     CMDLINE=$(ps -p "$PID" -o args= 2>/dev/null || true)
+    HOLDER_LABEL=$(holder_label "$PID")
     case "$CMDLINE" in
       *claude*|*launch-session*)
-        kill -TERM "$PID" 2>/dev/null || true
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-          kill -0 "$PID" 2>/dev/null || break
-          sleep 0.2
-        done
-        if kill -0 "$PID" 2>/dev/null; then
-          kill -KILL "$PID" 2>/dev/null || true
+        if [ "$HOLDER_LABEL" = "$LABEL" ]; then
+          kill -TERM "$PID" 2>/dev/null || true
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            holder_alive "$PID" || break
+            sleep 0.2
+          done
+          if holder_alive "$PID"; then
+            kill -KILL "$PID" 2>/dev/null || true
+            # KILL is async; confirm death before declaring the lock
+            # stale. A D-state holder can survive KILL until its I/O
+            # completes — keep the lock in that case (see header).
+            for _ in 1 2 3 4 5; do
+              holder_alive "$PID" || break
+              sleep 0.2
+            done
+            if holder_alive "$PID"; then
+              REMOVE_PIDFILE=0
+              echo "treadmill-channel-reap: pid $PID survived KILL" \
+                "(D-state?); keeping pidfile so the singleton guard" \
+                "blocks a double instance" >&2
+            fi
+          fi
+        else
+          echo "treadmill-channel-reap: pid $PID label mismatch" \
+            "(holder='${HOLDER_LABEL:-none}' want='$LABEL') — recycled" \
+            "PID; dropping stale lock without killing" >&2
         fi
         ;;
       *)
@@ -60,7 +125,7 @@ if [ -f "$PIDFILE" ]; then
         ;;
     esac
   fi
-  rm -f "$PIDFILE"
+  [ "$REMOVE_PIDFILE" = "1" ] && rm -f "$PIDFILE"
 fi
 
 exit 0
