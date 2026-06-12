@@ -208,3 +208,34 @@ def test_unit_declares_success_exit_status_and_keeps_reap() -> None:
     assert "SuccessExitStatus=143" in body
     assert "treadmill-channel-reap %i" in body
     assert "Restart=on-failure" in body
+
+
+# ── wrapper TERM semantics (#343 rework — worker-2's systemd repro) ──────────
+
+LAUNCH = (
+    Path(__file__).resolve().parents[1] / "systemd" / "treadmill-channel-launch"
+)
+
+
+def test_wrapper_term_trap_exits_promptly() -> None:
+    """SuccessExitStatus=143 on the unit only delivers if the WRAPPER
+    exits promptly on TERM. The pre-fix trap flipped a flag and kept
+    looping on tmux liveness that only ExecStopPost could end — but
+    ExecStopPost runs only after main exit: a chicken-and-egg deadlock
+    to TimeoutStopSec → SIGKILL → Result=timeout (reproduced on real
+    systemd; run log in PR #343).
+
+    TEST-LAYER BOUNDARY: PATH-stub tests structurally cannot observe
+    systemd's stop semantics (TimeoutStopSec, SuccessExitStatus mapping,
+    Result=) — those live only in a real systemd manager, covered by
+    the throwaway-unit run log per the #326 evidence convention. What a
+    unit test CAN pin is the wrapper's SHAPE: the prompt-exit trap is
+    present and the deadlocking flag pattern is gone.
+    """
+    body = LAUNCH.read_text()
+    assert "trap 'exit 143' TERM INT" in body
+    assert "STOPPED_BY_OPERATOR" not in body
+    # The #326 crashloop path is untouched: unexpected tmux death still
+    # exits 1 so Restart=on-failure self-heals.
+    assert "ended unexpectedly" in body
+    assert "exit 1" in body
