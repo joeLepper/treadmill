@@ -45,6 +45,15 @@ pending the ADR-0087 §Health bots redesign.
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - **ADR-0087 Phase 5 (PR-G)** — deleted the trigger evaluator + sweep
   family (above); moved the `DispatchPublishFailed` marker write into
   `persist_and_publish` so the ReplayLoop heals every emitter, not just

@@ -12,6 +12,15 @@ This directory contains Claude Code hooks that run during Treadmill author sessi
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - ADR-0030 plan + backfill — hooks are part of the federated in-repo agent context initiative.
 - ADR-0008 — learning capture skill + hook triggers; established the learning taxonomy and hook contract.
 - [#33](https://github.com/anthropics/treadmill/pull/33) — First Treadmill-specific rules in `docs/knowledge-base/rules/`.

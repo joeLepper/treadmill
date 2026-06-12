@@ -118,6 +118,15 @@ silently drifts the UI's numeric vocabulary across pages.
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - **UI-fix — triage finding c5bba331** — `src/review/registry.ts` line 21 glob pattern was including test files (`.test.tsx`) in the production bundle. Test files call `vi.mock` which crashes the browser when Vitest mocker is not initialized. Updated `import.meta.glob` to use Vite array negation syntax: `['./viewers/*.tsx', '!./viewers/*.test.tsx']` to exclude test files. New test case in `src/review/registry.test.ts` asserts `listKinds()` contains no kind with `.test` in the name.
 
 - **UI-fix — triage finding 82463a9a** — Tasks sidebar nav link was navigating to dead `/tasks` route. App.tsx has no `/tasks` route (only `/tasks/:taskId`), so clicking Tasks bounced to `/` via the wildcard fallback. Added optional `href` field to `NavEntry` interface in `src/design/PageLayout.tsx`; Tasks nav entry now has `href: '/'` so the link navigates to Overview where tasks live in v1, while `path: '/tasks'` still drives the `startsWith` active-state detection — the Tasks item correctly highlights when viewing `/tasks/:taskId` pages. Updated `Link` component to use `to={n.href ?? n.path}` to prefer `href` if provided. Test coverage in `src/design/PageLayout.test.tsx` (NEW): render at `/tasks/abc123`, assert Tasks nav link has `href=/`, verify Tasks item highlights at `/tasks/:taskId` but not at `/`.

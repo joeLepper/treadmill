@@ -44,6 +44,15 @@ the session at all, with suppressed events digested rather than dropped.
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - **ADR-0090 coordinator + evaluator wake allowlists (task fe98030f — the cb3d0c29 finale)**: `wake-filter.ts` gains `COORDINATOR_DEFAULT_WAKE_ACTIONS` + `EVALUATOR_DEFAULT_WAKE_ACTIONS`, wired through `parseWakeActions` role branches (the `launch-session.sh` `TREADMILL_ROLE` export already arms them for team labels via their .env files). Both sets EXCLUDE the two noise classes by design — `github.check_run_completed` (replaced by the API observer's one-per-suite `task.ci_result`, #336/#337) and `github.pr_synchronize` (push noise) — and both ENUMERATE the escalation-class actions per the #310 invariant. Coordinator keeps every §3-handler decision/lifecycle class incl. `plan.submitted` (its #310 pickup signal — load-bearing here, unlike the orchestrator set where it's an echo); evaluator gets the decision/escalation core + `task.ci_result` + the `review.*` handoff family, with bookkeeping classes deliberately out (briefs arrive via relay, which always wakes). The RELAY vocabulary dropped the same two classes: `task.ci_result` replaces `check_run_completed` at `normal` (the ci-fix loop now enters on the rollup), `pr_synchronize` left `verbose`. Both new role sets satisfy wake ⊇ relay at quiet AND normal; verbose's `step.*` remainder is the documented accepted WARN tier (orchestrator precedent). Worker stays unfiltered (measure first). Tests: 38 (13 new — per-role wake sets incl. the forbidden-failure escalation guard for both roles, both exclusions, evaluator bookkeeping-out, superset invariants per level, relay-vocabulary pins).
 
 - ADR-0089 wake-class filtering (task 9b7c1286, 2026-06-11) —

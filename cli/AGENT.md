@@ -21,6 +21,15 @@ The Treadmill CLI (`treadmill`) is the operator's interface to the Treadmill API
 
 ## Recent changes
 
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor). Entries below predate the
+> convention and are frozen; gardening folds them into the sections
+> above.
+
 - **`plan_validate` handles Optional `validation:` (task 56c0b353)**: the shared `TaskSpec` shape (imported from `treadmill_api.parsers.plan_doc`) made `workflow:`/`validation:` Optional post-ADR-0087 Phase 5; `_validate_task` now iterates `spec.validation or []` so a modern minimal doc (no dead fields) validates clean. Regression test `test_doc_without_workflow_and_validation_validates_clean` in `tests/test_plan_validate.py`.
 
 - **Dead-surface sweep completed (the follow-up #312 flagged)**: the `role` group (`show`/`update`/`versions`, ADR-0028) is REMOVED — ADR-0087 Phase 4 deleted the roles/role_versions tables and the roles router, so every invocation 404'd; session prompts live in `tools/team-templates` now. Same class, same sweep: `workflows trigger` (ADR-0053 Wave 3; the workflow routers + synthetic-task dispatch path died in Phase 4/5) and the `corpus` group (`commands/corpus.py`; the dashboard corpus-export router + DSPy gold-row models died in Phase 4) are removed with their tests (`test_cli_workflows_trigger.py`, the role-group block in `test_cli.py`) and the `ApiClient.trigger_workflow` method. KEPT deliberately: `learnings crystallize` and the `--workflow` options on `submit`/`task retry` ride live `/api/v1/plans` + `/api/v1/tasks` endpoints whose `workflow` fields are accepted-and-ignored wire-compat (PR-G deprecation window) — they rewire themselves when that window closes; `task retry`'s `workflow_run=None` output line is wire-compat residue of the same window. Grep gate: zero references to the deleted endpoint families anywhere under `cli/` (tombstone comments use prose, not paths, so the gate stays clean).
