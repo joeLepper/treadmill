@@ -2123,6 +2123,14 @@ def test_stop_deploy_watcher_sigterms_pid_and_cleans_up_pid_file(
     and removes the file."""
     rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
     monkeypatch.chdir(tmp_path)
+    # Task f82f7590: the global pidfile/lock live under HOME — pin HOME
+    # to the sandbox so the test can never touch the real host fleet's
+    # ~/.treadmill state, and stub the identity guard (pid 6666 is fake;
+    # the guard would correctly classify it as recycled otherwise).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        LocalRuntime, "_watcher_identity_ok", staticmethod(lambda pid: True)
+    )
     state_dir = tmp_path / ".treadmill-local"
     state_dir.mkdir()
     pid_file = state_dir / "deploy-watcher.pid"
@@ -2176,6 +2184,11 @@ def test_down_sigterms_deploy_watcher(
     process and removes the PID file."""
     rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
     monkeypatch.chdir(tmp_path)
+    # Task f82f7590 (see the stop test above for why).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        LocalRuntime, "_watcher_identity_ok", staticmethod(lambda pid: True)
+    )
     state_dir = tmp_path / ".treadmill-local"
     state_dir.mkdir()
     pid_file = state_dir / "deploy-watcher.pid"
@@ -2697,3 +2710,36 @@ def test_recreate_api_container_without_pin_keeps_tag_behavior(
     assert (
         fake_docker.containers.run.call_args.args[0] == "treadmill-api:dev"
     )
+
+
+def test_stop_deploy_watcher_recycled_pid_not_killed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """Task f82f7590 (#330 lesson): a pidfile whose live pid fails the
+    identity check (recycled onto an unrelated process) is treated as
+    stale — file dropped, nothing killed."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        LocalRuntime, "_watcher_identity_ok", staticmethod(lambda pid: False)
+    )
+    state_dir = tmp_path / ".treadmill-local"
+    state_dir.mkdir()
+    pid_file = state_dir / "deploy-watcher.pid"
+    pid_file.write_text("7777")
+    monkeypatch.setattr(
+        LocalRuntime, "_pid_alive", staticmethod(lambda pid: True)
+    )
+    kill_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        runtime_module.os, "kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    rt._stop_deploy_watcher()
+
+    assert kill_calls == []
+    assert not pid_file.exists()

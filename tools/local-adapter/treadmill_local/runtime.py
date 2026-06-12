@@ -2246,7 +2246,11 @@ class LocalRuntime:
         cfg = self.deployment_config
 
         if self._deploy_watcher_pid_alive():
-            console.print("• Deploy watcher already running.")
+            console.print(
+                "• Deploy watcher already running (possibly started from "
+                "another worktree — the pidfile and lock are host-global, "
+                "task f82f7590)."
+            )
             return
 
         deployment_id = cfg["deployment_id"]
@@ -2300,49 +2304,105 @@ class LocalRuntime:
             env.pop("AWS_PROFILE", None)
             env.update(managed)
 
+        # Clean daemonization (task f82f7590): no inherited stdin, cwd
+        # pinned to the repo root rather than whatever worktree the
+        # operator happened to run `up` from. start_new_session detaches
+        # from the controlling terminal; the watcher's own flock (its
+        # main() acquires it before any side effect) is the authoritative
+        # exactly-one guard — the pid-alive pre-check above is just the
+        # friendly fast path.
         proc = subprocess.Popen(
             [sys.executable, "-m", "treadmill_local.deploy_watcher"],
             env=env,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
-            cwd=str(Path.cwd()),
+            cwd=str(repo_root),
         )
-        DEPLOY_WATCHER_PID_FILE.write_text(str(proc.pid))
         console.print(
             f"• Deploy watcher started (pid={proc.pid}, deployment={deployment_id})."
         )
 
-    def _stop_deploy_watcher(self) -> None:
-        if not DEPLOY_WATCHER_PID_FILE.exists():
-            return
+    def _deploy_watcher_pid_files(self) -> list[Path]:
+        """Pidfile candidates, global first (task f82f7590).
+
+        The host-global file (keyed by deployment id, same as the
+        watcher's flock) is the authoritative one — the cwd-relative
+        legacy file gave every worktree a private copy, which is exactly
+        how two watchers ever ran at once. The legacy path is kept as a
+        cleanup target for one transition window.
+        """
+        from treadmill_local.deploy_watcher import watcher_pid_path
+
+        key = (
+            self.deployment_config["deployment_id"]
+            if self.deployment_config is not None
+            else "local"
+        )
+        return [watcher_pid_path(key), DEPLOY_WATCHER_PID_FILE]
+
+    @staticmethod
+    def _watcher_identity_ok(pid: int) -> bool:
+        """True iff ``/proc/<pid>/cmdline`` names the deploy-watcher
+        module. The #330 reap lesson applied here: a bare pid-alive
+        check passes for a RECYCLED pid, and stopping (or trusting) an
+        unrelated process that inherited the number is worse than
+        treating the pidfile as stale."""
         try:
-            pid = int(DEPLOY_WATCHER_PID_FILE.read_text().strip())
-        except ValueError:
-            DEPLOY_WATCHER_PID_FILE.unlink(missing_ok=True)
-            return
-        if self._pid_alive(pid):
+            cmdline = (
+                Path(f"/proc/{pid}/cmdline")
+                .read_bytes()
+                .replace(b"\0", b" ")
+                .decode(errors="replace")
+            )
+        except OSError:
+            return False
+        return "deploy_watcher" in cmdline
+
+    def _stop_deploy_watcher(self) -> None:
+        for pid_file in self._deploy_watcher_pid_files():
+            if not pid_file.exists():
+                continue
             try:
-                os.kill(pid, signal.SIGTERM)
-                for _ in range(20):
-                    if not self._pid_alive(pid):
-                        break
-                    time.sleep(0.1)
-                if self._pid_alive(pid):
-                    os.kill(pid, signal.SIGKILL)
-                console.print(f"• Deploy watcher stopped (pid={pid}).")
-            except ProcessLookupError:
-                pass
-        DEPLOY_WATCHER_PID_FILE.unlink(missing_ok=True)
+                pid = int(pid_file.read_text().strip())
+            except ValueError:
+                pid_file.unlink(missing_ok=True)
+                continue
+            alive = self._pid_alive(pid)
+            if alive and not self._watcher_identity_ok(pid):
+                console.print(
+                    f"• Deploy watcher pidfile {pid_file} points at pid "
+                    f"{pid}, which is not a deploy-watcher (recycled pid); "
+                    "dropping the stale file without killing."
+                )
+                pid_file.unlink(missing_ok=True)
+                continue
+            if alive:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(20):
+                        if not self._pid_alive(pid):
+                            break
+                        time.sleep(0.1)
+                    if self._pid_alive(pid):
+                        os.kill(pid, signal.SIGKILL)
+                    console.print(f"• Deploy watcher stopped (pid={pid}).")
+                except ProcessLookupError:
+                    pass
+            pid_file.unlink(missing_ok=True)
 
     def _deploy_watcher_pid_alive(self) -> bool:
-        if not DEPLOY_WATCHER_PID_FILE.exists():
-            return False
-        try:
-            pid = int(DEPLOY_WATCHER_PID_FILE.read_text().strip())
-        except ValueError:
-            return False
-        return self._pid_alive(pid)
+        for pid_file in self._deploy_watcher_pid_files():
+            if not pid_file.exists():
+                continue
+            try:
+                pid = int(pid_file.read_text().strip())
+            except ValueError:
+                continue
+            if self._pid_alive(pid) and self._watcher_identity_ok(pid):
+                return True
+        return False
 
     # ── ADR-0069 accelerator ──────────────────────────────────────────────────
 
