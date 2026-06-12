@@ -973,3 +973,47 @@ def test_plan_with_validations_persists_rows(
     assert first_task_rows[1].position == 1
     assert first_task_rows[1].kind == "llm-judge"
     assert first_task_rows[1].description == "code is readable"
+
+
+# ── Optional workflow:/validation: (task 56c0b353) ───────────────────────────
+
+
+_PLAN_DOC_MINIMAL_POST_PHASE5 = """# Plan: Test minimal
+
+## sequence_of_work
+
+```yaml
+sequence_of_work:
+  - id: t0
+    title: "Minimal modern task"
+    intent: Post-Phase-5 doc with neither workflow nor validation.
+    scope:
+      files: [a.py]
+```
+"""
+
+
+def test_create_plan_with_doc_without_workflow_or_validation_spawns_tasks(
+    client: httpx.Client,
+    truncate: None,
+    seed_team_config: None,
+) -> None:
+    """Task 56c0b353 regression: both fields are inert post-ADR-0087
+    Phase 5 and now optional — a doc that omits them must submit clean
+    end-to-end (parse → task spawn), with no legacy fixtures needed."""
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "test/repo",
+            "doc_path": "docs/plans/2026-06-11-minimal.md",
+            "doc_content": _PLAN_DOC_MINIMAL_POST_PHASE5,
+        },
+    )
+    assert response.status_code == 201, response.text
+    plan = response.json()
+
+    tasks_resp = client.get(f"/api/v1/plans/{plan['id']}/tasks")
+    assert tasks_resp.status_code == 200
+    tasks = tasks_resp.json()
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "Minimal modern task"

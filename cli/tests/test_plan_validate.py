@@ -435,3 +435,29 @@ def test_violation_carries_task_and_citation() -> None:
     assert v.task_id == "only-task"
     assert v.validation_index == 0
     assert "SKILL.md" in v.citation
+
+
+# ── Optional workflow:/validation: (task 56c0b353) ───────────────────────────
+
+
+def test_doc_without_workflow_and_validation_validates_clean() -> None:
+    """Regression for task 56c0b353: both fields are inert post-ADR-0087
+    Phase 5 and optional in the shared TaskSpec shape — a modern minimal
+    doc must validate with zero violations (the validator iterates a
+    possibly-absent validation list)."""
+    doc = textwrap.dedent("""\
+        # Plan: Test
+
+        ## Sequence of work
+
+        ```yaml
+        sequence_of_work:
+          - id: only-task
+            title: Test task
+            intent: |
+              Post-Phase-5 doc with no dead fields.
+            scope:
+              files: [services/api/treadmill_api/app.py]
+        ```
+    """)
+    assert validate_plan_doc(doc) == []

@@ -2,12 +2,13 @@
 from a plan markdown document, parse it, and validate against the
 schemas declared in the Phase 2 plan.
 
-Schema (from `docs/plans/2026-05-08-minimum-runnable-treadmill.md`):
+Schema (from `docs/plans/2026-05-08-minimum-runnable-treadmill.md`,
+amended post-ADR-0087 Phase 5 — task 56c0b353):
 
   sequence_of_work:
     - id: <kebab-case slug>           # required, unique within plan
       title: <terse imperative>       # required
-      workflow: <workflow slug>        # required
+      workflow: <workflow slug>        # OPTIONAL, deprecated: accepted-and-ignored
       depends_on: [...]                # optional
       intent: |                        # required
         Multi-line description.
@@ -15,19 +16,26 @@ Schema (from `docs/plans/2026-05-08-minimum-runnable-treadmill.md`):
         files: [...]                   # required, at least one
         services_affected: [...]       # optional
         out_of_scope: [...]            # optional
-      validation:                      # required, at least one entry
+      validation:                      # OPTIONAL, deprecated: accepted-and-ignored
         - kind: deterministic | llm-judge
           description: ...
 
 Strict validation: ``extra="forbid"`` rejects unknown fields. Required
 fields raise on absence. The parser does not guess — malformed docs fail
 loudly with paths to the offending field.
+
+``workflow:`` and ``validation:`` became optional with ADR-0087 Phases
+4/5: workflow versions and per-task validation gates were deleted, both
+fields are inert at submit (``_spawn_tasks_from_specs`` never reads
+them), and requiring them forced submitters to include dead fields just
+to pass parsing (the medicoder #1329 workaround). Present values are
+still shape-validated and then ignored, so older docs parse unchanged.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
@@ -114,11 +122,26 @@ class TaskSpec(BaseModel):
 
     id: str = Field(..., description="Kebab-case slug, unique within the plan.")
     title: str
-    workflow: str = Field(..., description="Workflow slug; must reference a known workflow.")
+    # DEPRECATED (ADR-0087 Phase 5): workflow versions are gone; the
+    # coordinator decides execution at dispatch time. Accepted for
+    # back-compat (older docs carry ``workflow: wf-author``) and ignored.
+    workflow: str | None = Field(
+        default=None,
+        description="DEPRECATED — accepted-and-ignored post-ADR-0087 Phase 5.",
+    )
     depends_on: list[str] = Field(default_factory=list)
     intent: str
     scope: TaskScope
-    validation: list[TaskValidationCheck] = Field(..., min_length=1)
+    # DEPRECATED (ADR-0087 Phases 4/5): per-task validation gates are
+    # gone (the evaluator's holistic judgment replaced them); blocks
+    # still flow to workers via the coordinator's brief but are never
+    # persisted. Present values stay shape-validated (a malformed check
+    # is an authoring error worth failing on), and an EXPLICIT empty
+    # list is still rejected — omit the key instead.
+    validation: Annotated[list[TaskValidationCheck], Field(min_length=1)] | None = Field(
+        default=None,
+        description="DEPRECATED — accepted-and-ignored post-ADR-0087 Phases 4/5.",
+    )
 
 
 class _PlanDocSequenceContainer(BaseModel):
