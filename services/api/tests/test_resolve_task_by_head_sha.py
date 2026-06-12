@@ -80,7 +80,10 @@ async def test_same_sha_query_orders_most_recent_first() -> None:
 
     (stmt,) = session.statements
     sql = str(stmt.compile(dialect=postgresql.dialect()))
-    assert "ORDER BY task_prs.created_at DESC" in sql
+    # Tiebreaker (PR #335 review): created_at alone is nondeterministic
+    # for same-transaction registrations; pr_number (unique per repo —
+    # task_prs has no id column) makes the choice stable.
+    assert "ORDER BY task_prs.created_at DESC, task_prs.pr_number DESC" in sql
     assert "LIMIT" in sql
 
 

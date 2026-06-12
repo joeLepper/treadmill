@@ -12,6 +12,14 @@ Most-recent matters because a superseded task's PR can be reopened or a
 follow-up task can push the same head (cherry-pick, retry-branch): the
 newest registration is the one the coordinator is currently driving.
 
+CLOSED PRs are deliberately NOT filtered (reviewer design note,
+PR #335): the query ignores ``closed_at``, so a newest-but-closed
+registration beats an older still-open one. The CI-observer (first
+consumer) must choose: if a check suite completing on a closed PR's
+head should not emit ``task.ci_result``, filter on the caller's side or
+extend this resolver deliberately — silence here is a decision, not an
+oversight.
+
 ``task_prs.head_sha`` is nullable and only as fresh as its writers —
 rows with a NULL or stale head simply never match. Callers that need
 attribution for heads no writer recorded can fall back to the events
@@ -42,7 +50,14 @@ async def resolve_task_by_head_sha(
         select(Task)
         .join(TaskPR, TaskPR.task_id == Task.id)
         .where(TaskPR.repo == repo, TaskPR.head_sha == head_sha)
-        .order_by(TaskPR.created_at.desc())
+        # Tiebreaker (PR #335 review): created_at alone is nondeterministic
+        # for same-transaction registrations (the coordinator-backfill
+        # shape — NOW() is transaction-stable). task_prs has NO id column
+        # (composite PK repo+pr_number), so pr_number is the stability
+        # key: unique within the repo filter, and a higher number is the
+        # later GitHub-side registration. Stability first, recency proxy
+        # second.
+        .order_by(TaskPR.created_at.desc(), TaskPR.pr_number.desc())
         .limit(1)
     )
     return result.scalars().first()
