@@ -30,6 +30,10 @@ def _sync_ok_then_build():
         MagicMock(returncode=0, stderr=""),
         MagicMock(returncode=0, stdout="abc1234\n"),
         MagicMock(returncode=0),
+        # ``docker image inspect --format {{.Id}}`` right after the build —
+        # the digest-pin (task c62f097d): the recreate runs THIS id, never
+        # whatever the mutable :dev tag resolves to later.
+        MagicMock(returncode=0, stdout="sha256:builtimage123\n"),
     ]
 
 
@@ -121,8 +125,8 @@ def _make_watcher(
         def pr_files_fn(pr_number: int) -> list[str] | None:
             return _files
 
-    def recreate_api() -> None:
-        recreate_calls.append("recreate")
+    def recreate_api(built_image_id: str) -> None:
+        recreate_calls.append(built_image_id)
 
     def recreate_dashboard() -> None:
         if dashboard_calls is not None:
@@ -243,9 +247,21 @@ def test_api_action_builds_and_recreates(mock_run, tmp_path):
         assert "restart" not in cmd, (
             f"deploy-watcher must not docker-restart the API; got cmd={cmd}"
         )
-    # The recreate helper was invoked exactly once after the build —
-    # this is what actually swaps the running container to the new image.
-    assert recreate_calls == ["recreate"]
+    # Digest-pin (task c62f097d): the watcher inspected the id of the image
+    # the build JUST produced and handed exactly that id to the recreate
+    # helper — the recreate can no longer run whatever :dev resolves to.
+    inspect_calls = [
+        c for c in mock_run.call_args_list
+        if c.args[0][:3] == ["docker", "image", "inspect"]
+    ]
+    assert len(inspect_calls) == 1
+    assert inspect_calls[0].args[0] == [
+        "docker", "image", "inspect", "treadmill-api:dev",
+        "--format", "{{.Id}}",
+    ]
+    # The recreate helper was invoked exactly once after the build, WITH
+    # the pinned id — this is what actually swaps the running container.
+    assert recreate_calls == ["sha256:builtimage123"]
     assert acked == ["rh-1"]
 
 
@@ -259,6 +275,7 @@ def test_api_action_continues_when_ff_fails(mock_run, tmp_path, caplog):
         MagicMock(returncode=0),  # fetch ok
         MagicMock(returncode=1, stderr="error: not possible to fast-forward\n"),
         MagicMock(returncode=0),  # docker build still runs
+        MagicMock(returncode=0, stdout="sha256:builtimage123\n"),  # image inspect
     ]
     watcher, acked, recreate_calls = _make_watcher(
         tmp_path, pr_files=["services/api/main.py"],
@@ -274,7 +291,7 @@ def test_api_action_continues_when_ff_fails(mock_run, tmp_path, caplog):
     ]
     assert len(build_calls) == 1
     # Recreate still ran — fallback to local state is the whole point.
-    assert recreate_calls == ["recreate"]
+    assert recreate_calls == ["sha256:builtimage123"]
     assert acked == ["rh-8"]
     # The merge stderr surfaces in the warning so the operator can see why.
     assert any(
@@ -622,7 +639,7 @@ def test_idempotency_skips_rebuild_for_same_sha(mock_run, tmp_path):
         c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
     ]
     assert len(build_calls) == 1
-    assert recreate_calls == ["recreate"]
+    assert recreate_calls == ["sha256:builtimage123"]
 
     # Second delivery of the same event: no action, still acked. No new
     # subprocess calls (no fetch, no merge, no build) — the dispatch
@@ -651,7 +668,7 @@ def test_idempotency_rebuilds_for_new_sha(mock_run, tmp_path):
         c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
     ]
     assert len(build_calls_first) == 1
-    assert recreate_calls == ["recreate"]
+    assert recreate_calls == ["sha256:builtimage123"]
 
     mock_run.reset_mock()
     recreate_calls.clear()
@@ -661,7 +678,7 @@ def test_idempotency_rebuilds_for_new_sha(mock_run, tmp_path):
         c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
     ]
     assert len(build_calls_second) == 1  # rebuild triggered
-    assert recreate_calls == ["recreate"]
+    assert recreate_calls == ["sha256:builtimage123"]
 
 
 @patch("subprocess.run")

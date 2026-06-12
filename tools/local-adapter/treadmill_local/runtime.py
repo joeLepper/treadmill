@@ -19,7 +19,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclasses_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1510,7 +1510,9 @@ class LocalRuntime:
             port_mappings=port_mappings,
         )
 
-    def recreate_api_container(self) -> Container:
+    def recreate_api_container(
+        self, expected_image_id: str | None = None,
+    ) -> Container:
         """Recreate the ``treadmill-api`` container from the current image.
 
         Used by the deploy-watcher's ``services/api/**`` PR-merge action
@@ -1524,6 +1526,18 @@ class LocalRuntime:
         ``_start_service_container`` is no-op on a running container, so
         this method has its own force-remove path.
 
+        ``expected_image_id`` (task c62f097d, digest-pinning): when the
+        caller knows WHICH image the deploy just built — the watcher
+        inspects the ID right after ``docker build`` — the new container
+        runs from that ID directly, never from whatever the mutable
+        ``:dev`` tag resolves to at run time. A migration-carrying merge
+        stamps the DB before the recreate; a stale tag then boots
+        pre-merge code against the post-merge schema and alembic
+        crashloops on Can't-locate-revision (the 2026-06-11 8h54m
+        outage). When the tag and the pinned ID disagree we log the
+        mismatch loudly — that log line is the smoking gun for whatever
+        actor re-pointed the tag.
+
         Returns the newly-started container.
         """
         assert self.deployment_config is not None, (
@@ -1536,6 +1550,19 @@ class LocalRuntime:
         svc = self._build_api_service_spec(self.deployment_config)
         # Service has exactly one container (the API itself).
         spec = svc.container_specs[0]
+        if expected_image_id is not None:
+            try:
+                tag_resolves_to = self.docker.images.get(spec.image).id
+            except Exception:
+                tag_resolves_to = None
+            if tag_resolves_to is not None and tag_resolves_to != expected_image_id:
+                logger.warning(
+                    "image tag %s resolves to %s but the deploy built %s — "
+                    "running the PINNED build (something re-pointed the tag; "
+                    "this line identifies the stale-recreate actor class)",
+                    spec.image, tag_resolves_to, expected_image_id,
+                )
+            spec = dataclasses_replace(spec, image=expected_image_id)
         name = spec.family
         try:
             existing = self.docker.containers.get(name)

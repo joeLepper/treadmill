@@ -2619,3 +2619,81 @@ def test_dev_local_api_env_omits_telegram_when_absent_or_partial(
     cfg["notifications"] = {"telegram_bot_token": "x"}
     env2 = rt._dev_local_api_env(cfg)
     assert "TREADMILL_TELEGRAM_BOT_TOKEN" not in env2
+
+
+def test_recreate_api_container_pins_expected_image_id(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """Digest-pin (task c62f097d): with ``expected_image_id`` the new
+    container runs from THAT id, not from whatever the mutable
+    ``treadmill-api:dev`` tag resolves to at run time. The 2026-06-11
+    8h54m outage: a stale tag booted pre-merge code against a
+    post-merge schema and alembic crashlooped on the just-stamped
+    revision."""
+    import docker as docker_lib
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+    fake_docker.containers.get.side_effect = docker_lib.errors.NotFound("none")
+    tag_image = MagicMock()
+    tag_image.id = "sha256:builtimage123"  # tag agrees with the build
+    fake_docker.images.get.return_value = tag_image
+
+    rt.recreate_api_container(expected_image_id="sha256:builtimage123")
+
+    fake_docker.containers.run.assert_called_once()
+    assert (
+        fake_docker.containers.run.call_args.args[0] == "sha256:builtimage123"
+    )
+
+
+def test_recreate_api_container_warns_and_pins_when_tag_is_stale(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+    caplog,
+) -> None:
+    """THE outage shape: the tag resolves to a DIFFERENT (stale) image
+    than the deploy just built. The recreate must run the pinned build
+    anyway and log the mismatch loudly — that line identifies the
+    tag-repointing actor the 2026-06-11 post-mortem never found."""
+    import logging
+
+    import docker as docker_lib
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+    fake_docker.containers.get.side_effect = docker_lib.errors.NotFound("none")
+    stale = MagicMock()
+    stale.id = "sha256:staleimage999"  # tag points at PRE-merge bits
+    fake_docker.images.get.return_value = stale
+
+    with caplog.at_level(logging.WARNING, logger="treadmill_local.runtime"):
+        rt.recreate_api_container(expected_image_id="sha256:builtimage123")
+
+    # The PINNED build runs — never the stale tag target.
+    assert (
+        fake_docker.containers.run.call_args.args[0] == "sha256:builtimage123"
+    )
+    warnings = [r.getMessage() for r in caplog.records]
+    assert any(
+        "sha256:staleimage999" in w and "sha256:builtimage123" in w
+        for w in warnings
+    ), warnings
+
+
+def test_recreate_api_container_without_pin_keeps_tag_behavior(
+    tmp_path: Path,
+    fake_docker: MagicMock,
+) -> None:
+    """Back-compat: callers without a freshly-built id (operator paths)
+    keep today's run-from-tag behavior."""
+    import docker as docker_lib
+
+    rt = _runtime_with_injected_creds(tmp_path, fake_docker)
+    fake_docker.containers.get.side_effect = docker_lib.errors.NotFound("none")
+    fake_docker.images.get.return_value = MagicMock()
+
+    rt.recreate_api_container()
+
+    assert (
+        fake_docker.containers.run.call_args.args[0] == "treadmill-api:dev"
+    )

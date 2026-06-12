@@ -111,7 +111,7 @@ class DeployWatcher:
         receive_fn: Callable[[], list[dict[str, Any]]],
         ack_fn: Callable[[str], None],
         get_pr_files_fn: Callable[[int], list[str] | None],
-        recreate_api_fn: Callable[[], None],
+        recreate_api_fn: Callable[[str], None],
         recreate_dashboard_fn: Callable[[], None],
         api_health_url: str,
         state_file: Path,
@@ -311,7 +311,23 @@ class DeployWatcher:
             ["docker", "build", "-t", "treadmill-api:dev", str(api_dir)],
             check=True,
         )
-        self._recreate_api_fn()
+        # Digest-pin (task c62f097d): resolve the image ID the build we
+        # JUST ran produced and recreate from THAT — never from whatever
+        # ``:dev`` happens to resolve to at run time. A migration-carrying
+        # merge stamps the DB moments before the recreate; a stale tag
+        # (raced rebuild, parallel actor, old watcher process) then boots
+        # pre-merge code against the post-merge schema and alembic
+        # crashloops on Can't-locate-revision — the 2026-06-11 8h54m loop
+        # outage, deterministic on every schema merge.
+        built_image_id = subprocess.run(
+            [
+                "docker", "image", "inspect", "treadmill-api:dev",
+                "--format", "{{.Id}}",
+            ],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        logger.info("api image built: %s", built_image_id)
+        self._recreate_api_fn(built_image_id)
         self._wait_healthy(
             self._api_health_url,
             timeout_seconds=_HEALTH_TIMEOUT_SECONDS,
@@ -541,8 +557,8 @@ def main() -> int:
             deployment_config=cfg,
         )
 
-        def recreate_api() -> None:
-            runtime.recreate_api_container()
+        def recreate_api(built_image_id: str) -> None:
+            runtime.recreate_api_container(expected_image_id=built_image_id)
 
         def recreate_dashboard() -> None:
             runtime.recreate_dashboard_container()
@@ -562,10 +578,11 @@ def main() -> int:
             cfg["local"]["api_url"].rstrip("/") + "/health/ready"
         )
     else:
-        def recreate_api() -> None:
+        def recreate_api(built_image_id: str) -> None:
             logger.warning(
                 "API recreate requested without a deployment_id; "
-                "no-op (fully-local / test mode)."
+                "no-op (fully-local / test mode). built_image_id=%s",
+                built_image_id,
             )
 
         def recreate_dashboard() -> None:
