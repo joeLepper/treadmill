@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Usage: treadmill-channel-reap <label>
+#
+# ExecStopPost for treadmill-channel@: reap the label's ENTIRE session
+# tree on every stop/restart (and after every failed start), so no live
+# launcher survives to hold the ADR-0073 single-instance lock against
+# the next start (docs/learnings/2026-06-11-orphan-launcher-crashloop-
+# after-fleet-sleep.md — NRestarts=4119).
+#
+# WHY ExecStopPost and not KillMode: the wrapper launches the session
+# via `tmux send-keys`, so the launcher/claude tree is parented to the
+# tmux SERVER (a tmux-spawn-*.scope cgroup), never to this unit's
+# cgroup — verified live 2026-06-11: the unit cgroup holds only the
+# wrapper bash + its sleep. KillMode governs the unit cgroup; it cannot
+# reach processes that were never in it.
+#
+# Because ExecStopPost also runs after a FAILED ExecStart, an
+# already-wedged crashloop self-heals: the first restart cycle after
+# deploy reaps the orphan, and the next attempt starts clean.
+#
+# NEVER exits non-zero — a failed reap must not wedge stop/restart.
+set -u
+
+LABEL="${1:-}"
+[ -n "$LABEL" ] || exit 0
+
+STATE_ROOT="$HOME/.cc-channels/$LABEL"
+PIDFILE="$STATE_ROOT/launcher.pid"
+
+# 1. Tear down the label's tmux session: kills the pane processes
+#    (claude + its channel server). Safe when absent.
+tmux kill-session -t "$LABEL" 2>/dev/null || true
+
+# 2. Reap the lock-holding process if it survived the pane teardown.
+#    The pidfile PID is the launcher which exec'd into claude, so its
+#    cmdline names claude or launch-session — anything else means PID
+#    reuse by an unrelated process: leave it alive (just drop the stale
+#    lock) rather than kill an innocent.
+if [ -f "$PIDFILE" ]; then
+  PID=$(cat "$PIDFILE" 2>/dev/null || true)
+  case "$PID" in
+    *[!0-9]*|"") PID="" ;;
+  esac
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    CMDLINE=$(ps -p "$PID" -o args= 2>/dev/null || true)
+    case "$CMDLINE" in
+      *claude*|*launch-session*)
+        kill -TERM "$PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          kill -0 "$PID" 2>/dev/null || break
+          sleep 0.2
+        done
+        if kill -0 "$PID" 2>/dev/null; then
+          kill -KILL "$PID" 2>/dev/null || true
+        fi
+        ;;
+      *)
+        echo "treadmill-channel-reap: pid $PID is not a launcher" \
+          "(${CMDLINE:-gone}); dropping stale lock without killing" >&2
+        ;;
+    esac
+  fi
+  rm -f "$PIDFILE"
+fi
+
+exit 0

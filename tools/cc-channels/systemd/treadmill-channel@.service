@@ -8,6 +8,12 @@ Type=simple
 # then sends the Claude launch into it. Foreground (stays
 # alive for systemd to supervise).
 ExecStart=%h/treadmill/tools/cc-channels/systemd/treadmill-channel-launch %i
+# Reap the label's whole session tree (tmux session + lock-holding
+# launcher/claude) on every stop/restart AND after failed starts. The
+# tree lives under the tmux server's cgroup, not this unit's, so
+# KillMode can never reach it — this is the fix for the 2026-06-11
+# orphan crashloop (NRestarts=4119; see tools/cc-channels AGENT.md).
+ExecStopPost=%h/treadmill/tools/cc-channels/systemd/treadmill-channel-reap %i
 Restart=on-failure
 RestartSec=5s
 
