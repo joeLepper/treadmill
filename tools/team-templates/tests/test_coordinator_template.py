@@ -267,3 +267,59 @@ def test_evaluator_template_pins_batch_per_wake() -> None:
     )
     assert "batch work when woken" in body
     assert "every queued PR in one wake" in body
+
+
+# ── Workspace isolation (task 801256e3) ──────────────────────────────
+
+
+def test_worker_template_pins_workspace_isolation() -> None:
+    """The 2026-06-11 collision rule (worker files swept into an
+    orchestrator revert commit): workers implement in their OWN clone
+    under their team dir and never write to the orchestrators' shared
+    host worktrees. Whitespace-normalized so the hard-wrapped prose
+    still pins."""
+    body = " ".join(
+        (TEMPLATES_DIR / "worker" / "CLAUDE.md.tmpl").read_text().split()
+    )
+    assert "## Workspace isolation" in body
+    assert "your own clone" in body
+    # The verified clone-path convention (template form).
+    assert "~/.treadmill/teams/{{REPO_SLUG}}/{{WORKER_LABEL}}/<repo>" in body
+    assert "NEVER write to `/home/joe/<repo>`" in body
+    # The one-line WHY the rule exists.
+    assert "four orchestrator sessions run branch operations there daily" in body
+    # The workdir trap: a pointer FILE owned by the launcher, not a dir.
+    assert "~/.cc-channels/{{WORKER_LABEL}}/workdir" in body
+    assert "pointer FILE" in body
+
+
+def test_install_renders_isolation_clone_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VERIFY clause of task 801256e3: the pinned isolation lines are
+    present in a rendered install, with the clone-path convention
+    resolved to the worker's real team dir."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import install as _install
+
+    monkeypatch.setattr(
+        _install, "_TEAMS_ROOT", tmp_path / ".treadmill" / "teams"
+    )
+    monkeypatch.setattr(
+        _install,
+        "_SHARED_TEMPLATES_DIR",
+        tmp_path / ".treadmill" / "teams" / "__templates__",
+    )
+
+    spec = make_team_spec("medicoder", worker_count=1)
+    install_team(spec)
+    body = " ".join(
+        (
+            tmp_path / ".treadmill" / "teams" / "medicoder"
+            / "worker-medicoder-1" / "CLAUDE.md"
+        ).read_text().split()
+    )
+    assert "~/.treadmill/teams/medicoder/worker-medicoder-1/<repo>" in body
+    assert "NEVER write to `/home/joe/<repo>`" in body
+    assert "{{WORKER_LABEL}}" not in body
