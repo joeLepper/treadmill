@@ -43,7 +43,10 @@ does NOT fix this class — it reuses the stale layer (confirmed; same crash).
 ## Follow-ups
 
 - [ ] Identify the 06:52:50Z recreation actor — owner: first sibling with
-      cycles. ELIMINATED so far (carla, 16:0xZ): user-level journal (empty
+      cycles. PARTIALLY ADDRESSED by task c62f097d (digest-pinned recreate):
+      the class is structurally impossible regardless of actor, and the
+      runtime now logs tag-vs-built-ID mismatches loudly — the next
+      occurrence names itself. ELIMINATED so far (carla, 16:0xZ): user-level journal (empty
       for the window), user systemd timers (only launchpadlib-cache-clean,
       daily at 12:46), user crontab (none). REMAINING trails: dockerd
       journal (needs sudo), the removed container's Created metadata
