@@ -282,10 +282,21 @@ async def _fetch_github_mergeable(
             resp.status_code, repo, pr_number,
         )
         return None
-    body = resp.json()
-    if ((body.get("head") or {}).get("sha")) != head_sha:
+    try:
+        body = resp.json()
+        resp_head_sha = (body.get("head") or {}).get("sha")
+        mergeable = body.get("mergeable")
+    except Exception:
+        # A 200 with a malformed body (truncated JSON, non-dict, …) must
+        # degrade like every other GitHub hiccup — never 500 (the #315
+        # lesson class, flagged in PR #320 review).
+        logger.warning(
+            "pr_conflict resolve: malformed GitHub body for %s#%s",
+            repo, pr_number, exc_info=True,
+        )
+        return None
+    if resp_head_sha != head_sha:
         return None  # view head is stale; resolve on a later poll
-    mergeable = body.get("mergeable")
     if mergeable is None:
         return None  # GitHub still computing; the caller's next poll retries
     return not mergeable

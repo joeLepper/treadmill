@@ -292,3 +292,33 @@ def test_task_without_pr_skips_resolution() -> None:
     assert resp.status_code == 200, resp.text
     assert resp.json()["derived_mergeability"] == "pending"
     assert not dispatcher.persisted
+
+
+class _MalformedBodyResponse:
+    """200 whose body is not parseable/shaped as expected."""
+
+    status_code = 200
+
+    def __init__(self, mode: str) -> None:
+        self._mode = mode
+
+    def json(self) -> Any:
+        if self._mode == "raises":
+            raise ValueError("truncated JSON")
+        return ["not", "a", "dict"]  # .get() raises AttributeError
+
+
+def test_malformed_200_body_never_500s() -> None:
+    """A 200 with an unparseable body must degrade like any other GitHub
+    hiccup — no event, no 500 (PR #320 review blocking item; the #315
+    lesson class: external-input shape failures inside the contract)."""
+    for mode in ("raises", "non_dict"):
+        session = _StubSession([_view_row()])
+        dispatcher = _StubDispatcher()
+        github = _StubGithubClient(_MalformedBodyResponse(mode))
+
+        resp = _get(_app(session, dispatcher, github))
+
+        assert resp.status_code == 200, (mode, resp.text)
+        assert resp.json()["pr_conflicting"] is None
+        assert not dispatcher.persisted
