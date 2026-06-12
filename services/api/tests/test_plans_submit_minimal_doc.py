@@ -184,3 +184,56 @@ def test_legacy_doc_with_fields_still_submits(client) -> None:
     assert response.status_code == 201, response.text
     tasks_resp = client.get(f"/api/v1/plans/{response.json()['id']}/tasks")
     assert len(tasks_resp.json()) == 1
+
+
+# ── auto_merge read surface (task e477a4a0) ──────────────────────────────
+
+
+def test_auto_merge_false_frontmatter_lands_on_get(client) -> None:
+    """Task e477a4a0 (the #335 merge-race fix): a doc whose frontmatter
+    says auto_merge:false must surface `auto_merge: false` on BOTH the
+    POST response and GET /plans/{id} — the read surface the coordinator
+    §9.3 hold depends on. The column carried the value since migration
+    0012; only the response was missing."""
+    repo = f"test/hold-{uuid.uuid4().hex[:8]}"
+    client.seed_team_config(repo)
+    doc = "---\nauto_merge: false\n---\n" + _MINIMAL_DOC
+
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": repo,
+            "doc_path": "docs/plans/2026-06-12-hold.md",
+            "doc_content": doc,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["auto_merge"] is False
+    plan_id = response.json()["id"]
+
+    got = client.get(f"/api/v1/plans/{plan_id}")
+    assert got.status_code == 200, got.text
+    assert got.json()["auto_merge"] is False
+
+
+def test_auto_merge_unspecified_coalesces_to_true(client) -> None:
+    """Coordinator consumer requirement: no tri-state. A doc with no
+    frontmatter (column NULL) reads as `auto_merge: true` at the API
+    boundary, so §9.3 is one branch."""
+    repo = f"test/auto-{uuid.uuid4().hex[:8]}"
+    client.seed_team_config(repo)
+
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": repo,
+            "doc_path": "docs/plans/2026-06-12-auto.md",
+            "doc_content": _MINIMAL_DOC,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["auto_merge"] is True
+    got = client.get(f"/api/v1/plans/{response.json()['id']}")
+    assert got.json()["auto_merge"] is True

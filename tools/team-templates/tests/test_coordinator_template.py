@@ -397,3 +397,25 @@ def test_peer_review_idempotency_guard_exists() -> None:
     assert "which the §8 IDEMPOTENCY GUARD provides" in body
     # And the folklore reference is gone.
     assert "§8.1 no-ops" not in body
+
+
+# ── auto_merge §9.3 hold (task e477a4a0) ─────────────────────────────
+
+
+def test_merge_step_reads_auto_merge_and_holds_when_false() -> None:
+    """The #335 merge-race fix: §9.3 must read plan.auto_merge BEFORE
+    merging, hold for the operator on false, and name the exact
+    cleared-relay shape (whitespace-normalized per the #313 pattern)."""
+    body = _coordinator_plain()
+    assert "READ THE PLAN'S MERGE POLICY first" in body
+    assert "`GET /api/v1/plans/{plan_id}`" in body
+    # One branch, no tri-state — the coordinator consumer requirement.
+    assert "one branch, never a tri-state" in body
+    assert "do NOT merge. HOLD for the operator" in body
+    # The named cleared-relay format.
+    assert (
+        "cleared-for-merge: <repo> PR #<n> task=<task_id> — evaluator "
+        "approved; auto_merge:false, merge is yours" in body
+    )
+    # The hold resumes on the orchestrator's own merge webhook.
+    assert "when the `github.pr_merged` webhook arrives from THEIR merge" in body

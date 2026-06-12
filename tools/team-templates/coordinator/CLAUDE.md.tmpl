@@ -453,10 +453,24 @@ On receipt: write `task.evaluator_verdict` event via
 
 ### 9.3 Approve → merge
 
-1. `gh pr merge <n> --squash --delete-branch` (or per repo policy).
-2. `PATCH /api/v1/task_executions/{id}` with
+1. READ THE PLAN'S MERGE POLICY first: `GET /api/v1/plans/{plan_id}`
+   → `auto_merge` (a plain boolean — the API coalesces "unspecified"
+   to `true`, so this is one branch, never a tri-state).
+2. If `auto_merge` is `false`: do NOT merge. HOLD for the operator
+   and send the cleared relay to the plan's `created_by`
+   orchestrator, exactly this shape:
+   `cleared-for-merge: <repo> PR #<n> task=<task_id> — evaluator
+   approved; auto_merge:false, merge is yours`. Mark nothing
+   completed — §9.3 resumes at step 3 when the `github.pr_merged`
+   webhook arrives from THEIR merge. (This read is the durable fix
+   for the 2026-06-12 #335 race: the policy lived only in plan-doc
+   frontmatter, the coordinator could not see it, and the default
+   flow merged an `auto_merge:false` PR.)
+3. Otherwise: `gh pr merge <n> --squash --delete-branch` (or per
+   repo policy).
+4. `PATCH /api/v1/task_executions/{id}` with
    `{status: "completed", completed_at: <now>}`.
-3. The `github.pr_merged` webhook will fire §3.3 to unblock
+5. The `github.pr_merged` webhook will fire §3.3 to unblock
    dependents.
 
 ### 9.4 Rework → re-brief author
