@@ -12,7 +12,14 @@ Type=simple
 # FIRST (task 9d6c0658, the #333 guard class): if another instance is
 # already reconciling — a manual run or a stale unit — this one logs
 # the holder and exits 0. Exit 0 is SUCCESS, so Restart=on-failure
-# does NOT loop a losing instance against the winner.
+# does NOT loop a losing instance against the winner — and the unit
+# then sits INACTIVE until the next start (login via WantedBy, or a
+# manual `systemctl --user start`). There is NO auto-takeover when a
+# competing manual daemon later exits: STOP THE MANUAL DAEMON FIRST,
+# then start this unit (the install procedure in the PR/fragment).
+# Restart=always would buy auto-takeover at the cost of a permanent
+# 10s-period refusal loop whenever any second instance exists —
+# rejected for a one-time transitional scenario.
 ExecStart=%h/.local/bin/uv run --project %h/treadmill/tools/local-adapter python -m treadmill_local.team_scheduler
 WorkingDirectory=%h/treadmill
 Environment=TREADMILL_TEAM_SCHEDULER_LOG_FILE=%h/.treadmill/team-scheduler.log
