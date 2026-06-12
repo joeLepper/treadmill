@@ -25,15 +25,24 @@ import httpx
 import pytest
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
+# Task 3aaba5e7: NO live-API default. TREADMILL_API_URL is ambient in
+# every team-session env (pointing at the LIVE deployment) and
+# localhost:8088 IS the live stack on the operator host — a dedicated
+# test var makes hitting an API an explicit act.
+TEST_API_URL = os.environ.get("TREADMILL_TEST_API_URL")
 pytestmark = pytest.mark.skipif(
-    not INTEGRATION,
-    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up`",
+    not (INTEGRATION and TEST_API_URL),
+    reason=(
+        "set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_API_URL (a test "
+        "API instance, never the live one) to run; requires a dedicated "
+        "`treadmill-local up`-style stack"
+    ),
 )
 
 
 @pytest.fixture(scope="module")
 def api_url() -> str:
-    return os.environ.get("TREADMILL_API_URL", "http://localhost:8088")
+    return TEST_API_URL
 
 
 @pytest.fixture(scope="module")
