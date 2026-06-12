@@ -86,6 +86,16 @@ class GithubCheckRunCompleted(EventPayload):
 
     head_sha: str
 
+    # ── Suite snapshot (ADR-0090 ci-observer; optional for back-compat
+    #    with pre-2026-06-12 rows) ─────────────────────────────────────
+    check_suite_id: int | None = None
+    suite_status: str | None = None
+    """Embedded check-suite status AT DELIVERY TIME — ``completed`` on
+    the delivery that finishes the suite; the ci-observer keys on it."""
+    suite_conclusion: str | None = None
+    app_slug: str = ""
+    """Owning app: ``github-actions`` | ``netlify`` | …"""
+
 
 class GithubPrConflict(EventPayload):
     """The definitive conflict state of a PR head against its base.

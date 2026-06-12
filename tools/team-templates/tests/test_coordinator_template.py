@@ -70,7 +70,7 @@ _REQUIRED_HANDLERS = (
     "plan.submitted",
     "task.registered",
     "github.pr_merged",
-    "github.check_run.completed",
+    "task.ci_result",
     "github.pull_request.synchronize",
 )
 
@@ -323,3 +323,77 @@ def test_install_renders_isolation_clone_path(
     assert "~/.treadmill/teams/medicoder/worker-medicoder-1/<repo>" in body
     assert "NEVER write to `/home/joe/<repo>`" in body
     assert "{{WORKER_LABEL}}" not in body
+
+
+# ── ADR-0090: §3.5 ci_result rollup handler (task 257b19a2) ──────────
+
+
+def _coordinator_plain() -> str:
+    return " ".join(
+        (TEMPLATES_DIR / "coordinator" / "CLAUDE.md.tmpl").read_text().split()
+    )
+
+
+def test_per_check_advance_rework_block_is_gone() -> None:
+    """The DELETION is a success criterion (plan cb3d0c29): the old
+    §3.5 per-check handler — advance on the last required check,
+    rework per check, coordinator hand-writing task.ci_result — must
+    not survive in any form."""
+    body = _coordinator_plain()
+    assert "### 3.5 `github.check_run.completed`" not in body
+    assert "last required check" not in body
+    assert "Write a `task.ci_result` event via `POST /api/v1/events`" not in body
+    # check_run survives ONLY as the never-re-derive rule + the
+    # transition note (no handler steps attached).
+    assert "They require NO action" in body
+
+
+def test_ci_result_handler_pins_payload_and_decisions() -> None:
+    body = _coordinator_plain()
+    assert "### 3.5 `task.ci_result`" in body
+    # The #336 payload contract, verbatim fields.
+    assert (
+        "`{repo, pr_number, head_sha, check_suite_id, conclusion, app_slug}`"
+        in body
+    )
+    assert "ONE decision per rollup" in body
+    assert "trigger peer review per §8" in body
+    assert "open coordinator-rework per §7.1" in body
+
+
+def test_ci_result_handler_pins_the_four_contractual_carry_forwards() -> None:
+    """#336 review+evaluation carry-forwards, contractual in the
+    handler text (task 257b19a2)."""
+    body = _coordinator_plain()
+    # (1) terminal-task tolerance, written down — not folklore.
+    assert "closed-PR heads DO emit" in body
+    assert "This tolerance is CONTRACTUAL, not folklore" in body
+    # (2) per-suite cardinality + the app filter as consumer policy.
+    assert "two suites at one head = two ci_result events" in body
+    assert "app_slug == 'github-actions'" in body
+    # (3) the serialized-ingest dedup caveat.
+    assert "holds only while API ingest stays serialized" in body
+    assert "keep this handler idempotent" in body
+    # (4) repo case-matching intent.
+    assert "canonical GitHub `owner/name` casing" in body
+
+
+def test_coordinator_does_not_write_ci_result() -> None:
+    """The observer owns the event; a coordinator write would collide
+    with its idempotency key."""
+    body = _coordinator_plain()
+    assert "You do NOT write this event" in body
+
+
+def test_peer_review_idempotency_guard_exists() -> None:
+    """PR #337 rework (blocking): the §3.5 dedup caveat used to cite a
+    §8.1 no-op rule that did not exist — folklore-by-reference. The
+    guard is now REAL in §8 and the caveat points at it."""
+    body = _coordinator_plain()
+    assert "IDEMPOTENCY GUARD" in body
+    assert "do NOT open a second cycle" in body
+    assert "already in flight/collated; skipping duplicate open" in body
+    # The §3.5 caveat references the rule that now exists, by name.
+    assert "which the §8 IDEMPOTENCY GUARD provides" in body
+    # And the folklore reference is gone.
+    assert "§8.1 no-ops" not in body

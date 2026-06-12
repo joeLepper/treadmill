@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.eventbus import EventPublisher
 from treadmill_api.events import encode_payload, parse_payload
+from treadmill_api.ci_observer import maybe_emit_ci_result
 from treadmill_api.models import Event, TaskPR
 from treadmill_api.webhooks.normalize import NormalizationResult
 from treadmill_api.webhooks.pending_events import (
@@ -231,5 +232,43 @@ async def persist_and_resolve_webhook_event(
             "row is persisted, consumer rescan will pick it up",
             event.id,
         )
+
+    # head_sha writer (task 5dd4a32d, decided from the #335 gap): keep
+    # ``task_prs.head_sha`` current at ingest so the resolver's fast path
+    # works for first-push CI. pr_opened can land BEFORE the coordinator
+    # registers the task_prs row — that race is covered by the
+    # ci-observer's events-join fallback, so a missed UPDATE here is
+    # self-healing, not a loss.
+    if (
+        normalized.action in ("pr_opened", "pr_synchronize")
+        and normalized.repo
+        and normalized.pr_number is not None
+    ):
+        head_sha = normalized.payload.get("head_sha")
+        if head_sha:
+            try:
+                from sqlalchemy import update
+
+                await session.execute(
+                    update(TaskPR)
+                    .where(
+                        func.lower(TaskPR.repo) == normalized.repo.lower(),
+                        TaskPR.pr_number == normalized.pr_number,
+                    )
+                    .values(head_sha=head_sha)
+                )
+                await session.commit()
+            except Exception:
+                logger.exception(
+                    "task_prs.head_sha update failed for %s#%s; "
+                    "observer fallback covers attribution",
+                    normalized.repo, normalized.pr_number,
+                )
+
+    # CI-observer (ADR-0090, task 5dd4a32d): one task.ci_result per
+    # completed check SUITE. Internally guarded — never raises into the
+    # ingress; an unattributable or still-running suite is a no-op.
+    if normalized.action == "check_run_completed":
+        await maybe_emit_ci_result(session, publisher, normalized.payload)
 
     return event

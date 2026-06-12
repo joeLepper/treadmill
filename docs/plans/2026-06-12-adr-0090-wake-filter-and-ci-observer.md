@@ -1,0 +1,207 @@
+---
+auto_merge: false
+---
+
+# Plan: ADR-0090 — evaluator wake-filter + coordinator CI-observer decouple
+
+- **Status:** drafting
+- **Date:** 2026-06-12
+- **Related ADRs:** ADR-0090 (this implements it), ADR-0089 (wake-filter
+  mechanism), ADR-0087 (team model), ADR-0063 (deferred `(repo, head_sha)`
+  FK — task `head-sha-resolver` is its first consumer)
+
+## Goal
+
+Cut the dominant remaining opus burn (coordinator + evaluator waking on
+~13 `check_run.completed` per PR) so software teams can run in parallel
+again under the Claude 5h limit — without blinding CI tracking.
+
+## Success criteria
+
+- A PR that triggers N check-runs produces **one** `task.ci_result` wake for
+  the coordinator, not N.
+- The coordinator still advances the step on suite-success and opens rework
+  on suite-failure (behavior preserved, now keyed on the rollup).
+- The evaluator no longer wakes on `check_run.completed` / `pr_synchronize`;
+  it still wakes on `ci_result`, verdicts, review handoffs, escalations.
+- `wake ⊇ relay` invariant stays green for both roles; no escalation-class
+  action is ever filtered.
+
+## Constraints / scope
+
+### In scope
+ADR-0090 §1 (evaluator filter) + §2 (CI-observer decouple), plus the agent
+sandbox gaining `bun` so the channel-server test gate can run.
+
+### Out of scope
+ADR-0091 team scheduler (separate fast-follow plan); worker filtering; model
+routing. The manual team pause stands until 0091 automates it.
+
+### Budget
+~4-5 worker-days. Abort to a post-mortem if `head-sha-resolver` reveals the
+lookup needs a migration larger than one nullable column.
+
+## Sequence of work
+
+```yaml
+sequence_of_work:
+  - id: add-bun-to-agent-sandbox
+    title: "Install bun in the agent image so channel-server tests can gate"
+    workflow: wf-implement
+    depends_on: []
+    intent: |
+      The worker sandbox (``workers/agent/Dockerfile``) installs uv + node
+      but NOT bun, so any ``bun test`` gate exits 127 (the recurring
+      "blocked on Bun" wall). Add a bun install to the Dockerfile
+      (``curl -fsSL https://bun.sh/install | bash`` with BUN_INSTALL set to
+      a PATH dir, e.g. /usr/local) so ``bun`` is on PATH for all future
+      channel-server (.ts) validation. This is a prerequisite for the
+      ``wake-allowlists`` task's gate. OPERATOR NOTE: after this PR merges,
+      the agent image must be rebuilt (deploy-watcher rebuilds on
+      ``workers/agent/**`` merges, or ``treadmill-local up --build``) before
+      ``wake-allowlists`` dispatches — auto_merge:false gives the operator
+      that timing control. Update ``workers/agent`` docs if present.
+    scope:
+      files:
+        - workers/agent/Dockerfile
+    validation:
+      - kind: deterministic
+        description: Dockerfile installs bun (presence; image rebuild verified by operator)
+        script: grep -qi "bun" workers/agent/Dockerfile
+
+  - id: head-sha-resolver
+    title: "(repo, head_sha) -> task_pr -> task resolver"
+    workflow: wf-implement
+    depends_on: []
+    intent: |
+      Confirm whether ``task_prs`` already carries ``head_sha`` (read
+      ``services/api/treadmill_api/models/task.py``). If it does, add a
+      resolver ``resolve_task_by_head_sha(session, repo, sha)`` and note the
+      existing column in the PR description. If it does NOT, add a nullable
+      ``head_sha VARCHAR`` column via an Alembic migration in
+      ``services/api/alembic/versions/`` mirroring ``20260611_0300_*`` (safe
+      on an empty/partial table), then add the resolver. This is the
+      ADR-0063-deferred ``(repo, head_sha)`` lookup; ADR-0090 is its first
+      consumer. Resolver returns the task for the most-recent task_pr
+      matching (repo, sha), else None.
+      Add tests to the API test suite: present-sha -> task; unknown-sha ->
+      None; two task_prs same sha -> most-recent.
+      Update ``services/api/AGENT.md`` (Key surfaces + Recent changes).
+    scope:
+      files:
+        - services/api/treadmill_api/models/task.py
+        - services/api/alembic/versions/
+        - services/api/tests/
+        - services/api/AGENT.md
+    validation:
+      - kind: deterministic
+        description: resolver unit tests pass (present / unknown / same-sha)
+        script: cd services/api && uv run pytest -k "head_sha or resolve_task" -q
+
+  - id: ci-observer
+    title: "API-side CI-observer emits task.ci_result on suite completion"
+    workflow: wf-implement
+    depends_on:
+      - task.head-sha-resolver.pr_merged
+    intent: |
+      Implement the CI-observer IN services/api alongside the existing
+      check_run ingest (``treadmill_api/webhooks/`` + ``events/github.py`` +
+      ``models/event.py``) — the API is the always-on control plane (no
+      separate process; it never pauses with a team, satisfying ADR-0091).
+      On ``github.check_run.completed`` ingest, compute check-SUITE
+      completion (multiple suites, reruns, the netlify-vs-CI distinction
+      seen 2026-06-12) and write ONE ``task.ci_result`` event carrying the
+      suite's overall success/failure, attributed via
+      ``resolve_task_by_head_sha``. Idempotent: at most one ci_result per
+      (task, suite-completion).
+      Tests MUST run against CAPTURED check-suite payloads (not synthetic):
+      exactly one ci_result per completed suite; correct task attribution;
+      correct rollup incl. a mixed (one failed check) suite -> failure.
+      Update ``services/api/AGENT.md``.
+    scope:
+      files:
+        - services/api/treadmill_api/events/github.py
+        - services/api/treadmill_api/webhooks/persist.py
+        - services/api/tests/
+        - services/api/AGENT.md
+    validation:
+      - kind: deterministic
+        description: observer unit tests pass (one ci_result/suite, attribution, rollup)
+        script: cd services/api && uv run pytest -k "observer or ci_result or suite" -q
+
+  - id: coordinator-ci-result-handler
+    title: "Coordinator: per-check handler -> task.ci_result rollup handler"
+    workflow: wf-implement
+    depends_on:
+      - task.ci-observer.pr_merged
+    intent: |
+      The coordinator's section 3.5 ``check_run.completed`` handler today
+      does per-check side-effects (verified 2026-06-12: advance the step on
+      the last successful required check; open coordinator-rework on a
+      non-success conclusion). REPLACE it with a ``task.ci_result`` handler
+      that fires those same decisions ONCE on the suite rollup: advance on
+      suite-success, open rework on suite-failure. REMOVE the per-check
+      advance/rework block entirely (its removal is a success criterion —
+      architect review confirms the old block is gone, since a doc grep
+      can't prove a deletion). Do NOT change wake config here (next task) --
+      only handler semantics, so the coordinator consumes ci_result before
+      it stops waking on check_run. Update the template AGENT.md.
+    scope:
+      files:
+        - tools/team-templates/coordinator/CLAUDE.md.tmpl
+        - tools/team-templates/coordinator/AGENT.md
+    validation:
+      - kind: deterministic
+        description: template keys off the ci_result rollup (presence; removal rides on architect review)
+        script: grep -q "task.ci_result" tools/team-templates/coordinator/CLAUDE.md.tmpl
+
+  - id: wake-allowlists
+    title: "Evaluator + coordinator wake allowlists (drop check_run noise)"
+    workflow: wf-implement
+    depends_on:
+      - task.coordinator-ci-result-handler.pr_merged
+      - task.add-bun-to-agent-sandbox.pr_merged
+    intent: |
+      In ``tools/cc-channel-treadmill/wake-filter.ts`` add role defaults for
+      ``coordinator`` and ``evaluator`` mirroring the ADR-0089 orchestrator
+      pattern. Coordinator: include ``task.ci_result`` + every
+      decision/lifecycle/escalation class it acts on (pr_merged, pr_opened,
+      task.*_verdict, task.escalat*, the enumerated escalation actions,
+      plan/task lifecycle); EXCLUDE ``github.check_run_completed`` and
+      ``github.pr_synchronize``. Evaluator: same decision/escalation set +
+      ``task.ci_result`` + review-handoff actions; EXCLUDE the same two
+      classes. Drop those two classes from BOTH roles' relay sets too so
+      ``wake >= relay`` holds (ADR-0089). Wire the role default through
+      ``launch-session.sh`` as the orchestrator default already is.
+      Extend ``wake-filter.test.ts``: assert each new role's wake set, the
+      wake-superset-of-relay invariant, and that EVERY escalation-class
+      action still wakes (forbidden-failure-mode guard). Requires bun in the
+      sandbox (add-bun-to-agent-sandbox, merged + image rebuilt).
+    scope:
+      files:
+        - tools/cc-channel-treadmill/wake-filter.ts
+        - tools/cc-channel-treadmill/wake-filter.test.ts
+        - tools/cc-channels/launch-session.sh
+    validation:
+      - kind: deterministic
+        description: wake-filter suite green incl. new role defaults + invariants
+        script: cd tools/cc-channel-treadmill && bun test
+```
+
+## Risks / unknowns
+
+- **head-sha-resolver** is load-bearing: if `head_sha` isn't on `task_prs`,
+  `ci-observer` can't attribute `ci_result`. Sequenced first.
+- **Suite-completion logic** must mirror the coordinator's current behavior
+  across multi-suite / rerun / partial-required cases — pinned with captured
+  payloads, not synthetic.
+- **Ordering**: `wake-allowlists` lands only after
+  `coordinator-ci-result-handler` (coordinator consumes ci_result) AND
+  `add-bun-to-agent-sandbox` (sandbox can run the bun gate). A premature
+  filter blinds CI tracking; a premature bun gate exits 127. Both enforced
+  by `depends_on`; operator rebuilds the agent image between the bun merge
+  and the wake-allowlists dispatch (auto_merge:false controls timing).
+
+## Diagram
+
+Intent layer captured in ADR-0090; this plan is the task sequencing.
