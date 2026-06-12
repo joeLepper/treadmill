@@ -1,0 +1,34 @@
+[Unit]
+Description=Treadmill team scheduler — ADR-0091 single-active-team reconciler
+# The daemon polls GET /api/v1/scheduler/decision and reconciles team
+# units via treadmill-team-control. FAIL-SAFE by construction: an
+# unreachable/erroring/null decision HOLDS the current set (never a
+# fleet-wide pause), so there is no hard dependency on the API unit.
+
+[Service]
+Type=simple
+# Run from the operator's repo checkout via uv (the workspace env
+# carries treadmill_local). The daemon acquires a host-global flock
+# FIRST (task 9d6c0658, the #333 guard class): if another instance is
+# already reconciling — a manual run or a stale unit — this one logs
+# the holder and exits 0. Exit 0 is SUCCESS, so Restart=on-failure
+# does NOT loop a losing instance against the winner — and the unit
+# then sits INACTIVE until the next start (login via WantedBy, or a
+# manual `systemctl --user start`). There is NO auto-takeover when a
+# competing manual daemon later exits: STOP THE MANUAL DAEMON FIRST,
+# then start this unit (the install procedure in the PR/fragment).
+# Restart=always would buy auto-takeover at the cost of a permanent
+# 10s-period refusal loop whenever any second instance exists —
+# rejected for a one-time transitional scenario.
+ExecStart=%h/.local/bin/uv run --project %h/treadmill/tools/local-adapter python -m treadmill_local.team_scheduler
+WorkingDirectory=%h/treadmill
+Environment=TREADMILL_TEAM_SCHEDULER_LOG_FILE=%h/.treadmill/team-scheduler.log
+Restart=on-failure
+RestartSec=10s
+# Intentional stop delivers SIGTERM; the daemon exits 0 on it, but a
+# kill that lands mid-syscall can record 143 — count it as success
+# (the #343 SuccessExitStatus papercut class).
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target

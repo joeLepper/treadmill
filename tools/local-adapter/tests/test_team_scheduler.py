@@ -27,6 +27,7 @@ from treadmill_local.team_scheduler import (
     DEFAULT_DWELL_MINUTES,
     TeamScheduler,
     acquire_scheduler_lock,
+    default_team_control_path,
     _team_label_dirs,
 )
 
@@ -285,3 +286,41 @@ def test_team_label_dirs_accept_only_team_shapes(tmp_path: Path) -> None:
         "worker-team-a-1",
         "worker-team-a-12",
     ]
+
+
+# ── default control-script path (task 1518598a) ─────────────────────
+
+
+def test_default_team_control_path_resolves_on_the_real_tree() -> None:
+    """Task 1518598a regression: the original default used parents[3]
+    (the repo root) and resolved to <repo>/cc-channels/systemd —
+    missing the tools/ segment — so the daemon exited 1 unless
+    TREADMILL_TEAM_CONTROL overrode it. This test STATS the real tree
+    (the plan's coarse grep gate never did): the default must point at
+    an existing, executable file at tools/cc-channels/systemd/.
+    """
+    import os
+
+    p = default_team_control_path()
+    assert p.is_file(), f"default team-control path does not exist: {p}"
+    assert os.access(p, os.X_OK), f"not executable: {p}"
+    assert p.parts[-4:] == (
+        "tools", "cc-channels", "systemd", "treadmill-team-control",
+    ), p
+
+
+def test_team_scheduler_unit_runs_daemon_and_restarts_on_failure() -> None:
+    """The durable-service half of task 1518598a: the shipped --user
+    unit must run the daemon module, restart on FAILURE only (a flock
+    refusal exits 0 = success, so a second instance never restart-loops
+    against the live one), and record SIGTERM's 143 as success (the
+    #343 papercut class)."""
+    unit = (
+        Path(__file__).resolve().parents[2]
+        / "cc-channels" / "systemd" / "treadmill-team-scheduler.service"
+    )
+    body = unit.read_text()
+    assert "-m treadmill_local.team_scheduler" in body
+    assert "Restart=on-failure" in body
+    assert "SuccessExitStatus=143" in body
+    assert "WantedBy=default.target" in body
