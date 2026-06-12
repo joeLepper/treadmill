@@ -88,12 +88,17 @@ class GithubCheckRunCompleted(EventPayload):
 
 
 class GithubPrConflict(EventPayload):
-    """A PR was detected as merge-conflicting against its base branch.
+    """The definitive conflict state of a PR head against its base.
 
-    Emitted by the conflict-detection sweep (after a ``pr_merged`` event
-    fires for any open PR in the repo). Per ADR-0013, this is the
-    conflict signal for the mergeability VIEW: when ``is_conflicting``
-    is true at HEAD, the VIEW resolves to ``blocked-on-conflict``.
+    Emitted by the lazy resolver in ``GET /tasks/{id}/mergeability``
+    (task 536bf319) when GitHub's REST API reports a definitive
+    ``mergeable`` value for the head the VIEW is looking at. (The
+    original emitter, the conflict-detection sweep, was deleted in
+    ADR-0087 Phase 5 — between that deletion and the lazy resolver,
+    NOTHING produced this event and the VIEW's ``pr_conflicting``
+    column could never resolve.) Per ADR-0013, this is the conflict
+    signal for the mergeability VIEW: when ``is_conflicting`` is true
+    at HEAD, the VIEW resolves to ``blocked-on-conflict``.
 
     A subsequent successful push to the PR's branch (which triggers
     ``pr_synchronize``) invalidates this signal — the VIEW joins on
@@ -108,5 +113,6 @@ class GithubPrConflict(EventPayload):
     pr_number: int
     head_sha: str
     is_conflicting: bool
-    """Always ``True`` when emitted; the field name makes the VIEW's
-    filter clause readable (``WHERE is_conflicting IS TRUE``)."""
+    """``False`` is the CLEAN signal (GitHub says mergeable) — the
+    sweep-era emitter only ever wrote ``True``, which is why NULL used
+    to be the only \'not conflicting\' state the VIEW could show."""

@@ -10,13 +10,16 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.dispatch import Dispatcher, get_dispatcher
+from treadmill_api.events.github import GithubPrConflict
 from treadmill_api.events.task import ArchitectEmitFailure, TaskRegistered, TaskRetry, TaskWorkerHintRequested
 from treadmill_api.models import (
     Plan,
@@ -26,6 +29,8 @@ from treadmill_api.events.task import OperatorHintSet
 
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
+
+logger = logging.getLogger(__name__)
 
 
 class TaskCreateRequest(BaseModel):
@@ -255,10 +260,54 @@ _MERGEABILITY_SQL = """
 """
 
 
+async def _fetch_github_mergeable(
+    github_client, repo: str, pr_number: int, head_sha: str,
+) -> bool | None:
+    """Ask GitHub whether the PR is conflicting. ``True``/``False`` only
+    when GitHub has a DEFINITIVE answer for the head the VIEW is looking
+    at; ``None`` for still-computing, a stale head (a push raced us), or
+    any API failure — the caller never writes an indefinite signal.
+    """
+    try:
+        resp = await github_client.get(f"/repos/{repo}/pulls/{pr_number}")
+    except Exception:
+        logger.warning(
+            "pr_conflict resolve: GitHub call failed for %s#%s",
+            repo, pr_number, exc_info=True,
+        )
+        return None
+    if resp.status_code != 200:
+        logger.warning(
+            "pr_conflict resolve: GitHub returned %s for %s#%s",
+            resp.status_code, repo, pr_number,
+        )
+        return None
+    try:
+        body = resp.json()
+        resp_head_sha = (body.get("head") or {}).get("sha")
+        mergeable = body.get("mergeable")
+    except Exception:
+        # A 200 with a malformed body (truncated JSON, non-dict, …) must
+        # degrade like every other GitHub hiccup — never 500 (the #315
+        # lesson class, flagged in PR #320 review).
+        logger.warning(
+            "pr_conflict resolve: malformed GitHub body for %s#%s",
+            repo, pr_number, exc_info=True,
+        )
+        return None
+    if resp_head_sha != head_sha:
+        return None  # view head is stale; resolve on a later poll
+    if mergeable is None:
+        return None  # GitHub still computing; the caller's next poll retries
+    return not mergeable
+
+
 @router.get("/{task_id}/mergeability", response_model=MergeabilityResponse)
 async def get_task_mergeability(
     task_id: uuid.UUID,
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
+    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
 ) -> MergeabilityResponse:
     """Return the ``task_mergeability`` row for a task per ADR-0013.
 
@@ -266,6 +315,20 @@ async def get_task_mergeability(
     ``task_mergeability``. We surface that as ``derived_mergeability =
     'pending'`` with every other field NULL — the auto-merge orchestrator
     treats it the same as "head sha unknown".
+
+    Lazy conflict resolution (task 536bf319): the VIEW's
+    ``pr_conflicting`` reads ``github.pr_conflict`` events, whose only
+    producer (the conflict-detection sweep) was deleted in ADR-0087
+    Phase 5 — the column could never resolve and coordinators burned
+    their full poll budget on NULL. When the VIEW shows NULL conflict
+    state at a known head, this endpoint asks GitHub's REST API once
+    and persists the DEFINITIVE answer (``is_conflicting`` true OR
+    false — false is the clean signal that never existed before) as the
+    canonical event, then re-reads the VIEW. GitHub computes
+    mergeability asynchronously, so a ``mergeable: null`` reply writes
+    nothing — the coordinator's existing 10s poll loop is the retry
+    driver, and the GET stays read-only in steady state (a non-NULL
+    column short-circuits before any GitHub call).
     """
 
     row = (
@@ -278,6 +341,40 @@ async def get_task_mergeability(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="task not found",
         )
+
+    github_client = getattr(request.app.state, "github_client", None)
+    if (
+        row.pr_conflicting is None
+        and row.head_sha is not None
+        and row.repo is not None
+        and row.pr_number is not None
+        and github_client is not None
+    ):
+        is_conflicting = await _fetch_github_mergeable(
+            github_client, row.repo, row.pr_number, row.head_sha,
+        )
+        if is_conflicting is not None:
+            await dispatcher.persist_and_publish(
+                session,
+                entity_type="github",
+                action="pr_conflict",
+                payload=GithubPrConflict(
+                    repo=row.repo,
+                    pr_number=row.pr_number,
+                    head_sha=row.head_sha,
+                    is_conflicting=is_conflicting,
+                ),
+                task_id=row.task_id,
+                commit_sha=row.head_sha,
+            )
+            await session.commit()
+            row = (
+                await session.execute(
+                    text(_MERGEABILITY_SQL),
+                    {"id": task_id},
+                )
+            ).one_or_none()
+
     return MergeabilityResponse(
         task_id=row.task_id,
         repo=row.repo,
