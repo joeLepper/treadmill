@@ -98,6 +98,28 @@ def test_agent_changes_fragments_are_well_formed() -> None:
     )
 
 
+def test_plan_skill_instructs_fragments_not_recent_changes_entries() -> None:
+    """The /plan skill is the authoring-guidance surface: it tells plan
+    authors what docs-currency instruction to put in every code task's
+    intent. If it drifts back to instructing an in-file 'Recent
+    changes' entry, authored plans re-introduce the shared-AGENT.md
+    touch the fragment design exists to eliminate (evaluator rework on
+    PR #349)."""
+    skill = " ".join(
+        (REPO_ROOT / ".claude" / "skills" / "plan" / "SKILL.md")
+        .read_text()
+        .split()
+    )
+    assert "agent-changes/YYYY-MM-DD-<task-short-id-or-pr>-<slug>.md" in skill
+    assert "docs/agent-md-schema.md" in skill
+    # The fragment path — not the shared AGENT.md — is what scope.files
+    # names when only changelog currency is needed.
+    assert "name the fragment path" in skill
+    assert 'never an in-file "Recent changes" entry' in skill
+    # The old instruction must not survive anywhere in the skill.
+    assert '"Key surfaces" + "Recent changes" entry' not in skill
+
+
 def test_schema_doc_defines_the_fragment_flow() -> None:
     """The authoring flow lives in the schema doc the templates point
     writers at — losing it orphans the per-AGENT.md pointers."""
