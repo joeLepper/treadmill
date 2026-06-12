@@ -20,13 +20,20 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
-# Record operator-initiated stop so a SIGTERM/SIGINT leaves the
-# script with exit 0 (systemd then leaves the unit stopped per
-# Restart=on-failure). An unexpected tmux-session end — claude
-# crash, tmux kill-session, OOM kill, panic — falls through to
-# exit 1 at the bottom so systemd restarts after RestartSec.
-STOPPED_BY_OPERATOR=0
-trap 'STOPPED_BY_OPERATOR=1' TERM INT
+# Operator-initiated stop (systemctl --user stop delivers TERM): exit
+# 143 PROMPTLY. The old flag-and-keep-looping trap deadlocked every
+# stop — the loop below waits on tmux liveness, but only ExecStopPost
+# can end the tmux session, and ExecStopPost runs only AFTER the main
+# process exits: chicken-and-egg, resolved by TimeoutStopSec -> SIGKILL
+# -> Result=timeout/failed (the 2026-06-12 papercut, reproduced on real
+# systemd in PR #343). Exiting 143 hands control to ExecStopPost (which
+# reaps the tmux tree, #326) and matches the unit's
+# SuccessExitStatus=143, so an intentional stop is a SUCCESS and
+# Restart=on-failure does not re-spawn. The unexpected tmux-death path
+# (claude crash, kill-session, OOM) is UNCHANGED: the loop ends on its
+# own and falls through to exit 1 — the #326 crashloop-self-heal
+# semantics.
+trap 'exit 143' TERM INT
 
 LABEL="${1:?label required}"
 REPO_DIR="${TREADMILL_REPO_DIR:-$HOME/treadmill}"
@@ -141,7 +148,7 @@ tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL \"$WORKDIR\"" Enter
 REAP_DIR="$(cd "$(dirname "$0")" && pwd)"
 while tmux has-session -t "$LABEL" 2>/dev/null; do
   sleep 30
-  if [ "$STOPPED_BY_OPERATOR" -eq 0 ]      && "$REAP_DIR/treadmill-limit-park-check" "$LABEL"; then
+  if "$REAP_DIR/treadmill-limit-park-check" "$LABEL"; then
     if "$REAP_DIR/treadmill-limit-park-recover" "$LABEL"; then
       echo "treadmill-channel-launch: limit park on $LABEL — failover armed; bouncing unit" >&2
       exit 1
@@ -149,13 +156,9 @@ while tmux has-session -t "$LABEL" 2>/dev/null; do
   fi
 done
 
-# Decide exit status. Operator-initiated stop (SIGTERM/SIGINT
-# delivered by `systemctl --user stop`) flipped the trap flag —
-# exit 0 so systemd's `Restart=on-failure` does not re-spawn.
-# Any other tmux-ended cause is a crash by our definition and
-# warrants restart.
-if [ "$STOPPED_BY_OPERATOR" -eq 1 ]; then
-  exit 0
-fi
+# Reaching here means the tmux session ended WITHOUT an operator stop
+# (the TERM/INT trap above exits 143 before this line can run): claude
+# crash, kill-session, OOM — a crash by our definition; exit 1 so
+# systemd restarts per Restart=on-failure (#326 self-heal).
 echo "treadmill-channel-launch: tmux session $LABEL ended unexpectedly; systemd will restart per Restart=on-failure" >&2
 exit 1

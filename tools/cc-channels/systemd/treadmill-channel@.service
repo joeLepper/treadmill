@@ -14,6 +14,13 @@ ExecStart=%h/treadmill/tools/cc-channels/systemd/treadmill-channel-launch %i
 # KillMode can never reach it — this is the fix for the 2026-06-11
 # orphan crashloop (NRestarts=4119; see tools/cc-channels AGENT.md).
 ExecStopPost=%h/treadmill/tools/cc-channels/systemd/treadmill-channel-reap %i
+# ADR-0091 §5 (task 92365367): an intentional stop delivers SIGTERM and
+# the launcher exits 143 — without this, every scheduled pause lands the
+# unit in 'failed' until reset-failed (papercut found 2026-06-12).
+# OPERATOR STEP on rollout: the installed unit at
+# ~/.config/systemd/user/treadmill-channel@.service is a plain copy —
+# cp + `systemctl --user daemon-reload` to pick this up.
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=5s
 
