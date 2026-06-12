@@ -24,7 +24,11 @@ STATE_ROOT="$HOME/.cc-channels/$LABEL"
 STATE_FILE="$STATE_ROOT/limit-park.state"
 SIGNATURE="limit to reset"
 
-PANE=$(tmux capture-pane -t "$LABEL" -p 2>/dev/null || true)
+# Bottom-anchored (PR #328 review note): the live modal renders in the
+# pane's BOTTOM lines; dismissed-modal residue higher up in a frozen
+# idle pane must not re-trigger detection. Hash the same window we
+# match against.
+PANE=$(tmux capture-pane -t "$LABEL" -p 2>/dev/null | tail -n 15 || true)
 if [ -z "$PANE" ] || ! printf '%s' "$PANE" | grep -qi "$SIGNATURE"; then
   rm -f "$STATE_FILE"
   exit 1

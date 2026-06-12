@@ -261,3 +261,85 @@ def test_launcher_sources_account_env() -> None:
     assert "claude-account-env.sh" in body
     # Sourced AFTER pidfile write, immediately before exec claude.
     assert body.index("claude-account-env.sh") < body.index("exec claude")
+
+
+# ── PR #328 rework items ─────────────────────────────────────────────
+
+
+def test_both_accounts_limited_escalates_instead_of_bounce_looping(
+    tmp_path: Path,
+) -> None:
+    """Blocking item A: once failed-over (claude-account == fallback), a
+    park on the FALLBACK account must NOT swap fallback->fallback and
+    exit 0 (which would bounce the unit forever, ~60s/cycle). It falls
+    through to the rate-limited escalate path."""
+    env = _env(tmp_path)
+    (Path(env["HOME"]) / ".claude-backup").mkdir()
+    (_state(env) / "claude-account-fallback").write_text("backup\n")
+    (_state(env) / "claude-account").write_text("backup\n")  # already failed over
+
+    result = _recover(env)
+
+    assert result.returncode == 2, result.stderr  # escalate, NOT bounce
+    assert (_state(env) / "claude-account").read_text().strip() == "backup"
+    assert not (_state(env) / "claude-account.limited").exists()
+    (event,) = _events(tmp_path)
+    assert event["payload"]["recovery"] == "escalate"
+    # And the loop guard composes with the rate limit: immediate re-park
+    # produces NO second event.
+    assert _recover(env).returncode == 2
+    assert len(_events(tmp_path)) == 1
+
+
+def test_both_limited_escalation_names_the_condition(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    relay_dir = Path(env["HOME"]) / ".cc-channels" / "coordinator-limitteam" / "relay"
+    relay_dir.mkdir(parents=True)
+    (Path(env["HOME"]) / ".claude-backup").mkdir()
+    (_state(env) / "claude-account-fallback").write_text("backup\n")
+    (_state(env) / "claude-account").write_text("backup\n")
+
+    assert _recover(env).returncode == 2
+    (relay_file,) = list(relay_dir.glob("*limit-park*"))
+    assert "BOTH accounts limited" in relay_file.read_text()
+
+
+def test_failover_also_relays_coordinator(tmp_path: Path) -> None:
+    """Blocking item B: the worker_limit_parked event is OWNERLESS, and
+    ws.py drops ownerless events on filtered connections — so the relay
+    is the ONLY real-time wake. The failover path must therefore relay
+    too, not just the escalate path."""
+    env = _env(tmp_path)
+    relay_dir = Path(env["HOME"]) / ".cc-channels" / "coordinator-limitteam" / "relay"
+    relay_dir.mkdir(parents=True)
+    (Path(env["HOME"]) / ".claude-backup").mkdir()
+    (_state(env) / "claude-account-fallback").write_text("backup\n")
+    (_state(env) / "claude-account").write_text("primary\n")
+
+    result = _recover(env)
+
+    assert result.returncode == 0
+    (relay_file,) = list(relay_dir.glob("*limit-park*"))
+    body = relay_file.read_text()
+    assert "auto-recovered" in body
+    assert "this relay is the wake" in body
+
+
+def test_detector_ignores_modal_residue_above_the_fold(tmp_path: Path) -> None:
+    """Non-blocking note taken: the live modal renders in the pane's
+    BOTTOM lines; dismissed-modal residue in a frozen idle pane's upper
+    region must not re-trigger detection (escalation noise / pre-guard
+    bounce fuel)."""
+    env = _env(tmp_path)
+    residue_top = MODAL + ("\n" * 20) + "✻ idle — esc to interrupt\n"
+    _set_pane(tmp_path, residue_top)
+    assert _check(env) == 1
+    assert _check(env) == 1  # frozen AND residue present — still no fire
+
+
+def test_detector_fires_on_modal_in_bottom_lines(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    bottom = ("scrollback noise\n" * 20) + MODAL
+    _set_pane(tmp_path, bottom)
+    assert _check(env) == 1
+    assert _check(env) == 0
