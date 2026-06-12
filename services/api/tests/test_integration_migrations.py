@@ -2,14 +2,13 @@
 
 Skipped by default. To run:
 
-  treadmill-local up
-  TREADMILL_INTEGRATION=1 uv run pytest services/api/tests/test_integration_migrations.py
-  treadmill-local down
+  TREADMILL_INTEGRATION=1 \
+  TREADMILL_TEST_DATABASE_URL=postgresql+psycopg://.../<DEDICATED TEST DB> \
+  uv run pytest services/api/tests/test_integration_migrations.py
 
-These tests assume the substrate is up and the API container has already
-applied the migrations on its first connect (or that we apply them here).
-We use the host-port-mapped Postgres at localhost:15432 (per the local
-adapter's default port-shift for 5432).
+These tests assume the target Postgres server is up. The URL comes from
+TREADMILL_TEST_DATABASE_URL — point it at a DEDICATED test database
+(task 9200ef54: integration tests carry no live-DB default).
 """
 
 from __future__ import annotations
@@ -23,22 +22,16 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
+TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not INTEGRATION,
-    reason="set TREADMILL_INTEGRATION=1 to run; requires `treadmill-local up`",
-)
-
-
-# Default Postgres URL: postgres on host port 15432 (from the local
-# adapter's port shift) with the credentials hardcoded in the spike CDK.
-DEFAULT_DATABASE_URL = (
-    "postgresql+psycopg://postgres:postgres@localhost:15432/treadmill"
+    not (INTEGRATION and TEST_DB_URL),
+    reason="set TREADMILL_INTEGRATION=1 and TREADMILL_TEST_DATABASE_URL (a DEDICATED test database) to run; requires `treadmill-local up`",
 )
 
 
 @pytest.fixture(scope="module")
 def database_url() -> str:
-    return os.environ.get("TREADMILL_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
+    return TEST_DB_URL
 
 
 @pytest.fixture(scope="module")
@@ -68,23 +61,26 @@ def migrations_applied(database_url: str) -> None:
     )
 
 
+# Current (post-ADR-0087 Phase 5 + ADR-0089) schema. The pre-Phase-5
+# workflow/role/validation tables were dropped by migrations
+# 20260611_0100/0200; this set was updated for task 9200ef54 (it had
+# pinned the dropped tables, so the test was permanently red).
 _EXPECTED_TABLES = {
     "plans",
     "tasks",
     "task_prs",
     "task_dependencies",
-    "task_validations",
-    "workflows",
-    "workflow_versions",
-    "workflow_version_steps",
-    "workflow_runs",
-    "workflow_run_steps",
-    "roles",
-    "skills",
-    "hooks",
-    "role_skills",
-    "role_hooks",
-    "event_triggers",
+    "task_executions",
+    "task_board",
+    "team_configs",
+    "repo_configs",
+    "repo_profiles",
+    "repo_context_docs",
+    "repo_worker_binaries",
+    "schedules",
+    "system_status",
+    "llm_calls",
+    "llm_harvest_cursors",
     "events",
     "alembic_version",
 }
@@ -104,12 +100,10 @@ def test_alembic_version_is_at_head(engine: Engine) -> None:
     assert len(result) == 1, "alembic_version table should have exactly one row"
 
 
-def test_tasks_workflow_version_id_fk_targets_workflow_versions(engine: Engine) -> None:
-    """Per ADR-0010, tasks pin to a specific workflow_version row."""
-    inspector = sa.inspect(engine)
-    fks = inspector.get_foreign_keys("tasks")
-    targets = {(fk["referred_table"], tuple(fk["referred_columns"])) for fk in fks}
-    assert ("workflow_versions", ("id",)) in targets
+# test_tasks_workflow_version_id_fk_targets_workflow_versions was
+# deleted (task 9200ef54): ADR-0087 Phase 5 INVERTED that contract —
+# tasks no longer pin a workflow version, and the unit test
+# test_task_has_no_workflow_version_pin pins the column's ABSENCE.
 
 
 def test_tasks_parent_task_id_self_fk_exists(engine: Engine) -> None:
@@ -193,116 +187,11 @@ def test_events_commit_sha_partial_indexes_exist(engine: Engine) -> None:
     assert "commit_sha IS NOT NULL" in eac_idx
 
 
-def test_task_validations_columns_match_model(engine: Engine) -> None:
-    """The migration creates every column the ORM model declares for
-    ``task_validations`` (per the 2026-05-11 closure plan D.3)."""
-    inspector = sa.inspect(engine)
-    cols = {c["name"] for c in inspector.get_columns("task_validations")}
-    assert cols == {
-        "id",
-        "task_id",
-        "position",
-        "kind",
-        "description",
-        "script",
-        "prompt",
-        "created_at",
-    }
-    # FK target.
-    fks = inspector.get_foreign_keys("task_validations")
-    targets = {(fk["referred_table"], tuple(fk["referred_columns"])) for fk in fks}
-    assert ("tasks", ("id",)) in targets
-
-    # UNIQUE (task_id, position).
-    uniques = inspector.get_unique_constraints("task_validations")
-    assert any(
-        set(u["column_names"]) == {"task_id", "position"} for u in uniques
-    )
-
-
-def test_migration_0007_seeds_event_triggers_when_workflows_present(
-    engine: Engine,
-) -> None:
-    """Migration ``0007_seed_event_triggers`` inserts five catch-all
-    rows mapping github verbs → starter workflows. Per Week-3 plan
-    §C.2, these are operational defaults — the trigger evaluator reads
-    them on every github event.
-
-    The migration's existence check (``WHERE EXISTS (SELECT 1 FROM
-    workflows WHERE id = '<wf>')``) means seeding is conditional:
-    rows land only after the workflows have been registered.
-
-    This test seeds the required workflows first, then re-runs the
-    migration's INSERTs by hand (the migration itself only runs once
-    per alembic upgrade — but the INSERTs are idempotent via the
-    ``NOT EXISTS`` guard, so the test can re-issue them safely).
-    """
-    expected = [
-        ("pr_opened", "wf-review"),
-        ("pr_synchronize", "wf-review"),
-        ("pr_review_submitted", "wf-feedback"),
-        ("check_run_completed", "wf-ci-fix"),
-        ("pr_conflict", "wf-conflict"),
-    ]
-
-    with engine.begin() as conn:
-        # Clean slate inside an isolated section so we don't trample
-        # any state another test left behind.
-        conn.execute(sa.text(
-            "DELETE FROM event_triggers WHERE repo IS NULL"
-        ))
-        for _, workflow_id in expected:
-            conn.execute(sa.text(
-                "INSERT INTO workflows (id) VALUES (:w) "
-                "ON CONFLICT DO NOTHING"
-            ), {"w": workflow_id})
-
-        # Re-issue the migration's INSERT statements — the same shape
-        # the alembic migration runs at upgrade time.
-        for event_type, workflow_id in expected:
-            conn.execute(sa.text(f"""
-                INSERT INTO event_triggers (repo, event_type, workflow_id,
-                                            version_strategy, enabled)
-                SELECT NULL, '{event_type}', '{workflow_id}', 'latest', TRUE
-                WHERE EXISTS (SELECT 1 FROM workflows WHERE id = '{workflow_id}')
-                  AND NOT EXISTS (
-                    SELECT 1 FROM event_triggers
-                    WHERE repo IS NULL AND event_type = '{event_type}'
-                  )
-            """))
-
-        # Verify all five rows landed.
-        rows = conn.execute(sa.text(
-            "SELECT event_type, workflow_id, version_strategy, enabled "
-            "FROM event_triggers WHERE repo IS NULL ORDER BY event_type"
-        )).all()
-        observed = {(r.event_type, r.workflow_id) for r in rows}
-        assert observed == set(expected)
-        for r in rows:
-            assert r.version_strategy == "latest"
-            assert r.enabled is True
-
-        # Idempotency: running the same INSERTs again is a no-op.
-        for event_type, workflow_id in expected:
-            conn.execute(sa.text(f"""
-                INSERT INTO event_triggers (repo, event_type, workflow_id,
-                                            version_strategy, enabled)
-                SELECT NULL, '{event_type}', '{workflow_id}', 'latest', TRUE
-                WHERE EXISTS (SELECT 1 FROM workflows WHERE id = '{workflow_id}')
-                  AND NOT EXISTS (
-                    SELECT 1 FROM event_triggers
-                    WHERE repo IS NULL AND event_type = '{event_type}'
-                  )
-            """))
-        rows_after = conn.execute(sa.text(
-            "SELECT COUNT(*) FROM event_triggers WHERE repo IS NULL"
-        )).scalar()
-        assert rows_after == len(expected)
-
-        # Clean up so other tests start fresh.
-        conn.execute(sa.text(
-            "DELETE FROM event_triggers WHERE repo IS NULL"
-        ))
+# test_task_validations_columns_match_model and
+# test_migration_0007_seeds_event_triggers_when_workflows_present were
+# deleted (task 9200ef54): the task_validations and event_triggers/
+# workflows tables they pinned were dropped by ADR-0087 Phase 5, so
+# both tests errored unconditionally on a current schema.
 
 
 def test_inserting_a_plan_row_works(engine: Engine) -> None:
