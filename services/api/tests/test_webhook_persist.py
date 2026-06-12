@@ -311,8 +311,10 @@ async def test_deterministic_event_id_uses_upsert_and_refetches() -> None:
         event_id=deterministic_id,
     )
 
-    # Two execute calls: task_prs SELECT + pg_insert(...).on_conflict_do_nothing.
-    assert session.execute.await_count == 2
+    # Three execute calls: task_prs SELECT + pg_insert(...)
+    # .on_conflict_do_nothing + the task 5dd4a32d head_sha writer
+    # (pr_opened/pr_synchronize UPDATE task_prs SET head_sha).
+    assert session.execute.await_count == 3
     # session.add MUST NOT be called — that's the fresh-UUID branch.
     session.add.assert_not_called()
     session.refresh.assert_not_called()

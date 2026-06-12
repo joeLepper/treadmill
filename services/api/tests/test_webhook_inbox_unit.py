@@ -258,12 +258,15 @@ async def test_process_happy_path_persists_publishes_and_deletes() -> None:
     msg = _sqs_message(_envelope())
     await poller._process(msg)
 
-    # Two execute calls: the task_prs SELECT lookup (added 2026-05-14 to
-    # match the HTTP route's task_id stamping) + the Event INSERT. Pre-fix
-    # this was 1 call; the dual-ingress drift surfaced when downstream
-    # tasks stayed deferred because ``events.task_id`` was NULL on every
-    # github event. See task #117 for the facade unification.
-    assert session.execute.await_count == 2
+    # Three execute calls: the task_prs SELECT lookup (added 2026-05-14 to
+    # match the HTTP route's task_id stamping) + the Event INSERT + the
+    # task 5dd4a32d head_sha writer (pr_opened/pr_synchronize UPDATE
+    # task_prs SET head_sha, feeding resolve_task_by_head_sha's fast
+    # path). Pre-2026-05-14 this was 1 call; the dual-ingress drift
+    # surfaced when downstream tasks stayed deferred because
+    # ``events.task_id`` was NULL on every github event. See task #117
+    # for the facade unification.
+    assert session.execute.await_count == 3
     session.commit.assert_awaited()
     assert len(publisher.published) == 1
     assert sqs.delete_calls == [

@@ -151,6 +151,14 @@ def _normalize_check_run(body: dict[str, Any]) -> NormalizationResult | None:
         else None
     )
 
+    # Suite snapshot (ADR-0090 ci-observer): the webhook embeds the
+    # check run's suite WITH its delivery-time status/conclusion — the
+    # observer detects suite completion from exactly this snapshot, so
+    # normalization must not drop it. ``app`` distinguishes suite owners
+    # (github-actions vs netlify, the 2026-06-12 distinction).
+    check_suite = check_run.get("check_suite") or {}
+    app = check_run.get("app") or {}
+
     return NormalizationResult(
         entity_type="github",
         action="check_run_completed",
@@ -160,6 +168,10 @@ def _normalize_check_run(body: dict[str, Any]) -> NormalizationResult | None:
             "check_name": check_run.get("name") or "",
             "conclusion": check_run.get("conclusion") or "",
             "head_sha": check_run.get("head_sha") or "",
+            "check_suite_id": check_suite.get("id"),
+            "suite_status": check_suite.get("status"),
+            "suite_conclusion": check_suite.get("conclusion"),
+            "app_slug": app.get("slug") or "",
         },
         repo=repo_full,
         pr_number=pr_number,
