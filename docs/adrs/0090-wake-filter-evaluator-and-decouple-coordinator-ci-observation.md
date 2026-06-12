@@ -52,7 +52,18 @@ rollup the coordinator emits today, now produced mechanically. The
 coordinator's wake allowlist then **excludes** raw `check_run.completed` and
 **includes** `task.ci_result`. Net effect: a PR's ~13 `check_run` wakes
 collapse to **one** `ci_result` wake for the coordinator. The coordinator's
-§3 `check_run.completed` handler is replaced by a `task.ci_result` handler.
+§3.5 `check_run.completed` handler is replaced by a `task.ci_result`
+handler — and crucially, that handler's per-check side-effects (verified
+2026-06-12: step-advance on suite-success, coordinator-rework on
+failure) move to fire on the **suite-completion** rollup rather than per
+check (Bert's #332 review #2). The observer determines suite success/failure
+and carries it on the `ci_result`; acting once per suite is both correct and
+the source of the wake saving. The observer is **always-on control plane**,
+not a team unit (ADR-0091 §2), so it keeps emitting rollups for any repo
+even while that repo's team is paused. Attribution depends on a reliable
+`(repo, head_sha) → task_pr → task` lookup — the FK family ADR-0063
+deferred; this ADR is its first consumer, so the implementation must confirm
+`task_prs` carries `head_sha` or build that lookup first (Bert's #1).
 
 ### 3. Forbidden-failure-mode guard (unchanged from ADR-0089)
 

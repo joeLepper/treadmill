@@ -37,6 +37,13 @@ software teams' groups. **Orchestrators** (`treadmill-alan`, …) and the
 operator interface stay up always — they are the control plane and Joe's
 surface, not software teams.
 
+ADR-0090's non-LLM CI-observer is **always-on control plane**, not a team
+unit (Bert's #332 review #6): it must keep emitting `task.ci_result` for any
+repo's open PRs regardless of which team is active, so a paused team's PRs
+still get rollups and resume (§4) only replays the coordinator *acting* on
+them, not the observation itself. It lives in the always-on group with the
+orchestrators/operator surface.
+
 ### 3. Reconciling supervisor
 
 A single supervisor reacts to plan-lifecycle events (`plan.submitted`,
@@ -46,10 +53,17 @@ instance decides) to avoid flapping.
 
 ### 4. Graceful pause + resume
 
-A team is stopped only at a **safe point** — no task in `executing`; any
-in-flight work finishes first. Stopped sessions `--resume` on reactivation,
-so context is preserved across a pause (the launcher already persists the
-per-label session id, ADR-0073). **Anti-flap hysteresis**: a minimum dwell
+A team is stopped only at a **safe point**, defined (per Bert's #332 review)
+as: no task `executing` **AND** no PR in await-merge for the team **AND** the
+coordinator's bookkeeping inbox drained (no half-registered PR). The
+narrower "no task executing" is wrong because an ADR-0087 execution spans
+until **merge**, not subprocess exit — pausing mid-await-merge risks the
+orphan-PR class the team already fought. Stopped sessions `--resume` on
+reactivation, so context is preserved across a pause (the launcher persists
+the per-label session id, ADR-0073). **Resume must trigger a `catch_up`
+reconcile** (Path-B backfill, already implemented) so any PR that merged
+while the team was paused — or any `ci_result` that arrived (see §2) — is
+picked up rather than stranded. **Anti-flap hysteresis**: a minimum dwell
 time per active team; no more than one swap per *X* minutes.
 
 ### 5. Clean stop semantics
