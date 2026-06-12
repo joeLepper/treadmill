@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         gnupg \
         make \
+        unzip \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -36,6 +37,17 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.138 aws-cdk
 # the standard ``cd <pkg> && uv run pytest`` pattern exits 127 and the
 # code disposition refuses to push.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# bun — the channel-server (.ts) validation gates run ``bun test``
+# (task 5dee5909; prerequisite for the ADR-0090 wake-allowlists gate).
+# Without bun, every such gate exits 127 — the recurring "blocked on
+# Bun" wall. BUN_INSTALL=/usr/local puts the binary at
+# /usr/local/bin/bun (already on PATH). Pinned to the version the
+# channel server is tested against (tools/cc-channel-treadmill,
+# bun 1.3.14) per the repo's pin-to-avoid-surprise convention;
+# ``unzip`` in the apt list above is the installer's extraction
+# dependency on slim images.
+RUN curl -fsSL https://bun.sh/install | env BUN_INSTALL=/usr/local bash -s "bun-v1.3.14"
 
 # Playwright + chromium-headless-shell for ADR-0061 role-ui-triage.
 # The triage role drives a headless browser through /opt/triage/*.mjs
