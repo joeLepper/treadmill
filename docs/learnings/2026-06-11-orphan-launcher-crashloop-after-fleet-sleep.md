@@ -1,7 +1,8 @@
 ---
 date: 2026-06-11
 trigger: pattern
-status: captured
+status: crystallized-into-rule-unit-restart-reaps-launcher-tree
+crystallized_into: tools/cc-channels/systemd/treadmill-channel-reap
 related: ADR-0073 (single-instance contract), ADR-0089 (wake filter — the work the restarts were picking up)
 ---
 
