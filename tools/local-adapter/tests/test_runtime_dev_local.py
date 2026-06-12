@@ -142,6 +142,42 @@ def fake_docker(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 # ── load_deployment_yaml ──────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _host_state_immune(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every test in this file immune to LIVE-HOST state (task
+    f82f7590 / #333 CI follow-up). On operator hosts the ADR-0072
+    managed-credentials file and ambient AWS env vars leaked into
+    assertions, producing a standing 6-test "known local env failures"
+    class — inside which a REAL regression (the pidfile move) hid from
+    the pre-push run because failure NAMES matched the noise baseline.
+    With host state neutralized, local red always means a real break.
+    CI behavior is unchanged (CI has neither the file nor the vars)."""
+    monkeypatch.setattr(
+        runtime_module, "resolve_managed_host_credentials", lambda: None
+    )
+    # resolve_boto3_session binds the live host's credentials path as a
+    # DEFAULT ARGUMENT, so patching the module constant can't redirect
+    # it — wrap the call to force the file-absent (SSO profile) branch.
+    from treadmill_local.managed_credentials import (
+        resolve_boto3_session as _real_resolve_session,
+    )
+
+    monkeypatch.setattr(
+        runtime_module,
+        "resolve_boto3_session",
+        lambda profile, region: _real_resolve_session(
+            profile, region, Path("/nonexistent-managed-host-credentials")
+        ),
+    )
+    for var in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_load_deployment_yaml_happy_path(yaml_file: Path) -> None:
     cfg = load_deployment_yaml("personal", path=yaml_file)
     assert cfg["deployment_id"] == "personal"
@@ -2008,8 +2044,12 @@ def test_start_deploy_watcher_dev_local_spawns_subprocess_with_expected_env(
     # Moto override MUST NOT leak through — dev-local hits real AWS.
     assert "AWS_ENDPOINT_URL" not in env
 
-    # PID file written for later teardown.
-    assert (tmp_path / ".treadmill-local" / "deploy-watcher.pid").read_text().strip() == "7777"
+    # Task f82f7590: the PARENT writes NO pidfile — the watcher's main()
+    # writes the host-global one (and the legacy file) only AFTER winning
+    # the singleton flock, so a refused second watcher leaves the
+    # winner's state untouched. The old assertion here pinned the
+    # cwd-relative file the dual-watcher bug rode on.
+    assert not (tmp_path / ".treadmill-local" / "deploy-watcher.pid").exists()
 
 
 def test_start_deploy_watcher_dev_local_uses_yaml_profile_when_env_absent(
@@ -2123,6 +2163,14 @@ def test_stop_deploy_watcher_sigterms_pid_and_cleans_up_pid_file(
     and removes the file."""
     rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
     monkeypatch.chdir(tmp_path)
+    # Task f82f7590: the global pidfile/lock live under HOME — pin HOME
+    # to the sandbox so the test can never touch the real host fleet's
+    # ~/.treadmill state, and stub the identity guard (pid 6666 is fake;
+    # the guard would correctly classify it as recycled otherwise).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        LocalRuntime, "_watcher_identity_ok", staticmethod(lambda pid: True)
+    )
     state_dir = tmp_path / ".treadmill-local"
     state_dir.mkdir()
     pid_file = state_dir / "deploy-watcher.pid"
@@ -2176,6 +2224,11 @@ def test_down_sigterms_deploy_watcher(
     process and removes the PID file."""
     rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
     monkeypatch.chdir(tmp_path)
+    # Task f82f7590 (see the stop test above for why).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        LocalRuntime, "_watcher_identity_ok", staticmethod(lambda pid: True)
+    )
     state_dir = tmp_path / ".treadmill-local"
     state_dir.mkdir()
     pid_file = state_dir / "deploy-watcher.pid"
@@ -2697,3 +2750,36 @@ def test_recreate_api_container_without_pin_keeps_tag_behavior(
     assert (
         fake_docker.containers.run.call_args.args[0] == "treadmill-api:dev"
     )
+
+
+def test_stop_deploy_watcher_recycled_pid_not_killed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: MagicMock,
+) -> None:
+    """Task f82f7590 (#330 lesson): a pidfile whose live pid fails the
+    identity check (recycled onto an unrelated process) is treated as
+    stale — file dropped, nothing killed."""
+    rt = LocalRuntime(tmp_path, deployment_config=_valid_yaml_dict())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        LocalRuntime, "_watcher_identity_ok", staticmethod(lambda pid: False)
+    )
+    state_dir = tmp_path / ".treadmill-local"
+    state_dir.mkdir()
+    pid_file = state_dir / "deploy-watcher.pid"
+    pid_file.write_text("7777")
+    monkeypatch.setattr(
+        LocalRuntime, "_pid_alive", staticmethod(lambda pid: True)
+    )
+    kill_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        runtime_module.os, "kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    rt._stop_deploy_watcher()
+
+    assert kill_calls == []
+    assert not pid_file.exists()

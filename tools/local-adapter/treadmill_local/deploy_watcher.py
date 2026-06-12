@@ -42,6 +42,106 @@ from typing import Any
 logger = logging.getLogger("treadmill.deploy_watcher")
 
 
+# ── Single-instance lock (task f82f7590) ──────────────────────────────────────
+#
+# The 2026-06-11 dual-watcher outage class: the pidfile lives under the
+# CWD-RELATIVE ``.treadmill-local/`` state dir, so two worktrees each
+# running ``up`` got two private pidfiles, two "legitimate" watchers, and
+# a race to recreate the ONE shared treadmill-api container from
+# different (possibly lagging) sources. The #329 digest-pin guards image
+# identity; this guards WATCHER identity: a host-global ``flock`` keyed
+# by deployment id, acquired by the watcher itself at startup — so the
+# guarantee holds no matter which worktree (or operator shell) spawns
+# the process. ``flock`` is released by the kernel on process death:
+# unlike a pidfile check there is no TOCTOU window and no PID-recycling
+# class (the lesson of the #330 reap guard, applied one level up).
+
+
+def watcher_lock_path(deployment_key: str) -> Path:
+    """Host-global lock path for a deployment's watcher.
+
+    Lives under ``~/.treadmill`` (the same global dir as the deployment
+    YAML), NEVER under the cwd-relative state dir — per-worktree scoping
+    of the lock is exactly the dual-watcher bug.
+    """
+    return Path.home() / ".treadmill" / f"deploy-watcher.{deployment_key}.lock"
+
+
+def watcher_pid_path(deployment_key: str) -> Path:
+    """Host-global pidfile, same keying as the lock — the parent's
+    stop/alive helpers must see the watcher regardless of which worktree
+    started it."""
+    return Path.home() / ".treadmill" / f"deploy-watcher.{deployment_key}.pid"
+
+
+def acquire_watcher_lock(lock_path: Path) -> int | None:
+    """Try to become THE watcher for this deployment.
+
+    Returns the held lock fd on success (keep it open for the process
+    lifetime — closing it releases the lock), or ``None`` when another
+    live watcher holds the lock. On success the lock file is rewritten
+    with pid/repo diagnostics so the losing side's refusal log can name
+    the winner.
+    """
+    import fcntl
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = os.read(fd, 4096).decode(errors="replace").strip()
+        except OSError:
+            holder = ""
+        finally:
+            os.close(fd)
+        logger.error(
+            "another deploy-watcher already owns %s (%s) — refusing to "
+            "start a second watcher for this deployment; exactly one "
+            "watcher per repo no matter how many worktrees run `up`",
+            lock_path, holder or "no diagnostics",
+        )
+        return None
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(
+        fd,
+        (
+            f"pid={os.getpid()} "
+            f"repo_root={os.environ.get('TREADMILL_REPO_ROOT', '?')} "
+            f"started_unix={int(time.time())}\n"
+        ).encode(),
+    )
+    return fd
+
+
+class _LockReleasingGuard:
+    """Wraps the staleness guard so a re-exec releases the singleton
+    lock FIRST: ``os.execv`` would otherwise carry the flock fd into a
+    fresh ``main()`` that then deadlocks against itself trying to
+    re-acquire (flock conflicts across open file descriptions, even
+    same-process). Releasing before exec leaves a microscopic window in
+    which a racing watcher could take the lock — in which case the
+    re-exec'd ``main()`` loses the acquire and exits, which still
+    satisfies the exactly-one invariant.
+    """
+
+    def __init__(self, guard: Any, lock_fd: int) -> None:
+        self._guard = guard
+        self._lock_fd = lock_fd
+
+    def changed(self) -> bool:
+        return self._guard.changed()
+
+    def reexec(self, pid_file: Path | None = None) -> None:
+        try:
+            os.close(self._lock_fd)
+        except OSError:
+            pass
+        self._guard.reexec(pid_file)
+
+
 # ── Dispatch table ────────────────────────────────────────────────────────────
 #
 # Each entry is (path_prefix, category). First-match wins: a file under
@@ -453,9 +553,31 @@ def main() -> int:
     log_file = Path(log_file_env) if log_file_env else DEPLOY_WATCHER_LOG_FILE
     configure_rotating_logging(log_file)
 
+    # Single-instance lock (task f82f7590) — acquired by the watcher
+    # ITSELF so the exactly-one guarantee covers every spawn path (any
+    # worktree's `up`, an operator's bare `python -m`, a staleness
+    # re-exec). Must precede every side effect, pidfile included: a
+    # losing watcher must leave the winner's state untouched.
+    deployment_key = (
+        os.environ.get("TREADMILL_DEPLOY_WATCHER_DEPLOYMENT_ID") or "local"
+    )
+    lock_fd = acquire_watcher_lock(watcher_lock_path(deployment_key))
+    if lock_fd is None:
+        # Refusal is SUCCESS for the system invariant (exactly one
+        # watcher per repo): exit 0, loud log already emitted by
+        # acquire_watcher_lock.
+        return 0
+
     # ADR-0069: rewrite the PID file with our own pid at startup so a
     # re-exec'd process owns the pid file the parent uses for
-    # ``_pid_alive`` + ``_stop_deploy_watcher``.
+    # ``_pid_alive`` + ``_stop_deploy_watcher``. Host-GLOBAL (keyed like
+    # the lock) since task f82f7590: the cwd-relative ``STATE_DIR``
+    # pidfile gave every worktree a private copy, which is how two
+    # watchers ever ran at once. The legacy relative pidfile is still
+    # written for one transition window so an older parent's stop path
+    # can find us.
+    pid_file = watcher_pid_path(deployment_key)
+    pid_file.write_text(str(os.getpid()))
     STATE_DIR.mkdir(exist_ok=True)
     DEPLOY_WATCHER_PID_FILE.write_text(str(os.getpid()))
 
@@ -598,7 +720,11 @@ def main() -> int:
 
     # ADR-0069: fingerprint our package bytes at startup; the loop
     # head consults this each iteration to decide whether to re-exec.
-    staleness_guard = StalenessGuard(module="treadmill_local.deploy_watcher")
+    # Wrapped so the re-exec releases the f82f7590 singleton lock first
+    # (the fresh main() re-acquires; see _LockReleasingGuard).
+    staleness_guard = _LockReleasingGuard(
+        StalenessGuard(module="treadmill_local.deploy_watcher"), lock_fd,
+    )
 
     watcher = DeployWatcher(
         receive_fn=receive,
@@ -611,7 +737,7 @@ def main() -> int:
         repo_root=repo_root,
         restart_host_processes_fn=restart_host_processes_fn,
         staleness_guard=staleness_guard,
-        staleness_pid_file=DEPLOY_WATCHER_PID_FILE,
+        staleness_pid_file=pid_file,
     )
 
     def _on_signal(_signum: int, _frame: Any) -> None:
