@@ -100,6 +100,11 @@ class TaskPR(Base):
         nullable=False,
     )
     branch: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """The PR head commit SHA (ADR-0063-deferred lookup; ADR-0090's
+    CI-observer resolves (repo, head_sha) → task through it). Nullable:
+    legacy rows and writers that don't know the head yet leave it NULL —
+    ``resolve_task_by_head_sha`` simply won't match those rows."""
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
