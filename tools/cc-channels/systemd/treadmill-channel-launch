@@ -110,6 +110,15 @@ tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL \"$WORKDIR\"" Enter
           sent_trust=1
         fi
         ;;
+      *"limit to reset"*)
+        # Post-failover relaunch: the resumed transcript redraws the
+        # STALE limit modal (a bounce alone never clears it — the
+        # 2026-06-11 lesson). Enter confirms the SAFE DEFAULT /
+        # dismisses. HARD CONSTRAINT: Enter is the ONLY key the
+        # platform ever sends at this modal — the billing options
+        # (usage credits / Team plan) are operator-only.
+        tmux send-keys -t "$LABEL" Enter
+        ;;
     esac
     # Done once both prompts are past us — claude's TUI footer ("bypass
     # permissions on" / "esc to interrupt") signals we're through.
@@ -119,9 +128,25 @@ tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL \"$WORKDIR\"" Enter
   done
 ) &
 
-# Keep ourselves alive while the tmux session exists.
+# Keep ourselves alive while the tmux session exists. Each beat also
+# runs the limit-park detector (task b561910d): the usage-limit modal
+# blocks claude on stdin with NO exit and NO relay, so the unit is the
+# only supervisor positioned to read the pane. On a CONFIRMED park
+# (signature + frozen pane across two beats) the recover script either
+# arms an account failover — then we exit 1 so systemd bounces us, the
+# #326 ExecStopPost reaps the parked tree, and the relaunch picks up
+# the swapped CLAUDE_CONFIG_DIR (the startup poller above dismisses the
+# stale modal the resumed transcript redraws) — or escalates with the
+# manual recipe (rate-limited inside the script) and we keep waiting.
+REAP_DIR="$(cd "$(dirname "$0")" && pwd)"
 while tmux has-session -t "$LABEL" 2>/dev/null; do
   sleep 30
+  if [ "$STOPPED_BY_OPERATOR" -eq 0 ]      && "$REAP_DIR/treadmill-limit-park-check" "$LABEL"; then
+    if "$REAP_DIR/treadmill-limit-park-recover" "$LABEL"; then
+      echo "treadmill-channel-launch: limit park on $LABEL — failover armed; bouncing unit" >&2
+      exit 1
+    fi
+  fi
 done
 
 # Decide exit status. Operator-initiated stop (SIGTERM/SIGINT

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Usage: treadmill-limit-park-recover <label>
+#
+# Recovery decision for a CONFIRMED limit park (task b561910d). Emits
+# the typed event, then either fails over to the pre-configured
+# non-limited account or escalates with the manual recipe.
+#
+#   exit 0  -> FAILOVER armed: $STATE_ROOT/claude-account now names the
+#              fallback; the caller (treadmill-channel-launch) bounces
+#              the unit so the relaunch picks it up (CLAUDE_CONFIG_DIR)
+#              and #326's ExecStopPost reaps the parked tree.
+#   exit 2  -> ESCALATED (no usable fallback): event + coordinator
+#              relay carry the manual recipe; the session stays parked
+#              for the operator. Rate-limited to one escalation per
+#              30 min so the keep-alive loop doesn't spam.
+#
+# HARD CONSTRAINT (spec): this script never touches tmux keys at all —
+# the only key the platform ever sends at the limit modal is the
+# wrapper's startup Enter (safe default / dismiss). Billing options
+# (usage credits / Team plan) are operator-only, never auto-selected.
+set -u
+
+LABEL="${1:-}"
+[ -n "$LABEL" ] || exit 2
+
+STATE_ROOT="$HOME/.cc-channels/$LABEL"
+API_URL="${TREADMILL_API_URL:-http://localhost:8088}"
+FALLBACK_FILE="$STATE_ROOT/claude-account-fallback"
+ACCOUNT_FILE="$STATE_ROOT/claude-account"
+ESCALATED_STAMP="$STATE_ROOT/limit-park.escalated"
+RECIPE="bounce: systemctl --user restart treadmill-channel@$LABEL; then dismiss the stale modal: tmux send-keys -t $LABEL Enter"
+
+emit_event() {
+  # ADR-0086 Path-B manual-event surface; best-effort (the relay/event
+  # is the signal, but a down API must not block recovery).
+  curl -fsS -m 10 -X POST "$API_URL/api/v1/events" \
+    -H 'Content-Type: application/json' \
+    -d "{\"entity_type\": \"task\", \"action\": \"worker_limit_parked\", \"payload\": {\"label\": \"$LABEL\", \"recovery\": \"$1\", \"fallback_account\": $2, \"recipe\": \"$RECIPE\"}}" \
+    >/dev/null 2>&1 || true
+}
+
+FALLBACK=$(cat "$FALLBACK_FILE" 2>/dev/null || true)
+if [ -n "$FALLBACK" ] && [ -d "$HOME/.claude-$FALLBACK" ]; then
+  CURRENT=$(cat "$ACCOUNT_FILE" 2>/dev/null || echo "default")
+  printf '%s\n' "$CURRENT" > "$STATE_ROOT/claude-account.limited"
+  printf '%s\n' "$FALLBACK" > "$ACCOUNT_FILE"
+  rm -f "$STATE_ROOT/limit-park.state"
+  emit_event "failover" "\"$FALLBACK\""
+  echo "treadmill-limit-park-recover: $LABEL failing over" \
+    "$CURRENT -> $FALLBACK; caller should bounce" >&2
+  exit 0
+fi
+
+# No usable fallback: escalate (rate-limited).
+if [ -f "$ESCALATED_STAMP" ]; then
+  AGE=$(( $(date +%s) - $(stat -c %Y "$ESCALATED_STAMP" 2>/dev/null || echo 0) ))
+  [ "$AGE" -lt 1800 ] && exit 2
+fi
+touch "$ESCALATED_STAMP"
+[ -n "$FALLBACK" ] && echo "treadmill-limit-park-recover: fallback '$FALLBACK'" \
+  "configured but ~/.claude-$FALLBACK missing; escalating instead" >&2
+emit_event "escalate" "null"
+
+# Best-effort coordinator relay for team labels (worker-<slug>-N /
+# evaluator-<slug> -> coordinator-<slug>); cc-relay's file-drop format.
+SLUG=""
+case "$LABEL" in
+  worker-*) SLUG=$(printf '%s' "$LABEL" | sed -E 's/^worker-(.*)-[0-9]+$/\1/') ;;
+  evaluator-*) SLUG="${LABEL#evaluator-}" ;;
+esac
+if [ -n "$SLUG" ] && [ -d "$HOME/.cc-channels/coordinator-$SLUG/relay" ]; then
+  TS=$(date +%s%N)
+  cat > "$HOME/.cc-channels/coordinator-$SLUG/relay/$TS-limit-park-from-$LABEL.md" <<RELAY
+[from: $LABEL]
+
+[from: $LABEL] LIMIT PARK (auto-detected): $LABEL is parked at the Claude usage-limit modal with no fallback account configured. Session is frozen, not crashed. Manual recovery recipe: $RECIPE. NEVER select the billing options. (Emitted task.worker_limit_parked event; this relay is the wake.)
+RELAY
+fi
+echo "treadmill-limit-park-recover: $LABEL parked, no fallback — escalated with recipe" >&2
+exit 2
