@@ -25,6 +25,32 @@ same fix (~15:47Z, `treadmill-local up --no-build` and a manual
 inspect→rm→run); one healthy container stood, no harm. Note: `docker start`
 does NOT fix this class — it reuses the stale layer (confirmed; same crash).
 
+## Recurrence — the pattern is now characterized (2 data points, ~1 day)
+
+- **06:52Z 2026-06-11** — recreate with pre-migration image; DB at
+  `20260611_0600`; crash `Can't locate revision 0600`.
+- **~02:1xZ 2026-06-12** — IDENTICAL; DB at `20260612_0100` (from #322);
+  crash `Can't locate revision 0100`. (coordinator-joelepper-treadmill,
+  recurrence relay.)
+
+**Confirmed trigger: every migration-carrying merge.** The sequence:
+post-merge deploy applies the new migration to the dev DB, then a SECOND
+recreate pulls the PRE-MERGE image (build not yet complete / watcher pulls
+before building) and starts a container whose alembic tree has no knowledge
+of the revision the DB is now stamped at → crashloop. The migration moves
+forward; the container regresses. This is the deploy-watcher-stale-source
+class (`2026-05-26` learnings) with a precise new signature — not random
+drift, but a build-vs-recreate race deterministic on migration merges.
+
+**Root-cause fix (the actionable item):** the deploy/recreate actor must
+either (a) build-then-recreate ATOMICALLY (no recreate until the post-merge
+image exists), or (b) pin the recreate to the post-merge image DIGEST, or
+(c) gate recreate on `alembic heads` ⊇ the DB's stamped revision. The
+2026-05-26 `_sync_local_to_origin` fix (ff origin/main before building)
+either regressed or has a gap on the migration-merge path. Until fixed, the
+class recurs on every schema-bearing merge — and each occurrence is a full
+loop outage (the API is every event consumer's single point of failure).
+
 ## The lesson(s)
 
 1. **Container-vs-image drift is the deploy-watcher-stale-source class in a
