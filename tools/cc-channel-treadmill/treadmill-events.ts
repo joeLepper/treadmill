@@ -32,8 +32,10 @@
  *   TREADMILL_WAKE_ACTIONS   ADR-0089 wake filter — comma-separated
  *                            entity.action globs deciding which events wake
  *                            the session at all. Unset → role default
- *                            (TREADMILL_ROLE=orchestrator gets the ADR-0089
- *                            allowlist; every other role is unfiltered).
+ *                            (orchestrator: ADR-0089 allowlist;
+ *                            coordinator/evaluator: ADR-0090 allowlists —
+ *                            task.ci_result replaces check_run noise;
+ *                            worker/unset: unfiltered).
  *                            Relay messages and reconcile frames ALWAYS wake.
  *   TREADMILL_MAX_SUPPRESSION_AGE
  *                            minutes, default 60 — bounded blindness: if
