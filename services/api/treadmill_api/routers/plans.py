@@ -119,6 +119,16 @@ class PlanResponse(BaseModel):
     INSERTed and the route did not LEFT JOIN). ``drafting`` is the default
     for a plan with no lifecycle events recorded yet.
     """
+    auto_merge: bool = True
+    """Effective auto-merge policy (ADR-0031), task e477a4a0. Coalesced
+    at the API boundary: a NULL column (no frontmatter / unspecified)
+    means ENABLED, so consumers get one branch and no tri-state — the
+    coordinator's §9.3 read is exactly ``if not plan.auto_merge: hold
+    for operator``. ``False`` only when the plan doc's frontmatter says
+    ``auto_merge: false``. The column has carried the value since
+    migration 0012; this field is the read surface the 2026-06-12 #335
+    merge race was missing.
+    """
 
 
 class TaskResponse(BaseModel):
@@ -284,6 +294,9 @@ def _to_plan_response(plan: Plan, derived_status: str | None = None) -> PlanResp
         created_by=plan.created_by,
         created_at=plan.created_at,
         derived_status=derived_status,
+        # None (unspecified) coalesces to enabled — ADR-0031 default;
+        # only an explicit frontmatter ``auto_merge: false`` holds.
+        auto_merge=plan.auto_merge is not False,
     )
 
 
