@@ -35,10 +35,18 @@ still shape-validated and then ignored, so older docs parse unchanged.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class PlanDocFormatError(ValueError):
@@ -137,11 +145,27 @@ class TaskSpec(BaseModel):
     # still flow to workers via the coordinator's brief but are never
     # persisted. Present values stay shape-validated (a malformed check
     # is an authoring error worth failing on), and an EXPLICIT empty
-    # list is still rejected — omit the key instead.
-    validation: Annotated[list[TaskValidationCheck], Field(min_length=1)] | None = Field(
+    # list is still rejected — with a message that says to omit the key,
+    # NOT pydantic's generic min-length text, which would steer authors
+    # toward adding a dead entry (PR #327 review).
+    validation: list[TaskValidationCheck] | None = Field(
         default=None,
         description="DEPRECATED — accepted-and-ignored post-ADR-0087 Phases 4/5.",
     )
+
+    @field_validator("validation")
+    @classmethod
+    def _empty_validation_means_omit(
+        cls, v: list[TaskValidationCheck] | None,
+    ) -> list[TaskValidationCheck] | None:
+        if v is not None and len(v) == 0:
+            raise ValueError(
+                "'validation: []' — omit the deprecated 'validation:' key "
+                "entirely instead of passing an empty list (the field is "
+                "accepted-and-ignored when present; per-task validation "
+                "gates were removed in ADR-0087 Phases 4/5)"
+            )
+        return v
 
 
 class _PlanDocSequenceContainer(BaseModel):

@@ -190,8 +190,12 @@ def test_parse_plan_doc_rejects_empty_validation_list():
       files: [a.py]
     validation: []
 """
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as exc_info:
         parse_plan_doc(_wrap_plan_md(yaml_body))
+    # PR #327 review item B: the rejection must steer authors to OMIT the
+    # deprecated key — pydantic's generic min-length text would steer
+    # them toward ADDING a dead entry instead.
+    assert "omit the deprecated 'validation:' key" in str(exc_info.value)
 
 
 def test_parse_plan_doc_rejects_unknown_validation_kind():
