@@ -428,3 +428,71 @@ class TestTemplateInstallWiring:
         assert (
             team_dir / "worker-acme-widget-1" / ".claude" / "settings.json"
         ).is_file()
+
+
+# ── Per-role model pin (task 5d14fbcc — INCIDENT 2026-06-12) ──────────────
+
+
+class TestModelPin:
+    """ANTHROPIC_MODEL written per-role into each .env so --resume never
+    falls back to the account-default (claude-fable-5 unavailable on this
+    account — incident 2026-06-12: coordinator + evaluator sessions silently
+    died; workers were safe only because their cwd .claude/settings.json
+    pinned sonnet; settings.json "model" does NOT fix --resume's persisted
+    model selection — only the env-var path reaches the subprocess)."""
+
+    def test_coordinator_env_carries_opus_model(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        runner.invoke(team_app, ["x/y"])
+        env_body = (
+            teams_dir / "x-y" / "coordinator-x-y" / "coordinator-x-y.env"
+        ).read_text()
+        assert "ANTHROPIC_MODEL=claude-opus-4-8\n" in env_body
+
+    def test_evaluator_env_carries_opus_model(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        runner.invoke(team_app, ["x/y"])
+        env_body = (
+            teams_dir / "x-y" / "evaluator-x-y" / "evaluator-x-y.env"
+        ).read_text()
+        assert "ANTHROPIC_MODEL=claude-opus-4-8\n" in env_body
+
+    def test_worker_env_carries_sonnet_model(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        runner.invoke(team_app, ["x/y"])
+        env_body = (
+            teams_dir / "x-y" / "worker-x-y-1" / "worker-x-y-1.env"
+        ).read_text()
+        assert "ANTHROPIC_MODEL=claude-sonnet-4-6\n" in env_body
+
+    def test_model_pin_is_distinct_per_role(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        """Coordinator + evaluator get opus; workers get sonnet — not
+        the same value, so a single-value regression can't pass silently."""
+        runner.invoke(team_app, ["x/y"])
+        coord_model = (
+            teams_dir / "x-y" / "coordinator-x-y" / "coordinator-x-y.env"
+        ).read_text()
+        worker_model = (
+            teams_dir / "x-y" / "worker-x-y-1" / "worker-x-y-1.env"
+        ).read_text()
+        assert "claude-opus-4-8" in coord_model
+        assert "claude-sonnet-4-6" in worker_model
+        assert "claude-opus-4-8" not in worker_model
+        assert "claude-sonnet-4-6" not in coord_model
