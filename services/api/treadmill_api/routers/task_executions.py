@@ -169,6 +169,10 @@ async def update_task_execution(
 
 
 _RECONCILE_COORDINATOR_RESTART_SQL = """\
+-- Over-restore accepted: a legitimate coordinator_restart row on a task that
+-- later reached pr_merged via a retry will also be flipped to completed.
+-- The information to distinguish "buggy sweep" from "real restart" is not
+-- stored; for an already-merged task, flipping is accurate-enough history.
 UPDATE task_executions
    SET status        = 'completed',
        failure_reason = NULL
