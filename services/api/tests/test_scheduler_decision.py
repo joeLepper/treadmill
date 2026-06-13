@@ -147,6 +147,27 @@ def test_idle_team_is_quiescent_even_with_pending_work() -> None:
     assert decision.quiescent_teams == ["team-a"]
 
 
+def test_registered_only_task_does_not_pin_quiescence() -> None:
+    """ADR-0091 fix (2026-06-12): a team whose only non-terminal task is
+    'registered' (queued, undispatched) MUST be quiescent.
+
+    Root cause: the SQL open_prs CTE used NOT IN ('done', 'cancelled'),
+    which includes 'registered'.  A task reset to 'registered' after a
+    prior execution may have a stale open task_prs row; that row made
+    open_pr_with_live_task=True and pinned the team non-quiescent even
+    though no work was in flight.  The fix adds 'registered' to the
+    exclusion set so the SQL correctly returns open_pr_with_live_task=False
+    for such teams.
+
+    This test pins the pure-function contract: pending_tasks=1 with all
+    in-flight flags False → quiescent."""
+    team = _team("team-a", pending_tasks=1)  # one registered task, nothing in-flight
+    assert is_quiescent(team)
+    decision = compute_decision([team], NOW)
+    assert "team-a" in decision.quiescent_teams
+    assert decision.desired_team == "team-a"  # still desired — daemon won't pause it
+
+
 # ── endpoint wrapper smoke ───────────────────────────────────────────
 
 

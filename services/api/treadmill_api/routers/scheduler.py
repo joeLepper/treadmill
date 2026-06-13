@@ -42,11 +42,15 @@ A team is quiescent ONLY when all three hold:
 1. **No task executing** — no ``task_executions`` row with
    ``status='running'`` for the team's worker/evaluator labels.
 2. **No in-flight PR** — no OPEN ``task_prs`` row (``closed_at IS
-   NULL``) for the team's repo whose task is non-terminal. This single
-   predicate covers BOTH await-CI and await-merge (Carla #342: a rework
-   push leaves the worker exited but CI running — the open PR + live
-   task makes the team non-quiescent without needing to distinguish the
-   two phases).
+   NULL``) for the team's repo whose task is non-terminal AND not
+   ``registered``. This single predicate covers BOTH await-CI and
+   await-merge (Carla #342: a rework push leaves the worker exited but
+   CI running — the open PR + live task makes the team non-quiescent
+   without needing to distinguish the two phases). ``registered`` is
+   explicitly excluded: a task reset to ``registered`` after a prior
+   execution may carry a stale open ``task_prs`` row; that row must not
+   pin the team non-quiescent, since the task has not been dispatched
+   and holds no in-flight resources (ADR-0091, 2026-06-12 fix).
 3. **No half-registered PR** — no recent ``github.pr_opened`` event
    (last ``HALF_REGISTERED_WINDOW_MINUTES``) for the repo that lacks a
    ``task_prs`` row: the coordinator's POST may be in flight, and
@@ -201,7 +205,7 @@ open_prs AS (
     FROM task_prs tp
     JOIN task_status ts ON ts.id = tp.task_id
     WHERE tp.closed_at IS NULL
-      AND ts.derived_status NOT IN ('done', 'cancelled')
+      AND ts.derived_status NOT IN ('done', 'cancelled', 'registered')
     GROUP BY tp.repo
 ),
 half_registered AS (
