@@ -18,9 +18,15 @@ PATCH /api/v1/task_executions/{id}
   - 404 on unknown execution id
   - 422 on out-of-vocabulary status value
 
-GET /api/v1/task_executions?task_id=<id>
+GET /api/v1/task_executions?task_id=<id>[&status=<status>]
   - returns rows ordered by started_at ascending
   - returns empty list when no rows
+  - ?status=running accepted (200) and returns only running rows
+  - ?status=invalid returns 422
+
+POST /api/v1/task_executions/reconcile-coordinator-restart
+  - returns {reconciled: N} from rowcount
+  - idempotent (200 on repeated calls)
 """
 
 from __future__ import annotations
@@ -80,10 +86,12 @@ class _StubSession:
         get_returns: object = None,
         scalars_returns: list | None = None,
         flush_raises: Exception | None = None,
+        rowcount: int = 0,
     ) -> None:
         self._get_returns = get_returns
         self._scalars_returns = scalars_returns or []
         self._flush_raises = flush_raises
+        self._rowcount = rowcount
         self.added: list[object] = []
 
     async def get(self, model_class, pk):  # noqa: ANN001
@@ -113,6 +121,7 @@ class _StubSession:
     async def execute(self, stmt):  # noqa: ANN001
         result = MagicMock()
         result.scalars.return_value.all.return_value = self._scalars_returns
+        result.rowcount = self._rowcount
         return result
 
 
@@ -352,3 +361,92 @@ class TestListTaskExecutions:
 
         resp = client.get("/api/v1/task_executions")
         assert resp.status_code == 422
+
+    def test_status_filter_running_returns_only_running_rows(self) -> None:
+        """?status=running must return only rows with status='running'.
+
+        This is the ADR-0087 stale-sweep precision fix: the coordinator
+        must pass ?status=running so it only marks in-flight rows as
+        failed/coordinator_restart, never already-terminal ones.
+
+        The stub is pre-loaded with a running execution only (mirroring
+        what a real DB returns for WHERE status='running'); the endpoint
+        must return exactly that row with status='running'.
+        """
+        task_id = uuid.uuid4()
+        ex_running = _stub_execution(task_id=task_id, status="running")
+        session = _StubSession(scalars_returns=[ex_running])
+        client = TestClient(_app(session))
+
+        resp = client.get(f"/api/v1/task_executions?task_id={task_id}&status=running")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["status"] == "running"
+
+    def test_status_filter_invalid_value_returns_422(self) -> None:
+        """An out-of-vocabulary ?status= value must return 422."""
+        task_id = uuid.uuid4()
+        session = _StubSession(scalars_returns=[])
+        client = TestClient(_app(session))
+
+        resp = client.get(
+            f"/api/v1/task_executions?task_id={task_id}&status=not-a-real-status"
+        )
+
+        assert resp.status_code == 422
+
+    def test_status_filter_completed_accepted(self) -> None:
+        task_id = uuid.uuid4()
+        ex = _stub_execution(task_id=task_id, status="completed")
+        session = _StubSession(scalars_returns=[ex])
+        client = TestClient(_app(session))
+
+        resp = client.get(f"/api/v1/task_executions?task_id={task_id}&status=completed")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body[0]["status"] == "completed"
+
+    def test_status_filter_omitted_returns_all_rows(self) -> None:
+        """No ?status= param leaves all rows visible (backwards-compatible)."""
+        task_id = uuid.uuid4()
+        ex1 = _stub_execution(task_id=task_id, status="running")
+        ex2 = _stub_execution(task_id=task_id, status="completed")
+        session = _StubSession(scalars_returns=[ex1, ex2])
+        client = TestClient(_app(session))
+
+        resp = client.get(f"/api/v1/task_executions?task_id={task_id}")
+
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()) == 2
+
+
+# ── Reconcile tests ─────────────────────────────────────────────────────
+
+
+class TestReconcileCoordinatorRestart:
+    def test_reconcile_returns_count_of_restored_rows(self) -> None:
+        """POST reconcile-coordinator-restart returns {reconciled: N}."""
+        session = _StubSession(rowcount=40)
+        client = TestClient(_app(session))
+
+        resp = client.post(
+            "/api/v1/task_executions/reconcile-coordinator-restart"
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"reconciled": 40}
+
+    def test_reconcile_zero_when_no_rows_match(self) -> None:
+        """Idempotent: a second call returns reconciled=0."""
+        session = _StubSession(rowcount=0)
+        client = TestClient(_app(session))
+
+        resp = client.post(
+            "/api/v1/task_executions/reconcile-coordinator-restart"
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"reconciled": 0}

@@ -1,6 +1,6 @@
 """``/api/v1/task_executions`` — ADR-0087 per-dispatch lifecycle surface.
 
-Three endpoints:
+Four endpoints:
 
 * ``POST /api/v1/task_executions`` — coordinator writes one row at
   dispatch time; returns 201 + row.
@@ -9,9 +9,16 @@ Three endpoints:
   ``completed_at`` / ``failure_reason``. Only fields present in the
   body are written (``model_fields_set`` semantics, same as
   ``/api/v1/workflow_run_steps``).
-* ``GET /api/v1/task_executions?task_id=<id>`` — read all executions
-  for a task, ordered by ``started_at``. Used by the evaluator and
-  by the coordinator to count rework cycles.
+* ``GET /api/v1/task_executions?task_id=<id>[&status=<status>]`` —
+  read executions for a task or worker label, optionally filtered by
+  ``status`` (running/completed/failed). Used by the evaluator, the
+  coordinator stale-sweep (?status=running narrows to in-flight rows
+  only), and the ADR-0089 token harvester (worker_label filter).
+* ``POST /api/v1/task_executions/reconcile-coordinator-restart`` —
+  restores rows mis-marked ``failed/coordinator_restart`` on tasks that
+  are now in a terminal good state (``pr_merged``, ``done``,
+  ``cancelled``). Idempotent; coordinator calls on restart after the
+  stale-sweep.
 
 404 when the referenced ``task_id`` or execution ``id`` does not exist.
 409 when the ``uq_task_executions_spawn`` UNIQUE constraint fires (same
@@ -27,9 +34,9 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,6 +168,39 @@ async def update_task_execution(
     return TaskExecutionRow.model_validate(execution, from_attributes=True)
 
 
+_RECONCILE_COORDINATOR_RESTART_SQL = """\
+-- Merge signal matched via EXISTS on events (not derived_status) so both
+-- bare 'pr_merged' (task_status clause 3b: no failed step on latest run)
+-- AND the overlay 'pr_merged (<wf>: failed)' (clause 5: pr_merged event +
+-- failed step) are covered.  An IN-list on derived_status silently missed
+-- the overlay variant; merged-but-last-run-failed tasks were never restored.
+-- 'done' is emitted by task_status clause 6d else-arm for local-only tasks
+-- (no PR opened, run completed, no decision:fail step output); kept in the
+-- subquery for defence-in-depth on that rare path.
+-- Over-restore accepted: a legitimate coordinator_restart row on a task that
+-- later reached pr_merged via a retry will also be flipped to completed.
+-- The information to distinguish "buggy sweep" from "real restart" is not
+-- stored; for an already-merged task, flipping is accurate-enough history.
+UPDATE task_executions
+   SET status        = 'completed',
+       failure_reason = NULL
+ WHERE status         = 'failed'
+   AND failure_reason = 'coordinator_restart'
+   AND (
+       EXISTS (
+           SELECT 1 FROM events e
+            WHERE e.task_id = task_executions.task_id
+              AND e.entity_type = 'github'
+              AND e.action = 'pr_merged'
+       )
+       OR task_id IN (
+           SELECT id FROM task_status
+            WHERE derived_status IN ('done', 'cancelled')
+       )
+   )
+"""
+
+
 @router.get(
     "/task_executions",
     response_model=list[TaskExecutionRow],
@@ -169,23 +209,64 @@ async def list_task_executions(
     session: Annotated[AsyncSession, Depends(get_session)],
     task_id: uuid.UUID | None = None,
     worker_label: str | None = None,
+    execution_status: Annotated[str | None, Query(alias="status")] = None,
 ) -> list[TaskExecutionRow]:
-    """List executions by task or by worker label.
+    """List executions by task or by worker label, with optional status filter.
 
     ``worker_label`` serves the ADR-0089 token harvester's window join
     (label + started_at..completed_at → call attribution). At least one
-    filter is required — the unfiltered table is unbounded.
+    of ``task_id`` / ``worker_label`` is required — the unfiltered table
+    is unbounded. ``?status=running`` narrows to in-flight rows only,
+    which is what the coordinator's startup stale-sweep must use to avoid
+    clobbering already-terminal executions.
     """
     if task_id is None and worker_label is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="provide at least one of task_id, worker_label",
         )
+    if execution_status is not None and execution_status not in _VALID_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"status must be one of {sorted(_VALID_STATUSES)!r}; "
+                f"got {execution_status!r}"
+            ),
+        )
     query = select(TaskExecution).order_by(TaskExecution.started_at)
     if task_id is not None:
         query = query.where(TaskExecution.task_id == task_id)
     if worker_label is not None:
         query = query.where(TaskExecution.worker_label == worker_label)
+    if execution_status is not None:
+        query = query.where(TaskExecution.status == execution_status)
     result = await session.execute(query)
     rows = result.scalars().all()
     return [TaskExecutionRow.model_validate(r, from_attributes=True) for r in rows]
+
+
+class ReconcileCoordinatorRestartResponse(BaseModel):
+    reconciled: int
+
+
+@router.post(
+    "/task_executions/reconcile-coordinator-restart",
+    response_model=ReconcileCoordinatorRestartResponse,
+)
+async def reconcile_coordinator_restart_executions(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ReconcileCoordinatorRestartResponse:
+    """Restore execution rows wrongly marked failed/coordinator_restart.
+
+    When the coordinator's startup stale-sweep lacked a ``?status=running``
+    filter, it marked ALL historical execution rows (including already-terminal
+    ones) as ``failed/coordinator_restart``. This endpoint restores rows on
+    tasks now in a terminal good state (``pr_merged``, ``done``, ``cancelled``)
+    back to ``completed``.
+
+    Idempotent — calling multiple times is safe; already-restored rows no
+    longer match the WHERE predicate.
+    """
+    result = await session.execute(text(_RECONCILE_COORDINATOR_RESTART_SQL))
+    await session.commit()
+    return ReconcileCoordinatorRestartResponse(reconciled=result.rowcount)
