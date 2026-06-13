@@ -55,19 +55,12 @@ parented to the tmux server's cgroup, invisible to `KillMode`).
 
 ## Recent changes
 
-> **New entries are PER-PR FRAGMENT FILES** — add
-> `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside this AGENT.md (one
-> file per PR, newest by filename). Do not prepend here; the conflict
-> surface is too wide when multiple in-flight PRs touch this directory.
-
-- **Durable 5-h limit-park sweep (task 2b8fd900)**: `treadmill-limit-park-sweep`
-  (non-LLM bash sweeper), `treadmill-limit-park-sweep.service` (oneshot), and
-  `treadmill-limit-park-sweep.timer` (`OnCalendar=*-*-* 00/5:00:00`,
-  `Persistent=true`). Replaces the CronCreate stopgap (session-only, 7-day
-  expiry, alan-dependent) with a persistent systemd timer. On a confirmed park
-  the sweep calls `treadmill-limit-park-recover` (event + potential failover)
-  then bounces the unit; the launcher's startup poller dismisses the stale
-  modal on relaunch. Test: `test_limit_park_sweep.py`.
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task
+> 986c5cf6): add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside
+> this AGENT.md — one entry per file, newest by filename; format in
+> `docs/agent-md-schema.md`. Prepending here is the conflict factory
+> that stacked three same-day rework cascades on 2026-06-12 (every
+> in-flight PR inserts at this same anchor).
 
 ## Pitfalls
 
