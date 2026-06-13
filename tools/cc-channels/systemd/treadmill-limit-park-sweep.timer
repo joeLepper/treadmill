@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Treadmill limit-park sweep every 5 hours (task 2b8fd900)
+# Persistent=true: if the host was off when the window fired, the sweep
+# runs once on next boot/login rather than silently skipping it.
+
+[Timer]
+OnCalendar=*-*-* 00/5:00:00
+Persistent=true
+Unit=treadmill-limit-park-sweep.service
+
+[Install]
+WantedBy=timers.target

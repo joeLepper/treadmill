@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# treadmill-limit-park-sweep
+#
+# Durable, non-LLM fleet sweep for usage-limit-parked sessions (task
+# 2b8fd900). Invoked every 5 h by a systemd --user timer (Persistent=true
+# so missed windows fire on resume). The 5 h interval aligns with the
+# Claude rolling-usage-window reset: when this fires, the limit has
+# cleared and a recycle suffices — no token swap needed.
+#
+# Covers the case where the orchestrator session (alan) itself is parked:
+# alan's LLM is frozen so it cannot create a CronCreate entry or run
+# cc-relay; this script runs entirely in bash under systemd and does not
+# need any LLM session alive.
+#
+# Algorithm per live label:
+#   1. treadmill-limit-park-check: signature + frozen pane (two identical
+#      hashes across the caller's run interval). The check reads the state
+#      file left by the launcher's own 30-s loop, so a single sweep call
+#      confirms a park that has been frozen since the last launcher beat.
+#   2. treadmill-limit-park-recover: emits the event and arms a failover
+#      account swap when one is configured.
+#   3. systemctl --user restart: bounces the unit via the #326 ExecStopPost
+#      path (reaps the parked tree, relaunches clean). The launcher's
+#      startup poller then sends Enter to dismiss the stale modal the
+#      resumed transcript redraws.
+#
+# Always exits 0 (per-label failures are logged but do not abort the sweep).
+# Idempotent: calling multiple times is safe; state files are cleared by
+# the check/recover scripts on the failover path and by the next live-pane
+# check on the relaunch path.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CHECK="$SCRIPT_DIR/treadmill-limit-park-check"
+RECOVER="$SCRIPT_DIR/treadmill-limit-park-recover"
+
+# Enumerate all active treadmill-channel@* units via systemd.
+# Output: one label per line (stripped of unit prefix/suffix).
+active_labels() {
+  systemctl --user list-units 'treadmill-channel@*.service' \
+    --state=active --no-legend --plain 2>/dev/null \
+    | awk '{print $1}' \
+    | sed 's/^treadmill-channel@//;s/\.service$//'
+}
+
+SWEPT=0
+RECOVERED=0
+
+for label in $(active_labels); do
+  SWEPT=$((SWEPT + 1))
+  if "$CHECK" "$label" 2>/dev/null; then
+    echo "treadmill-limit-park-sweep: park confirmed on $label — recovering" >&2
+    # Call recover for event emission + potential failover account swap.
+    # We capture the exit code but bounce the unit regardless: the 5h window
+    # resets on every timer fire so the account is usable again even on the
+    # no-fallback escalation path.
+    "$RECOVER" "$label" 2>/dev/null; recover_rc=$?
+    unit="treadmill-channel@${label}.service"
+    if systemctl --user restart "$unit" 2>/dev/null; then
+      echo "treadmill-limit-park-sweep: bounced $unit (recover_rc=$recover_rc)" >&2
+      RECOVERED=$((RECOVERED + 1))
+    else
+      echo "treadmill-limit-park-sweep: WARNING: restart failed for $unit" >&2
+    fi
+  fi
+done
+
+echo "treadmill-limit-park-sweep: done — swept $SWEPT labels, recovered $RECOVERED" >&2
+exit 0
