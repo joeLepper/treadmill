@@ -169,6 +169,14 @@ async def update_task_execution(
 
 
 _RECONCILE_COORDINATOR_RESTART_SQL = """\
+-- Merge signal matched via EXISTS on events (not derived_status) so both
+-- bare 'pr_merged' (task_status clause 3b: no failed step on latest run)
+-- AND the overlay 'pr_merged (<wf>: failed)' (clause 5: pr_merged event +
+-- failed step) are covered.  An IN-list on derived_status silently missed
+-- the overlay variant; merged-but-last-run-failed tasks were never restored.
+-- 'done' is emitted by task_status clause 6d else-arm for local-only tasks
+-- (no PR opened, run completed, no decision:fail step output); kept in the
+-- subquery for defence-in-depth on that rare path.
 -- Over-restore accepted: a legitimate coordinator_restart row on a task that
 -- later reached pr_merged via a retry will also be flipped to completed.
 -- The information to distinguish "buggy sweep" from "real restart" is not
@@ -178,9 +186,17 @@ UPDATE task_executions
        failure_reason = NULL
  WHERE status         = 'failed'
    AND failure_reason = 'coordinator_restart'
-   AND task_id IN (
-       SELECT id FROM task_status
-        WHERE derived_status IN ('pr_merged', 'done', 'cancelled')
+   AND (
+       EXISTS (
+           SELECT 1 FROM events e
+            WHERE e.task_id = task_executions.task_id
+              AND e.entity_type = 'github'
+              AND e.action = 'pr_merged'
+       )
+       OR task_id IN (
+           SELECT id FROM task_status
+            WHERE derived_status IN ('done', 'cancelled')
+       )
    )
 """
 

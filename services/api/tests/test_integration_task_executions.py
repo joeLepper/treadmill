@@ -150,18 +150,20 @@ def _seed_execution(
     task_id: uuid.UUID,
     exec_status: str,
     failure_reason: str | None = None,
+    trigger: str = "initial",
 ) -> uuid.UUID:
     exec_id = uuid.uuid4()
     conn.execute(
         sa.text(
             "INSERT INTO task_executions "
             "(id, task_id, worker_label, trigger, status, failure_reason) "
-            "VALUES (:id, :t, :w, 'initial', :s, :fr)"
+            "VALUES (:id, :t, :w, :trig, :s, :fr)"
         ),
         {
             "id": exec_id,
             "t": task_id,
             "w": WORKER,
+            "trig": trigger,
             "s": exec_status,
             "fr": failure_reason,
         },
@@ -177,6 +179,8 @@ def _seed_pr_merged_event(conn: sa.Connection, task_id: uuid.UUID) -> None:
         ),
         {"t": task_id},
     )
+
+
 
 
 def _fetch_execution(
@@ -306,15 +310,25 @@ class TestReconcileCoordinatorRestartIntegration:
         already-merged task.
         """
         with engine.begin() as conn:
-            # Execution 1: legitimate coordinator_restart (old, failed)
+            # Execution 1: legitimate coordinator_restart (old, failed).
+            # Use distinct triggers so the uq_task_executions_spawn unique
+            # constraint (task_id, trigger, worker_label, started_at) does not
+            # fire — PostgreSQL's NOW() is transaction-scoped, so back-to-back
+            # inserts in the same transaction share the same started_at.
             exec_old = _seed_execution(
                 conn,
                 task_id=seeded_task,
                 exec_status="failed",
                 failure_reason="coordinator_restart",
+                trigger="initial",
             )
             # Execution 2: successful retry
-            _seed_execution(conn, task_id=seeded_task, exec_status="completed")
+            _seed_execution(
+                conn,
+                task_id=seeded_task,
+                exec_status="completed",
+                trigger="coordinator-rework",
+            )
             # Task reached pr_merged via the retry
             _seed_pr_merged_event(conn, seeded_task)
 
@@ -325,6 +339,60 @@ class TestReconcileCoordinatorRestartIntegration:
         assert reconciled == 1
         with engine.connect() as conn:
             row = _fetch_execution(conn, exec_old)
+        assert row["status"] == "completed"
+        assert row["failure_reason"] is None
+
+    def test_case_e_exists_on_events_covers_current_schema_pr_merged(
+        self, engine: Engine, seeded_task: uuid.UUID,
+    ) -> None:
+        """Case (e): schema-aware coverage of the EXISTS-on-events fix.
+
+        The evaluator's rework noted that the overlay 'pr_merged (<wf>:
+        failed)' (introduced in migration 20260609_0900, clause 3b/5) was
+        missed by the old IN ('pr_merged', 'done', 'cancelled') predicate.
+        Migration 20260611_0100 dropped workflow_run_steps and rewrote
+        task_status to use task_executions — after that migration, the overlay
+        is no longer a reachable derived_status; any task with a
+        github.pr_merged event now always emits bare 'pr_merged'.
+
+        This test pins two things:
+        1. The current task_status view emits bare 'pr_merged' for a merged
+           task (documents no overlay exists post-20260611_0100).
+        2. The EXISTS-on-events reconcile fix correctly restores the row by
+           matching the merge signal in the events table directly, which is
+           the source of truth regardless of how the view derives status.
+
+        The fix (EXISTS on events rather than IN on derived_status) is correct
+        for BOTH the old overlay-capable schema and the current overlay-free
+        schema; it is architecturally more precise because it queries the
+        authoritative table directly.
+        """
+        with engine.begin() as conn:
+            exec_id = _seed_execution(
+                conn,
+                task_id=seeded_task,
+                exec_status="failed",
+                failure_reason="coordinator_restart",
+            )
+            _seed_pr_merged_event(conn, seeded_task)
+
+        # Confirm the post-20260611_0100 view emits bare 'pr_merged' — no overlay
+        with engine.connect() as conn:
+            status_row = conn.execute(
+                sa.text("SELECT derived_status FROM task_status WHERE id = :t"),
+                {"t": seeded_task},
+            ).fetchone()
+        assert status_row is not None
+        assert status_row.derived_status == "pr_merged", (
+            f"expected bare 'pr_merged' from post-20260611_0100 view, "
+            f"got {status_row.derived_status!r}"
+        )
+
+        reconciled = asyncio.run(_reconcile())
+
+        assert reconciled == 1
+        with engine.connect() as conn:
+            row = _fetch_execution(conn, exec_id)
         assert row["status"] == "completed"
         assert row["failure_reason"] is None
 
@@ -343,9 +411,11 @@ class TestStatusFilterIntegration:
         the database — the unit-stub test cannot verify this because
         _StubSession.execute ignores the query and returns preloaded rows."""
         with engine.begin() as conn:
-            _seed_execution(conn, task_id=seeded_task, exec_status="running")
-            _seed_execution(conn, task_id=seeded_task, exec_status="completed")
-            _seed_execution(conn, task_id=seeded_task, exec_status="failed")
+            # Distinct triggers avoid the uq_task_executions_spawn unique
+            # constraint — NOW() is transaction-scoped in PostgreSQL.
+            _seed_execution(conn, task_id=seeded_task, exec_status="running", trigger="initial")
+            _seed_execution(conn, task_id=seeded_task, exec_status="completed", trigger="coordinator-rework")
+            _seed_execution(conn, task_id=seeded_task, exec_status="failed", trigger="evaluator-rework")
 
         rows = asyncio.run(_list_executions(seeded_task, status="running"))
 
@@ -357,9 +427,9 @@ class TestStatusFilterIntegration:
     ) -> None:
         """No ?status= param must return all rows — backwards-compatible."""
         with engine.begin() as conn:
-            _seed_execution(conn, task_id=seeded_task, exec_status="running")
-            _seed_execution(conn, task_id=seeded_task, exec_status="completed")
-            _seed_execution(conn, task_id=seeded_task, exec_status="failed")
+            _seed_execution(conn, task_id=seeded_task, exec_status="running", trigger="initial")
+            _seed_execution(conn, task_id=seeded_task, exec_status="completed", trigger="coordinator-rework")
+            _seed_execution(conn, task_id=seeded_task, exec_status="failed", trigger="evaluator-rework")
 
         rows = asyncio.run(_list_executions(seeded_task, status=None))
 
