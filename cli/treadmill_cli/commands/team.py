@@ -123,6 +123,20 @@ def _api_url() -> str:
     return os.environ.get("TREADMILL_API_URL", _DEFAULT_API_URL).rstrip("/")
 
 
+# Per-role model map (task 5d14fbcc): ANTHROPIC_MODEL written into every
+# per-label .env so --resume never falls back to the default model.
+# INCIDENT 2026-06-12: model-less sessions default to claude-fable-5
+# (unavailable on this account) on restart; workers were safe only
+# because their workdir .claude/settings.json already pinned sonnet.
+# settings.json "model" does NOT override a persisted Fable-5 selection
+# on --resume — only the env-var path reaches the subprocess reliably.
+_ROLE_MODEL: dict[str, str] = {
+    "coordinator": "claude-opus-4-8",
+    "evaluator": "claude-opus-4-8",
+    "worker": "claude-sonnet-4-6",
+}
+
+
 def _env_contents(*, role: str, label: str, api_url: str) -> str:
     """Compose the per-session env file body.
 
@@ -130,11 +144,15 @@ def _env_contents(*, role: str, label: str, api_url: str) -> str:
     (``coordinator|evaluator|worker``); the launcher reads it to pick
     the correct CLAUDE.md template. ``TREADMILL_LABEL`` is the session
     label that scopes its cc-channels inbox + WS subscription.
+    ``ANTHROPIC_MODEL`` pins the Claude model so --resume never falls
+    back to the account-default (claude-fable-5 incident 2026-06-12).
     """
+    model = _ROLE_MODEL.get(role, "claude-opus-4-8")
     return (
         f"TREADMILL_ROLE={role}\n"
         f"TREADMILL_LABEL={label}\n"
         f"TREADMILL_API_URL={api_url}\n"
+        f"ANTHROPIC_MODEL={model}\n"
     )
 
 

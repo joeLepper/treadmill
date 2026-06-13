@@ -184,6 +184,15 @@ export TREADMILL_API_URL="${TREADMILL_API_URL:-http://localhost:8088}"
 # Default quiet — merges + ADR-0062 unexpected-terminal escalations only.
 export TREADMILL_RELAY_LEVEL="${TREADMILL_RELAY_LEVEL:-quiet}"
 
+# Per-role model pin (task 5d14fbcc — INCIDENT 2026-06-12): model-less
+# sessions default to claude-fable-5 (unavailable) on --resume. Team
+# roles (coordinator, evaluator, worker) get ANTHROPIC_MODEL from their
+# per-label .env already sourced above (written by `treadmill team up`).
+# Orchestrators carry no per-label .env, so this fallback is their pin.
+# The ${...:-} form never overrides an already-set value, so re-rendered
+# team .env files (e.g. worker=sonnet) are respected without conflict.
+export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-8}"
+
 # ── telegram channel (ADR-0067), only when this label has a bot ─────────────
 CHANNEL_ARGS=()
 TELEGRAM_ENV="$STATE_ROOT/telegram.env"

@@ -40,6 +40,7 @@ def _build_env(tmp_path: Path, *, home: Path) -> tuple[dict[str, str], Path]:
               echo "TREADMILL_ROLE=${{TREADMILL_ROLE:-}}"
               echo "TREADMILL_COORDINATOR_PLANS=${{TREADMILL_COORDINATOR_PLANS:-}}"
               echo "TREADMILL_SESSION_LABEL=${{TREADMILL_SESSION_LABEL:-}}"
+              echo "ANTHROPIC_MODEL=${{ANTHROPIC_MODEL:-}}"
             }} > {recorder}
             """
         )
@@ -360,3 +361,61 @@ def test_coordinator_env_sourced_before_cwd_change(tmp_path: Path) -> None:
     assert (
         f"CWD: {team_dir / 'coordinator-medicoder'}" in recorded
     )
+
+
+# ── Per-role model pin (task 5d14fbcc — INCIDENT 2026-06-12) ────────
+
+
+def test_orchestrator_label_carries_opus_model_fallback(tmp_path: Path) -> None:
+    """task 5d14fbcc regression: orchestrator sessions (treadmill-alan
+    etc.) carry no per-label .env, so they have no ANTHROPIC_MODEL unless
+    the launcher provides a fallback. The launcher must export
+    ANTHROPIC_MODEL=claude-opus-4-8 for orchestrators so --resume cannot
+    fall back to the account-default (claude-fable-5, unavailable on this
+    account — INCIDENT 2026-06-12: model-less sessions silently died)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    # Strip any host ANTHROPIC_MODEL so we test the launcher's own fallback.
+    env, recorder = _build_env(tmp_path, home=home)
+    env.pop("ANTHROPIC_MODEL", None)
+
+    subprocess.run(
+        [str(LAUNCHER), "treadmill-alan"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    assert recorder.exists(), "fake claude did not run"
+    recorded = recorder.read_text()
+    assert "ANTHROPIC_MODEL=claude-opus-4-8" in recorded
+
+
+def test_team_role_env_model_not_overridden_by_launcher(tmp_path: Path) -> None:
+    """When the per-label .env already carries ANTHROPIC_MODEL (written by
+    treadmill team up), the launcher's fallback must not override it — a
+    worker .env carries sonnet, not opus, and the ${var:-default} form must
+    preserve it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    session_dir = (
+        home / ".treadmill" / "teams" / "medicoder" / "worker-medicoder-1"
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / "worker-medicoder-1.env").write_text(
+        "TREADMILL_ROLE=worker\n"
+        "TREADMILL_LABEL=worker-medicoder-1\n"
+        "TREADMILL_API_URL=http://localhost:8088\n"
+        "ANTHROPIC_MODEL=claude-sonnet-4-6\n"
+    )
+    env, recorder = _build_env(tmp_path, home=home)
+    env.pop("ANTHROPIC_MODEL", None)
+
+    subprocess.run(
+        [str(LAUNCHER), "worker-medicoder-1"],
+        env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
+    )
+
+    assert recorder.exists(), "fake claude did not run"
+    recorded = recorder.read_text()
+    # Worker .env's sonnet pin must survive; opus fallback must not override.
+    assert "ANTHROPIC_MODEL=claude-sonnet-4-6" in recorded
+    assert "ANTHROPIC_MODEL=claude-opus-4-8" not in recorded
