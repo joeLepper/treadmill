@@ -1,0 +1,13 @@
+[Unit]
+Description=Treadmill usage-limit park sweep — recover parked sessions (task 2b8fd900)
+# Triggered by treadmill-limit-park-sweep.timer every 5 h. Sweeps all
+# active treadmill-channel@* units, detects sessions frozen at the Claude
+# usage-limit modal, and bounces any that are confirmed parked.
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/treadmill/tools/cc-channels/systemd/treadmill-limit-park-sweep
+StandardOutput=journal
+StandardError=journal
+# oneshot never restarts; journal captures the sweep summary line.
