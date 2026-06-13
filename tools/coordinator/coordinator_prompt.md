@@ -169,12 +169,15 @@ You subscribe to all SQS events for tasks in your plans. For each event,
 route per this table. **Update the task board BEFORE acting** so a
 restart can reconstruct your routing decisions.
 
-**Note on `[AVAILABLE]` relays**: workers broadcast `[AVAILABLE]` via
-`tools/dev-hooks/broadcast-idle.py` (Stop-hook) when they finish a
-response with no queued work. Treat each as a routing opportunity:
-check the task board for `ready` tasks before discarding. The signal
-is rate-limited at the source (300s cooldown per worker) so a burst
-of fast-turn workers won't flood your coord inbox.
+**Note on `[AVAILABLE]` relays**: worker sessions (``worker-<slug>-<n>``
+only — not orchestrators, evaluators, or coordinators) broadcast
+`[AVAILABLE]` via `tools/dev-hooks/broadcast-idle.py` (Stop-hook) when
+they finish a response with no queued work. The relay arrives ONLY in
+your inbox (owning-coordinator scoping — not fan-out; task b71be765).
+Treat each as a routing opportunity: check the task board for `ready`
+tasks before discarding. The signal is rate-limited at the source (3600s
+cooldown per worker) so a burst of fast-turn workers won't flood your
+coord inbox.
 
 | Incoming event | Route to | Coordinator action |
 |---|---|---|

@@ -190,24 +190,38 @@ Workers don't wait to be asked — they announce when they're idle.
 
 The mechanism: `tools/dev-hooks/broadcast-idle.py` runs as a `Stop`
 hook (`.claude/settings.json`) when a worker session finishes
-responding. It writes an `[AVAILABLE]` relay file into every
-discovered coordinator inbox (glob `~/.cc-channels/coordinator-*/relay/`)
-plus an availability record at `~/.treadmill/availability/<label>.json`.
+responding. It writes an `[AVAILABLE]` relay file into the OWNING
+coordinator's inbox (`~/.cc-channels/coordinator-<slug>/relay/`) plus
+an availability record at `~/.treadmill/availability/<label>.json`.
+
+Only `worker-<slug>-<n>` labels broadcast. Orchestrators
+(`treadmill-*`), coordinators (`coordinator-*`), evaluators
+(`evaluator-*`), and any other label class are skipped — they are not
+coordinator-routed workers and their idle ticks would wake every
+coordinator with no actionable signal (task b71be765: 20+ spurious
+wakes observed from orchestrator idle ticks).
+
+The owning coordinator is derived by string surgery — not a positional
+split (owner/repo slugs contain hyphens): strip `worker-` prefix, strip
+trailing `-<digits>` index, prepend `coordinator-`. If the owning
+coordinator's inbox doesn't exist, the relay write is suppressed (no
+fan-out fallback); a missed assignment self-heals on the next cooldown
+tick.
 
 The relay file shape:
 
 ```
 [AVAILABLE]
 
-[from: treadmill-bert]
+[from: worker-medicoder-1]
 
-Worker treadmill-bert is idle and available for task assignment.
+Worker worker-medicoder-1 is idle and available for task assignment.
 ```
 
 Filename convention: `<ns_ts>-<token>-available-from-<label>.md` so
 two workers idling in the same nanosecond don't collide.
 
-**Cooldown**: 300 seconds per worker (tracked in
+**Cooldown**: 3600 seconds per worker (tracked in
 `~/.treadmill/session-state/<label>/last-idle-broadcast`). A worker
 that finishes 12 turns in 5 minutes broadcasts once, not 12 times.
 
@@ -217,8 +231,9 @@ tasks and brief the worker, or no-op if nothing is queued.
 
 **Skip conditions** (the hook returns 0 silently):
 - `TREADMILL_SESSION_LABEL` unset — not a labeled session.
-- Label starts with `coordinator-` — coordinators don't broadcast.
-- Cooldown still active (< 300s since last broadcast).
+- Label is not `worker-<slug>-<n>` shape — non-workers don't broadcast.
+- Cooldown still active (< 3600s since last broadcast).
+- Owning coordinator inbox missing — relay suppressed, no fan-out.
 - I/O failures (disk full, permission denied) — Stop hooks must not
   block the worker from idling.
 
