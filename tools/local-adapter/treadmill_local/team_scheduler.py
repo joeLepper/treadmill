@@ -90,6 +90,8 @@ import urllib.request
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
+from treadmill_local.account_pool import AccountLeasePool
+
 logger = logging.getLogger("treadmill.team_scheduler")
 
 
@@ -117,9 +119,16 @@ def scheduler_pid_path() -> Path:
 
 
 def scheduler_state_path() -> Path:
-    """Persisted last-switch stamp so a daemon restart cannot reset the
-    dwell window and flap."""
+    """Persisted per-team dwell tenures so a daemon restart cannot reset
+    the dwell window and flap."""
     return Path.home() / ".treadmill" / "team-scheduler.state"
+
+
+def scheduler_account_leases_path() -> Path:
+    """Persisted account-lease state (task bc5cdc23), CO-LOCATED with the
+    host flock under ``~/.treadmill`` so reconcile is coherent with the
+    lock that guards its single writer."""
+    return Path.home() / ".treadmill" / "team-account-leases.json"
 
 
 def acquire_scheduler_lock(lock_path: Path) -> int | None:
@@ -197,6 +206,7 @@ class TeamScheduler:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         max_active_teams: int = 1,
         account_pool: Sequence[str] = (),
+        lease_pool: "AccountLeasePool | None" = None,
     ) -> None:
         self._fetch_decision = fetch_decision
         self._team_control = team_control
@@ -210,6 +220,11 @@ class TeamScheduler:
         # The account pool sizes the concurrency ceiling here (task
         # 6c2446b2); task bc5cdc23 wires the actual per-team lease/binding.
         self._account_pool = list(account_pool)
+        # task bc5cdc23: when present, leases a distinct subscription per
+        # active team (binding via the per-label claude-account file). None
+        # = the task-B behavior (sizing only, no per-team account binding).
+        self._lease_pool = lease_pool
+        self._pool_reconciled = False
         self._stop_event = threading.Event()
         self._tenures: dict[str, float] = self._load_tenures()
 
@@ -347,6 +362,14 @@ class TeamScheduler:
         active = {t for t in installed if self._team_active(t)}
         active_now = set(active)
 
+        # task bc5cdc23: ONE-TIME ground-truth reconcile of the lease pool
+        # against the actually-running teams (a running team's on-disk
+        # account binding is authoritative; orphan leases are freed). Done
+        # here on the first valid decision so it has the live active set.
+        if self._lease_pool is not None and not self._pool_reconciled:
+            self._lease_pool.reconcile(active)
+            self._pool_reconciled = True
+
         # PAUSE PHASE: drop teams not in the desired set. Never pause a
         # desired team (carried note 1: it stays in desired_set). Each pause
         # is dwell-gated by THAT team's tenure and quiescence-gated.
@@ -367,6 +390,10 @@ class TeamScheduler:
             if self._team_control("pause", team):
                 active_now.discard(team)
                 self._clear_tenure(team)
+                # FREE-LAST: the team's sessions are now stopped, so the
+                # account can be safely returned to the pool.
+                if self._lease_pool is not None:
+                    self._lease_pool.release(team)
             else:
                 logger.warning("pause of %s failed — will retry", team)
 
@@ -381,10 +408,25 @@ class TeamScheduler:
                 continue
             if len(active_now) >= effective_max:
                 break
+            # task bc5cdc23: LEASE a distinct subscription BEFORE activating
+            # (the pool persists the lease record + binds the team's
+            # claude-account files first — persist-first crash-safety). No
+            # free account => do NOT activate on the shared default (the
+            # double-burn); log and wait for a freed slot.
+            if self._lease_pool is not None:
+                if self._lease_pool.lease(team) is None:
+                    logger.warning(
+                        "no free subscription to activate %s — waiting", team,
+                    )
+                    continue
             logger.info("activating %s", team)
             if self._team_control("activate", team):
                 active_now.add(team)
                 self._stamp_tenure(team)
+            elif self._lease_pool is not None:
+                # Activation failed after leasing — return the account so it
+                # is not stranded; a later pass re-leases and retries.
+                self._lease_pool.release(team)
 
     # ── loop ─────────────────────────────────────────────────────────
 
@@ -484,6 +526,42 @@ def _real_team_active(teams_root: Path, slug: str) -> bool:
         if result.returncode == 0:
             return True
     return False
+
+
+def _cc_channels_account_file(label: str) -> Path:
+    """The per-label ``claude-account`` file the launcher reads
+    (``claude-account-env.sh``: ``STATE_ROOT=~/.cc-channels/<label>``)."""
+    return Path.home() / ".cc-channels" / label / "claude-account"
+
+
+def _real_bind_account(teams_root: Path, slug: str, account: str) -> None:
+    """Bind every session label of the team to ``account`` by writing its
+    ``claude-account`` file — the launcher then sets
+    ``CLAUDE_CONFIG_DIR=~/.claude-<account>`` for that session."""
+    for label in _team_label_dirs(teams_root, slug):
+        path = _cc_channels_account_file(label)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(account + "\n")
+        except OSError:
+            logger.warning(
+                "could not write claude-account for %s -> %s", label, account,
+            )
+
+
+def _real_read_bound_account(teams_root: Path, slug: str) -> str | None:
+    """Ground truth for reconcile: the account a running team's sessions
+    are actually bound to, read from its first label's ``claude-account``
+    file (all labels of a team share one leased account)."""
+    for label in _team_label_dirs(teams_root, slug):
+        path = _cc_channels_account_file(label)
+        try:
+            value = path.read_text().strip()
+            if value:
+                return value
+        except OSError:
+            continue
+    return None
 
 
 def _real_team_control(script: Path, verb: str, slug: str) -> bool:
@@ -589,6 +667,24 @@ def main() -> int:
         if a.strip()
     ]
 
+    # task bc5cdc23: the lease pool that binds each active team to a distinct
+    # subscription. Only when a pool is configured (otherwise single-active
+    # on the default account, no leasing — the task-B behavior).
+    lease_pool = (
+        AccountLeasePool(
+            accounts=account_pool,
+            state_path=scheduler_account_leases_path(),
+            bind_account=lambda slug, account: _real_bind_account(
+                teams_root, slug, account,
+            ),
+            read_bound_account=lambda slug: _real_read_bound_account(
+                teams_root, slug,
+            ),
+        )
+        if account_pool
+        else None
+    )
+
     scheduler = TeamScheduler(
         fetch_decision=lambda: _real_fetch_decision(api_url),
         team_control=lambda verb, slug: _real_team_control(
@@ -601,6 +697,7 @@ def main() -> int:
         poll_seconds=poll,
         max_active_teams=max_active,
         account_pool=account_pool,
+        lease_pool=lease_pool,
     )
 
     import signal as _signal
