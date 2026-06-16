@@ -3,13 +3,12 @@
  *
  * The cost hero (S3) is wired here: GET /api/v1/llm_calls/report gives the
  * harvester's real per-label token sums; the pricing module converts them
- * to USD. Everything derived from this is LIVE. Aggregates the report
- * endpoint does not yet serve (per-outcome rollup, per-model split, daily
- * series) remain on the v2mock module, flagged in the UI as estimated so
- * real-vs-derived-vs-mock is never ambiguous.
+ * to USD. The per-model split, daily series, and outcomes rollup are LIVE
+ * too via GET /api/v1/cost/rollup (useCostRollup). No cost aggregate is
+ * mock anymore — every number on the cost surface derives from a real
+ * endpoint, priced client-side.
  *
- * The same `_apiFetch` idiom as src/api/queries.ts; the seam is honest
- * about what is live so the follow-up endpoints have a visible target.
+ * The same `_apiFetch` idiom as src/api/queries.ts.
  */
 
 import { useQuery } from '@tanstack/react-query';

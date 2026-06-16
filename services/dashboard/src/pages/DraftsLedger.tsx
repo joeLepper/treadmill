@@ -20,7 +20,8 @@ import { Panel } from '../design/Panel';
 import { ConnectionAffordance } from '../design/ConnectionAffordance';
 import { fmt } from '../design/fmt';
 import type { Tone } from '../design/fmt';
-import { INTENT_STAGES, ledger, type IntentStage, type LedgerDoc } from '../api/v2mock';
+import { INTENT_STAGES, type IntentStage, type LedgerDoc } from '../api/v2mock';
+import { realLedger } from '../api/docContent';
 
 const STAGE_TONE: Record<IntentStage, Tone> = {
   draft: 'muted',
@@ -44,10 +45,10 @@ const STAGE_LABEL: Record<IntentStage, string> = {
 
 export function DraftsLedger() {
   const [kind, setKind] = useState<'all' | 'ADR' | 'Plan'>('all');
-  const rows = kind === 'all' ? ledger : ledger.filter((d) => d.kind === kind);
-  const byStage = (s: IntentStage) => ledger.filter((d) => d.stage === s).length;
+  const rows = kind === 'all' ? realLedger : realLedger.filter((d) => d.kind === kind);
+  const byStage = (s: IntentStage) => realLedger.filter((d) => d.stage === s).length;
   // Drafts that haven't reached a PR are the "invisible until now" set.
-  const unsurfaced = ledger.filter((d) => d.stage === 'draft' || d.stage === 'review').length;
+  const unsurfaced = realLedger.filter((d) => d.stage === 'draft' || d.stage === 'review').length;
 
   return (
     <PageLayout

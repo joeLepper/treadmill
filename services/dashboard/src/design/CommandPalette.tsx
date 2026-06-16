@@ -10,18 +10,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search } from 'lucide-react';
-import { plans, pipeline, teams, ledger } from '../api/v2mock';
+import { usePlans, useTasks, useTeamConfigs, type PlanRow, type BoardTask, type ApiTeamConfig } from '../api/v2queries';
+import { realLedger } from '../api/docContent';
 
 interface Entry { kind: string; label: string; sub: string; path: string; }
 
-function buildIndex(): Entry[] {
+/** Build the search index from LIVE query data (no mock fallback — an empty
+ *  result while a query is loading is correct; the box shows "no match"). */
+function buildIndex(plans: PlanRow[], tasks: BoardTask[], teams: ApiTeamConfig[]): Entry[] {
   const out: Entry[] = [];
-  const seenTask = new Set<string>();
   for (const p of plans) out.push({ kind: 'plan', label: p.title, sub: `plan · ${p.repo}`, path: `/plans/${p.id}` });
-  for (const t of pipeline) { seenTask.add(t.id); out.push({ kind: 'task', label: t.title, sub: `task · ${t.worker} · ${t.stage}`, path: `/tasks/${t.id}` }); }
-  for (const p of plans) for (const t of p.tasks) if (!seenTask.has(t.id)) { seenTask.add(t.id); out.push({ kind: 'task', label: t.title, sub: `task · ${p.repo}`, path: `/tasks/${t.id}` }); }
-  for (const team of teams) for (const s of [team.coordinator, team.evaluator, ...team.workers]) out.push({ kind: 'session', label: s.label, sub: `${s.role} · ${team.repo}`, path: `/?session=${s.label}` });
-  for (const d of ledger) if (d.kind === 'ADR') out.push({ kind: 'adr', label: d.title, sub: `ADR · ${d.repo}`, path: `/adrs/${d.id}` });
+  for (const t of tasks) out.push({ kind: 'task', label: t.title, sub: `task · ${t.worker} · ${t.stage}`, path: `/tasks/${t.id}` });
+  for (const team of teams) {
+    const sessions = [
+      { label: team.coordinator_label, role: 'coordinator' },
+      { label: team.evaluator_label, role: 'evaluator' },
+      ...team.worker_labels.map((l) => ({ label: l, role: 'worker' })),
+    ];
+    for (const s of sessions) out.push({ kind: 'session', label: s.label, sub: `${s.role} · ${team.repo}`, path: `/?session=${s.label}` });
+  }
+  for (const d of realLedger) if (d.kind === 'ADR') out.push({ kind: 'adr', label: d.title, sub: `ADR · ${d.repo}`, path: `/adrs/${d.id}` });
   return out;
 }
 
@@ -29,7 +37,13 @@ const KIND_TONE: Record<string, string> = { plan: 'warn', task: 'info', session:
 
 export function CommandPalette() {
   const navigate = useNavigate();
-  const index = useMemo(buildIndex, []);
+  const { data: plansData } = usePlans();
+  const { data: tasksData } = useTasks();
+  const { data: teamsData } = useTeamConfigs();
+  const index = useMemo(
+    () => buildIndex(plansData?.plans ?? [], tasksData?.tasks ?? [], teamsData?.teams ?? []),
+    [plansData, tasksData, teamsData],
+  );
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
