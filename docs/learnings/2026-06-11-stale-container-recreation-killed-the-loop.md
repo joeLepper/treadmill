@@ -40,6 +40,25 @@ does NOT fix this class — it reuses the stale layer (confirmed; same crash).
    the exact outage envelope. Worth remembering as the standard first move
    for any loop-outage post-mortem.
 
+## Sibling class: orphaned-launcher crashloop (3-for-3 today)
+
+The API outage cascaded into a SECOND class on the session launchers. When a
+session's launcher survives as an orphan (alive, outside systemd's current
+tracking) while systemd tries to (re)start the unit, the single-instance
+guard in `tools/cc-channels/launch-session.sh` refuses ("launcher already
+alive for label … refusing to start") and systemd crashloops against it —
+coordinator-medicoderhq-medicoder (83 restarts), worker-medicoderhq-medicoder-1,
+and treadmill-carla (3111 restarts) all hit it on 2026-06-11. Recovery is
+manual: `systemctl stop` → kill the orphan launcher pid (from
+`~/.cc-channels/<label>/launcher.pid`) → `rm launcher.pid` →
+`reset-failed` → `start`. The session resumes via its intact `session-id`.
+
+**Durable fix (Alan, 2026-06-11):** the single-instance guard should
+distinguish a DEAD-pid orphan (stale launcher.pid → auto-clear and proceed)
+from a genuinely-live duplicate (refuse). Crashlooping thousands of times
+against a stale pid is the bug; a one-time `kill -0 $pid || rm launcher.pid`
+check at guard time converts it to self-healing.
+
 ## Follow-ups
 
 - [ ] Identify the 06:52:50Z recreation actor — owner: first sibling with
