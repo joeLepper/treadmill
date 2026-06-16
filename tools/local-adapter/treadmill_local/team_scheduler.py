@@ -1,33 +1,47 @@
-"""ADR-0091 team-scheduler daemon — reconcile the single active team.
+"""Team-scheduler daemon — reconcile the active team SET.
 
-Task 9d6c0658 (plan 992d65b7, the ADR-0091 finale). An always-on
-control-plane daemon, modeled on ``deploy_watcher.py``: on a loop it
-polls ``GET /api/v1/scheduler/decision`` and reconciles the running
-team set toward ``desired_team`` by shelling to
-``treadmill-team-control`` — pause the current team only when the API
-reports it quiescent, then activate the desired team. The DECISION
-lives entirely in the API (``treadmill_api/routers/scheduler.py``);
-this daemon enacts it and never re-derives it.
+Task 9d6c0658 (ADR-0091 finale) established the single-active daemon;
+ADR-0092 (task 6c2446b2) generalized it to N concurrent active teams,
+one per Claude subscription. An always-on control-plane daemon, modeled
+on ``deploy_watcher.py``: on a loop it polls
+``GET /api/v1/scheduler/decision`` and reconciles the running team set
+toward the top ``effective_max`` of ``desired_teams`` (the API's RANKED
+list) by shelling to ``treadmill-team-control`` — pause teams not in the
+desired set when the API reports them quiescent, then activate desired
+teams into free slots. The DECISION lives entirely in the API
+(``treadmill_api/routers/scheduler.py``); this daemon enacts it and
+never re-derives it.
+
+``effective_max = min(max_active_teams, pool_size)``, but CLAMPED to 1
+when no account pool is configured (ADR-0092): the subscription pool
+(task bc5cdc23) is what unlocks multi-active — without it the daemon
+must not run two teams on one default subscription. So at the default
+(``max_active_teams=1`` / empty pool) this is byte-for-byte the ADR-0091
+single active slot, and the daemon reads ``desired_teams`` with a
+fallback to the singular ``desired_team`` shim so a pre-ADR-0092
+decision still drives the single-slot path.
 
 LOAD-BEARING FAIL-SAFE (Carla #342 on the plan): if the decision
 endpoint is unreachable, errors, returns a malformed body, or reports
-``desired_team: null``, the daemon HOLDS the current active set and
+an empty desired list, the daemon HOLDS the current active set and
 pauses NOTHING. The API is a SPOF (a ~9h outage occurred 2026-06-12);
 the scheduler degrades to "leave things as they are", never to
 "stop everything".
 
 Reconcile contract (the four carried review notes are contractual):
 
-1. The endpoint reports FACTS — ``quiescent_teams`` may include
-   ``desired_team`` (momentarily idle between dispatches). THIS daemon
-   enacts policy: it only ever pauses teams OTHER than the desired one
-   (structural: the pause set is ``active - {desired}``), so a listed
+1. The endpoint reports FACTS — ``quiescent_teams`` may include a
+   desired team (momentarily idle between dispatches). THIS daemon
+   enacts policy: it only ever pauses teams OTHER than the desired set
+   (structural: the pause set is ``active - desired_set``), so a listed
    desired team is never paused.
-2. Anti-flap hysteresis: a team's tenure is protected by a minimum
-   dwell (default ``DEFAULT_DWELL_MINUTES``); at most one switch per
-   window, stamped persistently so a daemon restart cannot flap. The
-   dwell MUST stay <= the API's ``AGING_TIME_CONSTANT_MINUTES`` (the
-   aging term must never demand swaps faster than anti-flap allows
+2. Anti-flap hysteresis is PER-TEAM (ADR-0092): each team's tenure
+   (activation time) is protected by a minimum dwell (default
+   ``DEFAULT_DWELL_MINUTES``); a team is not evicted until ITS OWN dwell
+   elapses, so a just-activated team never flaps as the ranking jitters
+   below it within the set. Tenures persist so a daemon restart cannot
+   flap. The dwell MUST stay <= the API's ``AGING_TIME_CONSTANT_MINUTES``
+   (the aging term must never demand swaps faster than anti-flap allows
    one); the suite asserts against the imported constant directly.
 3. KNOWN INHERITED EDGE (from the #344 review): quiescence predicate 3
    (half-registered PRs) only looks back
@@ -73,7 +87,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 logger = logging.getLogger("treadmill.team_scheduler")
@@ -181,6 +195,8 @@ class TeamScheduler:
         state_path: Path | None = None,
         now: Callable[[], float] = time.time,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
+        max_active_teams: int = 1,
+        account_pool: Sequence[str] = (),
     ) -> None:
         self._fetch_decision = fetch_decision
         self._team_control = team_control
@@ -190,124 +206,185 @@ class TeamScheduler:
         self._state_path = state_path
         self._now = now
         self._poll_seconds = poll_seconds
+        self._max_active_teams = max(1, int(max_active_teams))
+        # The account pool sizes the concurrency ceiling here (task
+        # 6c2446b2); task bc5cdc23 wires the actual per-team lease/binding.
+        self._account_pool = list(account_pool)
         self._stop_event = threading.Event()
-        self._last_switch: float | None = self._load_last_switch()
+        self._tenures: dict[str, float] = self._load_tenures()
 
-    # ── dwell persistence ────────────────────────────────────────────
+    # ── dwell persistence (per-team tenure) ──────────────────────────
+    #
+    # ADR-0092: dwell is PER-TEAM, keyed by the team's activation time
+    # ("tenure"), so a just-activated team is never paused while the
+    # ranking jitters below it within the active set. At max_active=1
+    # this reduces EXACTLY to ADR-0091's single-slot dwell (the one
+    # active team's tenure gates the one possible switch) — the
+    # unchanged single-active suite proves the reduction.
 
-    def _load_last_switch(self) -> float | None:
+    def _load_tenures(self) -> dict[str, float]:
         if self._state_path is None or not self._state_path.exists():
-            return None
+            return {}
         try:
             data = json.loads(self._state_path.read_text())
-            return float(data["last_switch_unix"])
-        except (ValueError, KeyError, OSError, TypeError):
-            return None
+            tenures = data.get("tenures", {})
+            if not isinstance(tenures, dict):
+                return {}
+            return {
+                str(k).lower(): float(v)
+                for k, v in tenures.items()
+                if isinstance(v, (int, float))
+            }
+        except (ValueError, OSError, TypeError, AttributeError):
+            # An older {last_switch_unix} state file (pre-ADR-0092) has no
+            # tenures key -> empty; one dwell window resets on upgrade, safe.
+            return {}
 
-    def _stamp_switch(self) -> None:
-        self._last_switch = self._now()
-        if self._state_path is not None:
-            try:
-                self._state_path.parent.mkdir(parents=True, exist_ok=True)
-                self._state_path.write_text(
-                    json.dumps({"last_switch_unix": self._last_switch})
-                )
-            except OSError:
-                logger.warning(
-                    "could not persist dwell stamp to %s", self._state_path,
-                )
+    def _persist_tenures(self) -> None:
+        if self._state_path is None:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(json.dumps({"tenures": self._tenures}))
+        except OSError:
+            logger.warning(
+                "could not persist dwell tenures to %s", self._state_path,
+            )
 
-    def _dwell_remaining(self) -> float:
-        if self._last_switch is None:
-            return 0.0
-        return max(0.0, self._dwell_s - (self._now() - self._last_switch))
+    def _stamp_tenure(self, team: str) -> None:
+        self._tenures[team] = self._now()
+        self._persist_tenures()
+
+    def _clear_tenure(self, team: str) -> None:
+        if self._tenures.pop(team, None) is not None:
+            self._persist_tenures()
+
+    def _dwell_remaining(self, team: str) -> float:
+        stamp = self._tenures.get(team)
+        if stamp is None:
+            return 0.0  # unknown tenure (never-stamped / restart) = pausable
+        return max(0.0, self._dwell_s - (self._now() - stamp))
+
+    def _effective_max(self) -> int:
+        """The concurrency ceiling: min(max_active_teams, pool_size), but
+        CLAMPED to 1 when no account pool is configured. The pool (task
+        bc5cdc23) is what unlocks multi-active — without it the daemon must
+        not run two teams on the same default subscription (the double-burn).
+        """
+        if self._account_pool:
+            return max(1, min(self._max_active_teams, len(self._account_pool)))
+        return 1
+
+    def _parse_desired_teams(
+        self, decision: dict,
+    ) -> tuple[list[str], bool]:
+        """Read the RANKED desired list, falling back to the singular
+        ``desired_team`` so a pre-task-A decision (or the unchanged
+        single-active fixtures) still drive the single-slot path. Returns
+        ``(ranked_lowercased_list, ok)``; ``ok=False`` means malformed → HOLD.
+        """
+        raw = decision.get("desired_teams")
+        if raw is not None:
+            if not isinstance(raw, list):
+                logger.warning("malformed desired_teams %r — HOLDING", raw)
+                return [], False
+            return [t.lower() for t in raw if isinstance(t, str)], True
+        # Back-compat: fall back to the singular shim.
+        raw_one = decision.get("desired_team")
+        if raw_one is None:
+            return [], True
+        if not isinstance(raw_one, str):
+            logger.warning("malformed desired_team %r — HOLDING", raw_one)
+            return [], False
+        return [raw_one.lower()], True
 
     # ── one reconcile pass ───────────────────────────────────────────
 
     def reconcile_once(self) -> None:
-        """Poll the decision and take at most one switch toward it.
+        """Poll the decision and reconcile the active set toward the top
+        ``effective_max`` desired teams.
 
         Every early return below is the fail-safe HOLD: no pause call
-        is ever made without an affirmative, well-formed decision.
+        is ever made without an affirmative, well-formed decision. At
+        ``effective_max=1`` this is byte-for-byte the ADR-0091 single
+        active slot.
         """
         decision = self._fetch_decision()
         if decision is None:
             logger.warning("decision unavailable — HOLDING current set")
             return
 
-        raw_desired = decision.get("desired_team")
-        raw_quiescent = decision.get("quiescent_teams")
-        if raw_desired is not None and not isinstance(raw_desired, str):
-            logger.warning("malformed desired_team %r — HOLDING", raw_desired)
+        desired_list, ok = self._parse_desired_teams(decision)
+        if not ok:
             return
+        raw_quiescent = decision.get("quiescent_teams")
         if not isinstance(raw_quiescent, list):
             logger.warning(
                 "malformed quiescent_teams %r — HOLDING", raw_quiescent,
             )
             return
-        if raw_desired is None:
+        if not desired_list:
             logger.info("no team has pending work — HOLDING current set")
             return
 
         # Carried note 4: normalize casing on intake, both sides.
-        desired = raw_desired.lower()
-        quiescent = {
-            t.lower() for t in raw_quiescent if isinstance(t, str)
-        }
+        quiescent = {t.lower() for t in raw_quiescent if isinstance(t, str)}
         installed = {t.lower() for t in self._installed_teams()}
 
-        if desired not in installed:
+        # Rank-ordered desired teams that we can actually enact.
+        desired_ranked = [t for t in desired_list if t in installed]
+        if not desired_ranked:
             logger.warning(
-                "desired team %r is not installed under the teams root — "
-                "HOLDING (run `treadmill team up` for it first)", desired,
+                "no desired team is installed under the teams root — "
+                "HOLDING (run `treadmill team up` first); desired=%r",
+                desired_list,
             )
             return
+
+        effective_max = self._effective_max()
+        desired_set = set(desired_ranked[:effective_max])
 
         active = {t for t in installed if self._team_active(t)}
-        others = active - {desired}  # carried note 1: never pause desired
+        active_now = set(active)
 
-        if not others:
-            if desired in active:
-                return  # steady state
-            # Nothing else is running — activating into an idle fleet
-            # pauses nobody, so it is not dwell-gated; the new tenure
-            # IS stamped so it gets dwell protection from now on.
-            logger.info("activating %s (no other team active)", desired)
-            if self._team_control("activate", desired):
-                self._stamp_switch()
-            return
-
-        # A switch (pausing a current team) is dwell-gated.
-        remaining = self._dwell_remaining()
-        if remaining > 0:
-            logger.info(
-                "switch to %s wanted but dwell has %.0fs left — HOLDING",
-                desired, remaining,
-            )
-            return
-
-        all_paused = True
-        for team in sorted(others):
+        # PAUSE PHASE: drop teams not in the desired set. Never pause a
+        # desired team (carried note 1: it stays in desired_set). Each pause
+        # is dwell-gated by THAT team's tenure and quiescence-gated.
+        for team in sorted(active - desired_set):
+            remaining = self._dwell_remaining(team)
+            if remaining > 0:
+                logger.info(
+                    "want to pause %s but its dwell has %.0fs left — holding",
+                    team, remaining,
+                )
+                continue
             if team not in quiescent:
                 logger.info(
-                    "switch to %s wanted but %s is not quiescent — "
-                    "holding that pause for a later pass",
-                    desired, team,
+                    "want to pause %s but it is not quiescent — "
+                    "holding that pause for a later pass", team,
                 )
-                all_paused = False
                 continue
-            if not self._team_control("pause", team):
+            if self._team_control("pause", team):
+                active_now.discard(team)
+                self._clear_tenure(team)
+            else:
                 logger.warning("pause of %s failed — will retry", team)
-                all_paused = False
 
-        if not all_paused:
-            # Single-active invariant over progress: do not activate
-            # the desired team while another team is still running.
-            return
-
-        self._stamp_switch()
-        logger.info("activating %s", desired)
-        self._team_control("activate", desired)
+        # ACTIVATE PHASE: fill free slots (up to effective_max) with desired
+        # teams not yet active, in rank order. Activating into a free slot
+        # pauses nobody, so it is NOT dwell-gated; the new tenure is stamped
+        # so the team gets dwell protection from now on. The slot ceiling is
+        # what enforces the single-active invariant at effective_max=1 (a
+        # still-running team that could not be paused leaves no free slot).
+        for team in desired_ranked:
+            if team in active_now:
+                continue
+            if len(active_now) >= effective_max:
+                break
+            logger.info("activating %s", team)
+            if self._team_control("activate", team):
+                active_now.add(team)
+                self._stamp_tenure(team)
 
     # ── loop ─────────────────────────────────────────────────────────
 
@@ -436,6 +513,12 @@ def main() -> int:
       TREADMILL_TEAM_SCHEDULER_DWELL_MINUTES   default 20
       TREADMILL_TEAM_SCHEDULER_POLL_SECONDS    default 60
       TREADMILL_TEAM_SCHEDULER_LOG_FILE        rotating log target
+      TREADMILL_MAX_ACTIVE_TEAMS               max concurrent teams
+                                               (ADR-0092; default 1)
+      TREADMILL_TEAM_ACCOUNT_POOL              comma-separated Claude
+                                               account slugs; sizes the
+                                               concurrency cap. Empty =>
+                                               clamp to 1 (no double-burn).
     """
     from treadmill_local.runtime import (
         STATE_DIR,
@@ -492,6 +575,20 @@ def main() -> int:
         "TREADMILL_TEAM_SCHEDULER_POLL_SECONDS", DEFAULT_POLL_SECONDS,
     )
 
+    # ADR-0092 multi-active: how many teams may run at once, and the pool of
+    # Claude subscription accounts to size that against. DEFAULT 1 + empty
+    # pool => byte-for-byte ADR-0091 single-active. The no-pool clamp lives
+    # in _effective_max (a max>1 set without a pool stays capped at 1).
+    try:
+        max_active = int(os.environ.get("TREADMILL_MAX_ACTIVE_TEAMS", "1"))
+    except ValueError:
+        max_active = 1
+    account_pool = [
+        a.strip()
+        for a in os.environ.get("TREADMILL_TEAM_ACCOUNT_POOL", "").split(",")
+        if a.strip()
+    ]
+
     scheduler = TeamScheduler(
         fetch_decision=lambda: _real_fetch_decision(api_url),
         team_control=lambda verb, slug: _real_team_control(
@@ -502,6 +599,8 @@ def main() -> int:
         dwell_minutes=dwell,
         state_path=scheduler_state_path(),
         poll_seconds=poll,
+        max_active_teams=max_active,
+        account_pool=account_pool,
     )
 
     import signal as _signal
