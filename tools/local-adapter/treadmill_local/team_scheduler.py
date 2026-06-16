@@ -368,6 +368,29 @@ class TeamScheduler:
         # here on the first valid decision so it has the live active set.
         if self._lease_pool is not None and not self._pool_reconciled:
             self._lease_pool.reconcile(active)
+            # WARM-START LEASE ADOPTION (ADR-0092 follow-up): teams already
+            # running when the daemon starts never pass through the ACTIVATE
+            # phase below (they are already in active_now), so they hold no
+            # lease and keep running on the shared DEFAULT subscription — the
+            # double-burn the pool exists to prevent. For each desired team
+            # (rank order, capped at effective_max) that is already active
+            # but unleased after reconcile, claim a free account now. lease()
+            # is persist-first and binds the team's claude-account files; the
+            # running sessions adopt CLAUDE_CONFIG_DIR on their next restart
+            # (recycle), and a later reconcile reclaims that binding as
+            # ground truth. Pool-exhaustion just leaves the team on default
+            # (logged) — never an activation, so no behavior regression.
+            for team in desired_ranked[:effective_max]:
+                if (
+                    team in active
+                    and self._lease_pool.leased_account(team) is None
+                ):
+                    if self._lease_pool.lease(team) is None:
+                        logger.warning(
+                            "warm-start: no free subscription for "
+                            "already-active %s — it stays on the default "
+                            "sub until a slot frees", team,
+                        )
             self._pool_reconciled = True
 
         # PAUSE PHASE: drop teams not in the desired set. Never pause a

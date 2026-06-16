@@ -567,3 +567,76 @@ def test_cap_decrease_drains_without_third_activation() -> None:
     assert rec.pauses == ["team-b"]   # top-1 desired is team-a; team-b drains
     assert rec.activations == []      # no third activation
     assert pool.leased_account("team-b") is None  # released on drain
+
+
+# ── ADR-0092 follow-up: warm-start lease adoption ───────────────────
+# Teams already running when the daemon starts never pass through the
+# ACTIVATE phase (they are already active), so without warm-start they
+# would keep running UNLEASED on the shared default subscription — the
+# double-burn the pool exists to prevent. These pin the startup pass.
+
+
+def test_warm_start_leases_already_active_unbound_teams() -> None:
+    """The headline gap: two desired teams already ACTIVE with NO on-disk
+    binding (started before the pool existed) get leased to distinct
+    accounts on the first reconcile — no activate, no pause."""
+    pool, bound = _mk_lease_pool(["acct1", "acct2"])  # empty bound = unbound
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        installed=("team-a", "team-b"), active=("team-a", "team-b"),
+        max_active_teams=2, account_pool=("acct1", "acct2"), lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert rec.activations == []  # already active — nothing to activate
+    assert rec.pauses == []       # both desired — nothing to pause
+    assert bound == {"team-a": "acct1", "team-b": "acct2"}  # bound on warm start
+    assert pool.leased_account("team-a") != pool.leased_account("team-b")
+
+
+def test_warm_start_respects_rank_and_effective_max() -> None:
+    """Three active unbound teams, cap=2, two accounts: only the top-2
+    desired get a warm lease; the rank-3 team stays unbound (it is the one
+    headed for a pause once quiescent)."""
+    pool, bound = _mk_lease_pool(["acct1", "acct2"])
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b", "team-c"],
+         "quiescent_teams": []},
+        installed=("team-a", "team-b", "team-c"),
+        active=("team-a", "team-b", "team-c"),
+        max_active_teams=2, account_pool=("acct1", "acct2"), lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert bound == {"team-a": "acct1", "team-b": "acct2"}
+    assert pool.leased_account("team-c") is None  # rank-3, no warm lease
+
+
+def test_warm_start_does_not_disturb_reclaimed_bindings() -> None:
+    """A team already bound on disk (ground truth) is reclaimed by reconcile
+    and NOT re-leased; only the genuinely-unbound active team gets a warm
+    lease, onto the remaining free account."""
+    pool, bound = _mk_lease_pool(["acct1", "acct2"])
+    bound["team-a"] = "acct2"  # team-a is live on acct2 (ground truth)
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        installed=("team-a", "team-b"), active=("team-a", "team-b"),
+        max_active_teams=2, account_pool=("acct1", "acct2"), lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert pool.leased_account("team-a") == "acct2"  # reclaimed, unchanged
+    assert pool.leased_account("team-b") == "acct1"  # warm-leased the free one
+    assert rec.activations == [] and rec.pauses == []
+
+
+def test_warm_start_pool_exhaustion_leaves_team_on_default() -> None:
+    """Two active unbound teams but only ONE pool account: top-1 gets the
+    lease, the rank-2 team stays unleased (on default) — logged, never
+    crashes, never double-assigns."""
+    pool, bound = _mk_lease_pool(["acct1"])
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        installed=("team-a", "team-b"), active=("team-a", "team-b"),
+        max_active_teams=2, account_pool=("acct1", "acct2"), lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert bound == {"team-a": "acct1"}            # only the free account bound
+    assert pool.leased_account("team-b") is None   # stays on default sub
