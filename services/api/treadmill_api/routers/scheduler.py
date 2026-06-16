@@ -4,9 +4,9 @@ All testable scheduler logic lives HERE (task acb4adcb); the host daemon
 is a thin enactor that polls this endpoint and reconciles systemd units
 toward it, never duplicating the decision.
 
-Response: ``{desired_team, quiescent_teams, reason}``.
+Response: ``{desired_teams, quiescent_teams, reason}``.
 
-Desired team — priority + aging (the documented formula)
+Desired teams — priority + aging (the documented formula)
 =========================================================
 
 Plans carry no explicit priority column, so priority is derived from
@@ -32,7 +32,11 @@ the daemon is allowed to perform one. The daemon's dwell default must
 not exceed ``AGING_TIME_CONSTANT_MINUTES``; raise this constant if the
 dwell grows.
 
-``desired_team`` is null when no team has pending work.
+``desired_teams`` is the FULL ranked list of teams with pending work,
+highest score first.  Empty list when no team has pending work.  The
+daemon applies its own N-cap and subscription-pool logic to this list;
+the endpoint never collapses it to a single winner (tasks 6c2446b2 +
+bc5cdc23 own the cap/pool side).
 
 Quiescence — safe to pause (ADR-0091 §4, Bert #332 + Carla #342)
 ================================================================
@@ -109,7 +113,7 @@ class TeamSnapshot:
 
 @dataclass(frozen=True)
 class Decision:
-    desired_team: str | None
+    desired_teams: list[str]
     quiescent_teams: list[str] = field(default_factory=list)
     reason: str = ""
 
@@ -134,7 +138,7 @@ def compute_decision(teams: list[TeamSnapshot], now: datetime) -> Decision:
     contenders = [t for t in teams if t.pending_tasks > 0]
     if not contenders:
         return Decision(
-            desired_team=None,
+            desired_teams=[],
             quiescent_teams=quiescent,
             reason="no team has pending work",
         )
@@ -149,7 +153,7 @@ def compute_decision(teams: list[TeamSnapshot], now: datetime) -> Decision:
         else ""
     )
     return Decision(
-        desired_team=best.slug,
+        desired_teams=[t.slug for _, t in scored],
         quiescent_teams=quiescent,
         reason=(
             f"{best.slug} leads with score {best_score:.2f} "
@@ -265,7 +269,7 @@ async def fetch_team_snapshots(session: AsyncSession) -> list[TeamSnapshot]:
 
 
 class SchedulerDecisionResponse(BaseModel):
-    desired_team: str | None
+    desired_teams: list[str]
     quiescent_teams: list[str]
     reason: str
 
@@ -277,7 +281,7 @@ async def scheduler_decision(
     teams = await fetch_team_snapshots(session)
     decision = compute_decision(teams, now=datetime.now(timezone.utc))
     return SchedulerDecisionResponse(
-        desired_team=decision.desired_team,
+        desired_teams=decision.desired_teams,
         quiescent_teams=decision.quiescent_teams,
         reason=decision.reason,
     )
