@@ -141,3 +141,31 @@ jobs:
 
       - name: Smoke-import the app in the built image
         run: docker run --rm treadmill-api:ci python -c "import treadmill_api.app; print('app import ok')"
+
+  # services/dashboard is React/TS (Vite + Vitest) — outside the uv matrix.
+  # It had NO CI job, which is exactly why a tsc build break (#348's
+  # architect/validator-gold prop-type errors) AND 16 review-UI test failures
+  # landed unseen: nothing ran `npm run build` or `npm test` on a PR. This job
+  # closes the build half — `npm run build` (tsc -b + vite build) is the gate
+  # that would have caught the break. The vitest suite is a tracked follow-up:
+  # 16 pre-existing review/ + PageLayout failures (ADR-0061 triage UI) must be
+  # fixed or quarantined first, then `npm test` joins this job as a gate.
+  dashboard:
+    name: services/dashboard (vite build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: services/dashboard/package-lock.json
+
+      - name: Install deps
+        working-directory: services/dashboard
+        run: npm ci
+
+      - name: Build (tsc -b + vite)
+        working-directory: services/dashboard
+        run: npm run build
