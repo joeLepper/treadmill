@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from treadmill_local.account_pool import AccountLeasePool
 from treadmill_local.team_scheduler import (
     DEFAULT_DWELL_MINUTES,
     TeamScheduler,
@@ -30,6 +31,21 @@ from treadmill_local.team_scheduler import (
     default_team_control_path,
     _team_label_dirs,
 )
+
+
+def _mk_lease_pool(accounts):
+    """An in-memory lease pool whose 'on-disk binding' is a dict, for the
+    reconcile-from-ground-truth path. Returns (pool, bound-dict)."""
+    bound: dict[str, str] = {}
+    return (
+        AccountLeasePool(
+            accounts=accounts,
+            state_path=None,
+            bind_account=lambda t, a: bound.__setitem__(t, a),
+            read_bound_account=lambda t: bound.get(t),
+        ),
+        bound,
+    )
 
 
 class Recorder:
@@ -61,6 +77,7 @@ def _scheduler(
     now=None,
     max_active_teams: int = 1,
     account_pool=(),
+    lease_pool=None,
 ) -> tuple[TeamScheduler, Recorder]:
     recorder = recorder or Recorder()
     active_set = {a.lower() for a in active}
@@ -75,6 +92,7 @@ def _scheduler(
         state_path=state_path,
         max_active_teams=max_active_teams,
         account_pool=account_pool,
+        lease_pool=lease_pool,
     )
     if now is not None:
         kwargs["now"] = now
@@ -484,3 +502,68 @@ def test_incumbent_protected_by_its_own_dwell_on_eviction(
     s3.reconcile_once()
     assert rec3.pauses == ["team-b"]
     assert rec3.activations == ["team-c"]
+
+
+# ── ADR-0092 task C: subscription-lease wiring through reconcile ─────
+
+
+def test_lease_pool_binds_distinct_accounts_to_concurrent_teams() -> None:
+    pool, bound = _mk_lease_pool(["acct1", "acct2"])
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        active=(), max_active_teams=2, account_pool=("acct1", "acct2"),
+        lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a", "team-b"]
+    assert bound == {"team-a": "acct1", "team-b": "acct2"}  # distinct subs
+    assert pool.leased_account("team-a") != pool.leased_account("team-b")
+
+
+def test_pause_releases_the_teams_account_lease() -> None:
+    pool, _ = _mk_lease_pool(["acct1", "acct2"])
+    s, rec = _scheduler(
+        {"desired_teams": ["team-b"], "quiescent_teams": ["team-a"]},
+        installed=("team-a", "team-b"), active=("team-a",),
+        max_active_teams=2, account_pool=("acct1", "acct2"), lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert rec.pauses == ["team-a"]
+    assert pool.leased_account("team-a") is None  # released after pause
+
+
+def test_activation_skipped_when_lease_pool_exhausted() -> None:
+    """Defensive guard: a free SLOT but no free ACCOUNT -> do NOT activate
+    on the shared default (the double-burn). Exercised by a lease pool with
+    fewer accounts than the sizing cap."""
+    pool, _ = _mk_lease_pool(["acct1"])  # only ONE real account
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        active=(), max_active_teams=2,
+        account_pool=("acct1", "acct2"),  # sizing says 2 slots
+        lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a"]  # team-b has no free sub -> skipped
+    assert pool.leased_account("team-b") is None
+
+
+def test_cap_decrease_drains_without_third_activation() -> None:
+    """Bert's nice-to-have: when the cap DECREASES (pool 2 -> 1) with two
+    teams already active, the over-set drains via the pause phase and the
+    slot ceiling prevents any new activation — a converging transient, no
+    new double-burn."""
+    pool, bound = _mk_lease_pool(["acct1", "acct2"])
+    bound["team-a"] = "acct1"  # both live (ground truth for reconcile)
+    bound["team-b"] = "acct2"
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"],
+         "quiescent_teams": ["team-a", "team-b"]},
+        installed=("team-a", "team-b"), active=("team-a", "team-b"),
+        max_active_teams=2, account_pool=("acct1",),  # cap shrank to 1
+        lease_pool=pool,
+    )
+    s.reconcile_once()
+    assert rec.pauses == ["team-b"]   # top-1 desired is team-a; team-b drains
+    assert rec.activations == []      # no third activation
+    assert pool.leased_account("team-b") is None  # released on drain
