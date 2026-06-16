@@ -59,6 +59,8 @@ def _scheduler(
     dwell_minutes: float = 0.0,
     state_path: Path | None = None,
     now=None,
+    max_active_teams: int = 1,
+    account_pool=(),
 ) -> tuple[TeamScheduler, Recorder]:
     recorder = recorder or Recorder()
     active_set = {a.lower() for a in active}
@@ -71,6 +73,8 @@ def _scheduler(
         team_active=lambda slug: slug in active_set,
         dwell_minutes=dwell_minutes,
         state_path=state_path,
+        max_active_teams=max_active_teams,
+        account_pool=account_pool,
     )
     if now is not None:
         kwargs["now"] = now
@@ -324,3 +328,159 @@ def test_team_scheduler_unit_runs_daemon_and_restarts_on_failure() -> None:
     assert "Restart=on-failure" in body
     assert "SuccessExitStatus=143" in body
     assert "WantedBy=default.target" in body
+
+
+# ── ADR-0092 multi-active: N teams, pool-sized, per-team dwell ────────
+#
+# The single-active suite above runs UNCHANGED at the default
+# (max_active_teams=1, empty pool) and is the no-regression gate. These
+# add the multi-active behavior.
+
+
+def test_two_desired_teams_activate_concurrently_with_pool() -> None:
+    """max=2 + a 2-account pool: both top desired teams come up together."""
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        active=(),
+        max_active_teams=2,
+        account_pool=("acct1", "acct2"),
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a", "team-b"]  # rank order
+    assert rec.pauses == []
+
+
+def test_no_pool_clamps_multi_active_to_one() -> None:
+    """The safe-staging clamp: max=2 but NO pool configured -> effective
+    cap is 1, so only the top team activates (never two on one default
+    subscription = the double-burn). This is what makes task B safe to
+    ship before the pool (task C) lands."""
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        active=(),
+        max_active_teams=2,
+        account_pool=(),  # no pool
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a"]
+
+
+def test_pool_size_caps_effective_max_below_max_active() -> None:
+    """effective cap = min(max_active_teams, pool_size): a 1-account pool
+    holds it to one even at max=2."""
+    s, rec = _scheduler(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []},
+        active=(),
+        max_active_teams=2,
+        account_pool=("only-one",),
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a"]
+
+
+def test_singular_desired_team_fallback_drives_single_slot() -> None:
+    """A decision with only the singular ``desired_team`` (pre-task-A API,
+    or the unchanged fixtures) drives the single-slot path even at max=2 —
+    one desired team yields one activation."""
+    s, rec = _scheduler(
+        {"desired_team": "team-b", "quiescent_teams": ["team-a"]},
+        active=("team-a",),
+        max_active_teams=2,
+        account_pool=("acct1", "acct2"),
+    )
+    s.reconcile_once()
+    assert rec.calls == [("pause", "team-a"), ("activate", "team-b")]
+
+
+def test_desired_teams_list_takes_precedence_over_singular_shim() -> None:
+    """When both fields are present (the post-task-A contract), the daemon
+    uses the ranked list, not just the shim's single team."""
+    s, rec = _scheduler(
+        {
+            "desired_teams": ["team-a", "team-b"],
+            "desired_team": "team-a",
+            "quiescent_teams": [],
+        },
+        active=(),
+        max_active_teams=2,
+        account_pool=("acct1", "acct2"),
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a", "team-b"]
+
+
+def test_reorder_within_active_set_causes_no_flap(tmp_path: Path) -> None:
+    """Bert: set-level anti-flap must not collapse into 'set size stable
+    but members churning'. A pure reorder of the SAME top-N teams touches
+    nothing."""
+    clock = {"t": 1000.0}
+    state = tmp_path / "state.json"
+
+    def make(decision, active):
+        return _scheduler(
+            decision, installed=("team-a", "team-b"), active=active,
+            dwell_minutes=20, state_path=state, now=lambda: clock["t"],
+            max_active_teams=2, account_pool=("acct1", "acct2"),
+        )
+
+    s, rec = make(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []}, (),
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a", "team-b"]
+
+    # 5 min later the ranking flips order, but both are still the top 2.
+    clock["t"] += 5 * 60
+    s2, rec2 = make(
+        {"desired_teams": ["team-b", "team-a"],
+         "quiescent_teams": ["team-a", "team-b"]},
+        ("team-a", "team-b"),
+    )
+    s2.reconcile_once()
+    assert rec2.calls == []  # no churn on a reorder within the active set
+
+
+def test_incumbent_protected_by_its_own_dwell_on_eviction(
+    tmp_path: Path,
+) -> None:
+    """Per-team dwell: when a new team displaces an incumbent in the
+    ranking, the incumbent is not evicted until ITS OWN dwell elapses —
+    and the cap means the challenger waits for a freed slot, so no flap."""
+    clock = {"t": 1000.0}
+    state = tmp_path / "state.json"
+
+    def make(decision, active):
+        return _scheduler(
+            decision, installed=("team-a", "team-b", "team-c"),
+            active=active, dwell_minutes=20, state_path=state,
+            now=lambda: clock["t"], max_active_teams=2,
+            account_pool=("acct1", "acct2"),
+        )
+
+    s, rec = make(
+        {"desired_teams": ["team-a", "team-b"], "quiescent_teams": []}, (),
+    )
+    s.reconcile_once()
+    assert rec.activations == ["team-a", "team-b"]
+
+    # 5 min later team-c displaces team-b; team-b's dwell (15m left)
+    # protects it from eviction, so the slot stays full and team-c waits.
+    clock["t"] += 5 * 60
+    s2, rec2 = make(
+        {"desired_teams": ["team-a", "team-c"],
+         "quiescent_teams": ["team-b", "team-c"]},
+        ("team-a", "team-b"),
+    )
+    s2.reconcile_once()
+    assert rec2.calls == []
+
+    # Past team-b's dwell it is evicted and team-c takes the freed slot.
+    clock["t"] += 16 * 60
+    s3, rec3 = make(
+        {"desired_teams": ["team-a", "team-c"],
+         "quiescent_teams": ["team-b", "team-c"]},
+        ("team-a", "team-b"),
+    )
+    s3.reconcile_once()
+    assert rec3.pauses == ["team-b"]
+    assert rec3.activations == ["team-c"]
