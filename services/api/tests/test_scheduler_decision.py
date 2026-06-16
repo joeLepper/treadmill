@@ -227,6 +227,32 @@ def test_endpoint_wraps_pure_decision() -> None:
     assert "formula: pending + wait_min/" in body["reason"]
 
 
+def test_desired_team_shim_equals_top_of_ranked_list() -> None:
+    """back-compat shim: desired_team == desired_teams[0] when non-empty,
+    None when empty.  Shim lives until task 6c2446b2 ships the daemon migration
+    (remove in the contract-cleanup follow-up, not before)."""
+    a = _team("team-a", pending_tasks=3)
+    b = _team("team-b", pending_tasks=1)
+
+    decision = compute_decision([a, b], NOW)
+    assert decision.desired_team == decision.desired_teams[0] == "team-a"
+
+    empty = compute_decision([_team("team-a")], NOW)
+    assert empty.desired_team is None
+    assert empty.desired_teams == []
+
+
+def test_endpoint_shim_in_response_body() -> None:
+    """HTTP response includes desired_team shim alongside desired_teams."""
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_session] = lambda: _StubSession()
+
+    body = TestClient(app).get("/api/v1/scheduler/decision").json()
+
+    assert body["desired_team"] == body["desired_teams"][0] == "team-a"
+
+
 def test_aging_constant_documents_daemon_dwell_floor() -> None:
     """Carla #342: aging must not out-pace the daemon's anti-flap
     dwell. The constant is the contract surface the daemon task reads —

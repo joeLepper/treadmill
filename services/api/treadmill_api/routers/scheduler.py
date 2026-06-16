@@ -4,7 +4,16 @@ All testable scheduler logic lives HERE (task acb4adcb); the host daemon
 is a thin enactor that polls this endpoint and reconciles systemd units
 toward it, never duplicating the decision.
 
-Response: ``{desired_teams, quiescent_teams, reason}``.
+Response: ``{desired_teams, desired_team, quiescent_teams, reason}``.
+
+**Transitional dual-field state (expand/contract, tasks c31e0994 → 6c2446b2)**:
+Both ``desired_teams`` (new, full ranked list) and ``desired_team`` (back-compat
+shim, equals ``desired_teams[0]`` or ``None``) are returned during the A→B
+migration window so the still-running single-active daemon can keep reading the
+singular field without stalling.  Once task 6c2446b2 ships the daemon migration
+(daemon reads ``desired_teams``), a contract-cleanup PR will drop ``desired_team``
+from both the dataclass and the response model.  Do NOT remove either field before
+that cleanup; alan is tracking the follow-up.
 
 Desired teams — priority + aging (the documented formula)
 =========================================================
@@ -74,7 +83,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -116,6 +125,12 @@ class Decision:
     desired_teams: list[str]
     quiescent_teams: list[str] = field(default_factory=list)
     reason: str = ""
+
+    @property
+    def desired_team(self) -> str | None:
+        # back-compat shim for the pre-task-B daemon; remove in the
+        # contract-cleanup once the daemon reads desired_teams (task 6c2446b2).
+        return self.desired_teams[0] if self.desired_teams else None
 
 
 def _score(team: TeamSnapshot, now: datetime) -> float:
@@ -272,6 +287,13 @@ class SchedulerDecisionResponse(BaseModel):
     desired_teams: list[str]
     quiescent_teams: list[str]
     reason: str
+
+    @computed_field
+    @property
+    def desired_team(self) -> str | None:
+        # back-compat shim for the pre-task-B daemon; remove in the
+        # contract-cleanup once the daemon reads desired_teams (task 6c2446b2).
+        return self.desired_teams[0] if self.desired_teams else None
 
 
 @router.get("/decision", response_model=SchedulerDecisionResponse)
