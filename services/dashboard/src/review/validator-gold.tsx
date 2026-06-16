@@ -72,7 +72,7 @@ export default function ValidatorGoldViewer({
         alignItems: 'start',
       }}
     >
-      <CandidateColumn candidate={candidate} recommendation={row.llm} />
+      <CandidateColumn candidate={candidate} recommendation={candidate.llm_label} />
       <LabelColumn draft={draft} onChange={setDraft} onSubmit={onSubmit} />
     </div>
   );

@@ -9,8 +9,9 @@
  */
 
 import type { ReactNode } from 'react';
-import { Activity, Box, Search } from 'lucide-react';
+import { Activity, AlertTriangle, DollarSign, Layers, ScrollText, Workflow } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
+import { CommandPalette } from './CommandPalette';
 
 interface NavEntry {
   path: string;
@@ -142,8 +143,12 @@ function Skeleton() {
 }
 
 const NAV: NavEntry[] = [
-  { path: '/', label: 'Overview', icon: <Activity size={14} /> },
-  { path: '/tasks', label: 'Tasks', icon: <Box size={14} />, href: '/' },
+  { path: '/', label: 'Mission', icon: <Activity size={14} /> },
+  { path: '/tasks', label: 'Tasks', icon: <Workflow size={14} /> },
+  { path: '/cost', label: 'Cost', icon: <DollarSign size={14} /> },
+  { path: '/plans', label: 'Plans', icon: <Layers size={14} /> },
+  { path: '/adrs', label: 'ADRs', icon: <ScrollText size={14} /> },
+  { path: '/escalations', label: 'Escalations', icon: <AlertTriangle size={14} /> },
 ];
 
 function Sidebar() {
@@ -263,34 +268,7 @@ function TopBar({ freshness }: { freshness?: ReactNode }) {
         background: 'var(--tm-bg)',
       }}
     >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          flex: 1,
-          maxWidth: 380,
-          background: 'var(--tm-surface-2)',
-          borderRadius: 2,
-          border: '1px solid var(--tm-border)',
-          padding: '5px 10px',
-          color: 'var(--tm-t3)',
-          fontSize: 12.5,
-        }}
-      >
-        <Search size={13} />
-        <span style={{ color: 'var(--tm-t4)' }}>jump to task / plan / repo</span>
-        <span
-          style={{
-            marginLeft: 'auto',
-            fontFamily: 'var(--tm-mono)',
-            color: 'var(--tm-t4)',
-            fontSize: 11,
-          }}
-        >
-          ⌘K
-        </span>
-      </div>
+      <CommandPalette />
       <div style={{ flex: 1 }} />
       {freshness}
     </div>
