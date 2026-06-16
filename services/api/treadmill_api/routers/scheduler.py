@@ -4,9 +4,18 @@ All testable scheduler logic lives HERE (task acb4adcb); the host daemon
 is a thin enactor that polls this endpoint and reconciles systemd units
 toward it, never duplicating the decision.
 
-Response: ``{desired_team, quiescent_teams, reason}``.
+Response: ``{desired_teams, desired_team, quiescent_teams, reason}``.
 
-Desired team — priority + aging (the documented formula)
+**Transitional dual-field state (expand/contract, tasks c31e0994 → 6c2446b2)**:
+Both ``desired_teams`` (new, full ranked list) and ``desired_team`` (back-compat
+shim, equals ``desired_teams[0]`` or ``None``) are returned during the A→B
+migration window so the still-running single-active daemon can keep reading the
+singular field without stalling.  Once task 6c2446b2 ships the daemon migration
+(daemon reads ``desired_teams``), a contract-cleanup PR will drop ``desired_team``
+from both the dataclass and the response model.  Do NOT remove either field before
+that cleanup; alan is tracking the follow-up.
+
+Desired teams — priority + aging (the documented formula)
 =========================================================
 
 Plans carry no explicit priority column, so priority is derived from
@@ -32,7 +41,11 @@ the daemon is allowed to perform one. The daemon's dwell default must
 not exceed ``AGING_TIME_CONSTANT_MINUTES``; raise this constant if the
 dwell grows.
 
-``desired_team`` is null when no team has pending work.
+``desired_teams`` is the FULL ranked list of teams with pending work,
+highest score first.  Empty list when no team has pending work.  The
+daemon applies its own N-cap and subscription-pool logic to this list;
+the endpoint never collapses it to a single winner (tasks 6c2446b2 +
+bc5cdc23 own the cap/pool side).
 
 Quiescence — safe to pause (ADR-0091 §4, Bert #332 + Carla #342)
 ================================================================
@@ -70,7 +83,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -109,9 +122,15 @@ class TeamSnapshot:
 
 @dataclass(frozen=True)
 class Decision:
-    desired_team: str | None
+    desired_teams: list[str]
     quiescent_teams: list[str] = field(default_factory=list)
     reason: str = ""
+
+    @property
+    def desired_team(self) -> str | None:
+        # back-compat shim for the pre-task-B daemon; remove in the
+        # contract-cleanup once the daemon reads desired_teams (task 6c2446b2).
+        return self.desired_teams[0] if self.desired_teams else None
 
 
 def _score(team: TeamSnapshot, now: datetime) -> float:
@@ -134,7 +153,7 @@ def compute_decision(teams: list[TeamSnapshot], now: datetime) -> Decision:
     contenders = [t for t in teams if t.pending_tasks > 0]
     if not contenders:
         return Decision(
-            desired_team=None,
+            desired_teams=[],
             quiescent_teams=quiescent,
             reason="no team has pending work",
         )
@@ -149,7 +168,7 @@ def compute_decision(teams: list[TeamSnapshot], now: datetime) -> Decision:
         else ""
     )
     return Decision(
-        desired_team=best.slug,
+        desired_teams=[t.slug for _, t in scored],
         quiescent_teams=quiescent,
         reason=(
             f"{best.slug} leads with score {best_score:.2f} "
@@ -265,9 +284,16 @@ async def fetch_team_snapshots(session: AsyncSession) -> list[TeamSnapshot]:
 
 
 class SchedulerDecisionResponse(BaseModel):
-    desired_team: str | None
+    desired_teams: list[str]
     quiescent_teams: list[str]
     reason: str
+
+    @computed_field
+    @property
+    def desired_team(self) -> str | None:
+        # back-compat shim for the pre-task-B daemon; remove in the
+        # contract-cleanup once the daemon reads desired_teams (task 6c2446b2).
+        return self.desired_teams[0] if self.desired_teams else None
 
 
 @router.get("/decision", response_model=SchedulerDecisionResponse)
@@ -277,7 +303,7 @@ async def scheduler_decision(
     teams = await fetch_team_snapshots(session)
     decision = compute_decision(teams, now=datetime.now(timezone.utc))
     return SchedulerDecisionResponse(
-        desired_team=decision.desired_team,
+        desired_teams=decision.desired_teams,
         quiescent_teams=decision.quiescent_teams,
         reason=decision.reason,
     )
