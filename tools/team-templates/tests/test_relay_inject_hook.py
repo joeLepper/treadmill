@@ -68,17 +68,17 @@ def test_label_without_inbox_dir_emits_empty_object(tmp_path: Path) -> None:
     """Hook with a worker label but no relay inbox on disk returns
     ``{}`` cleanly (fresh-fleet case)."""
     result = _run_hook(
-        {"TREADMILL_SESSION_LABEL": "worker-medicoder-1"}, home=tmp_path
+        {"TREADMILL_SESSION_LABEL": "worker-ramjac-1"}, home=tmp_path
     )
     assert result.returncode == 0
     assert result.stdout.strip() == "{}"
 
 
 def test_inbox_with_no_messages_emits_empty_object(tmp_path: Path) -> None:
-    inbox = tmp_path / ".cc-channels" / "worker-medicoder-1" / "relay"
+    inbox = tmp_path / ".cc-channels" / "worker-ramjac-1" / "relay"
     inbox.mkdir(parents=True)
     result = _run_hook(
-        {"TREADMILL_SESSION_LABEL": "worker-medicoder-1"}, home=tmp_path
+        {"TREADMILL_SESSION_LABEL": "worker-ramjac-1"}, home=tmp_path
     )
     assert result.returncode == 0
     assert result.stdout.strip() == "{}"
@@ -88,11 +88,11 @@ def test_inbox_with_no_messages_emits_empty_object(tmp_path: Path) -> None:
 
 
 def test_coordinator_message_injected_and_consumed(tmp_path: Path) -> None:
-    """A relay file from ``coordinator-medicoder`` to
-    ``worker-medicoder-1`` → hook injects + deletes the file."""
-    worker = "worker-medicoder-1"
+    """A relay file from ``coordinator-ramjac`` to
+    ``worker-ramjac-1`` → hook injects + deletes the file."""
+    worker = "worker-ramjac-1"
     msg_path = _make_relay_msg(
-        sender="coordinator-medicoder",
+        sender="coordinator-ramjac",
         body="re-run pytest -k auth_flow then push",
         home=tmp_path,
         worker_label=worker,
@@ -117,9 +117,9 @@ def test_sibling_worker_message_not_injected(tmp_path: Path) -> None:
     """A relay from another worker (sibling) is data, not instructions.
     The hook returns ``{}`` and the message is LEFT in the inbox so
     the worker can read it as ordinary content via Read."""
-    worker = "worker-medicoder-1"
+    worker = "worker-ramjac-1"
     msg_path = _make_relay_msg(
-        sender="worker-medicoder-2",
+        sender="worker-ramjac-2",
         body="hey can you take this branch over",
         home=tmp_path,
         worker_label=worker,
@@ -137,9 +137,9 @@ def test_sibling_worker_message_not_injected(tmp_path: Path) -> None:
 def test_evaluator_message_not_injected(tmp_path: Path) -> None:
     """An evaluator that misroutes its verdict to a worker inbox MUST
     NOT be treated as a coordinator instruction. Stays as data."""
-    worker = "worker-medicoder-1"
+    worker = "worker-ramjac-1"
     msg_path = _make_relay_msg(
-        sender="evaluator-medicoder",
+        sender="evaluator-ramjac",
         body="approve",
         home=tmp_path,
         worker_label=worker,
@@ -155,7 +155,7 @@ def test_orchestrator_message_not_injected(tmp_path: Path) -> None:
     """Orchestrators talk to coordinators, not workers. If an orchestrator
     relay lands in a worker inbox (operator mistake), the hook treats it
     as data."""
-    worker = "worker-medicoder-1"
+    worker = "worker-ramjac-1"
     msg_path = _make_relay_msg(
         sender="treadmill-alan",
         body="urgent — restart the chain",
@@ -171,9 +171,9 @@ def test_orchestrator_message_not_injected(tmp_path: Path) -> None:
 
 def test_cross_team_coordinator_not_injected(tmp_path: Path) -> None:
     """The trust boundary is PER-TEAM. ``coordinator-scraper-v2`` is a
-    valid coordinator for its team but NOT for the medicoder worker.
+    valid coordinator for its team but NOT for the ramjac worker.
     Cross-team injection MUST NOT activate."""
-    worker = "worker-medicoder-1"
+    worker = "worker-ramjac-1"
     msg_path = _make_relay_msg(
         sender="coordinator-scraper-v2",
         body="run a sweep",
@@ -194,16 +194,16 @@ def test_oldest_coordinator_message_consumed_first(tmp_path: Path) -> None:
     """When multiple coordinator messages are waiting, the oldest
     (lowest-numbered timestamp prefix) is injected first. The newer
     ones stay in the inbox for the next hook invocation."""
-    worker = "worker-medicoder-1"
+    worker = "worker-ramjac-1"
     old = _make_relay_msg(
-        sender="coordinator-medicoder",
+        sender="coordinator-ramjac",
         body="first message",
         home=tmp_path,
         worker_label=worker,
         name="001-first.md",
     )
     new = _make_relay_msg(
-        sender="coordinator-medicoder",
+        sender="coordinator-ramjac",
         body="second message",
         home=tmp_path,
         worker_label=worker,
@@ -242,9 +242,9 @@ def test_non_worker_label_does_not_inject(tmp_path: Path) -> None:
 def test_malformed_worker_label_does_not_inject(tmp_path: Path) -> None:
     """A label that doesn't match ``worker-<slug>-N`` pattern (e.g. no
     trailing numeric suffix) short-circuits cleanly."""
-    label = "worker-medicoder"  # missing trailing -N
+    label = "worker-ramjac"  # missing trailing -N
     msg_path = _make_relay_msg(
-        sender="coordinator-medicoder",
+        sender="coordinator-ramjac",
         body="anything",
         home=tmp_path,
         worker_label=label,
@@ -262,17 +262,17 @@ def test_malformed_worker_label_does_not_inject(tmp_path: Path) -> None:
 def test_unreadable_message_skipped_gracefully(tmp_path: Path) -> None:
     """A relay file that can't be read (e.g. chmod 000) is skipped;
     subsequent valid messages are still considered."""
-    worker = "worker-medicoder-1"
+    worker = "worker-ramjac-1"
     inbox = tmp_path / ".cc-channels" / worker / "relay"
     inbox.mkdir(parents=True)
 
     bad = inbox / "000-unreadable.md"
-    bad.write_text("[from: coordinator-medicoder]\nbad\n")
+    bad.write_text("[from: coordinator-ramjac]\nbad\n")
     bad.chmod(0o000)
     # Wrap in try/finally so the test cleanup can restore perms.
     try:
         _make_relay_msg(
-            sender="coordinator-medicoder",
+            sender="coordinator-ramjac",
             body="reachable",
             home=tmp_path,
             worker_label=worker,
@@ -293,9 +293,9 @@ def test_unreadable_message_skipped_gracefully(tmp_path: Path) -> None:
 def test_hook_output_parses_as_json_on_inject(tmp_path: Path) -> None:
     """The decision payload must be valid JSON (Claude Code parses it
     strictly). Verify no stray whitespace or non-JSON output."""
-    worker = "worker-medicoder-1"
+    worker = "worker-ramjac-1"
     _make_relay_msg(
-        sender="coordinator-medicoder",
+        sender="coordinator-ramjac",
         body="x",
         home=tmp_path,
         worker_label=worker,

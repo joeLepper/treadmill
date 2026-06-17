@@ -359,13 +359,13 @@ def test_queue_depth_excludes_coordinator_authored_tasks(app_and_session) -> Non
     app, session = app_and_session
     session.seed_team_config(
         repo="owner/repo",
-        coordinator_label="coordinator-medicoder",
+        coordinator_label="coordinator-ramjac",
         worker_labels=["treadmill-carla"],
     )
     # Excluded — created_by matches coordinator_label.
     session.seed_task(
         derived_status="registered",
-        created_by="coordinator-medicoder",
+        created_by="coordinator-ramjac",
     )
     # Counted as visible.
     session.seed_task(derived_status="registered", created_by="treadmill-alan")

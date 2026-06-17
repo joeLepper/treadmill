@@ -158,14 +158,14 @@ CREATE INDEX ix_task_board_status ON task_board(status);
 ## Phase 5 — End-to-end proof on RAMJAC (2 days) — IN PROGRESS
 
 **Testbed plan**: `b3a8bd29-38d9-448c-85f9-046eb493c855` — GCP observability stack +
-dashboards-as-code (7 tasks). Submitted 2026-06-09T06:37Z by coordinator-medicoder.
+dashboards-as-code (7 tasks). Submitted 2026-06-09T06:37Z by coordinator-ramjac.
 coordinator.env updated to include plan ID. Workers briefed via cc-relay.
 
 **Task routing** (2026-06-09):
 - Bert: otel-collector-deploy (78af1379), dispatcher-coverage (449d380f)
 - Bert: otel-collector-deploy (78af1379) blocked on operator prereqs, dispatcher-coverage (449d380f)
 - Donna: datadog-dashboards-as-code (9959c49c) ✓ MERGED PR #1231, dedup-purge-cloud-run-job (9bbda236) ✓ MERGED PR #1233 + lib PR #26, chain-dep-bump-0.1.8 (07ad049d) in flight
-- Carla: consumer-subscription-validation (7877139d) ✓ MERGED PR #25 (medicoder-events), dashboard-generator-gcp (9c586a77) in flight, planrouter-fixture-expansion (4e3cffc2)
+- Carla: consumer-subscription-validation (7877139d) ✓ MERGED PR #25 (ramjac-events), dashboard-generator-gcp (9c586a77) in flight, planrouter-fixture-expansion (4e3cffc2)
 - Alan: cloud-trace-verify (82179115) — blocked on otel-collector-deploy
 
 **Brokered count: 10 merged, 0 amends — PHASE 5 QUALITY GATE MET (0% < 30% threshold)**
@@ -175,18 +175,18 @@ coordinator.env updated to include plan ID. Workers briefed via cc-relay.
 | 1 | 9959c49c datadog-dashboards-as-code | #1231 | Donna/Carla | 06:39Z |
 | 2 | 7877139d consumer-subscription-validation | #25 medev | Carla | 06:46Z |
 | 3 | 9bbda236 dedup-purge Cloud Run Job | #1233 + #26 medev | Donna | 06:49Z |
-| 4 | 07ad049d medicoder-events pin >=0.1.8 | #1234 | Donna | 06:51Z |
+| 4 | 07ad049d ramjac-events pin >=0.1.8 | #1234 | Donna | 06:51Z |
 | 5 | 449d380f dispatcher coverage | #267 treadmill | Bert | 07:07Z |
 | 6 | 78af1379 otel-collector deploy | #1235 | Bert | 07:xx Z |
 | 7 | 9c586a77 dashboard-generator --target=gcp | c12a1ff6 + #1236 | Carla | 07:12Z |
 | 8 | 82179115 cloud-trace-verify | #1238 | Alan | 07:13Z |
 | 9 | 4e3cffc2 planrouter-fixture-expansion | #268 treadmill | Carla | 07:24Z |
-| 10 | ad333cbe per-session worktrees medicoder | #1237 | Donna | 07:xx Z |
+| 10 | ad333cbe per-session worktrees ramjac | #1237 | Donna | 07:xx Z |
 
 **Amend rate: 0 / 10 = 0%** (gate: ≤30%). Phase 5 proof complete.
 **Operator action**: `dd-api-key-dev` in Secret Manager `care-transitions-testing` holds 11-char placeholder; Datadog exporter 403 until Joe sets the real 32-char key.
 
-Run a real plan on RAMJAC using coordinator-medicoder + 2 workers. Verify:
+Run a real plan on RAMJAC using coordinator-ramjac + 2 workers. Verify:
 - Coordinator provisions workers (not autoscaler)
 - CI failure signal routes correctly to author worker
 - Coordinator writes per-repo memory at plan close
@@ -224,7 +224,7 @@ Each step is a small commit; total revert cost < 1 day.
   (direct API calls to `POST /api/v1/tasks`). This validates the coordinator's ability
   to adapt scope mid-run without re-submitting the plan.
 
-- **2026-06-09**: Branch race in medicoder (shared working tree, no per-session worktrees)
+- **2026-06-09**: Branch race in ramjac (shared working tree, no per-session worktrees)
   caused a direct push to main on task 9c586a77. Decision: retrospective PR (#1236) +
   per-sibling worktree setup script (PR #1237). Force-revert explicitly ruled out.
 
@@ -240,7 +240,7 @@ Each step is a small commit; total revert cost < 1 day.
 
 - **0% amend rate on 10 tasks** — coordinator briefing with full plan-doc context + task
   intent eliminated the architect-loop overhead entirely. Prior Docker-worker runs averaged
-  ~30% amend rate on medicoder tasks.
+  ~30% amend rate on ramjac tasks.
 - **Dynamic scope adaptation** — coordinator grew the plan from 7→10 tasks mid-run via
   `POST /api/v1/tasks` API calls as new work surfaced. No plan re-submission needed.
 - **Parallel worker throughput** — Bert/Carla/Donna worked independently on non-conflicting
@@ -248,15 +248,15 @@ Each step is a small commit; total revert cost < 1 day.
   at peak.
 - **Availability broadcast** — the Stop hook (PR #264) meant returning workers announced
   themselves; coordinator immediately re-assigned. Zero idle time between task completions.
-- **Heterogeneous task pool** — medicoder infrastructure (Pulumi/GCP) and treadmill
+- **Heterogeneous task pool** — ramjac infrastructure (Pulumi/GCP) and treadmill
   service tasks (trace-replay harness) in one plan, one worker pool. No friction.
 - **otel-collector pipeline** — OTLP → Cloud Trace verified end-to-end, multi-service
   linked traces confirmed within minutes of the collector deploying.
 
 ### What surprised us
 
-- **Branch races in medicoder (not treadmill)** — Treadmill workers have isolated git
-  worktrees; named sessions working medicoder share one tree. Two races hit on the same
+- **Branch races in ramjac (not treadmill)** — Treadmill workers have isolated git
+  worktrees; named sessions working ramjac share one tree. Two races hit on the same
   day. Donna shipped the fix (PR #1237) in the same Phase 5 run.
 - **Grafana-on-GCP already existed** — the initial 10-task scope assumed Grafana needed
   deploying. It was already live with all 4 datasources. Scope collapsed immediately on

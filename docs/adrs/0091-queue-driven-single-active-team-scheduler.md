@@ -98,7 +98,7 @@ intentional `stop` currently lands the unit in `failed` until `reset-failed`).
 - **Multiple Claude accounts (fan the fleet across subscriptions to multiply
   the 5h budget).** Orthogonal: raises the ceiling rather than capping burn,
   and needs operator credential setup (only `~/.claude` + the expired
-  `~/.claude-osmo` are logged in today, 2026-06-12). Could combine with this.
+  `~/.claude-zephyr` are logged in today, 2026-06-12). Could combine with this.
 - **Scale workers to 2/team.** Already applied as a stopgap; low impact
   because workers are sonnet — the burn is the opus coordinator/evaluator.
 

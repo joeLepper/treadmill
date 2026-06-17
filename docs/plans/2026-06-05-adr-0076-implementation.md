@@ -14,7 +14,7 @@ Land the three nullable `repo_configs` columns ADR-0076 specifies
 (`git_author_name`, `git_author_email`, `commit_trailer`) and wire the
 worker's commit path to honor them, so a repo can be onboarded with a
 git author identity + trailer policy that overrides the worker's
-defaults at every commit. Unblocks the osmoai/osmo bootstrap on
+defaults at every commit. Unblocks the ZEPHYR/zephyr bootstrap on
 Treadmill's side; behaviour-neutral for every currently-onboarded repo
 (all-NULL → existing defaults preserved).
 
@@ -34,7 +34,7 @@ Treadmill's side; behaviour-neutral for every currently-onboarded repo
    commit-message template that calls it) applies the
    `commit_trailer` three-valued semantics (NULL → default trailer,
    `""` → suppress, any string → use verbatim).
-5. End-to-end smoke against `osmoai/osmo` with
+5. End-to-end smoke against `ZEPHYR/zephyr` with
    `git_author_name="Joe Lepper"` /
    `git_author_email="josephlepper@gmail.com"` / `commit_trailer=""`:
    a Treadmill worker commit shows `Joe Lepper
@@ -65,7 +65,7 @@ Treadmill's side; behaviour-neutral for every currently-onboarded repo
 - **Operator CLI / dashboard UI** for the override fields. Schema +
   API first; UI later, separate plan.
 - **Migrating existing rows.** All three columns default NULL; the
-  existing `treadmill`, RAMJAC, RAMJAC-events, and osmoai/osmo
+  existing `treadmill`, RAMJAC, RAMJAC-events, and ZEPHYR/zephyr
   rows are behaviour-neutral until an operator explicitly sets the
   override.
 - **Changing the env-var fallback shape.** `GIT_AUTHOR_EMAIL` and
@@ -286,7 +286,7 @@ sequence_of_work:
       out_of_scope:
         - services/api/ surfaces (landed in PR A)
         - PR-level identity / GitHub App vs. PAT decision (sibling ADR)
-        - End-to-end smoke against osmoai/osmo (acceptance only)
+        - End-to-end smoke against ZEPHYR/zephyr (acceptance only)
     validation:
       - kind: deterministic
         description: |
@@ -348,5 +348,5 @@ _Empty — populated as we work._
 ## Post-mortem
 
 _Filled in on completed / abandoned: did the two PRs land clean? Did
-the osmoai/osmo end-to-end smoke confirm the right commit identity?
+the ZEPHYR/zephyr end-to-end smoke confirm the right commit identity?
 Any surprises that should become an ADR or learning?_

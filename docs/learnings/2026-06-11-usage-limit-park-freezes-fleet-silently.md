@@ -9,7 +9,7 @@ related: ADR-0055 (per-account creds), ADR-0066 (usage-limit fallback), ADR-0087
 # Learning: a Claude usage-limit park freezes a worker silently; auto-fallback can't catch it
 
 ## Trigger
-2026-06-11: the medicoder fleet's dispatched work froze for ~3h. Tasks
+2026-06-11: the ramjac fleet's dispatched work froze for ~3h. Tasks
 showed "worker-X: executing" with zero branches/commits. Donna and the
 coordinator escalated it as the orphan-crashloop class; the operator-side
 tmux look found the real cause — workers parked at the interactive Claude

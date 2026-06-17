@@ -2,7 +2,7 @@
 date: 2026-06-08
 trigger: surprise
 status: captured
-related: medicoder Plan C, diagnosis-entity-detector-dev, promote-to-dev
+related: ramjac Plan C, diagnosis-entity-detector-dev, promote-to-dev
 ---
 
 # Learning: Pulumi 409 Conflict when Cloud Run service updated outside Pulumi

@@ -147,7 +147,7 @@ def test_patch_creates_row_on_first_call(app_and_session) -> None:
             "status": "in_flight",
             "assignee": "treadmill-bert",
             "branch": "feat/x",
-            "updated_by": "coordinator-medicoder",
+            "updated_by": "coordinator-ramjac",
         },
     )
     assert resp.status_code == 200, resp.text
@@ -157,7 +157,7 @@ def test_patch_creates_row_on_first_call(app_and_session) -> None:
     assert body["status"] == "in_flight"
     assert body["assignee"] == "treadmill-bert"
     assert body["branch"] == "feat/x"
-    assert body["updated_by"] == "coordinator-medicoder"
+    assert body["updated_by"] == "coordinator-ramjac"
     assert session.commit_calls == 1
 
 
@@ -190,7 +190,7 @@ def test_patch_updates_selectively(app_and_session) -> None:
         pr_number=None,
         notes=None,
         updated_at=datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc),
-        updated_by="coordinator-medicoder",
+        updated_by="coordinator-ramjac",
     )
     session.seed_board(existing)
 
@@ -224,7 +224,7 @@ def test_patch_clears_assignee_explicitly(app_and_session) -> None:
         pr_number=None,
         notes=None,
         updated_at=datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc),
-        updated_by="coordinator-medicoder",
+        updated_by="coordinator-ramjac",
     )
     session.seed_board(existing)
 

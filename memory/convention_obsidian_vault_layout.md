@@ -10,7 +10,7 @@ Obsidian vault files synced with Treadmill follow a deterministic naming convent
 
 **Path pattern:** `{slug}/{doc_path}.md`
 
-- **`{slug}`** — Normalized repo identifier (e.g., `treadmill`, `ramjac-prod`, `osmoai-osmo`). Derived from the repo's `RepoConfig` identifier and normalized to lowercase, hyphens, no special chars.
+- **`{slug}`** — Normalized repo identifier (e.g., `treadmill`, `ramjac-prod`, `ZEPHYR-zephyr`). Derived from the repo's `RepoConfig` identifier and normalized to lowercase, hyphens, no special chars.
 - **`{doc_path}`** — Document path within that repo's docs (e.g., `adrs/0078-bidirectional-obsidian-sync`, `plans/2026-06-05-vault-sync-daemon`, `learnings/2026-06-05-mobile-authoring`).
 
 This convention ensures:

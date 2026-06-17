@@ -16,8 +16,8 @@ This plan ships the three load-bearing pieces: the `team_configs` DB table, the 
 ## Success criteria
 
 1. `team_configs` table exists with columns `(id, repo, coordinator_label, worker_labels, created_at, updated_at)`.
-2. `treadmill plan submit --repo MediCoderHQ/medicoder --doc <path>` sets `created_by = "coordinator-medicoder"` automatically (no `--created-by` flag required).
-3. `treadmill repo add MediCoderHQ/medicoder` creates the `team_configs` row, writes `~/.treadmill/teams/medicoder/coordinator.env`, and issues `systemctl --user enable/start treadmill-channel@coordinator-medicoder.service`.
+2. `treadmill plan submit --repo RAMJAC/ramjac --doc <path>` sets `created_by = "coordinator-ramjac"` automatically (no `--created-by` flag required).
+3. `treadmill repo add RAMJAC/ramjac` creates the `team_configs` row, writes `~/.treadmill/teams/ramjac/coordinator.env`, and issues `systemctl --user enable/start treadmill-channel@coordinator-ramjac.service`.
 4. A new API endpoint `GET /api/v1/queue_depth?exclude_coordinator_owned=true` returns task counts that exclude coordinator-owned pending tasks; the autoscaler calls this endpoint so coordinator-owned work never inflates its scaling signal.
 5. On plan submit, a `plan.submitted` event is published via the existing `dispatcher.persist_and_publish()` mechanism with `coordinator_label` as a payload field, waking the coordinator.
 6. The coordinator session, on receiving `plan.submitted` as a channel notification (via the treadmill-events SQS filter), tracks the plan ID in working memory and immediately begins routing its tasks to available workers.
@@ -251,8 +251,8 @@ sequence_of_work:
          treadmill repo add <org/repo> [--coordinator-label <label>] [--workers bert,donna,carla]
          ```
          - Default coordinator label: `coordinator-<slug>` where slug = repo name
-           lowercased with `/` replaced by `-` (e.g. `MediCoderHQ/medicoder` →
-           `coordinator-medicoder`).
+           lowercased with `/` replaced by `-` (e.g. `RAMJAC/ramjac` →
+           `coordinator-ramjac`).
          - Default workers: `["treadmill-bert", "treadmill-donna", "treadmill-carla"]`.
 
       2. The command does the following in order:
@@ -364,11 +364,11 @@ sequence_of_work:
 ## Operator checklist (post-merge, requires credentials)
 
 1. Run the Alembic migration: `docker exec treadmill-api alembic upgrade head`
-2. Register the medicoder team: `treadmill repo add MediCoderHQ/medicoder`
-3. Verify `coordinator-medicoder` systemd service is active: `systemctl --user status treadmill-channel@coordinator-medicoder.service`
-4. Re-submit the scheduler migration plan (which was cancelled): `treadmill plan submit --repo MediCoderHQ/medicoder --doc .treadmill-docs/MediCoderHQ/medicoder/plans/2026-06-09-scraper-v2-scheduler-gcp.md` — no `--created-by` flag needed.
+2. Register the ramjac team: `treadmill repo add RAMJAC/ramjac`
+3. Verify `coordinator-ramjac` systemd service is active: `systemctl --user status treadmill-channel@coordinator-ramjac.service`
+4. Re-submit the scheduler migration plan (which was cancelled): `treadmill plan submit --repo RAMJAC/ramjac --doc .treadmill-docs/RAMJAC/ramjac/plans/2026-06-09-scraper-v2-scheduler-gcp.md` — no `--created-by` flag needed.
 5. Verify the autoscaler does NOT pick up the new tasks (check autoscaler log: `visible` count should stay 0 for coordinator-owned tasks).
-6. Verify coordinator-medicoder receives the `plan.submitted` event and begins briefing workers.
+6. Verify coordinator-ramjac receives the `plan.submitted` event and begins briefing workers.
 
 ## Risks / unknowns
 

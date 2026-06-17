@@ -61,7 +61,7 @@ class TeamSpec:
     """Inputs for one team's template install."""
 
     repo_slug: str
-    """The slug used in every label (e.g. ``medicoder``). Worker labels
+    """The slug used in every label (e.g. ``ramjac``). Worker labels
     are ``worker-<slug>-1``..``-N``; coordinator is ``coordinator-<slug>``;
     evaluator is ``evaluator-<slug>``."""
 
@@ -75,8 +75,8 @@ class TeamSpec:
     pr_base: str = "main"
     """Branch workers branch FROM and open PRs INTO; the coordinator
     auto-merges into it. Defaults to ``main`` so existing teams
-    (medicoder/treadmill) are byte-for-byte unchanged. Set per-team to a
-    team-controlled trunk (e.g. ``forecast/stage-a`` for the osmo team)
+    (ramjac/treadmill) are byte-for-byte unchanged. Set per-team to a
+    team-controlled trunk (e.g. ``forecast/stage-a`` for the zephyr team)
     so workers NEVER touch the repo's real mainline — workers pass it
     explicitly via ``gh pr create --base`` rather than relying on the
     repo default branch."""
@@ -157,7 +157,7 @@ def install_team(spec: TeamSpec) -> None:
     # Drop pre-ADR-0087 stale CLAUDE.md at the team-dir root. Claude
     # reads CLAUDE.md hierarchically (cwd + parents); without this
     # cleanup, the new per-label CLAUDE.md inherits the stale parent
-    # (ADR-0084 era, ~23KB on the existing medicoder team). See
+    # (ADR-0084 era, ~23KB on the existing ramjac team). See
     # docs/learnings/2026-06-10-template-install-layout-vs-launcher-
     # cwd-mismatch.md. Idempotent: no-op on second run.
     stale_root_claude = team_dir / "CLAUDE.md"

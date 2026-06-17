@@ -8,7 +8,7 @@ related: ADR-0087
 # Learning: gate-exclusion windows accumulate unvalidated deltas — the first post-reinstatement firing covers the whole window
 
 ## Trigger
-The medicoder chain-smoke gate was excluded from the coordinator's merge gate
+The ramjac chain-smoke gate was excluded from the coordinator's merge gate
 while its own CI hang was fixed (the nta pip-backtracking incident). During
 that exclusion window, the entire outbox consumer wave (4 PRs rewiring every
 chain consumer's emit path) merged without the chain smoke ever executing
@@ -42,7 +42,7 @@ architectural change first — not from the triggering PR.
 ## Proposed remediation
 Coordinator-side: the exclusion audit event carries the window's merge list
 (it already logs exclusions per the 2026-06-10 ruling); the reinstatement
-event names the covering run. Captured in the medicoder coordinator's gate
+event names the covering run. Captured in the ramjac coordinator's gate
 discipline as an addendum the same day; this learning generalizes it for
 other coordinators/repos.
 

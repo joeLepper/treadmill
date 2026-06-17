@@ -125,8 +125,8 @@ def _now() -> datetime:
 def _task_row(
     *,
     derived_status: str,
-    repo: str = "osmo/web",
-    account: str | None = "osmo",
+    repo: str = "zephyr/web",
+    account: str | None = "zephyr",
     title: str = "Sample task",
     run_id: uuid.UUID | None = None,
     workflow_id: str | None = "wf-quick",
@@ -202,7 +202,7 @@ def test_overview_happy_path() -> None:
         ],
         accounts=[
             {"name": "personal", "tokens_24h": 1_842_103},
-            {"name": "osmo", "tokens_24h": 5_310_788},
+            {"name": "zephyr", "tokens_24h": 5_310_788},
         ],
         events=[
             {
@@ -250,7 +250,7 @@ def test_overview_happy_path() -> None:
     assert blocked_task["pr"]["head_sha"] == "deadbee"  # short SHA (first 7)
 
     # Accounts strip carries the rolled-up token totals + USD estimate.
-    assert {a["name"] for a in body["accounts"]} == {"personal", "osmo"}
+    assert {a["name"] for a in body["accounts"]} == {"personal", "zephyr"}
     for acct in body["accounts"]:
         assert acct["usd_est_24h"] > 0
 
@@ -281,8 +281,8 @@ def _filterable_fixtures() -> _StubSession:
             ),
             _task_row(
                 derived_status="blocked-on-ci",
-                repo="osmo/web",
-                account="osmo",
+                repo="zephyr/web",
+                account="zephyr",
                 title="Auth callback async migration",
             ),
         ],
@@ -294,11 +294,11 @@ def test_overview_filter_by_repo() -> None:
     app = _build_app(session)
     with TestClient(app) as client:
         response = client.get(
-            "/api/v1/dashboard/overview", params={"repo": "osmo/web"},
+            "/api/v1/dashboard/overview", params={"repo": "zephyr/web"},
         )
     assert response.status_code == 200
     body = response.json()
-    assert [t["repo"] for t in body["tasks"]] == ["osmo/web"]
+    assert [t["repo"] for t in body["tasks"]] == ["zephyr/web"]
     # Bucket counts stay global so the page chrome doesn't lie.
     assert body["bucketCounts"]["total"] == 3
 
@@ -346,11 +346,11 @@ def test_overview_filter_by_account() -> None:
     app = _build_app(session)
     with TestClient(app) as client:
         response = client.get(
-            "/api/v1/dashboard/overview", params={"account": "osmo"},
+            "/api/v1/dashboard/overview", params={"account": "zephyr"},
         )
     assert response.status_code == 200
     body = response.json()
-    assert {t["account"] for t in body["tasks"]} == {"osmo"}
+    assert {t["account"] for t in body["tasks"]} == {"zephyr"}
 
 
 def test_overview_filter_by_query_substring() -> None:

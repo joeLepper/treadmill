@@ -177,7 +177,7 @@ def test_strips_whitespace_and_newline_from_token(
 ) -> None:
     # A trailing newline in the stored secret made the Bearer header an invalid
     # HTTP header value — claude exited 1 with "Header has invalid value",
-    # crashlooping the worker (2026-06-04 medicoder incident). The resolver must
+    # crashlooping the worker (2026-06-04 ramjac incident). The resolver must
     # strip surrounding whitespace so a sloppily-stored secret can't break auth.
     accounts = {
         "primary": {"type": "oauth", "secret_name": "treadmill/claude-primary"},
@@ -215,7 +215,7 @@ def test_502_when_secret_is_only_whitespace(
 def test_sanitizes_ansi_escapes_and_internal_newlines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The 2026-06-04 carebrain incident: the stored token was captured from a
+    # The 2026-06-04 hearth incident: the stored token was captured from a
     # colored terminal, so it carried ANSI escape sequences (\x1b[…m) AND
     # internal newlines — which .strip() can't touch (invalid Bearer header,
     # 80ms instant-fail). Sanitize must recover the clean token.

@@ -73,7 +73,7 @@ session's launcher survives as an orphan (alive, outside systemd's current
 tracking) while systemd tries to (re)start the unit, the single-instance
 guard in `tools/cc-channels/launch-session.sh` refuses ("launcher already
 alive for label … refusing to start") and systemd crashloops against it —
-coordinator-medicoderhq-medicoder (83 restarts), worker-medicoderhq-medicoder-1,
+coordinator-ramjac-ramjac (83 restarts), worker-ramjac-ramjac-1,
 and treadmill-carla (3111 restarts) all hit it on 2026-06-11. Recovery is
 manual: `systemctl stop` → kill the orphan launcher pid (from
 `~/.cc-channels/<label>/launcher.pid`) → `rm launcher.pid` →

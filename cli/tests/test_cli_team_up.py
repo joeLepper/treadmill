@@ -130,25 +130,25 @@ class TestLabelDerivation:
         )
 
     def test_derive_labels_default_3_workers(self) -> None:
-        coord, eval_, workers = team_module._derive_labels("medicoder", 3)
-        assert coord == "coordinator-medicoder"
-        assert eval_ == "evaluator-medicoder"
+        coord, eval_, workers = team_module._derive_labels("ramjac", 3)
+        assert coord == "coordinator-ramjac"
+        assert eval_ == "evaluator-ramjac"
         assert workers == [
-            "worker-medicoder-1",
-            "worker-medicoder-2",
-            "worker-medicoder-3",
+            "worker-ramjac-1",
+            "worker-ramjac-2",
+            "worker-ramjac-3",
         ]
 
     def test_derive_labels_custom_count(self) -> None:
-        coord, eval_, workers = team_module._derive_labels("medicoder", 5)
+        coord, eval_, workers = team_module._derive_labels("ramjac", 5)
         assert len(workers) == 5
-        assert workers[-1] == "worker-medicoder-5"
+        assert workers[-1] == "worker-ramjac-5"
 
     def test_role_for_label_inference(self) -> None:
         assert team_module._role_for_label("coordinator-x") == "coordinator"
         assert team_module._role_for_label("evaluator-x") == "evaluator"
         assert team_module._role_for_label("worker-x-1") == "worker"
-        assert team_module._role_for_label("worker-medicoder-3") == "worker"
+        assert team_module._role_for_label("worker-ramjac-3") == "worker"
 
 
 # ── Happy path ───────────────────────────────────────────────────────────
@@ -381,7 +381,7 @@ class TestTemplateInstallWiring:
 
 class TestOsmoFlags:
     """``--slug`` / ``--pr-base`` / ``--env-extra`` — the new-team-type
-    extension (osmo). Default behaviour (no flags) is asserted unchanged
+    extension (zephyr). Default behaviour (no flags) is asserted unchanged
     by the rest of the suite."""
 
     def test_pr_base_forwarded_to_install(
@@ -392,7 +392,7 @@ class TestOsmoFlags:
         stub_template_install: list[tuple[str, int, str]],
     ) -> None:
         result = runner.invoke(
-            team_app, ["osmoai/osmo", "--pr-base", "forecast/stage-a"]
+            team_app, ["ZEPHYR/zephyr", "--pr-base", "forecast/stage-a"]
         )
         assert result.exit_code == 0, result.stdout
         assert stub_template_install[0][2] == "forecast/stage-a"
@@ -405,14 +405,14 @@ class TestOsmoFlags:
         stub_template_install: list[tuple[str, int, str]],
     ) -> None:
         result = runner.invoke(
-            team_app, ["osmoai/osmo", "--slug", "joelepper-osmo"]
+            team_app, ["ZEPHYR/zephyr", "--slug", "joelepper-zephyr"]
         )
         assert result.exit_code == 0, result.stdout
         # labels use the override slug; team_configs.repo stays the real repo
         body = fake_api_client._request.call_args.kwargs["json"]
-        assert body["repo"] == "osmoai/osmo"
-        assert body["coordinator_label"] == "coordinator-joelepper-osmo"
-        assert (teams_dir / "joelepper-osmo").is_dir()
+        assert body["repo"] == "ZEPHYR/zephyr"
+        assert body["coordinator_label"] == "coordinator-joelepper-zephyr"
+        assert (teams_dir / "joelepper-zephyr").is_dir()
 
     def test_env_extra_appended_to_label_env(
         self,
@@ -422,19 +422,19 @@ class TestOsmoFlags:
         systemctl_success: list[list[str]],
         stub_template_install: list[tuple[str, int, str]],
     ) -> None:
-        extra = tmp_path / "osmo.env"
-        extra.write_text("source /home/joe/osmo/.env\nOSMO_PYTHON=/home/joe/osmo/tools/osmo-python\n")
+        extra = tmp_path / "zephyr.env"
+        extra.write_text("source /home/joe/zephyr/.env\nZEPHYR_PYTHON=/home/joe/zephyr/tools/zephyr-python\n")
         result = runner.invoke(
             team_app,
-            ["osmoai/osmo", "--slug", "joelepper-osmo", "--env-extra", str(extra)],
+            ["ZEPHYR/zephyr", "--slug", "joelepper-zephyr", "--env-extra", str(extra)],
         )
         assert result.exit_code == 0, result.stdout
         env_body = (
-            teams_dir / "joelepper-osmo" / "worker-joelepper-osmo-1"
-            / "worker-joelepper-osmo-1.env"
+            teams_dir / "joelepper-zephyr" / "worker-joelepper-zephyr-1"
+            / "worker-joelepper-zephyr-1.env"
         ).read_text()
         assert "TREADMILL_ROLE=worker" in env_body          # standard vars still present
-        assert "OSMO_PYTHON=/home/joe/osmo/tools/osmo-python" in env_body  # extra appended
+        assert "ZEPHYR_PYTHON=/home/joe/zephyr/tools/zephyr-python" in env_body  # extra appended
 
     def test_env_extra_missing_file_errors(
         self,
@@ -442,7 +442,7 @@ class TestOsmoFlags:
         fake_api_client: MagicMock,
     ) -> None:
         result = runner.invoke(
-            team_app, ["osmoai/osmo", "--env-extra", "/nonexistent/osmo.env"]
+            team_app, ["ZEPHYR/zephyr", "--env-extra", "/nonexistent/zephyr.env"]
         )
         assert result.exit_code == 1
 

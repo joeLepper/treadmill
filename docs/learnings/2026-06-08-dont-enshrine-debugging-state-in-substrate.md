@@ -1,7 +1,7 @@
 # Don't enshrine debugging state in substrate-as-code
 
 **Date:** 2026-06-08
-**Context:** Medicoder Plan C substrate-reconciliation, Stream 5 wrap (pulumi-up follow-up on 2 subscription filter REPLACEs)
+**Context:** Ramjac Plan C substrate-reconciliation, Stream 5 wrap (pulumi-up follow-up on 2 subscription filter REPLACEs)
 **Tags:** `pulumi`, `substrate-as-code`, `reconciliation`, `target-state`
 
 ## The trigger
@@ -40,5 +40,5 @@ When reconciling substrate after operators ran gcloud-direct / terraform-direct 
 
 ## Cross-references
 
-- [Cloud Run command/args bypass entrypoint](../../../medicoder/docs/learnings/2026-06-07-cloud-run-command-args-bypasses-entrypoint-skips-alembic.md) — same shape, different domain: a workaround captured into substrate locked in an alembic-bypass for a window. The substrate fix (Dockerfile CMD) was the structural close; the substrate-capture of the override was the temporary bridge.
+- [Cloud Run command/args bypass entrypoint](../../../ramjac/docs/learnings/2026-06-07-cloud-run-command-args-bypasses-entrypoint-skips-alembic.md) — same shape, different domain: a workaround captured into substrate locked in an alembic-bypass for a window. The substrate fix (Dockerfile CMD) was the structural close; the substrate-capture of the override was the temporary bridge.
 - [feedback-pulumi-iambinding-authoritative-race](../../../.claude/projects/-home-joe-treadmill/memory/feedback_pulumi_iambinding_authoritative_race.md) — Donna's gcloud-direct cloudtrace.agent grant on otel-collector WAS target state (the substrate just had the IAMBinding-loop bug). That made it a category-1 reconciliation (update substrate, apply, done). Category matters.

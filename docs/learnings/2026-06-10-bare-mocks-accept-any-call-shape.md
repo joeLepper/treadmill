@@ -2,13 +2,13 @@
 date: 2026-06-10
 trigger: pattern
 status: captured
-related: medicoder #1323 (logger sweep), #1265/#1310 (the three instances)
+related: ramjac #1323 (logger sweep), #1265/#1310 (the three instances)
 ---
 
 # Learning: bare MagicMock loggers accept any call shape — spec= moves the failure into the test
 
 ## Trigger
-Three medicoder services crashed in production error paths on dict-positional
+Three ramjac services crashed in production error paths on dict-positional
 StructuredLogger calls (DED #1265, anonymizer, MAR #1310 layer 11). The
 follow-up sweep (#1323) found the class extinct but answered WHY tests missed
 all three: the suites inject bare MagicMock() loggers, which accept any call
@@ -40,5 +40,5 @@ Reviewer-checklist line + (later) a lint for MagicMock() assigned to an
 attribute whose real type is importable. Not wired anywhere yet.
 
 ## Notes
-Medicoder is adopting it via #1323's review rider; this learning is the
+Ramjac is adopting it via #1323's review rider; this learning is the
 treadmill-side export.

@@ -58,7 +58,7 @@ class RepoConfig:
     # behavior-neutral.
     is_public: bool = False
     # Per-repo extra sensitive-string blocklist (ADR-0078). The gate
-    # always checks the hardcoded baseline (medicoder slug variants +
+    # always checks the hardcoded baseline (ramjac slug variants +
     # the public-repo account-id) plus any substrings declared here.
     # ``None`` means "baseline only". Stored as JSONB list of strings.
     sensitive_strings: list[str] | None = None

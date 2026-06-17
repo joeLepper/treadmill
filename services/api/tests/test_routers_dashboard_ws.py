@@ -518,7 +518,7 @@ def test_plan_ids_filter_drops_ownerless_events() -> None:
 
 
 def test_coordinator_label_forwards_when_plan_repo_matches(monkeypatch) -> None:
-    """``?coordinator_label=coordinator-medicoder`` forwards a
+    """``?coordinator_label=coordinator-ramjac`` forwards a
     plan.submitted event whose plan belongs to a repo whose team_config
     points at this coordinator. Closes the ADR-0085+0086 in-session
     pickup gap: new plans have created_by=<orchestrator> so the
@@ -527,13 +527,13 @@ def test_coordinator_label_forwards_when_plan_repo_matches(monkeypatch) -> None:
     """
     from treadmill_api.routers.dashboard import ws as ws_module
 
-    plan_owned = str(uuid.uuid4())     # belongs to coordinator-medicoder
+    plan_owned = str(uuid.uuid4())     # belongs to coordinator-ramjac
     plan_other = str(uuid.uuid4())     # belongs to coordinator-otherrepo
     plan_unknown = str(uuid.uuid4())   # no team_config row
 
     async def stub_coord_lookup(plan_id, session_factory=None):
         if plan_id == plan_owned:
-            return "coordinator-medicoder"
+            return "coordinator-ramjac"
         if plan_id == plan_other:
             return "coordinator-otherrepo"
         return None
@@ -551,7 +551,7 @@ def test_coordinator_label_forwards_when_plan_repo_matches(monkeypatch) -> None:
     with TestClient(app) as client:
         with client.websocket_connect(
             "/api/v1/dashboard/ws/events"
-            "?coordinator_label=coordinator-medicoder"
+            "?coordinator_label=coordinator-ramjac"
         ) as ws:
             assert ws.receive_json()["type"] == "hello"
 
@@ -590,7 +590,7 @@ def test_coordinator_label_composes_with_created_by_and_plan_ids_by_or(
 
     async def stub_coord(plan_id, session_factory=None):
         if plan_id == plan_via_coord_label:
-            return "coordinator-medicoder"
+            return "coordinator-ramjac"
         return None
 
     monkeypatch.setattr(ws_module, "_lookup_created_by", stub_created_by)
@@ -608,7 +608,7 @@ def test_coordinator_label_composes_with_created_by_and_plan_ids_by_or(
             "/api/v1/dashboard/ws/events"
             "?created_by=lbl-a"
             f"&plan_ids={plan_via_plan_ids}"
-            "&coordinator_label=coordinator-medicoder"
+            "&coordinator_label=coordinator-ramjac"
         ) as ws:
             assert ws.receive_json()["type"] == "hello"
 
@@ -647,7 +647,7 @@ def test_coordinator_label_lookup_is_cached(monkeypatch) -> None:
     async def stub_lookup(pid, session_factory=None):
         nonlocal call_count
         call_count += 1
-        return "coordinator-medicoder"
+        return "coordinator-ramjac"
 
     monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
 
@@ -655,7 +655,7 @@ def test_coordinator_label_lookup_is_cached(monkeypatch) -> None:
     with TestClient(app) as client:
         with client.websocket_connect(
             "/api/v1/dashboard/ws/events"
-            "?coordinator_label=coordinator-medicoder"
+            "?coordinator_label=coordinator-ramjac"
         ) as ws:
             assert ws.receive_json()["type"] == "hello"
             for _ in range(5):
@@ -678,7 +678,7 @@ def test_coordinator_label_lookup_failure_drops_event(monkeypatch) -> None:
     async def stub_lookup(pid, session_factory=None):
         if pid == plan_failing:
             raise RuntimeError("simulated DB blip")
-        return "coordinator-medicoder"
+        return "coordinator-ramjac"
 
     monkeypatch.setattr(ws_module, "_lookup_coordinator_label", stub_lookup)
 
@@ -689,7 +689,7 @@ def test_coordinator_label_lookup_failure_drops_event(monkeypatch) -> None:
     with TestClient(app) as client:
         with client.websocket_connect(
             "/api/v1/dashboard/ws/events"
-            "?coordinator_label=coordinator-medicoder"
+            "?coordinator_label=coordinator-ramjac"
         ) as ws:
             assert ws.receive_json()["type"] == "hello"
             _broadcast_local(rec_fail)

@@ -50,8 +50,8 @@ parented to the tmux server's cgroup, invisible to `KillMode`).
 - `treadmill-team-scheduler.service` — runs the team-scheduler daemon (ADR-0091).
   Uses a host-global flock so a competing manual run exits 0 rather than
   loop-fighting.
-- `treadmill-channel@coordinator-medicoder.service` — static override for the
-  medicoder coordinator unit (non-template instance).
+- `treadmill-channel@coordinator-ramjac.service` — static override for the
+  ramjac coordinator unit (non-template instance).
 
 ## Recent changes
 

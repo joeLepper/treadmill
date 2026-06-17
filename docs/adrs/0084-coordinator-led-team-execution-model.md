@@ -9,7 +9,7 @@
 
 ### The experiment that motivated this ADR
 
-On 2026-06-07, the operator ran a multi-session sprint using four named orchestrator sessions (alan, bert, carla, donna) to execute a set of coordinated medicoder tasks. The sessions communicated via cc-relay (see ADR-0067 / ADR-0068), shared plan context, divided work, warned each other about file conflicts before they happened, and asked for help when stuck. Result: substantially more work completed with fewer total tokens than a comparable batch of isolated workers looping independently.
+On 2026-06-07, the operator ran a multi-session sprint using four named orchestrator sessions (alan, bert, carla, donna) to execute a set of coordinated ramjac tasks. The sessions communicated via cc-relay (see ADR-0067 / ADR-0068), shared plan context, divided work, warned each other about file conflicts before they happened, and asked for help when stuck. Result: substantially more work completed with fewer total tokens than a comparable batch of isolated workers looping independently.
 
 The core efficiency gain was not from better individual workers — it was from the elimination of rework. Conflicts were resolved before they created dirty-branch states. Gate failures that one worker had already solved were shared before a second worker hit the same wall. Workers sized their scope by reading what others were doing rather than discovering the conflict at merge time. The reactive-loop model (ralph loop → wf-feedback → wf-architecture-resolve → cap) is correct in shape but fires too late: most of its iterations address conditions that pre-push communication would have prevented.
 

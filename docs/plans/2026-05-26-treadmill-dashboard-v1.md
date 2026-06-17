@@ -59,7 +59,7 @@ Two-to-three focused dev days end-to-end, split roughly: Claude Design visual ex
 - Total non-terminal tasks (count by stage).
 - Worker fleet — running worker count, autoscaler "alive since" heartbeat timestamp.
 - Scheduler last-tick timestamp.
-- Per-account spend last 24h, by account name (`personal`, `osmo`, …) — token total + USD estimate.
+- Per-account spend last 24h, by account name (`personal`, `zephyr`, …) — token total + USD estimate.
 - Escalations badge (count of tasks carrying a `task.escalated_to_operator` event).
 
 **Main table — non-terminal tasks:**
@@ -96,7 +96,7 @@ Route: `/tasks/:task_id`.
 
 **Header:**
 - Title, repo (link to GitHub repo), `derived_status` (large badge), plan link, created/started/completed timestamps.
-- Account routing badge — which Claude account this task bills (`personal` / `osmo` / etc., per ADR-0055).
+- Account routing badge — which Claude account this task bills (`personal` / `zephyr` / etc., per ADR-0055).
 
 **PR strip (if `task_prs` row exists for this task):**
 Source: `task_prs` + `task_mergeability`.
@@ -282,7 +282,7 @@ Captured here so the worker dispatcher doesn't pick them up by accident:
 
 ### Dispatcher hints
 
-- All B1–B6 worker tasks should carry `claude_account: personal` (the operator's own dashboard work bills personal, not osmo/bunkhouse) — see ADR-0055.
+- All B1–B6 worker tasks should carry `claude_account: personal` (the operator's own dashboard work bills personal, not zephyr/bunkhouse) — see ADR-0055.
 - All tasks should reference ADR-0056 and `docs/dashboard/DESIGN.md` in their initial prompt.
 - B7 is read-only; can run on any account.
 - The seven parallel tasks (B1–B7) collapse PR B from "one bigass PR" to a fan-out of seven small PRs that merge in any order, plus three small sequenced ones. Realistic wall-clock with the autoscaler at default capacity: ~one Treadmill ralph-loop per task = ~25–40 min/task, four in flight at once = PR B lands inside half a day instead of a focused multi-day session.

@@ -1003,8 +1003,8 @@ def test_build_deployment_config_extracts_claude_accounts_from_outputs(
     in ``aws.claude_accounts`` with the deterministic secret_name and the
     default OAuth type. Sorted by name for stable YAML output."""
     extra = dict(synthetic_outputs)
-    extra["SecretsClaudeAccountSecretOsmoNameDEADBEEF"] = (
-        "treadmill-acme/claude-account-osmo"
+    extra["SecretsClaudeAccountSecretZephyrNameDEADBEEF"] = (
+        "treadmill-acme/claude-account-zephyr"
     )
     extra["SecretsClaudeAccountSecretPersonalNameDEADBEEF"] = (
         "treadmill-acme/claude-account-personal"
@@ -1020,14 +1020,14 @@ def test_build_deployment_config_extracts_claude_accounts_from_outputs(
 
     assert config["aws"]["claude_accounts"] == [
         {
-            "name": "osmo",
-            "type": "oauth",
-            "secret_name": "treadmill-acme/claude-account-osmo",
-        },
-        {
             "name": "personal",
             "type": "oauth",
             "secret_name": "treadmill-acme/claude-account-personal",
+        },
+        {
+            "name": "zephyr",
+            "type": "oauth",
+            "secret_name": "treadmill-acme/claude-account-zephyr",
         },
     ]
     # ``claude_default_account`` is intentionally not auto-populated; the

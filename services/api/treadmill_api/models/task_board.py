@@ -25,7 +25,7 @@ Schema invariants
   schema changes to vocab evolution).
 - ``updated_at`` defaults to ``now()`` at insert; the PATCH endpoint
   refreshes it on every write.
-- ``updated_by`` records the writer's label (e.g. ``coordinator-medicoder``)
+- ``updated_by`` records the writer's label (e.g. ``coordinator-ramjac``)
   for audit; nullable because the initial reconciliation INSERT may be
   triggered by a startup task with no specific operator label.
 

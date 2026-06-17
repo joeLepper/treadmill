@@ -13,7 +13,7 @@ single-binary tools that ship as one statically-linked file (e.g. cosign,
 hadolint, sccache); it does not work for tools that ship as a tarball
 containing a directory of sibling binaries.
 
-The first real-world fault surfaced on Plan A (GCP substrate, MediCoderHQ/medicoder,
+The first real-world fault surfaced on Plan A (GCP substrate, RAMJAC/ramjac,
 2026-06-05). The bootstrap task's `wf-feedback.action` check ran
 `pulumi preview --stack <stack>`. The worker's overlay had no `pulumi`
 binary; the check failed with `/bin/sh: 2: pulumi: not found`. The

@@ -10,7 +10,7 @@ related: ADR-0087, plan-2026-06-10-adr-0087-implementation
 ## Trigger
 After merging ADR-0087 PR-D (#292, coordinator template) and PR-E (#291, worker
 hooks + install.py), the plan's next step was "restart the live coordinator/worker
-sessions to pick up the new templates." Inspecting the live `coordinator-medicoder`
+sessions to pick up the new templates." Inspecting the live `coordinator-ramjac`
 on disk before restarting revealed the restart would have been a no-op — the running
 session reads a different file than `install_team()` writes.
 
@@ -22,7 +22,7 @@ Three concrete layout mismatches between `tools/team-templates/install.py` and
    `~/.treadmill/teams/<slug>/` and sources `<team>/coordinator.env`. Claude Code
    reads `CLAUDE.md` from cwd (and parents). `install_team()` renders the coordinator
    prompt to the per-label *subdir* `<team>/coordinator-<slug>/CLAUDE.md`, which the
-   running session never reads. The live coordinator-medicoder was still reading the
+   running session never reads. The live coordinator-ramjac was still reading the
    stale ADR-0084 `<team>/CLAUDE.md` (23KB, pre-ADR-0087).
 2. Worker `settings.json` is rendered to `<team>/<label>/settings.json`, but Claude
    Code discovers project settings at `<cwd>/.claude/settings.json`. The PostToolUse
@@ -36,7 +36,7 @@ even moving a session's cwd into its per-label subdir would still inherit the st
 `<team>/CLAUDE.md` as a parent. The reconciliation has to remove/replace that root
 file too.
 
-The compound effect: a restart of `coordinator-medicoder` would re-load the stale
+The compound effect: a restart of `coordinator-ramjac` would re-load the stale
 ADR-0084 prompt from the root file (winning hierarchically over the un-read
 per-label new file) and worker spawns would have no relay-inject hook registered.
 
@@ -105,8 +105,8 @@ A single wiring PR reconciles all three seams:
    cwd for every role family so a future refactor cannot reintroduce either bug.
 
 ### Transcript migration
-Only `coordinator-medicoder` had a live transcript before PR-H. Its cwd changes
-from `<team>/` to `<team>/coordinator-medicoder/`, which changes the
+Only `coordinator-ramjac` had a live transcript before PR-H. Its cwd changes
+from `<team>/` to `<team>/coordinator-ramjac/`, which changes the
 `claude --resume` transcript directory slug (see
 `2026-06-04-systemd-default-cwd-breaks-claude-resume.md`). The chosen migration is
 **option 3** (Bert + Alan + Carla consensus): accept the transcript loss; rely on

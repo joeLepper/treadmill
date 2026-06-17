@@ -31,7 +31,7 @@ const secondsAgo = (s: number) => new Date(Date.now() - s * 1000);
 
 export const ACCOUNTS: Account[] = [
   { name: 'personal', tokens_24h: 1_842_103, usd_est_24h: 24.18 },
-  { name: 'osmo', tokens_24h: 5_310_788, usd_est_24h: 71.04 },
+  { name: 'zephyr', tokens_24h: 5_310_788, usd_est_24h: 71.04 },
   { name: 'bunkhouse', tokens_24h: 612_440, usd_est_24h: 9.21 },
   { name: 'scratch', tokens_24h: 96_220, usd_est_24h: 1.42 },
 ];
@@ -49,9 +49,9 @@ let TASKS: Task[] = [
   {
     id: 'tsk_8f3a2b1c',
     title: 'Migrate auth callbacks to async/await',
-    repo: 'osmo/web',
+    repo: 'zephyr/web',
     repo_mode: 'conform',
-    account: 'osmo',
+    account: 'zephyr',
     plan_id: 'pln_q3_auth_refresh',
     derived_status: 'blocked-on-ci',
     last_activity: minutesAgo(12),
@@ -103,9 +103,9 @@ let TASKS: Task[] = [
   {
     id: 'tsk_a01ec773',
     title: 'Rate limit headers for v2 ingest endpoints',
-    repo: 'osmo/data-pipeline',
+    repo: 'zephyr/data-pipeline',
     repo_mode: 'conform',
-    account: 'osmo',
+    account: 'zephyr',
     plan_id: 'pln_v2_ingest',
     derived_status: 'awaiting_review',
     last_activity: minutesAgo(3),
@@ -134,9 +134,9 @@ let TASKS: Task[] = [
   {
     id: 'tsk_1b6f5d22',
     title: 'Snapshot restore failing on >2GB volumes',
-    repo: 'osmo/data-pipeline',
+    repo: 'zephyr/data-pipeline',
     repo_mode: 'conform',
-    account: 'osmo',
+    account: 'zephyr',
     plan_id: 'pln_snapshot_repro',
     derived_status: 'wf-feedback: executing',
     last_activity: secondsAgo(45),
@@ -278,7 +278,7 @@ let EVENTS: Event[] = [
     entity_type: 'task',
     action: 'escalated_to_operator',
     task_id: 'tsk_8f3a2b1c',
-    repo: 'osmo/web',
+    repo: 'zephyr/web',
     created_at: minutesAgo(12),
     detail: 'CI failing > 10m',
   },
@@ -287,7 +287,7 @@ let EVENTS: Event[] = [
     entity_type: 'step',
     action: 'failed',
     task_id: 'tsk_8f3a2b1c',
-    repo: 'osmo/web',
+    repo: 'zephyr/web',
     created_at: minutesAgo(12),
     detail: 'review step · e2e-auth failed',
   },
@@ -296,7 +296,7 @@ let EVENTS: Event[] = [
     entity_type: 'github',
     action: 'ci_failed',
     task_id: 'tsk_8f3a2b1c',
-    repo: 'osmo/web',
+    repo: 'zephyr/web',
     created_at: minutesAgo(13),
     detail: 'e2e-auth · run #4128',
   },
@@ -332,7 +332,7 @@ let EVENTS: Event[] = [
     entity_type: 'github',
     action: 'pr_opened',
     task_id: 'tsk_a01ec773',
-    repo: 'osmo/data-pipeline',
+    repo: 'zephyr/data-pipeline',
     created_at: minutesAgo(22),
     detail: 'PR #982',
   },
@@ -341,7 +341,7 @@ let EVENTS: Event[] = [
     entity_type: 'step',
     action: 'started',
     task_id: 'tsk_1b6f5d22',
-    repo: 'osmo/data-pipeline',
+    repo: 'zephyr/data-pipeline',
     created_at: secondsAgo(45),
     detail: 'feedback · responding to review',
   },
@@ -368,7 +368,7 @@ let EVENTS: Event[] = [
     entity_type: 'step',
     action: 'completed',
     task_id: 'tsk_a01ec773',
-    repo: 'osmo/data-pipeline',
+    repo: 'zephyr/data-pipeline',
     created_at: minutesAgo(3),
     detail: 'code · 412 LOC · $0.43',
   },
@@ -377,7 +377,7 @@ let EVENTS: Event[] = [
     entity_type: 'github',
     action: 'ci_success',
     task_id: 'tsk_a01ec773',
-    repo: 'osmo/data-pipeline',
+    repo: 'zephyr/data-pipeline',
     created_at: minutesAgo(4),
     detail: 'all checks passed',
   },
@@ -395,7 +395,7 @@ let EVENTS: Event[] = [
     entity_type: 'plan',
     action: 'dispatched',
     task_id: null,
-    repo: 'osmo/data-pipeline',
+    repo: 'zephyr/data-pipeline',
     created_at: minutesAgo(35),
     detail: 'pln_v2_ingest · 4 tasks',
   },
@@ -637,12 +637,12 @@ export function getTaskDetail(taskId: string): TaskDetail {
 }
 
 const REPO_DOCS: Record<string, RepoDocs> = {
-  'osmo/web': {
+  'zephyr/web': {
     arch: '.treadmill/arch.md',
     plans: 3,
     last_updated: minutesAgo(180),
   },
-  'osmo/data-pipeline': {
+  'zephyr/data-pipeline': {
     arch: '.treadmill/arch.md',
     plans: 2,
     last_updated: minutesAgo(1200),

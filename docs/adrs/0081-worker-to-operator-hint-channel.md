@@ -275,7 +275,7 @@ to keep the feature.
   v1 accepts last-write-wins; multi-operator races are not the
   expected case (one operator session per task per the
   `created_by` convention).
-- For ADAPT-mode repos (medicoder, osmoai) the operator session
+- For ADAPT-mode repos (ramjac, ZEPHYR) the operator session
   may be a different label than the `created_by` if the
   bootstrap was operator-initiated. Plan must verify the
   cc-channels relay path correctly routes to the active

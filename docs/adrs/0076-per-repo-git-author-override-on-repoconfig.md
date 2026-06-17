@@ -14,17 +14,17 @@ itself, where the operator agreed to the attribution, and tolerable on
 RAMJAC, where the RAMJAC org is comfortable with bot-authored commits.
 
 It is **not tolerable on the next adapt-mode bootstrap target,
-osmoai/osmo**. The operator (Joe Lepper) wants commits landing there to
+ZEPHYR/zephyr**. The operator (Joe Lepper) wants commits landing there to
 show under his own identity — `Joe Lepper <josephlepper@gmail.com>` —
 with no `Co-Authored-By` trailer and no Anthropic or Treadmill string
 anywhere in the commit metadata. The constraint is product-shaped:
-osmoai/osmo is owned by a separate org with its own contributor norms,
+ZEPHYR/zephyr is owned by a separate org with its own contributor norms,
 and bot-attributed commits in their PR diffs are a cultural friction
 that the operator has decided to avoid for the initial passes.
 
 The blocking gap is on the **storage side**: `repo_configs` has no
 columns for per-repo author identity or commit-trailer policy. The
-worker has no way to learn that osmoai/osmo wants a different identity
+worker has no way to learn that ZEPHYR/zephyr wants a different identity
 than RAMJAC, and the operator has no way to express it. ADR-0049's
 dual-identity model already separated the GitHub App seam (PR author +
 merger) from the worker's identity-on-disk, so the schema layer is the
@@ -47,7 +47,7 @@ This ADR scopes to (1). (2) is explicitly deferred — see Follow-ups.
 The PR-level question gets its own ADR because the trade-offs are
 different (per-repo PAT vs. installing the GitHub App on the target
 org). The operator stated that for initial passes against
-osmoai/osmo, App-authored PRs are acceptable as long as the *commits*
+ZEPHYR/zephyr, App-authored PRs are acceptable as long as the *commits*
 inside the PR show the operator's identity.
 
 ## Decision
@@ -93,7 +93,7 @@ the current identity because the override columns default to NULL.
   identity is a property of where the commit is going, not who the
   worker is running as. The same account (`personal`) commits to
   Treadmill (where `treadmill-agent` is fine) and would commit to
-  osmoai/osmo (where it isn't). Per-repo is the load-bearing axis.
+  ZEPHYR/zephyr (where it isn't). Per-repo is the load-bearing axis.
 - **Read the operator's git config from `~/.gitconfig` and use that
   for all worker commits.** Rejected: workers run on Cloud Run, not on
   the operator's host; there is no `~/.gitconfig` to read, and even
@@ -109,7 +109,7 @@ the current identity because the override columns default to NULL.
   --trailer="Co-Authored-By: ..."` inline flag chain only, no schema
   storage; let the operator pass identity per dispatch.** Rejected: a
   dispatch-time override is per-task, not per-repo, and an operator
-  who forgets the override on one of fifty tasks against osmoai/osmo
+  who forgets the override on one of fifty tasks against ZEPHYR/zephyr
   has already lost. Per-repo storage means the operator chooses once
   at onboarding and every subsequent dispatch inherits.
 
@@ -121,7 +121,7 @@ the current identity because the override columns default to NULL.
   policy without code changes — fill in the three columns at
   onboarding and every Treadmill PR against that repo carries the
   intended identity.
-- The osmoai/osmo bootstrap unblocks immediately on Treadmill's side:
+- The ZEPHYR/zephyr bootstrap unblocks immediately on Treadmill's side:
   with this in place, the only remaining identity question is the
   PR-author one (sibling ADR, see Follow-ups).
 - The trailer suppression knob also covers a class of conform-repo
@@ -165,7 +165,7 @@ the current identity because the override columns default to NULL.
 ### Neutral
 
 - The PR-level identity (treadmill-agent[bot]) is unchanged. A PR
-  against osmoai/osmo will still show "opened by treadmill-agent[bot]"
+  against ZEPHYR/zephyr will still show "opened by treadmill-agent[bot]"
   in the GitHub UI. The operator has accepted that for initial
   passes.
 
@@ -208,10 +208,10 @@ sequenceDiagram
   secret pattern). Out of scope here; that ADR will need to weigh PAT
   rotation, scope minimization, and the loss of App-side conveniences
   against the attribution benefit.
-- **Worker clone path for osmoai/osmo.** The Treadmill GitHub App is
+- **Worker clone path for ZEPHYR/zephyr.** The Treadmill GitHub App is
   installed on the `joeLepper` org and the RAMJAC org but not on
-  `osmoai`. Before any Forecast work can dispatch, either the App
-  needs to be installed on osmoai (operator + osmoai admin task) or
+  `ZEPHYR`. Before any Forecast work can dispatch, either the App
+  needs to be installed on ZEPHYR (operator + ZEPHYR admin task) or
   the worker needs a separate clone path keyed on a PAT for the
   target repo. Tracked alongside the PR-identity ADR above.
 - **Operator UI for the override columns.** The CLI / dashboard
@@ -224,7 +224,7 @@ sequenceDiagram
   merger both moved to `treadmill-agent[bot]`).
 - ADR-0050 — Onboarding + `RepoConfig` as the per-repo source of
   truth.
-- ADR-0054 — Adapt-mode context-docs over the API; osmoai/osmo will
+- ADR-0054 — Adapt-mode context-docs over the API; ZEPHYR/zephyr will
   be the second adapt-mode target after RAMJAC.
 - ADR-0055 — Per-repo `claude_account` override; the schema shape
   here mirrors that ADR (nullable override → deployment default).

@@ -46,17 +46,17 @@ The convention is enforced by `tools/cc-channels/launch-session.sh`:
 when the label matches `coordinator-*`, the launcher pins the workdir
 to the team directory and sources `coordinator.env` from there.
 
-To start a coordinator for the `medicoder` repo:
+To start a coordinator for the `ramjac` repo:
 
 ```bash
-systemctl --user start treadmill-channel@coordinator-medicoder.service
+systemctl --user start treadmill-channel@coordinator-ramjac.service
 ```
 
 The unit will:
 
-1. Create `~/.treadmill/teams/medicoder/` if absent.
-2. Source `~/.treadmill/teams/medicoder/coordinator.env` if present.
-3. Set the session workdir to `~/.treadmill/teams/medicoder/`.
+1. Create `~/.treadmill/teams/ramjac/` if absent.
+2. Source `~/.treadmill/teams/ramjac/coordinator.env` if present.
+3. Set the session workdir to `~/.treadmill/teams/ramjac/`.
 4. Skip the dispatch-reminder print (coordinators route signals; they do
    not call `treadmill plan submit`).
 5. Launch the Claude Code session with the standard treadmill-events
@@ -114,17 +114,17 @@ for *operating* a coordinator session.
 
 ## Phase 5 launch
 
-The Phase 5 end-to-end proof runs against RAMJAC (medicoder). Three
+The Phase 5 end-to-end proof runs against RAMJAC (ramjac). Three
 pieces are pre-staged for one-command launch:
 
 1. A specialized systemd unit at
-   `tools/cc-channels/systemd/treadmill-channel@coordinator-medicoder.service`
-   — sets `TREADMILL_ROLE=coordinator`, `TREADMILL_LABEL=coordinator-medicoder`,
-   `EnvironmentFile=%h/.treadmill/teams/medicoder/coordinator.env` (the
-   `-` prefix tolerates a missing file), `WorkingDirectory=%h/.treadmill/teams/medicoder`.
+   `tools/cc-channels/systemd/treadmill-channel@coordinator-ramjac.service`
+   — sets `TREADMILL_ROLE=coordinator`, `TREADMILL_LABEL=coordinator-ramjac`,
+   `EnvironmentFile=%h/.treadmill/teams/ramjac/coordinator.env` (the
+   `-` prefix tolerates a missing file), `WorkingDirectory=%h/.treadmill/teams/ramjac`.
 2. The `launch-session.sh` label-detection from Task 3A — also sources
    `coordinator.env` and pins workdir, so the two layers agree even when
-   the unit is bypassed (direct `launch-session.sh coordinator-medicoder`
+   the unit is bypassed (direct `launch-session.sh coordinator-ramjac`
    on the operator's terminal).
 3. A wrapper `tools/coordinator/launch-coordinator.sh` that reconciles
    the plan id into the env file and starts the unit.
@@ -133,12 +133,12 @@ pieces are pre-staged for one-command launch:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-ln -s ~/treadmill/tools/cc-channels/systemd/treadmill-channel@coordinator-medicoder.service \
-    ~/.config/systemd/user/treadmill-channel@coordinator-medicoder.service
+ln -s ~/treadmill/tools/cc-channels/systemd/treadmill-channel@coordinator-ramjac.service \
+    ~/.config/systemd/user/treadmill-channel@coordinator-ramjac.service
 systemctl --user daemon-reload
 ```
 
-The unit name uses `@coordinator-medicoder` literally — systemd resolves
+The unit name uses `@coordinator-ramjac` literally — systemd resolves
 this as a concrete unit name and uses the specialized file (not the
 generic `treadmill-channel@.service` template).
 
@@ -146,21 +146,21 @@ generic `treadmill-channel@.service` template).
 
 ```bash
 ~/treadmill/tools/coordinator/launch-coordinator.sh \
-    --repo medicoder --plan-id <plan-uuid>
+    --repo ramjac --plan-id <plan-uuid>
 ```
 
 The wrapper:
-- Ensures `~/.treadmill/teams/medicoder/` exists.
+- Ensures `~/.treadmill/teams/ramjac/` exists.
 - Reconciles `coordinator.env` — replaces an existing
   `TREADMILL_COORDINATOR_PLANS=` line if present (preserving any other
   vars the API wrote, e.g. `TREADMILL_OPERATOR_INSTANCE`), or writes
   `TREADMILL_ROLE` + the plan id if the file is fresh.
-- Runs `systemctl --user start treadmill-channel@coordinator-medicoder.service`.
+- Runs `systemctl --user start treadmill-channel@coordinator-ramjac.service`.
 
 ### Observing the session
 
 ```bash
-tmux attach -t coordinator-medicoder
+tmux attach -t coordinator-ramjac
 ```
 
 systemd's `Restart=on-failure` brings the unit back if the session
@@ -171,7 +171,7 @@ amend rate ≤ 30%) is measured across the session's plan-close events.
 ### Stopping cleanly
 
 ```bash
-systemctl --user stop treadmill-channel@coordinator-medicoder.service
+systemctl --user stop treadmill-channel@coordinator-ramjac.service
 ```
 
 The launcher sets a SIGTERM/SIGINT trap that suppresses systemd's
@@ -180,8 +180,8 @@ session end still triggers restart.
 
 ### Adding a new repo
 
-Copy `treadmill-channel@coordinator-medicoder.service` and substitute
-every `medicoder` with the new slug. Same install-via-symlink, same
+Copy `treadmill-channel@coordinator-ramjac.service` and substitute
+every `ramjac` with the new slug. Same install-via-symlink, same
 launch wrapper with `--repo <new-slug>`.
 
 ## Worker availability protocol
@@ -213,9 +213,9 @@ The relay file shape:
 ```
 [AVAILABLE]
 
-[from: worker-medicoder-1]
+[from: worker-ramjac-1]
 
-Worker worker-medicoder-1 is idle and available for task assignment.
+Worker worker-ramjac-1 is idle and available for task assignment.
 ```
 
 Filename convention: `<ns_ts>-<token>-available-from-<label>.md` so

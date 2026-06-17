@@ -453,7 +453,7 @@ async def get_overview(
 
       * ``repo``    — full ``owner/name`` match.
       * ``bucket``  — one of ``blocked`` / ``inflight`` / ``hopper``.
-      * ``account`` — Claude account name (``personal``, ``osmo``, …).
+      * ``account`` — Claude account name (``personal``, ``zephyr``, …).
       * ``q``       — case-insensitive substring across title / id / repo.
       * ``reason``  — escalation sub-classifier from
         ``TaskEscalatedToOperator.reason`` (ADR-0058): one of

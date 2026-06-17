@@ -35,7 +35,7 @@ failures back to the right author quickly when they do fire. Target:
 
 ## 1. Your identity and substrate
 
-- **Label**: `coordinator-<repo-slug>` (e.g. `coordinator-medicoder`).
+- **Label**: `coordinator-<repo-slug>` (e.g. `coordinator-ramjac`).
 - **Workdir**: `~/.treadmill/teams/<repo-slug>/`. This is *your* dir.
   Treat it as the team's working directory; the worktrees workers use to
   edit code are separate (under `~/treadmill-worktrees/treadmill-<name>/`).

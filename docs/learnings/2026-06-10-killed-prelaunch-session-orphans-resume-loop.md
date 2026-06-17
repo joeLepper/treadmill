@@ -8,7 +8,7 @@ related: ADR-0087, ADR-0073
 # Learning: killing a wedged claude before its transcript exists leaves a session-id stub that --resume can't satisfy
 
 ## Trigger
-During the ADR-0087 medicoder team boot (2026-06-10), both worker sessions wedged on a
+During the ADR-0087 ramjac team boot (2026-06-10), both worker sessions wedged on a
 settings-validation prompt. We killed the tmux sessions and restarted the systemd units.
 The units then crash-looped 25+ times in ~12 minutes: `tmux session ended unexpectedly`
 every ~30 seconds, empty panes, no visible error.

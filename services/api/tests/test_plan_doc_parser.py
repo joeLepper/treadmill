@@ -576,7 +576,7 @@ def test_parse_plan_doc_frontmatter_invalid_yaml_raises_format_error() -> None:
 def test_parse_plan_doc_accepts_doc_without_workflow_and_validation():
     """Regression for task 56c0b353: both fields are inert post-PR-F/G,
     so a doc that omits them must parse — submitters were including dead
-    fields just to pass parsing (medicoder #1329 workaround)."""
+    fields just to pass parsing (ramjac #1329 workaround)."""
     yaml_body = """sequence_of_work:
   - id: t0
     title: "Modern minimal task"
