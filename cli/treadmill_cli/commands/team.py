@@ -171,7 +171,7 @@ def _role_for_label(label: str) -> str:
 
 
 def _ensure_session_tree(
-    slug: str, label: str, *, api_url: str
+    slug: str, label: str, *, api_url: str, env_extra: str = ""
 ) -> tuple[Path, Path]:
     """Create ``~/.treadmill/teams/<slug>/<label>/`` if absent.
 
@@ -192,13 +192,18 @@ def _ensure_session_tree(
     if not session_id_path.exists():
         session_id_path.write_text("")
     env_path = session_dir / f"{label}.env"
-    env_path.write_text(
-        _env_contents(
-            role=_role_for_label(label),
-            label=label,
-            api_url=api_url,
-        )
+    body = _env_contents(
+        role=_role_for_label(label),
+        label=label,
+        api_url=api_url,
     )
+    if env_extra:
+        # Per-team toolchain block (``--env-extra``), appended so it is
+        # sourced (``set -a``) at session launch AFTER the standard vars
+        # — lets a non-default team type (e.g. osmo: conda + Gemini key +
+        # scratch-DB DSN) carry its env without bloating every team.
+        body = body + "\n# ── per-team env (--env-extra) ──\n" + env_extra.rstrip("\n") + "\n"
+    env_path.write_text(body)
     return session_id_path, env_path
 
 
@@ -218,7 +223,9 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _install_templates(repo_slug: str, worker_count: int) -> None:
+def _install_templates(
+    repo_slug: str, worker_count: int, pr_base: str = "main"
+) -> None:
     """Render the per-session CLAUDE.md + settings.json files.
 
     Loads ``tools/team-templates/install.py`` from the repo checkout
@@ -255,7 +262,9 @@ def _install_templates(repo_slug: str, worker_count: int) -> None:
         sys.modules.pop(spec.name, None)
         raise
     module.install_team(
-        module.make_team_spec(repo_slug, worker_count=worker_count)
+        module.make_team_spec(
+            repo_slug, worker_count=worker_count, pr_base=pr_base
+        )
     )
 
 
@@ -314,6 +323,44 @@ def up(
             ),
         ),
     ] = False,
+    slug_override: Annotated[
+        str | None,
+        typer.Option(
+            "--slug",
+            help=(
+                "Override the label slug (default: derived from the repo). "
+                "Labels become ``coordinator-<slug>`` etc. while "
+                "``team_configs.repo`` stays the real repo — lets a team's "
+                "operating identity differ from the repo owner (e.g. "
+                "``--slug joelepper-osmo`` for repo ``osmoai/osmo``)."
+            ),
+        ),
+    ] = None,
+    pr_base: Annotated[
+        str,
+        typer.Option(
+            "--pr-base",
+            help=(
+                "Branch workers branch FROM and PR INTO (default ``main``). "
+                "Set to a team trunk (e.g. ``forecast/stage-a``) so workers "
+                "never touch the repo's real mainline. Rendered into the "
+                "worker template via ``{{PR_BASE}}`` (PR #362)."
+            ),
+        ),
+    ] = "main",
+    env_extra: Annotated[
+        Path | None,
+        typer.Option(
+            "--env-extra",
+            help=(
+                "Path to a file whose contents are appended to every "
+                "per-label ``.env`` (sourced at launch). For a non-default "
+                "team type that needs its own toolchain env — e.g. osmo: "
+                "``source /home/joe/osmo/.env`` + ``STAGEA_DSN`` + "
+                "``OSMO_PYTHON``."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Provision (or update) a per-repo Treadmill team.
 
@@ -325,7 +372,14 @@ def up(
         )
         raise typer.Exit(code=1)
 
-    slug = _slug_from_repo(repo)
+    env_extra_body = ""
+    if env_extra is not None:
+        if not env_extra.is_file():
+            err_console.print(f"[red]--env-extra file not found: {env_extra}[/red]")
+            raise typer.Exit(code=1)
+        env_extra_body = env_extra.read_text()
+
+    slug = slug_override or _slug_from_repo(repo)
     coordinator_label, evaluator_label, worker_labels = _derive_labels(
         slug, workers
     )
@@ -368,7 +422,9 @@ def up(
     session_id_paths: list[Path] = []
     env_paths: list[Path] = []
     for label in all_labels:
-        sid, env = _ensure_session_tree(slug, label, api_url=api_url)
+        sid, env = _ensure_session_tree(
+            slug, label, api_url=api_url, env_extra=env_extra_body
+        )
         session_id_paths.append(sid)
         env_paths.append(env)
 
@@ -378,7 +434,7 @@ def up(
     # a team whose sessions boot without templates is the exact silent
     # no-op PR-H fixed — fail loudly and let the operator re-run.
     try:
-        _install_templates(slug, workers)
+        _install_templates(slug, workers, pr_base=pr_base)
     except Exception as exc:
         err_console.print(f"[red]template render failed: {exc}[/red]")
         err_console.print(
