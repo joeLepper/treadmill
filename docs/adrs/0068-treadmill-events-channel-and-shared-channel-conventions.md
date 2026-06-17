@@ -51,7 +51,7 @@ are greenfield.
 ### Part 1 — shared conventions for all per-session channels
 
 1. **The session label is the identity primitive.** Every long-lived session gets a
-   stable kebab-case label (e.g. `tm-fallback`, `osmo-forecast`). The label names the
+   stable kebab-case label (e.g. `tm-fallback`, `zephyr-forecast`). The label names the
    session's Telegram bot (ADR-0067: the phone's chat list *is* the session list), keys
    its channel state directory, and is the value the session passes as `--created-by` on
    every Treadmill dispatch. One label, three uses — phone addressing, state isolation,

@@ -28,7 +28,7 @@ loudly with paths to the offending field.
 4/5: workflow versions and per-task validation gates were deleted, both
 fields are inert at submit (``_spawn_tasks_from_specs`` never reads
 them), and requiring them forced submitters to include dead fields just
-to pass parsing (the medicoder #1329 workaround). Present values are
+to pass parsing (the ramjac #1329 workaround). Present values are
 still shape-validated and then ignored, so older docs parse unchanged.
 """
 

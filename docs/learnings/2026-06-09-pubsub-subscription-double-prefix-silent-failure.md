@@ -9,9 +9,9 @@ related: plan-2026-06-08-adr-0084-coordinator-implementation
 
 ## Trigger
 
-Three medicoder chain services (attachment_anonymizer, diagnosis_entity_detector, interaction_detector) deployed to Cloud Run, logged `consumer_ready`, served health checks, but never processed a single Pub/Sub message. Four other services (OCR, classifier, MAR, NTA) worked fine on the same substrate. Debugging spanned gen1→gen2, cpu-throttling, Presidio thread safety, and gRPC fork support before the actual cause was identified.
+Three ramjac chain services (attachment_anonymizer, diagnosis_entity_detector, interaction_detector) deployed to Cloud Run, logged `consumer_ready`, served health checks, but never processed a single Pub/Sub message. Four other services (OCR, classifier, MAR, NTA) worked fine on the same substrate. Debugging spanned gen1→gen2, cpu-throttling, Presidio thread safety, and gRPC fork support before the actual cause was identified.
 
-Root cause (PR #1225): the Pulumi substrate was passing a fully-qualified subscription path (`projects/X/subscriptions/dev-attachment-to-anonymizer`) to `medicoder_events.Consumer`. The `Consumer.run()` method prepended `projects/{project}/subscriptions/` again, producing an invalid double-prefixed name. The streaming pull `SubscriberClient.subscribe()` returned a future that terminated immediately with `InvalidArgument 400` — but since the future was not held or monitored, the termination was silent. The consumer appeared to start correctly (health endpoint live, no exception logged).
+Root cause (PR #1225): the Pulumi substrate was passing a fully-qualified subscription path (`projects/X/subscriptions/dev-attachment-to-anonymizer`) to `ramjac_events.Consumer`. The `Consumer.run()` method prepended `projects/{project}/subscriptions/` again, producing an invalid double-prefixed name. The streaming pull `SubscriberClient.subscribe()` returned a future that terminated immediately with `InvalidArgument 400` — but since the future was not held or monitored, the termination was silent. The consumer appeared to start correctly (health endpoint live, no exception logged).
 
 ## Observation
 
@@ -27,7 +27,7 @@ Every `StreamingPullFuture` must be: (a) held in a variable, and (b) either `.re
 
 ## Proposed remediation
 
-The `medicoder_events.Consumer.run()` method now (v0.1.6, PR #23) holds the future and attaches a done callback that logs `streaming_pull_future_terminated` with the exception. This fires for every Cloud Run pubsub consumer regardless of how the subscription name is passed. Any future silent termination will surface via this log entry. The complementary fix: validate subscription name format in `Consumer.__init__` and raise immediately on a double-prefixed value.
+The `ramjac_events.Consumer.run()` method now (v0.1.6, PR #23) holds the future and attaches a done callback that logs `streaming_pull_future_terminated` with the exception. This fires for every Cloud Run pubsub consumer regardless of how the subscription name is passed. Any future silent termination will surface via this log entry. The complementary fix: validate subscription name format in `Consumer.__init__` and raise immediately on a double-prefixed value.
 
 ## Notes
 

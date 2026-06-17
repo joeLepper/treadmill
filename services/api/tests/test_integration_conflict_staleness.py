@@ -259,7 +259,7 @@ def test_other_repo_merge_does_not_invalidate(
     for this PR's base."""
     _add_head(engine, HEAD, _at(0))
     _add_conflict_answer(engine, HEAD, is_conflicting=False, at=_at(1))
-    _add_merge(engine, at=_at(2), repo="MediCoderHQ/medicoder")
+    _add_merge(engine, at=_at(2), repo="RAMJAC/ramjac")
     assert _conflict_column(engine, seeded_task) is False
 
 

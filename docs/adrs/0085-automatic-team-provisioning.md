@@ -9,9 +9,9 @@
 
 ADR-0084 defined the coordinator model: a persistent named session acts as PM for a plan, routes tasks to worker sessions, and receives SQS events for the plan's lifecycle. The model was designed and observed to work. What it did not specify was *how coordinators come to exist* — that was left as an operator task.
 
-The gap became concrete on 2026-06-09 when a plan (`scraper_v2_scheduler` GCP migration) was submitted via `treadmill plan submit --created-by coordinator-medicoder`. The Treadmill autoscaler, still running from the old model, immediately picked up all 8 unblocked tasks and spun up Docker workers. The operator had to manually cancel the tasks and kill the autoscaler. The coordinator-medicoder session — which was *already running as a systemd service* — never received the tasks because:
+The gap became concrete on 2026-06-09 when a plan (`scraper_v2_scheduler` GCP migration) was submitted via `treadmill plan submit --created-by coordinator-ramjac`. The Treadmill autoscaler, still running from the old model, immediately picked up all 8 unblocked tasks and spun up Docker workers. The operator had to manually cancel the tasks and kill the autoscaler. The coordinator-ramjac session — which was *already running as a systemd service* — never received the tasks because:
 
-1. The plan was submitted with `--created-by coordinator-medicoder` but the autoscaler has no awareness of `created_by` routing — it picks up all pending tasks regardless.
+1. The plan was submitted with `--created-by coordinator-ramjac` but the autoscaler has no awareness of `created_by` routing — it picks up all pending tasks regardless.
 2. There is no mechanism to declare "this repo's tasks belong to this coordinator, not to the worker pool."
 3. Standing up a new team for a new repo requires operator hands: create `coordinator.env`, add plan IDs to it, enable the systemd unit, verify the SQS filter is wired correctly.
 
@@ -26,8 +26,8 @@ Introduce a `team_configs` table (and corresponding `TeamConfig` model) that bin
 ```sql
 CREATE TABLE team_configs (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    repo          VARCHAR(255) NOT NULL UNIQUE,  -- e.g. "MediCoderHQ/medicoder"
-    coordinator_label VARCHAR(64) NOT NULL,       -- e.g. "coordinator-medicoder"
+    repo          VARCHAR(255) NOT NULL UNIQUE,  -- e.g. "RAMJAC/ramjac"
+    coordinator_label VARCHAR(64) NOT NULL,       -- e.g. "coordinator-ramjac"
     worker_labels TEXT[] NOT NULL DEFAULT '{}',  -- e.g. ["treadmill-bert", "treadmill-donna", "treadmill-carla"]
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -42,7 +42,7 @@ The autoscaler, if running, **does not pick up tasks whose `created_by` matches 
 
 ### 2. Coordinator is always persistent — provisioning is startup, not per-plan
 
-Coordinators are long-running systemd services (per ADR-0073, ADR-0084). They do not start and stop per plan. A coordinator for `MediCoderHQ/medicoder` runs continuously and receives all plan events for that repo. Plans queue in SQS if the coordinator is briefly offline; they drain when it restarts.
+Coordinators are long-running systemd services (per ADR-0073, ADR-0084). They do not start and stop per plan. A coordinator for `RAMJAC/ramjac` runs continuously and receives all plan events for that repo. Plans queue in SQS if the coordinator is briefly offline; they drain when it restarts.
 
 The provisioning act is therefore **repo onboarding**, not plan submission:
 - When a new repo is registered (`treadmill repo add <org/repo>`), the CLI:

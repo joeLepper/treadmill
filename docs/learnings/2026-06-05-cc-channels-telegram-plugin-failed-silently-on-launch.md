@@ -11,7 +11,7 @@ memory
 Joe pinged treadmill-donna over Telegram and got no response. Her cc-channels
 launcher process was running and her claude session was alive (transcript
 active through 23:04, ~30 min before he noticed). His first guess was that
-the cwd `/home/joe/medicoder` had something to do with it. It didn't — the
+the cwd `/home/joe/ramjac` had something to do with it. It didn't — the
 per-session telegram config lives at `~/.cc-channels/<label>/`, independent
 of where claude is rooted.
 

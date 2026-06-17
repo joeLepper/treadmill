@@ -2,13 +2,13 @@
 date: 2026-06-08
 trigger: surprise
 status: captured
-related: medicoder promote-to-dev, d5e583e2 deploy
+related: ramjac promote-to-dev, d5e583e2 deploy
 ---
 
 # Learning: Artifact Registry image not queryable for ~70s after push
 
 ## Trigger
-In the medicoder Plan C sprint, `promote-to-dev` ran 26 seconds after `build-and-push` completed.
+In the ramjac Plan C sprint, `promote-to-dev` ran 26 seconds after `build-and-push` completed.
 The image was in AR but `gcloud artifacts docker images describe` returned "Image not found"
 for `rest_api:d5e583e` — even though querying the same tag 10 minutes later returned the digest
 immediately. The skip path left `Pulumi.dev.yaml`'s old image URI in place, and `pulumi up`

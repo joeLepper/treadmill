@@ -272,7 +272,7 @@ CLI-wiring follow-up Carla flagged.
 **2026-06-10: Wave 3 complete (PR-D #292 merged) — but restart step GATED on a reconciliation PR**
 
 All of PR-A/B/C/D/E merged. Before running the session-restart step, on-disk inspection of the
-live `coordinator-medicoder` surfaced a 3-part layout seam between `install_team()` and
+live `coordinator-ramjac` surfaced a 3-part layout seam between `install_team()` and
 `launch-session.sh` + Claude Code's config discovery:
 
 1. Launcher pins coordinator cwd to `<team>/`; `install_team()` renders coordinator CLAUDE.md to
@@ -291,7 +291,7 @@ transcript slug — needs migration. Captured in
 Bert (launcher/CLI) + Carla (install.py) to split + own. This becomes **PR-H (wiring)**, inserted
 before the restart step and Wave 4.
 
-**2026-06-10: PR-H merged (#293), PR-I merged (#294) — restart executed; medicoder team live on canonical slug**
+**2026-06-10: PR-H merged (#293), PR-I merged (#294) — restart executed; ramjac team live on canonical slug**
 
 PR-I (Alan, sibling co-signs from Bert + Carla) closed the last wiring gap: `team up` now calls
 `install_team()`. Gate verification passed: scratch-slug install (10/10 checks incl. stale-root
@@ -300,14 +300,14 @@ unlink + `.claude/settings.json`), real-launcher end-to-end with fake claude (pe
 
 Two operational surprises during the restart:
 
-1. **Slug derivation cutover.** `treadmill team up MediCoderHQ/medicoder` derives slug
-   `medicoderhq-medicoder`, not the hand-rolled ADR-0084-era `medicoder`. The upsert rewrote
+1. **Slug derivation cutover.** `treadmill team up RAMJAC/ramjac` derives slug
+   `ramjac-ramjac`, not the hand-rolled ADR-0084-era `ramjac`. The upsert rewrote
    `team_configs` to the canonical labels and `team up` started units for them. Decision: adopt
    the canonical derivation (it is the merged design — "no manual override"); the old
-   `coordinator-medicoder` session was retired (its transcript was being reset anyway per
-   option 3), `memory.md` copied into the new coordinator's cwd, old `~/.treadmill/teams/medicoder/`
-   tree left in place for later cleanup. The live team is now `coordinator-medicoderhq-medicoder`,
-   `evaluator-medicoderhq-medicoder`, `worker-medicoderhq-medicoder-1/2`.
+   `coordinator-ramjac` session was retired (its transcript was being reset anyway per
+   option 3), `memory.md` copied into the new coordinator's cwd, old `~/.treadmill/teams/ramjac/`
+   tree left in place for later cleanup. The live team is now `coordinator-ramjac-ramjac`,
+   `evaluator-ramjac-ramjac`, `worker-ramjac-ramjac-1/2`.
 2. **settings.json `$comment` wedge.** Claude Code's boot-time settings validation flags the
    template's `$comment` keys (non-schema) with an interactive "values were skipped — Continue?"
    prompt; both workers wedged on first boot. Fixed operationally (clean settings applied on disk +

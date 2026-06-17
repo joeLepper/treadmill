@@ -126,7 +126,7 @@ describe('useOverview', () => {
 
     const { result } = renderHook(
       () =>
-        useOverview({ repo: 'foo/bar', bucket: 'blocked', account: 'osmo', q: 'auth' }),
+        useOverview({ repo: 'foo/bar', bucket: 'blocked', account: 'zephyr', q: 'auth' }),
       { wrapper: wrapper() },
     );
 
@@ -135,7 +135,7 @@ describe('useOverview', () => {
     expect(String(url)).toContain('?');
     expect(String(url)).toContain('repo=foo%2Fbar');
     expect(String(url)).toContain('bucket=blocked');
-    expect(String(url)).toContain('account=osmo');
+    expect(String(url)).toContain('account=zephyr');
     expect(String(url)).toContain('q=auth');
   });
 
@@ -264,8 +264,8 @@ describe('useAcknowledgeEscalation', () => {
 
     const seed = {
       escalations: [
-        { task_id: 'tsk_abc', repo: 'osmo/web', title: 'x', escalated_at: new Date(), reason: 'why' },
-        { task_id: 'tsk_other', repo: 'osmo/web', title: 'y', escalated_at: new Date(), reason: 'why' },
+        { task_id: 'tsk_abc', repo: 'zephyr/web', title: 'x', escalated_at: new Date(), reason: 'why' },
+        { task_id: 'tsk_other', repo: 'zephyr/web', title: 'y', escalated_at: new Date(), reason: 'why' },
       ],
       tasks: [
         { id: 'tsk_abc', escalated: true },
@@ -314,7 +314,7 @@ describe('useAcknowledgeEscalation', () => {
     const { qc, Wrapper } = makeWrapper();
     qc.setQueryData(['overview', {}], {
       escalations: [
-        { task_id: 'tsk_abc', repo: 'osmo/web', title: 'x', escalated_at: new Date(), reason: 'why' },
+        { task_id: 'tsk_abc', repo: 'zephyr/web', title: 'x', escalated_at: new Date(), reason: 'why' },
       ],
       tasks: [{ id: 'tsk_abc', escalated: true }],
     });

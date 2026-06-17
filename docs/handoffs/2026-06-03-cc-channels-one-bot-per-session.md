@@ -2,7 +2,7 @@
 
 ## Where we left off
 
-Research session (in the osmo repo session, but the work is Treadmill-adjacent
+Research session (in the zephyr repo session, but the work is Treadmill-adjacent
 agent-ops, hence docs here). Goal: interact with Joe's ~5 concurrent long-running
 Claude Code sessions from his phone.
 
@@ -36,7 +36,7 @@ doc-guaranteed. Worth a 2-minute re-verify against plugin source before building
 ## What needs Joe's hands
 
 1. **Create the bots in BotFather** (one per session, ~5). Name them after the
-   sessions (e.g. `osmo_forecast_bot`, `osmo_galaxy_bot`) so the Telegram chat list
+   sessions (e.g. `zephyr_forecast_bot`, `zephyr_galaxy_bot`) so the Telegram chat list
    reads as the session list. Collect the 5 tokens.
 2. **Approve Bun install** (system-wide runtime, `curl -fsSL https://bun.sh/install | bash`
    or distro package — orchestrator should not install without the nod).

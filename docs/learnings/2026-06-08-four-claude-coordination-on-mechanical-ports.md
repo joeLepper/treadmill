@@ -3,13 +3,13 @@
 **Date:** 2026-06-08
 **Related:** ADR-0067 (phone bots) + ADR-0068 (treadmill-events channel),
 the cc-channels server in `tools/cc-channels/`, the
-`/cc-relay` skill, the MediCoderHQ/medicoder Plan C sprint
+`/cc-relay` skill, the RAMJAC/ramjac Plan C sprint
 (`docs/plans/2026-06-03-phase-2-per-service-ports.md` in that repo).
 
 ## What happened
 
 Joe set up four Claude sessions (alan / bert / carla / donna) for a
-sprint to port seven medicoder services from AWS to GCP. Previously
+sprint to port seven ramjac services from AWS to GCP. Previously
 the same shape of work had been dispatched to Treadmill agent workers;
 the sprint was an explicit hypothesis test: would four operator-shaped
 Claudes coordinating via cc-relay outperform individually-dispatched
@@ -31,7 +31,7 @@ it would derive an independent shape, and reviewers would surface
 the inconsistencies after the fact.
 
 **Cross-cutting convention discovery.** Bert audited
-`medicoder_events.StructuredLogger` and surfaced that 0.1.0 had no
+`ramjac_events.StructuredLogger` and surfaced that 0.1.0 had no
 `.child()` or `.debug()` — a boot-blocker for anyone copying
 Donna's pattern verbatim. Workaround propagated to all in-flight
 services inside 5 minutes via cc-relay. Carla flagged the dedup_key
@@ -46,7 +46,7 @@ unblocking the next: sqlalchemy ORM dir → Dockerfile COPY of
 deleted files → boto3 transitive imports for Bedrock fallback →
 positional-dict → StructuredLogger kwargs-splat sweep (15 call
 sites) → pytest missing as a transitive dep of
-`medicoder_events.testing`. Alan diagnosed each failure within
+`ramjac_events.testing`. Alan diagnosed each failure within
 minutes of CI completing and pushed a recipe back via cc-relay.
 The carla session applied the fix + force-pushed; the next CI
 round surfaced the next layer. A worker-dispatched task would
@@ -76,9 +76,9 @@ These three primitives carried the load:
    and PR-up announcements. Reduced the "one finding × N siblings"
    broadcast cost from N 1:1 relays to one file-drop.
 
-3. **Per-Claude git worktrees** (`/home/joe/medicoder-worktrees/<label>/`)
+3. **Per-Claude git worktrees** (`/home/joe/ramjac-worktrees/<label>/`)
    to avoid shared-tree race when multiple sessions ran `git checkout`
-   in `/home/joe/medicoder` concurrently. After carla's MAR PR-A
+   in `/home/joe/ramjac` concurrently. After carla's MAR PR-A
    commit landed on the wrong branch via a race, all subsequent work
    moved to per-label worktrees and the problem vanished.
 
@@ -151,7 +151,7 @@ on useful work until Joe explicitly releases.
   created mid-sprint, persists for future multi-session work
 - `~/treadmill/.claude/skills/cc-relay/` — the 1:1 relay skill
 - ADR-0067 + ADR-0068 — phone bots + treadmill-events channel
-- MediCoderHQ/medicoder PRs #1122 (Donna OCR canonical), #1124
+- RAMJAC/ramjac PRs #1122 (Donna OCR canonical), #1124
   (Bert anonymizer), #1126 (Carla MAR app-side), #1131 (Bert
   classifier), #1133 (Carla NTA app-side), #1135 (Carla MAR
   substrate), #1136 (Carla NTA substrate), #1137 (Carla MAR

@@ -52,7 +52,7 @@ def _sanitize_secret_token(raw: str | None) -> str:
     secret captured from a *decorated* terminal.
 
     A leading/trailing newline alone made the ``Bearer`` header invalid
-    (PR #170 stripped that); the 2026-06-04 carebrain incident went further —
+    (PR #170 stripped that); the 2026-06-04 hearth incident went further —
     the stored token had embedded ANSI escape codes (``\\x1b[…m``) AND internal
     newlines, which ``.strip()`` can't touch. Since an OAuth / API token can
     contain none of: whitespace, ASCII control characters, or ANSI sequences,
@@ -180,7 +180,7 @@ async def fetch_claude_credentials(
     # secret makes the ``Bearer`` header an invalid HTTP header value — claude
     # exits 1 with "Header has invalid value", which is non-recoverable AND not
     # a usage-limit signature, so the fallback never fires and the worker
-    # crashloops. (2026-06-04 medicoder incident: both VLM builds wedged on a
+    # crashloops. (2026-06-04 ramjac incident: both VLM builds wedged on a
     # newline-tainted token after a subscription swap.)
     token = _sanitize_secret_token(secret.get("SecretString"))
     if not token:

@@ -292,18 +292,18 @@ worker path is reserved for work that requires code changes, PR authorship, or t
 ### Team bootstrap
 
 ```bash
-treadmill team up --repo MediCoderHQ/medicoder
+treadmill team up --repo RAMJAC/ramjac
 ```
 
 Writes `team_configs` row; spawns systemd units for each named session. Worker labels and the
 evaluator label are derived deterministically from the repo slug — no manual naming required:
 
 ```
-coordinator-medicoder
-evaluator-medicoder
-worker-medicoder-1
-worker-medicoder-2
-worker-medicoder-3   (default count: 3; override with --workers N)
+coordinator-ramjac
+evaluator-ramjac
+worker-ramjac-1
+worker-ramjac-2
+worker-ramjac-3   (default count: 3; override with --workers N)
 ```
 
 Sessions are created fresh if they don't exist; the command is idempotent (re-running against

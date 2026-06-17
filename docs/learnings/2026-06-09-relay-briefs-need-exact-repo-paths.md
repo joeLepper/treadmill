@@ -9,7 +9,7 @@ related: plan-2026-06-08-adr-0084-coordinator-implementation
 
 ## Trigger
 
-When briefing Carla on the medicoder IAMBinding sweep task, Alan wrote "medicoder-gcp-substrate repo" — an inference from Donna's description of the path `infrastructure-gcp/`. The correct location is `infrastructure-gcp/` directory inside the main medicoder repo. Carla caught the discrepancy immediately (she had reviewed multiple medicoder substrate PRs that day) and held before starting until the path was confirmed.
+When briefing Carla on the ramjac IAMBinding sweep task, Alan wrote "ramjac-gcp-substrate repo" — an inference from Donna's description of the path `infrastructure-gcp/`. The correct location is `infrastructure-gcp/` directory inside the main ramjac repo. Carla caught the discrepancy immediately (she had reviewed multiple ramjac substrate PRs that day) and held before starting until the path was confirmed.
 
 ## Observation
 
@@ -21,7 +21,7 @@ When we author task briefs for sibling sessions, we tend to paraphrase source in
 
 ## Proposed rule
 
-Task briefs that reference a specific file location must state both the repo and the path within it explicitly (e.g., "infrastructure-gcp/ inside MediCoderHQ/medicoder"), never just a directory name.
+Task briefs that reference a specific file location must state both the repo and the path within it explicitly (e.g., "infrastructure-gcp/ inside RAMJAC/ramjac"), never just a directory name.
 
 ## Proposed remediation
 

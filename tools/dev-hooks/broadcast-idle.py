@@ -24,8 +24,8 @@ split (owner/repo slugs contain hyphens):
     ``coordinator-``
 
     Examples:
-      worker-medicoder-1            → coordinator-medicoder
-      worker-medicoderhq-medicoder-2 → coordinator-medicoderhq-medicoder
+      worker-ramjac-1            → coordinator-ramjac
+      worker-ramjac-ramjac-2 → coordinator-ramjac-ramjac
       worker-joelepper-treadmill-3  → coordinator-joelepper-treadmill
 
 If the owning coordinator inbox does not exist, the relay write is
@@ -43,7 +43,7 @@ preconditions hold:
   300s cooldown shipped in PR #264 was sized for fast-turn workers,
   but during long-haul autonomous-loop idle (30-min ScheduleWakeup
   ticks), every tick crossed the 300s window and fired a broadcast.
-  Coordinator-medicoder flagged the noise after ~16 broadcasts in
+  Coordinator-ramjac flagged the noise after ~16 broadcasts in
   one overnight quiet period. A 1-hour floor suppresses tick-driven
   re-broadcasts while still letting a worker that genuinely just
   became available signal once. A proper edge-only protocol

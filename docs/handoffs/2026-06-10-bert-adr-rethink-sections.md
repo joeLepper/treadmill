@@ -68,7 +68,7 @@ This captures the architectural hypothesis directly: each rework row carries its
 
 ### Identity + substrate
 
-* **Label**: `architect-<repo-slug>` (e.g., `architect-medicoder`, `architect-treadmill`). One architect per repo, mirroring the coordinator role.
+* **Label**: `architect-<repo-slug>` (e.g., `architect-ramjac`, `architect-treadmill`). One architect per repo, mirroring the coordinator role.
 * **Workdir**: `~/.treadmill/teams/<slug>/architect/` (parallel to the coordinator's workdir under the same team root).
 * **CLAUDE.md**: separate system-prompt artifact at `~/.treadmill/teams/<slug>/architect/CLAUDE.md`. Distinct from the coordinator's CLAUDE.md — different role, different decision surface.
 * **Spawned alongside coordinator + workers** when a new repo's team stands up via `treadmill repo add` (per Task F PR #275, to be extended).
@@ -163,8 +163,8 @@ Cost of keep: a small table sitting unused. Cost of delete + re-add: a migration
 
 The three-tier per-repo model (coordinator + architect + workers) assumes everything is repo-specific. Two edge cases to flag:
 
-* **Cross-repo architectural questions.** Sometimes a question spans repos (e.g., medicoder ↔ medicoder-events boundary). Does the per-repo architect have a path to consult a cross-repo decision-maker? My read: no special path; cross-repo questions get escalated to Joe (or to an orchestrator session in operator-team mode) the same way per-repo decisions get escalated when an architect doesn't know. The role hierarchy: workers → coordinator → architect → operator. Cross-repo = operator.
-* **Worker sharing across repos.** Could `worker-adam` serve both medicoder + treadmill? Probably not in v1 — the worker's repo-specific memory + CLAUDE.md context binds to one repo. Multi-repo workers are a future-ADR question.
+* **Cross-repo architectural questions.** Sometimes a question spans repos (e.g., ramjac ↔ ramjac-events boundary). Does the per-repo architect have a path to consult a cross-repo decision-maker? My read: no special path; cross-repo questions get escalated to Joe (or to an orchestrator session in operator-team mode) the same way per-repo decisions get escalated when an architect doesn't know. The role hierarchy: workers → coordinator → architect → operator. Cross-repo = operator.
+* **Worker sharing across repos.** Could `worker-adam` serve both ramjac + treadmill? Probably not in v1 — the worker's repo-specific memory + CLAUDE.md context binds to one repo. Multi-repo workers are a future-ADR question.
 
 Joe's call: confirm the per-repo binding everywhere; cross-repo concerns escalate to operator.
 

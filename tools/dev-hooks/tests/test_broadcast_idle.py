@@ -11,8 +11,8 @@ Pins the skip conditions + the broadcast shape post-task-b71be765
 - Worker label, first broadcast → writes availability JSON + relay file
   in the OWNING coordinator's inbox ONLY (not a fan-out to all
   coordinator inboxes)
-- Hyphenated owner/repo: worker-medicoderhq-medicoder-2 →
-  coordinator-medicoderhq-medicoder (string surgery, not positional split)
+- Hyphenated owner/repo: worker-ramjac-ramjac-2 →
+  coordinator-ramjac-ramjac (string surgery, not positional split)
 - Owning coordinator inbox missing → relay suppressed, availability still
   written (self-heals on next cooldown tick; fan-out is the leak fixed)
 - Second broadcast within 3600s → skipped (cooldown)
@@ -56,13 +56,13 @@ def test_unset_label_is_noop(tmp_path: Path) -> None:
     worker sessions broadcast."""
     home = tmp_path / "home"
     home.mkdir()
-    _seed_coordinator_inbox(home, "medicoder")
+    _seed_coordinator_inbox(home, "ramjac")
 
     result = _run(home=home, label=None)
 
     assert result.returncode == 0
     relay_files = list(
-        (home / ".cc-channels" / "coordinator-medicoder" / "relay").glob("*.md")
+        (home / ".cc-channels" / "coordinator-ramjac" / "relay").glob("*.md")
     )
     assert relay_files == []
     assert not (home / ".treadmill" / "availability").exists()
@@ -73,9 +73,9 @@ def test_coordinator_label_is_noop(tmp_path: Path) -> None:
     broadcast availability to other coordinators."""
     home = tmp_path / "home"
     home.mkdir()
-    relay = _seed_coordinator_inbox(home, "medicoder")
+    relay = _seed_coordinator_inbox(home, "ramjac")
 
-    result = _run(home=home, label="coordinator-medicoder")
+    result = _run(home=home, label="coordinator-ramjac")
 
     assert result.returncode == 0
     assert list(relay.glob("*.md")) == []
@@ -88,7 +88,7 @@ def test_orchestrator_label_is_noop(tmp_path: Path) -> None:
     (fan-out) with no actionable signal — 20+ spurious wakes reported."""
     home = tmp_path / "home"
     home.mkdir()
-    relay = _seed_coordinator_inbox(home, "medicoder")
+    relay = _seed_coordinator_inbox(home, "ramjac")
 
     result = _run(home=home, label="treadmill-alan")
 
@@ -102,9 +102,9 @@ def test_evaluator_label_is_noop(tmp_path: Path) -> None:
     are review-triggered per ADR-0090, not idle-task-assigned."""
     home = tmp_path / "home"
     home.mkdir()
-    relay = _seed_coordinator_inbox(home, "medicoder")
+    relay = _seed_coordinator_inbox(home, "ramjac")
 
-    result = _run(home=home, label="evaluator-medicoder")
+    result = _run(home=home, label="evaluator-ramjac")
 
     assert result.returncode == 0
     assert list(relay.glob("*.md")) == []
@@ -120,11 +120,11 @@ def test_worker_broadcasts_to_owning_coordinator_inbox(tmp_path: Path) -> None:
     coordinator inboxes are NOT written to."""
     home = tmp_path / "home"
     home.mkdir()
-    owning_relay = _seed_coordinator_inbox(home, "medicoder")
+    owning_relay = _seed_coordinator_inbox(home, "ramjac")
     # Sibling coordinator inbox that must NOT receive a file.
     bystander_relay = _seed_coordinator_inbox(home, "other-team")
 
-    result = _run(home=home, label="worker-medicoder-1")
+    result = _run(home=home, label="worker-ramjac-1")
 
     assert result.returncode == 0
 
@@ -133,24 +133,24 @@ def test_worker_broadcasts_to_owning_coordinator_inbox(tmp_path: Path) -> None:
     assert len(files) == 1
     body = files[0].read_text()
     assert body.startswith("[AVAILABLE]\n\n")
-    assert "[from: worker-medicoder-1]" in body
-    assert "Worker worker-medicoder-1 is idle" in body
-    assert files[0].name.endswith("-available-from-worker-medicoder-1.md")
+    assert "[from: worker-ramjac-1]" in body
+    assert "Worker worker-ramjac-1 is idle" in body
+    assert files[0].name.endswith("-available-from-worker-ramjac-1.md")
 
     # Bystander inbox: nothing written.
     assert list(bystander_relay.glob("*.md")) == []
 
     # Availability JSON written.
-    avail = home / ".treadmill" / "availability" / "worker-medicoder-1.json"
+    avail = home / ".treadmill" / "availability" / "worker-ramjac-1.json"
     assert avail.exists()
     record = json.loads(avail.read_text())
-    assert record["label"] == "worker-medicoder-1"
+    assert record["label"] == "worker-ramjac-1"
     assert isinstance(record["available_since"], int)
     assert isinstance(record["updated_at"], int)
 
     # Cooldown stamp written.
     cooldown = (
-        home / ".treadmill" / "session-state" / "worker-medicoder-1"
+        home / ".treadmill" / "session-state" / "worker-ramjac-1"
         / "last-idle-broadcast"
     )
     assert cooldown.exists()
@@ -160,15 +160,15 @@ def test_hyphenated_owner_repo_resolved_correctly(tmp_path: Path) -> None:
     """String surgery (not positional split) resolves the owning coordinator
     even when the slug contains hyphens.
 
-    worker-medicoderhq-medicoder-2  →  coordinator-medicoderhq-medicoder
-    (a split('-')[1:3] slice would wrongly yield coordinator-medicoderhq)
+    worker-ramjac-ramjac-2  →  coordinator-ramjac-ramjac
+    (a split('-')[1:3] slice would wrongly yield coordinator-ramjac)
     """
     home = tmp_path / "home"
     home.mkdir()
-    owning_relay = _seed_coordinator_inbox(home, "medicoderhq-medicoder")
-    wrong_relay = _seed_coordinator_inbox(home, "medicoderhq")
+    owning_relay = _seed_coordinator_inbox(home, "ramjac-ramjac")
+    wrong_relay = _seed_coordinator_inbox(home, "ramjac")
 
-    result = _run(home=home, label="worker-medicoderhq-medicoder-2")
+    result = _run(home=home, label="worker-ramjac-ramjac-2")
 
     assert result.returncode == 0
     # Correct coordinator (full slug) gets the file.
@@ -182,11 +182,11 @@ def test_multi_coordinator_dirs_only_owning_receives(tmp_path: Path) -> None:
     owning coordinator's inbox ONLY — one file total, not N."""
     home = tmp_path / "home"
     home.mkdir()
-    owning = _seed_coordinator_inbox(home, "medicoder")
+    owning = _seed_coordinator_inbox(home, "ramjac")
     sibling_a = _seed_coordinator_inbox(home, "treadmill")
-    sibling_b = _seed_coordinator_inbox(home, "ramjac")
+    sibling_b = _seed_coordinator_inbox(home, "acme")
 
-    result = _run(home=home, label="worker-medicoder-1")
+    result = _run(home=home, label="worker-ramjac-1")
     assert result.returncode == 0
 
     assert len(list(owning.glob("*.md"))) == 1
@@ -204,19 +204,19 @@ def test_owning_coordinator_inbox_missing_suppresses_relay(tmp_path: Path) -> No
     self-heals on the next cooldown tick."""
     home = tmp_path / "home"
     home.mkdir()
-    # No coordinator-medicoder inbox present.
+    # No coordinator-ramjac inbox present.
     (home / ".cc-channels").mkdir()
 
-    result = _run(home=home, label="worker-medicoder-1")
+    result = _run(home=home, label="worker-ramjac-1")
 
     assert result.returncode == 0
     # No relay file anywhere.
     relay_files = list((home / ".cc-channels").rglob("*.md"))
     assert relay_files == []
     # Availability + cooldown still written.
-    assert (home / ".treadmill" / "availability" / "worker-medicoder-1.json").exists()
+    assert (home / ".treadmill" / "availability" / "worker-ramjac-1.json").exists()
     assert (
-        home / ".treadmill" / "session-state" / "worker-medicoder-1"
+        home / ".treadmill" / "session-state" / "worker-ramjac-1"
         / "last-idle-broadcast"
     ).exists()
 
@@ -228,11 +228,11 @@ def test_channels_root_missing_suppresses_relay(tmp_path: Path) -> None:
     home.mkdir()
     # No .cc-channels at all.
 
-    result = _run(home=home, label="worker-medicoder-1")
+    result = _run(home=home, label="worker-ramjac-1")
 
     assert result.returncode == 0
     assert not (home / ".cc-channels").exists()
-    assert (home / ".treadmill" / "availability" / "worker-medicoder-1.json").exists()
+    assert (home / ".treadmill" / "availability" / "worker-ramjac-1.json").exists()
 
 
 def test_non_coordinator_dirs_in_cc_channels_ignored(tmp_path: Path) -> None:
@@ -240,12 +240,12 @@ def test_non_coordinator_dirs_in_cc_channels_ignored(tmp_path: Path) -> None:
     not receive a broadcast — only the owning coordinator inbox."""
     home = tmp_path / "home"
     home.mkdir()
-    owning_relay = _seed_coordinator_inbox(home, "medicoder")
+    owning_relay = _seed_coordinator_inbox(home, "ramjac")
     # Worker session dir alongside the coordinator dir.
-    worker_relay = home / ".cc-channels" / "worker-medicoder-2" / "relay"
+    worker_relay = home / ".cc-channels" / "worker-ramjac-2" / "relay"
     worker_relay.mkdir(parents=True)
 
-    result = _run(home=home, label="worker-medicoder-1")
+    result = _run(home=home, label="worker-ramjac-1")
 
     assert result.returncode == 0
     assert len(list(owning_relay.glob("*.md"))) == 1
@@ -261,17 +261,17 @@ def test_cooldown_blocks_second_broadcast(tmp_path: Path) -> None:
     availability record."""
     home = tmp_path / "home"
     home.mkdir()
-    relay = _seed_coordinator_inbox(home, "medicoder")
+    relay = _seed_coordinator_inbox(home, "ramjac")
 
-    first = _run(home=home, label="worker-medicoder-1")
+    first = _run(home=home, label="worker-ramjac-1")
     assert first.returncode == 0
     assert len(list(relay.glob("*.md"))) == 1
 
-    avail = home / ".treadmill" / "availability" / "worker-medicoder-1.json"
+    avail = home / ".treadmill" / "availability" / "worker-ramjac-1.json"
     first_mtime = avail.stat().st_mtime
 
     time.sleep(0.05)
-    second = _run(home=home, label="worker-medicoder-1")
+    second = _run(home=home, label="worker-ramjac-1")
     assert second.returncode == 0
 
     # No new relay file.
@@ -285,15 +285,15 @@ def test_cooldown_expires_allows_rebroadcast(tmp_path: Path) -> None:
     fires again. Simulate elapsed time by writing a stale timestamp."""
     home = tmp_path / "home"
     home.mkdir()
-    relay = _seed_coordinator_inbox(home, "medicoder")
+    relay = _seed_coordinator_inbox(home, "ramjac")
 
     cooldown = (
-        home / ".treadmill" / "session-state" / "worker-medicoder-1"
+        home / ".treadmill" / "session-state" / "worker-ramjac-1"
         / "last-idle-broadcast"
     )
     cooldown.parent.mkdir(parents=True)
     cooldown.write_text(f"{int(time.time()) - 4000}\n")
 
-    result = _run(home=home, label="worker-medicoder-1")
+    result = _run(home=home, label="worker-ramjac-1")
     assert result.returncode == 0
     assert len(list(relay.glob("*.md"))) == 1

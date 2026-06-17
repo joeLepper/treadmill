@@ -183,7 +183,7 @@ async def _lookup_coordinator_label(
 
     This is the ADR-0085+0086 fix for the in-session plan-pickup gap:
     new plans are submitted with ``created_by=<orchestrator-label>`` (e.g.
-    ``treadmill-alan``), so a ``coordinator-medicoder`` socket
+    ``treadmill-alan``), so a ``coordinator-ramjac`` socket
     subscribing only on ``created_by`` and ``plan_ids`` never sees its
     own ``plan.submitted`` because (a) the plan is new — not in
     ``plan_ids`` yet, and (b) ``created_by`` doesn't match. This helper

@@ -62,7 +62,7 @@ def _coordinator_label_for_team(worker_label: str) -> str | None:
     """
     if not worker_label.startswith("worker-"):
         return None
-    # ``worker-medicoder-1`` → slug ``medicoder`` → ``coordinator-medicoder``.
+    # ``worker-ramjac-1`` → slug ``ramjac`` → ``coordinator-ramjac``.
     # Strip the trailing ``-N`` numeric suffix to get the slug.
     body = worker_label[len("worker-"):]
     parts = body.rsplit("-", 1)

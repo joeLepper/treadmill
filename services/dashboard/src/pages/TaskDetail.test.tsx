@@ -28,9 +28,9 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'tsk_test0001',
     title: 'test task',
-    repo: 'osmo/web',
+    repo: 'zephyr/web',
     repo_mode: 'conform',
-    account: 'osmo',
+    account: 'zephyr',
     plan_id: 'pln_test',
     derived_status: 'wf-quick: executing',
     last_activity: new Date(),
@@ -63,14 +63,14 @@ describe('ActionBar', () => {
 
   it('open·pr deeplinks to the GitHub PR URL (triage finding 71ed396b)', () => {
     const task = makeTask({
-      repo: 'osmo/web',
+      repo: 'zephyr/web',
       pr: { ...basePR, pr_number: 980 },
     });
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
     render(<ActionBar task={task} onCancel={vi.fn()} onAck={vi.fn()} />);
     fireEvent.click(screen.getByText(/open·pr/));
     expect(openSpy).toHaveBeenCalledWith(
-      'https://github.com/osmo/web/pull/980',
+      'https://github.com/zephyr/web/pull/980',
       '_blank',
     );
     openSpy.mockRestore();

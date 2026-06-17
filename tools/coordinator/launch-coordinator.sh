@@ -10,11 +10,11 @@
 #   launch-coordinator.sh --repo <slug> --plan-id <uuid>
 #
 # Example:
-#   launch-coordinator.sh --repo medicoder --plan-id 7b3e...c14a
+#   launch-coordinator.sh --repo ramjac --plan-id 7b3e...c14a
 #
 # The systemd unit `treadmill-channel@coordinator-<slug>.service` must
-# exist (one per repo). For medicoder, see
-# tools/cc-channels/systemd/treadmill-channel@coordinator-medicoder.service.
+# exist (one per repo). For an example instantiation, see the checked-in
+# tools/cc-channels/systemd/treadmill-channel@coordinator-<slug>.service unit.
 set -euo pipefail
 
 REPO=""

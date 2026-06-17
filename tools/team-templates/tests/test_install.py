@@ -24,15 +24,15 @@ from install import (  # noqa: E402
 
 
 def test_make_team_spec_default_worker_count() -> None:
-    spec = make_team_spec("medicoder")
-    assert spec.repo_slug == "medicoder"
-    assert spec.coordinator_label == "coordinator-medicoder"
-    assert spec.evaluator_label == "evaluator-medicoder"
+    spec = make_team_spec("ramjac")
+    assert spec.repo_slug == "ramjac"
+    assert spec.coordinator_label == "coordinator-ramjac"
+    assert spec.evaluator_label == "evaluator-ramjac"
     assert spec.worker_count == 3
     assert spec.worker_labels == (
-        "worker-medicoder-1",
-        "worker-medicoder-2",
-        "worker-medicoder-3",
+        "worker-ramjac-1",
+        "worker-ramjac-2",
+        "worker-ramjac-3",
     )
 
 
@@ -45,19 +45,19 @@ def test_make_team_spec_custom_worker_count() -> None:
 
 def test_make_team_spec_is_deterministic() -> None:
     """Same inputs → same spec. Idempotent ``team up`` depends on this."""
-    spec_a = make_team_spec("medicoder", worker_count=3)
-    spec_b = make_team_spec("medicoder", worker_count=3)
+    spec_a = make_team_spec("ramjac", worker_count=3)
+    spec_b = make_team_spec("ramjac", worker_count=3)
     assert spec_a == spec_b
 
 
 def test_make_team_spec_pr_base_defaults_to_main() -> None:
-    """Existing teams (medicoder/treadmill) keep main — no behavior change."""
-    assert make_team_spec("medicoder").pr_base == "main"
+    """Existing teams (ramjac/treadmill) keep main — no behavior change."""
+    assert make_team_spec("ramjac").pr_base == "main"
 
 
 def test_make_team_spec_custom_pr_base() -> None:
-    """A team can target a non-default trunk (osmo → forecast/stage-a)."""
-    assert make_team_spec("osmo", pr_base="forecast/stage-a").pr_base == "forecast/stage-a"
+    """A team can target a non-default trunk (zephyr → forecast/stage-a)."""
+    assert make_team_spec("zephyr", pr_base="forecast/stage-a").pr_base == "forecast/stage-a"
 
 
 def test_render_substitutes_pr_base(tmp_path: Path) -> None:
@@ -69,7 +69,7 @@ def test_render_substitutes_pr_base(tmp_path: Path) -> None:
     src = tmp_path / "t.tmpl"
     src.write_text("branch from origin/{{PR_BASE}}; gh pr create --base {{PR_BASE}}")
     dst = tmp_path / "out.md"
-    _render(src, dst, make_team_spec("osmo", pr_base="forecast/stage-a"))
+    _render(src, dst, make_team_spec("zephyr", pr_base="forecast/stage-a"))
     body = dst.read_text()
     assert "origin/forecast/stage-a" in body
     assert "--base forecast/stage-a" in body
@@ -82,7 +82,7 @@ def test_render_pr_base_defaults_to_main(tmp_path: Path) -> None:
     src = tmp_path / "t.tmpl"
     src.write_text("origin/{{PR_BASE}}")
     dst = tmp_path / "out.md"
-    _render(src, dst, make_team_spec("medicoder"))
+    _render(src, dst, make_team_spec("ramjac"))
     assert dst.read_text() == "origin/main"
 
 
@@ -144,21 +144,21 @@ def synthetic_home(
 def test_install_team_writes_evaluator_claude_md(
     synthetic_home: Path,
 ) -> None:
-    spec = make_team_spec("medicoder", worker_count=2)
+    spec = make_team_spec("ramjac", worker_count=2)
     install_team(spec)
 
     claude = (
         synthetic_home
         / ".treadmill"
         / "teams"
-        / "medicoder"
-        / "evaluator-medicoder"
+        / "ramjac"
+        / "evaluator-ramjac"
         / "CLAUDE.md"
     )
     assert claude.is_file()
     body = claude.read_text()
     # Placeholder substituted.
-    assert "evaluator-medicoder" in body
+    assert "evaluator-ramjac" in body
     assert "{{REPO_SLUG}}" not in body
     # Fixed verdict format preserved.
     assert "[verdict: approve | rework]" in body
@@ -167,14 +167,14 @@ def test_install_team_writes_evaluator_claude_md(
 def test_install_team_writes_one_worker_config_per_worker(
     synthetic_home: Path,
 ) -> None:
-    spec = make_team_spec("medicoder", worker_count=3)
+    spec = make_team_spec("ramjac", worker_count=3)
     install_team(spec)
 
     team_dir = (
-        synthetic_home / ".treadmill" / "teams" / "medicoder"
+        synthetic_home / ".treadmill" / "teams" / "ramjac"
     )
     for n in (1, 2, 3):
-        worker_dir = team_dir / f"worker-medicoder-{n}"
+        worker_dir = team_dir / f"worker-ramjac-{n}"
         assert worker_dir.is_dir()
         claude = worker_dir / "CLAUDE.md"
         # settings.json now lives under <label>/.claude/ so Claude
@@ -187,7 +187,7 @@ def test_install_team_writes_one_worker_config_per_worker(
 
         # Placeholders substituted per worker.
         claude_body = claude.read_text()
-        assert f"worker-medicoder-{n}" in claude_body
+        assert f"worker-ramjac-{n}" in claude_body
         assert "{{WORKER_LABEL}}" not in claude_body
         assert "{{REPO_SLUG}}" not in claude_body
 
@@ -205,7 +205,7 @@ def test_install_team_writes_one_worker_config_per_worker(
 
 def test_install_team_is_idempotent(synthetic_home: Path) -> None:
     """Re-installing the same spec overwrites cleanly without raising."""
-    spec = make_team_spec("medicoder", worker_count=2)
+    spec = make_team_spec("ramjac", worker_count=2)
     install_team(spec)
     install_team(spec)  # second invocation must not raise
 
@@ -213,8 +213,8 @@ def test_install_team_is_idempotent(synthetic_home: Path) -> None:
         synthetic_home
         / ".treadmill"
         / "teams"
-        / "medicoder"
-        / "worker-medicoder-1"
+        / "ramjac"
+        / "worker-ramjac-1"
         / "CLAUDE.md"
     )
     assert claude.is_file()
@@ -224,22 +224,22 @@ def test_install_team_no_cross_team_overwrite(
     synthetic_home: Path,
 ) -> None:
     """Installing two teams creates two independent directory trees."""
-    install_team(make_team_spec("medicoder", worker_count=1))
+    install_team(make_team_spec("ramjac", worker_count=1))
     install_team(make_team_spec("scraper-v2", worker_count=1))
 
-    medicoder_dir = (
-        synthetic_home / ".treadmill" / "teams" / "medicoder"
+    ramjac_dir = (
+        synthetic_home / ".treadmill" / "teams" / "ramjac"
     )
     scraper_dir = (
         synthetic_home / ".treadmill" / "teams" / "scraper-v2"
     )
-    assert (medicoder_dir / "worker-medicoder-1" / "CLAUDE.md").is_file()
+    assert (ramjac_dir / "worker-ramjac-1" / "CLAUDE.md").is_file()
     assert (scraper_dir / "worker-scraper-v2-1" / "CLAUDE.md").is_file()
 
-    # Cross-pollination check: medicoder worker's CLAUDE.md doesn't
+    # Cross-pollination check: ramjac worker's CLAUDE.md doesn't
     # accidentally reference scraper-v2.
     medi_body = (
-        medicoder_dir / "worker-medicoder-1" / "CLAUDE.md"
+        ramjac_dir / "worker-ramjac-1" / "CLAUDE.md"
     ).read_text()
     assert "scraper-v2" not in medi_body
 
@@ -254,22 +254,22 @@ def test_install_team_renders_coordinator_claude_md(
     ``{{REPO_SLUG}}`` resolved to the team's slug. No settings.json
     is written (the coordinator does not run the worker's PostToolUse
     hook substrate — it IS the live process routing signals)."""
-    spec = make_team_spec("medicoder", worker_count=2)
+    spec = make_team_spec("ramjac", worker_count=2)
     install_team(spec)
 
     coord_dir = (
         synthetic_home
         / ".treadmill"
         / "teams"
-        / "medicoder"
-        / "coordinator-medicoder"
+        / "ramjac"
+        / "coordinator-ramjac"
     )
     assert coord_dir.is_dir()
     coord_claude = coord_dir / "CLAUDE.md"
     assert coord_claude.is_file()
     body = coord_claude.read_text()
-    assert "coordinator-medicoder" in body  # substituted REPO_SLUG appears in the label form
-    assert "medicoder" in body
+    assert "coordinator-ramjac" in body  # substituted REPO_SLUG appears in the label form
+    assert "ramjac" in body
     assert "{{REPO_SLUG}}" not in body  # placeholder fully resolved
     # Coordinator-specific: no settings.json next to it (workers only).
     assert not (coord_dir / "settings.json").exists()
@@ -299,14 +299,14 @@ def test_install_team_coordinator_is_idempotent(synthetic_home: Path) -> None:
     """Re-running ``install_team`` overwrites the coordinator's
     rendered CLAUDE.md cleanly (same shape ``test_install_team_is_
     idempotent`` pins for worker + evaluator)."""
-    spec = make_team_spec("medicoder", worker_count=2)
+    spec = make_team_spec("ramjac", worker_count=2)
     install_team(spec)
     first = (
         synthetic_home
         / ".treadmill"
         / "teams"
-        / "medicoder"
-        / "coordinator-medicoder"
+        / "ramjac"
+        / "coordinator-ramjac"
         / "CLAUDE.md"
     ).read_text()
     install_team(spec)
@@ -314,8 +314,8 @@ def test_install_team_coordinator_is_idempotent(synthetic_home: Path) -> None:
         synthetic_home
         / ".treadmill"
         / "teams"
-        / "medicoder"
-        / "coordinator-medicoder"
+        / "ramjac"
+        / "coordinator-ramjac"
         / "CLAUDE.md"
     ).read_text()
     assert first == second
@@ -353,11 +353,11 @@ def test_worker_settings_json_renders_under_dot_claude(
     See docs/learnings/2026-06-10-template-install-layout-vs-launcher-
     cwd-mismatch.md.
     """
-    spec = make_team_spec("medicoder", worker_count=1)
+    spec = make_team_spec("ramjac", worker_count=1)
     install_team(spec)
     worker_dir = (
-        synthetic_home / ".treadmill" / "teams" / "medicoder"
-        / "worker-medicoder-1"
+        synthetic_home / ".treadmill" / "teams" / "ramjac"
+        / "worker-ramjac-1"
     )
     assert (worker_dir / ".claude" / "settings.json").is_file(), (
         "settings.json must live under .claude/ for Claude Code discovery"
@@ -371,24 +371,24 @@ def test_install_team_removes_stale_root_claude_md(
     synthetic_home: Path,
 ) -> None:
     """Pre-ADR-0087 deployments left a stale CLAUDE.md at the team-dir
-    root (ADR-0084 era, ~23KB on existing medicoder team). Claude
+    root (ADR-0084 era, ~23KB on existing ramjac team). Claude
     reads CLAUDE.md hierarchically so the stale parent shadows the
     new per-label files. install_team() must unlink it.
     """
-    team_dir = synthetic_home / ".treadmill" / "teams" / "medicoder"
+    team_dir = synthetic_home / ".treadmill" / "teams" / "ramjac"
     team_dir.mkdir(parents=True, exist_ok=True)
     stale = team_dir / "CLAUDE.md"
     stale.write_text("# stale ADR-0084 content\n")
 
-    install_team(make_team_spec("medicoder", worker_count=1))
+    install_team(make_team_spec("ramjac", worker_count=1))
 
     assert not stale.exists(), "stale parent CLAUDE.md must be removed"
     # Per-label CLAUDE.md files DO exist (the install renders them).
     assert (
-        team_dir / "coordinator-medicoder" / "CLAUDE.md"
+        team_dir / "coordinator-ramjac" / "CLAUDE.md"
     ).is_file()
     assert (
-        team_dir / "worker-medicoder-1" / "CLAUDE.md"
+        team_dir / "worker-ramjac-1" / "CLAUDE.md"
     ).is_file()
 
 
@@ -397,13 +397,13 @@ def test_install_team_root_claude_cleanup_idempotent(
 ) -> None:
     """Second `team up` (no stale file present) must not raise. The
     `if stale.exists()` guard makes the unlink idempotent."""
-    spec = make_team_spec("medicoder", worker_count=1)
+    spec = make_team_spec("ramjac", worker_count=1)
     install_team(spec)
     # No stale file remaining after first install. Second install must
     # complete cleanly.
     install_team(spec)
     assert not (
-        synthetic_home / ".treadmill" / "teams" / "medicoder" / "CLAUDE.md"
+        synthetic_home / ".treadmill" / "teams" / "ramjac" / "CLAUDE.md"
     ).exists()
 
 
@@ -414,7 +414,7 @@ def test_install_team_root_claude_cleanup_idempotent(
 # template is allowed to use. Anything else (e.g. "$comment") raises an
 # interactive "values were skipped — Continue?" prompt at session boot,
 # which wedges an unattended worker until an operator presses Enter
-# (both medicoder workers wedged on the first ADR-0087 team boot —
+# (both ramjac workers wedged on the first ADR-0087 team boot —
 # 2026-06-10). Extend deliberately; never add documentation keys.
 _SETTINGS_ALLOWED_TOP_LEVEL = {"permissions", "hooks", "env", "model"}
 

@@ -13,12 +13,12 @@ Joe, on discovering the ADR-0088 prod-promotion gate (contract + API +
 CLI + templates, built and merged overnight): "This is wrong. You should
 have looked at how this used to work. We used GitHub environments and
 approved reviewers before and that's the system that we should use going
-forward. Treadmill is my system. It is separate from medicoder."
+forward. Treadmill is my system. It is separate from ramjac."
 
 ## Observation
 Four sessions designed, contract-reviewed, implemented, and cross-reviewed
 a human-approval gate for prod deploys — contract-first, sibling-validated,
-well-tested — without anyone asking how medicoder's previous deploy
+well-tested — without anyone asking how ramjac's previous deploy
 pipeline handled human approval. The answer (GitHub environment protection
 with required reviewers) was the platform-native feature the project had
 already used. The review process caught design flaws INSIDE the chosen

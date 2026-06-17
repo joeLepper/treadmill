@@ -400,10 +400,10 @@ def test_no_claude_accounts_keeps_secret_count_at_baseline():
 
 
 def test_claude_accounts_create_per_account_secret_resources():
-    """``--context claude_accounts=personal,osmo`` adds two secrets named
+    """``--context claude_accounts=personal,zephyr`` adds two secrets named
     ``treadmill-<id>/claude-account-<name>`` (deterministic so the operator
     can populate via ``put-secret-value``)."""
-    template = _template(claude_accounts="personal,osmo")
+    template = _template(claude_accounts="personal,zephyr")
     template.resource_count_is("AWS::SecretsManager::Secret", 6)
     template.has_resource_properties(
         "AWS::SecretsManager::Secret",
@@ -411,7 +411,7 @@ def test_claude_accounts_create_per_account_secret_resources():
     )
     template.has_resource_properties(
         "AWS::SecretsManager::Secret",
-        {"Name": "treadmill-test/claude-account-osmo"},
+        {"Name": "treadmill-test/claude-account-zephyr"},
     )
 
 
@@ -421,7 +421,7 @@ def test_claude_accounts_emit_per_account_cfn_outputs():
     name string (not a CDK token that synthesizes to ``Fn::Join``-of-
     ``Fn::Split``). The local-adapter's ``build_deployment_config`` matches
     on the VALUE pattern (CDK hash-mangles the output key)."""
-    template = _template(claude_accounts="personal,osmo").to_json()
+    template = _template(claude_accounts="personal,zephyr").to_json()
     outputs = template.get("Outputs", {})
     values = [
         v["Value"] for v in outputs.values()
@@ -429,7 +429,7 @@ def test_claude_accounts_emit_per_account_cfn_outputs():
         and v["Value"].startswith("treadmill-test/claude-account-")
     ]
     assert "treadmill-test/claude-account-personal" in values
-    assert "treadmill-test/claude-account-osmo" in values
+    assert "treadmill-test/claude-account-zephyr" in values
 
 
 def test_claude_accounts_extend_api_policy_get_secret_value_arns():

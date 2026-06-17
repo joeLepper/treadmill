@@ -74,11 +74,11 @@ def test_coordinator_label_creates_team_dir(tmp_path: Path) -> None:
     env, _ = _build_env(tmp_path, home=home)
 
     subprocess.run(
-        [str(LAUNCHER), "coordinator-medicoder"],
+        [str(LAUNCHER), "coordinator-ramjac"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
-    assert (home / ".treadmill" / "teams" / "medicoder").is_dir()
+    assert (home / ".treadmill" / "teams" / "ramjac").is_dir()
 
 
 def test_coordinator_label_sources_coordinator_env(tmp_path: Path) -> None:
@@ -87,7 +87,7 @@ def test_coordinator_label_sources_coordinator_env(tmp_path: Path) -> None:
     survives the launcher → claude env handoff."""
     home = tmp_path / "home"
     home.mkdir()
-    team_dir = home / ".treadmill" / "teams" / "medicoder"
+    team_dir = home / ".treadmill" / "teams" / "ramjac"
     team_dir.mkdir(parents=True)
     (team_dir / "coordinator.env").write_text(
         "TREADMILL_ROLE=coordinator\nTREADMILL_COORDINATOR_PLANS=p-1,p-2\n"
@@ -95,7 +95,7 @@ def test_coordinator_label_sources_coordinator_env(tmp_path: Path) -> None:
     env, recorder = _build_env(tmp_path, home=home)
 
     subprocess.run(
-        [str(LAUNCHER), "coordinator-medicoder"],
+        [str(LAUNCHER), "coordinator-ramjac"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
@@ -118,13 +118,13 @@ def test_coordinator_workdir_pinned_to_per_label_subdir(tmp_path: Path) -> None:
     env, recorder = _build_env(tmp_path, home=home)
 
     subprocess.run(
-        [str(LAUNCHER), "coordinator-medicoder", str(misleading)],
+        [str(LAUNCHER), "coordinator-ramjac", str(misleading)],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
     recorded = recorder.read_text()
     expected_workdir = str(
-        home / ".treadmill" / "teams" / "medicoder" / "coordinator-medicoder"
+        home / ".treadmill" / "teams" / "ramjac" / "coordinator-ramjac"
     )
     assert f"CWD: {expected_workdir}" in recorded
 
@@ -135,13 +135,13 @@ def test_coordinator_skips_dispatch_reminder(tmp_path: Path) -> None:
     specific notice replaces it."""
     home = tmp_path / "home"
     home.mkdir()
-    team_dir = home / ".treadmill" / "teams" / "medicoder"
+    team_dir = home / ".treadmill" / "teams" / "ramjac"
     team_dir.mkdir(parents=True)
     (team_dir / "coordinator.env").write_text("TREADMILL_ROLE=coordinator\n")
     env, _ = _build_env(tmp_path, home=home)
 
     result = subprocess.run(
-        [str(LAUNCHER), "coordinator-medicoder"],
+        [str(LAUNCHER), "coordinator-ramjac"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
@@ -211,7 +211,7 @@ def test_coordinator_workdir_override_logs_notice(tmp_path: Path) -> None:
     env, _ = _build_env(tmp_path, home=home)
 
     result = subprocess.run(
-        [str(LAUNCHER), "coordinator-medicoder", str(other)],
+        [str(LAUNCHER), "coordinator-ramjac", str(other)],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
@@ -231,12 +231,12 @@ def test_evaluator_label_pins_cwd_to_per_label_subdir(tmp_path: Path) -> None:
     env, recorder = _build_env(tmp_path, home=home)
 
     subprocess.run(
-        [str(LAUNCHER), "evaluator-medicoder"],
+        [str(LAUNCHER), "evaluator-ramjac"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
     expected_session_dir = (
-        home / ".treadmill" / "teams" / "medicoder" / "evaluator-medicoder"
+        home / ".treadmill" / "teams" / "ramjac" / "evaluator-ramjac"
     )
     assert expected_session_dir.is_dir()
     recorded = recorder.read_text()
@@ -253,12 +253,12 @@ def test_worker_team_label_pins_cwd_to_per_label_subdir(tmp_path: Path) -> None:
     env, recorder = _build_env(tmp_path, home=home)
 
     subprocess.run(
-        [str(LAUNCHER), "worker-medicoder-2"],
+        [str(LAUNCHER), "worker-ramjac-2"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
     expected_session_dir = (
-        home / ".treadmill" / "teams" / "medicoder" / "worker-medicoder-2"
+        home / ".treadmill" / "teams" / "ramjac" / "worker-ramjac-2"
     )
     assert expected_session_dir.is_dir()
     recorded = recorder.read_text()
@@ -318,16 +318,16 @@ def test_per_label_env_file_sourced_when_present(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
     session_dir = (
-        home / ".treadmill" / "teams" / "medicoder" / "worker-medicoder-1"
+        home / ".treadmill" / "teams" / "ramjac" / "worker-ramjac-1"
     )
     session_dir.mkdir(parents=True)
-    (session_dir / "worker-medicoder-1.env").write_text(
+    (session_dir / "worker-ramjac-1.env").write_text(
         "TREADMILL_ROLE=worker\nTREADMILL_API_URL=http://from-env\n"
     )
     env, recorder = _build_env(tmp_path, home=home)
 
     subprocess.run(
-        [str(LAUNCHER), "worker-medicoder-1"],
+        [str(LAUNCHER), "worker-ramjac-1"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
@@ -342,7 +342,7 @@ def test_coordinator_env_sourced_before_cwd_change(tmp_path: Path) -> None:
     (ADR-0084 §3A) depends on it staying at <team>/coordinator.env."""
     home = tmp_path / "home"
     home.mkdir()
-    team_dir = home / ".treadmill" / "teams" / "medicoder"
+    team_dir = home / ".treadmill" / "teams" / "ramjac"
     team_dir.mkdir(parents=True)
     (team_dir / "coordinator.env").write_text(
         "TREADMILL_COORDINATOR_PLANS=plan-abc-123\n"
@@ -350,16 +350,16 @@ def test_coordinator_env_sourced_before_cwd_change(tmp_path: Path) -> None:
     env, recorder = _build_env(tmp_path, home=home)
 
     subprocess.run(
-        [str(LAUNCHER), "coordinator-medicoder"],
+        [str(LAUNCHER), "coordinator-ramjac"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 
     recorded = recorder.read_text()
     # The env value lands in claude's environment despite cwd having
-    # moved to <team>/coordinator-medicoder/ before exec.
+    # moved to <team>/coordinator-ramjac/ before exec.
     assert "TREADMILL_COORDINATOR_PLANS=plan-abc-123" in recorded
     assert (
-        f"CWD: {team_dir / 'coordinator-medicoder'}" in recorded
+        f"CWD: {team_dir / 'coordinator-ramjac'}" in recorded
     )
 
 
@@ -397,12 +397,12 @@ def test_team_role_env_model_not_overridden_by_launcher(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
     session_dir = (
-        home / ".treadmill" / "teams" / "medicoder" / "worker-medicoder-1"
+        home / ".treadmill" / "teams" / "ramjac" / "worker-ramjac-1"
     )
     session_dir.mkdir(parents=True)
-    (session_dir / "worker-medicoder-1.env").write_text(
+    (session_dir / "worker-ramjac-1.env").write_text(
         "TREADMILL_ROLE=worker\n"
-        "TREADMILL_LABEL=worker-medicoder-1\n"
+        "TREADMILL_LABEL=worker-ramjac-1\n"
         "TREADMILL_API_URL=http://localhost:8088\n"
         "ANTHROPIC_MODEL=claude-sonnet-4-6\n"
     )
@@ -410,7 +410,7 @@ def test_team_role_env_model_not_overridden_by_launcher(tmp_path: Path) -> None:
     env.pop("ANTHROPIC_MODEL", None)
 
     subprocess.run(
-        [str(LAUNCHER), "worker-medicoder-1"],
+        [str(LAUNCHER), "worker-ramjac-1"],
         env=env, capture_output=True, text=True, cwd=str(tmp_path), timeout=10,
     )
 

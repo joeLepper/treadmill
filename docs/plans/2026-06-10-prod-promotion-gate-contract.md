@@ -4,12 +4,12 @@
   approval is GitHub environment protection with required reviewers.
   Preserved as the historical record; the Evidence semantic floor
   section's REQUIREMENTS survive as workflow preconditions in the
-  medicoder promote pipeline (the smoke gates the environment-protected
+  ramjac promote pipeline (the smoke gates the environment-protected
   deploy job), not as a Treadmill bundle.
 - **Date:** 2026-06-10
 - **Consumers:** Alan's human-gate ADR (API + coordinator-template mechanics) and
-  Carla's prod-promotion plan (medicoder `promote-to-prod.yml` + pipeline)
-- **Related:** medicoder `docs/plans/2026-06-10-gcp-staging-standup.md`
+  Carla's prod-promotion plan (ramjac `promote-to-prod.yml` + pipeline)
+- **Related:** ramjac `docs/plans/2026-06-10-gcp-staging-standup.md`
   (Treadmill-side companion section defines the deploy/staging_smoke vocabulary
   this contract extends); #301 event-vocabulary discipline
 
@@ -17,8 +17,8 @@
 
 ```
 sequenceDiagram
-    participant STG as staging pipeline (medicoder CI)
-    participant COORD as coordinator-medicoderhq-medicoder
+    participant STG as staging pipeline (ramjac CI)
+    participant COORD as coordinator-ramjac-ramjac
     participant API as Treadmill API / events table
     participant JOE as operator (Joe)
     participant GH as promote-to-prod.yml
@@ -54,7 +54,7 @@ sequenceDiagram
 ```json
 {
   "proposal_id": "<uuid — correlation key for every later action>",
-  "repo": "MediCoderHQ/medicoder",
+  "repo": "RAMJAC/ramjac",
   "env_from": "staging",
   "env_to": "prod",
   "digests": [{"service": "<name>", "digest": "sha256:<...>"}],
@@ -66,7 +66,7 @@ sequenceDiagram
   },
   "diff_summary": ["<PR numbers / shas included since the last prod promotion>"],
   "expires_at": "<iso8601 — default proposed_at + 48h>",
-  "proposed_by": "coordinator-medicoderhq-medicoder"
+  "proposed_by": "coordinator-ramjac-ramjac"
 }
 ```
 
@@ -105,16 +105,16 @@ REAL backends (no stubs, no emulators):
    (the dead-MAR lesson: health endpoints lie).
 3. **Consumer idle-wake** — a message published to an IDLE chain is
    processed within the smoke's settle budget. Outcome-based, not
-   instance-count-based: under always-on consumers (medicoder #1348,
+   instance-count-based: under always-on consumers (ramjac #1348,
    minInstances=1) idle means warm-but-quiescent; under backlog
-   autoscaling (medicoder #143) zero instances on an empty queue is
+   autoscaling (ramjac #143) zero instances on an empty queue is
    CORRECT, and the evidence must distinguish empty-queue-zero from
    dead-consumer-zero by publishing and observing processing — never by
    counting instances. (The min-instances=0 stall class: a warm-only
    smoke proves nothing about idle prod.)
 
 `Ready=True` alone is never promotion evidence. Basis: the 2026-06-11
-staging e2e caught three prod-breaking configs (medicoder #141 dead
+staging e2e caught three prod-breaking configs (ramjac #141 dead
 Bedrock default, #142 zero-pull idle stall, SQL bootstrap mismatches)
 on a chain that was 8/8 green by readiness — a bundle assembled from
 readiness-only evidence would have promoted a system producing zero

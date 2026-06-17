@@ -2,7 +2,7 @@
 
 - **Status:** superseded (2026-06-11, operator directive) — deploy
   approval uses **GitHub environment protection with required
-  reviewers** (medicoder's incumbent system, which this ADR failed to
+  reviewers** (ramjac's incumbent system, which this ADR failed to
   evaluate as an alternative); Treadmill is team orchestration, not a
   deploy control plane. See
   `docs/learnings/2026-06-11-check-the-incumbent-before-designing.md`.
@@ -12,9 +12,9 @@
 - **Date:** 2026-06-10
 - **Related:** ADR-0086 (coordinator owns task lifecycle), ADR-0087 (team
   execution model), `docs/plans/2026-06-10-prod-promotion-gate-contract.md`
-  (the contract of record this ADR implements — PR #302), medicoder
+  (the contract of record this ADR implements — PR #302), ramjac
   `docs/plans/2026-06-10-gcp-staging-standup.md` (deploy/smoke vocabulary),
-  medicoder `docs/roadmaps/2026-06-10-aws-to-gcp-migration.md` (step B)
+  ramjac `docs/roadmaps/2026-06-10-aws-to-gcp-migration.md` (step B)
 
 ## Context
 

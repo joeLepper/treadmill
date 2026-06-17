@@ -4,13 +4,13 @@ trigger: surprise
 status: captured
 ---
 
-# Learning: GCP resources have `medicoder-` prefix + `{env}-` topic prefix; scripts must not assume bare names
+# Learning: GCP resources have `ramjac-` prefix + `{env}-` topic prefix; scripts must not assume bare names
 
 ## Trigger
 During Plan C smoke chain testing, `smoke-end-to-end.sh` defaulted to
 `webhook-attachments-${ENV}` for the GCS bucket and `topics/attachment` for
 the Pub/Sub topic. Both were wrong:
-- Actual bucket: `medicoder-webhook-attachments-dev`
+- Actual bucket: `ramjac-webhook-attachments-dev`
 - Actual topic: `dev-attachment` (full path: `projects/care-transitions-testing/topics/dev-attachment`)
 
 The upload succeeded (separate gcloud auth) but the publish hit `Resource not found
@@ -20,8 +20,8 @@ end-to-end.
 ## Observation
 GCP resources in `care-transitions-testing` follow two naming conventions:
 1. **Pub/Sub topics**: `{env}-{name}` (e.g., `dev-attachment`, `dev-tag`, `dev-notification`)
-2. **GCS buckets**: `medicoder-{purpose}-{env}` (e.g., `medicoder-webhook-attachments-dev`,
-   `medicoder-webhook-attachment-text-dev`)
+2. **GCS buckets**: `ramjac-{purpose}-{env}` (e.g., `ramjac-webhook-attachments-dev`,
+   `ramjac-webhook-attachment-text-dev`)
 
 Scripts that hardcode bare resource names (`webhook-attachments-${ENV}`,
 `topics/attachment`) will silently fail at publish/read time even if GCS upload
@@ -30,10 +30,10 @@ succeeds.
 ## Generalization
 Any new script that touches GCP storage or Pub/Sub must derive its defaults from
 the actual deployed resource names (via `gcloud pubsub topics list` or
-`gcloud storage buckets list`) rather than guessing a convention. The `medicoder-`
+`gcloud storage buckets list`) rather than guessing a convention. The `ramjac-`
 prefix on GCS and the `{env}-` prefix on Pub/Sub topics are both load-bearing.
 
-The OCR service env var `ATTACHMENT_BUCKET=medicoder-webhook-attachments-dev`
+The OCR service env var `ATTACHMENT_BUCKET=ramjac-webhook-attachments-dev`
 is the authoritative source for the correct bucket name.
 
 ## Proposed rule

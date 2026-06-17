@@ -201,16 +201,16 @@ def test_install_resolves_repo_slug_in_rendered_template(
         tmp_path / ".treadmill" / "teams" / "__templates__",
     )
 
-    spec = make_team_spec("medicoder", worker_count=2)
+    spec = make_team_spec("ramjac", worker_count=2)
     install_team(spec)
     body = (
-        tmp_path / ".treadmill" / "teams" / "medicoder"
-        / "coordinator-medicoder" / "CLAUDE.md"
+        tmp_path / ".treadmill" / "teams" / "ramjac"
+        / "coordinator-ramjac" / "CLAUDE.md"
     ).read_text()
     assert "{{REPO_SLUG}}" not in body
-    assert "coordinator-medicoder" in body
+    assert "coordinator-ramjac" in body
     # Sanity: the substituted slug appears in the per-team header / labels.
-    assert "medicoder" in body
+    assert "ramjac" in body
 
 
 def test_template_pins_deploy_observe_section() -> None:
@@ -312,15 +312,15 @@ def test_install_renders_isolation_clone_path(
         tmp_path / ".treadmill" / "teams" / "__templates__",
     )
 
-    spec = make_team_spec("medicoder", worker_count=1)
+    spec = make_team_spec("ramjac", worker_count=1)
     install_team(spec)
     body = " ".join(
         (
-            tmp_path / ".treadmill" / "teams" / "medicoder"
-            / "worker-medicoder-1" / "CLAUDE.md"
+            tmp_path / ".treadmill" / "teams" / "ramjac"
+            / "worker-ramjac-1" / "CLAUDE.md"
         ).read_text().split()
     )
-    assert "~/.treadmill/teams/medicoder/worker-medicoder-1/<repo>" in body
+    assert "~/.treadmill/teams/ramjac/worker-ramjac-1/<repo>" in body
     assert "NEVER write to `/home/joe/<repo>`" in body
     assert "{{WORKER_LABEL}}" not in body
 

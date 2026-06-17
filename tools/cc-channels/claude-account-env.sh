@@ -20,7 +20,7 @@ if [[ -f "$_ACCOUNT_FILE" ]]; then
     # dir that has never accepted it. An unattended session has no one to press
     # "2. Yes, I accept", so it wedges on stdin BEFORE loading the treadmill-events
     # channel — no crash, no MCP log, just blocked. A fresh leased dir hits this
-    # on every launch (2026-06-16: this is exactly why the osmo + medicoder-events
+    # on every launch (2026-06-16: this is exactly why the zephyr + ramjac-events
     # leased teams never came up — the latent parallel-teams bug). Seed the accept
     # flag into the leased dir's settings.json idempotently so the modal never
     # appears. Best-effort: a write failure or unparseable file must NOT break the

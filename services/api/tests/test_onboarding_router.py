@@ -516,7 +516,7 @@ def test_onboard_repo_accepts_git_author_override(
     app = _build_app(session, store, monkeypatch)
 
     body = {
-        "repo": "osmoai/osmo",
+        "repo": "ZEPHYR/zephyr",
         "profile": {"languages": ["python"]},
         "git_author_name": "Joe Lepper",
         "git_author_email": "josephlepper@gmail.com",

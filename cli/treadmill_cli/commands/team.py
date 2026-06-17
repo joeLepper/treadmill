@@ -200,7 +200,7 @@ def _ensure_session_tree(
     if env_extra:
         # Per-team toolchain block (``--env-extra``), appended so it is
         # sourced (``set -a``) at session launch AFTER the standard vars
-        # — lets a non-default team type (e.g. osmo: conda + Gemini key +
+        # — lets a non-default team type (e.g. zephyr: conda + Gemini key +
         # scratch-DB DSN) carry its env without bloating every team.
         body = body + "\n# ── per-team env (--env-extra) ──\n" + env_extra.rstrip("\n") + "\n"
     env_path.write_text(body)
@@ -332,7 +332,7 @@ def up(
                 "Labels become ``coordinator-<slug>`` etc. while "
                 "``team_configs.repo`` stays the real repo — lets a team's "
                 "operating identity differ from the repo owner (e.g. "
-                "``--slug joelepper-osmo`` for repo ``osmoai/osmo``)."
+                "``--slug joelepper-zephyr`` for repo ``ZEPHYR/zephyr``)."
             ),
         ),
     ] = None,
@@ -355,9 +355,9 @@ def up(
             help=(
                 "Path to a file whose contents are appended to every "
                 "per-label ``.env`` (sourced at launch). For a non-default "
-                "team type that needs its own toolchain env — e.g. osmo: "
-                "``source /home/joe/osmo/.env`` + ``STAGEA_DSN`` + "
-                "``OSMO_PYTHON``."
+                "team type that needs its own toolchain env — e.g. zephyr: "
+                "``source /home/joe/zephyr/.env`` + ``STAGEA_DSN`` + "
+                "``ZEPHYR_PYTHON``."
             ),
         ),
     ] = None,

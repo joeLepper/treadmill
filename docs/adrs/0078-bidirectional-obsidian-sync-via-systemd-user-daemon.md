@@ -8,7 +8,7 @@
 
 The Obsidian vault backing Treadmill's federated doc authoring (ADR-0030, ADR-0054) is synced one-way from the API to a local mirror. Phone edits (Joe's iPad in the Obsidian app) are captured locally on the device but never propagate back to the server or to other machines. This creates a **failure mode where phone edits are stuck on the device** — any work done in Obsidian on mobile has no path back to Treadmill's state. The blocking gap is a write-side sync daemon that watches the local vault, detects changes, and pushes them back through the same API-backed store.
 
-The vault file naming convention is governed by `project_obsidian_vault_layout_convention`: files are stored as `{slug}/{doc_path}.md` where `{slug}` is derived from the repo's normalized identifier (e.g., `treadmill`, `ramjac-prod`, `osmoai-osmo`), ensuring deterministic, readable paths across all synced repos.
+The vault file naming convention is governed by `project_obsidian_vault_layout_convention`: files are stored as `{slug}/{doc_path}.md` where `{slug}` is derived from the repo's normalized identifier (e.g., `treadmill`, `ramjac-prod`, `ZEPHYR-zephyr`), ensuring deterministic, readable paths across all synced repos.
 
 ## Decision
 
@@ -54,7 +54,7 @@ The daemon refuses to push if any of these conditions hold (logged as a *held* a
 2. **ADR-immutability gate:** Any edit to a file previously tagged as immutable on the server (stored in the vault metadata or as a special comment in the ADR itself). Held alert.
 3. **Creation-disallowed gate:** File path does not exist on the server (new file creation). Phone edits are assumed to be edits to existing docs, not the creation of new ones. Held alert: `"New file {path} created on phone — doc creation disallowed, held for server-side adoption"`.
 4. **No-source gate:** The file has no corresponding row in the doc index (repo_context_docs) on the server. Treat as creation-disallowed.
-5. **Public-repo-secret-leak gate:** The file is being pushed to an `adapt`-mode repo (public external repo like osmoai/osmo, stored in S3) and the content matches a secret pattern (regex check against `TREADMILL_SECRET_PATTERNS`; e.g., `ANTHROPIC_API_KEY=`, `aws_secret_access_key=`). Held alert: `"Potential secret detected in {path} destined for public repo, held for review"`.
+5. **Public-repo-secret-leak gate:** The file is being pushed to an `adapt`-mode repo (public external repo like ZEPHYR/zephyr, stored in S3) and the content matches a secret pattern (regex check against `TREADMILL_SECRET_PATTERNS`; e.g., `ANTHROPIC_API_KEY=`, `aws_secret_access_key=`). Held alert: `"Potential secret detected in {path} destined for public repo, held for review"`.
 
 **Side-defaults** (not gates, no hold-on-match — silent behavior):
 

@@ -311,9 +311,9 @@ Substitute your real repo slugs / account names locally — keep them out of com
 ## Post-mortem
 
 Completed 2026-06-04. All three tasks merged (PRs #133 A, #135 B, #139 C); the agent
-image rebuilt with C; medicoder wired `claude_account=carebrain` /
+image rebuilt with C; ramjac wired `claude_account=hearth` /
 `claude_account_fallback=personal` and verified end-to-end (resolver returns both
-credentials). The carebrain-as-primary half shipped earlier and independently of the
+credentials). The hearth-as-primary half shipped earlier and independently of the
 fallback code — ADR-0055 single-account routing was already live, so it needed only the
 CDK secret + token + YAML + one `repo_configs` UPDATE.
 
