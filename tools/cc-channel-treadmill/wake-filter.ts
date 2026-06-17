@@ -43,13 +43,22 @@ export type RelayLevel = (typeof RELAY_LEVELS)[number]
  */
 export const ORCHESTRATOR_DEFAULT_WAKE_ACTIONS: readonly string[] = [
   'github.pr_merged',
-  'task.*_verdict',
+  // `task.evaluator_verdict` is enumerated instead of the old `task.*_verdict`
+  // glob: the evaluator's verdict is a low-volume DECISION-class wake, but the
+  // glob also pulled in `task.peer_review_verdict` — a per-event firehose on a
+  // high-volume plan (many tasks x multiple peer reviews each). The
+  // orchestrator does NOT act on raw peer verdicts; it acts on escalations,
+  // the evaluator decision, and the coordinator's direct cc-relay co-sign /
+  // escalation [ACTION REQUEST]s (a SEPARATE path, unaffected by this filter).
+  'task.evaluator_verdict',
   'task.escalat*',
   // -- enumerated escalation-class actions (escape the escalat* glob) --
   'task.evaluator_timeout',
   'task.rework_exhausted',
   // -------------------------------------------------------------------
-  'task.registered',
+  // `task.registered` dropped 2026-06-17 (operator directive): task creation
+  // is the coordinator's lifecycle, not orchestrator-actionable, and on a
+  // high-volume plan it is pure noise. Superset-safe — not relay-significant.
   'task.cancelled',
   // Terminal plan outcomes are decision-carrying (a finished plan
   // triggers the next wave; an abandoned plan demands attention now) —
