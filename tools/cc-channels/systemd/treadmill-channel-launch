@@ -117,12 +117,18 @@ tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL \"$WORKDIR\"" Enter
       *"Yes, I accept"*)
         # The --dangerously-skip-permissions "Bypass Permissions mode"
         # ACCEPTANCE modal (1. No, exit / 2. Yes, I accept). Its default
-        # highlight is "1. No, exit", so we must send "2" THEN Enter —
-        # a bare Enter here would select "No, exit" and quit claude. This
-        # should be rare (claude-account-env.sh seeds the skip flag), but
-        # backstops any config dir that slipped through.
+        # highlight is "1. No, exit", so we MOVE the selection to option 2
+        # (Down) and THEN confirm (Enter). We deliberately do NOT send the
+        # number "2": claude's modals are not verified to honor numeric
+        # hotkeys for the non-default option, and if a "2" were dropped the
+        # trailing Enter would select the DEFAULT ("No, exit") and quit
+        # claude → restart → same modal → quit = the crash-loop this
+        # backstop exists to prevent. Down+Enter was verified live against
+        # this exact modal (2026-06-16). Rare in practice — the skip flag
+        # seeded by claude-account-env.sh means the modal normally never
+        # appears — but this backstops any config dir that slipped through.
         if [ "$sent_bypass" -eq 0 ]; then
-          tmux send-keys -t "$LABEL" "2" Enter
+          tmux send-keys -t "$LABEL" Down Enter
           sent_bypass=1
         fi
         ;;
