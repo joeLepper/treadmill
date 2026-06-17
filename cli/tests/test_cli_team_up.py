@@ -48,11 +48,13 @@ def stub_template_install(
     covered by ``tools/team-templates/tests/test_install.py``; these
     tests assert the CLI wiring (call + args + failure surface).
     """
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, int, str]] = []
     monkeypatch.setattr(
         team_module,
         "_install_templates",
-        lambda slug, workers: calls.append((slug, workers)),
+        lambda slug, workers, pr_base="main": calls.append(
+            (slug, workers, pr_base)
+        ),
     )
     return calls
 
@@ -374,7 +376,75 @@ class TestTemplateInstallWiring:
         2026-06-10-template-install-layout-vs-launcher-cwd-mismatch.md."""
         result = runner.invoke(team_app, ["Acme/Widget", "--workers", "2"])
         assert result.exit_code == 0, result.stdout
-        assert stub_template_install == [("acme-widget", 2)]
+        assert stub_template_install == [("acme-widget", 2, "main")]
+
+
+class TestOsmoFlags:
+    """``--slug`` / ``--pr-base`` / ``--env-extra`` — the new-team-type
+    extension (osmo). Default behaviour (no flags) is asserted unchanged
+    by the rest of the suite."""
+
+    def test_pr_base_forwarded_to_install(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+        stub_template_install: list[tuple[str, int, str]],
+    ) -> None:
+        result = runner.invoke(
+            team_app, ["osmoai/osmo", "--pr-base", "forecast/stage-a"]
+        )
+        assert result.exit_code == 0, result.stdout
+        assert stub_template_install[0][2] == "forecast/stage-a"
+
+    def test_slug_override_decouples_labels_from_repo(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+        stub_template_install: list[tuple[str, int, str]],
+    ) -> None:
+        result = runner.invoke(
+            team_app, ["osmoai/osmo", "--slug", "joelepper-osmo"]
+        )
+        assert result.exit_code == 0, result.stdout
+        # labels use the override slug; team_configs.repo stays the real repo
+        body = fake_api_client._request.call_args.kwargs["json"]
+        assert body["repo"] == "osmoai/osmo"
+        assert body["coordinator_label"] == "coordinator-joelepper-osmo"
+        assert (teams_dir / "joelepper-osmo").is_dir()
+
+    def test_env_extra_appended_to_label_env(
+        self,
+        tmp_path: Path,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+        stub_template_install: list[tuple[str, int, str]],
+    ) -> None:
+        extra = tmp_path / "osmo.env"
+        extra.write_text("source /home/joe/osmo/.env\nOSMO_PYTHON=/home/joe/osmo/tools/osmo-python\n")
+        result = runner.invoke(
+            team_app,
+            ["osmoai/osmo", "--slug", "joelepper-osmo", "--env-extra", str(extra)],
+        )
+        assert result.exit_code == 0, result.stdout
+        env_body = (
+            teams_dir / "joelepper-osmo" / "worker-joelepper-osmo-1"
+            / "worker-joelepper-osmo-1.env"
+        ).read_text()
+        assert "TREADMILL_ROLE=worker" in env_body          # standard vars still present
+        assert "OSMO_PYTHON=/home/joe/osmo/tools/osmo-python" in env_body  # extra appended
+
+    def test_env_extra_missing_file_errors(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+    ) -> None:
+        result = runner.invoke(
+            team_app, ["osmoai/osmo", "--env-extra", "/nonexistent/osmo.env"]
+        )
+        assert result.exit_code == 1
 
     def test_template_failure_aborts_with_exit_2_before_systemd(
         self,
