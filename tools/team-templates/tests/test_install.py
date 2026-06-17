@@ -50,6 +50,42 @@ def test_make_team_spec_is_deterministic() -> None:
     assert spec_a == spec_b
 
 
+def test_make_team_spec_pr_base_defaults_to_main() -> None:
+    """Existing teams (medicoder/treadmill) keep main — no behavior change."""
+    assert make_team_spec("medicoder").pr_base == "main"
+
+
+def test_make_team_spec_custom_pr_base() -> None:
+    """A team can target a non-default trunk (osmo → forecast/stage-a)."""
+    assert make_team_spec("osmo", pr_base="forecast/stage-a").pr_base == "forecast/stage-a"
+
+
+def test_render_substitutes_pr_base(tmp_path: Path) -> None:
+    """``{{PR_BASE}}`` is replaced with the team's base — and nothing is
+    left un-substituted (a leftover placeholder would have the worker
+    branch from a literal '{{PR_BASE}}')."""
+    from install import _render
+
+    src = tmp_path / "t.tmpl"
+    src.write_text("branch from origin/{{PR_BASE}}; gh pr create --base {{PR_BASE}}")
+    dst = tmp_path / "out.md"
+    _render(src, dst, make_team_spec("osmo", pr_base="forecast/stage-a"))
+    body = dst.read_text()
+    assert "origin/forecast/stage-a" in body
+    assert "--base forecast/stage-a" in body
+    assert "{{PR_BASE}}" not in body
+
+
+def test_render_pr_base_defaults_to_main(tmp_path: Path) -> None:
+    from install import _render
+
+    src = tmp_path / "t.tmpl"
+    src.write_text("origin/{{PR_BASE}}")
+    dst = tmp_path / "out.md"
+    _render(src, dst, make_team_spec("medicoder"))
+    assert dst.read_text() == "origin/main"
+
+
 # ── install_shared_templates ─────────────────────────────────────────
 
 

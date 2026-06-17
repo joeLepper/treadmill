@@ -72,8 +72,19 @@ class TeamSpec:
     evaluator_label: str
     worker_labels: tuple[str, ...]
 
+    pr_base: str = "main"
+    """Branch workers branch FROM and open PRs INTO; the coordinator
+    auto-merges into it. Defaults to ``main`` so existing teams
+    (medicoder/treadmill) are byte-for-byte unchanged. Set per-team to a
+    team-controlled trunk (e.g. ``forecast/stage-a`` for the osmo team)
+    so workers NEVER touch the repo's real mainline — workers pass it
+    explicitly via ``gh pr create --base`` rather than relying on the
+    repo default branch."""
 
-def make_team_spec(repo_slug: str, worker_count: int = 3) -> TeamSpec:
+
+def make_team_spec(
+    repo_slug: str, worker_count: int = 3, pr_base: str = "main"
+) -> TeamSpec:
     """Derive the label set for a repo slug. Deterministic — same
     inputs always produce the same TeamSpec so re-running ``treadmill
     team up`` is idempotent."""
@@ -85,6 +96,7 @@ def make_team_spec(repo_slug: str, worker_count: int = 3) -> TeamSpec:
         worker_labels=tuple(
             f"worker-{repo_slug}-{n}" for n in range(1, worker_count + 1)
         ),
+        pr_base=pr_base,
     )
 
 
@@ -212,6 +224,7 @@ def _render(
     """
     body = src.read_text()
     body = body.replace("{{REPO_SLUG}}", spec.repo_slug)
+    body = body.replace("{{PR_BASE}}", spec.pr_base)
     if worker_label is not None:
         body = body.replace("{{WORKER_LABEL}}", worker_label)
     dst.write_text(body)
