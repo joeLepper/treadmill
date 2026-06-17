@@ -97,11 +97,20 @@ describe('orchestrator default wake set', () => {
     expect(gate.wakes('task.escalation_closed')).toBe(true)
     expect(gate.wakes('github.pr_merged')).toBe(true)
     expect(gate.wakes('task.evaluator_verdict')).toBe(true)
-    expect(gate.wakes('task.registered')).toBe(true)
     expect(gate.wakes('task.cancelled')).toBe(true)
     expect(gate.wakes('deploy.failed')).toBe(true)
     expect(gate.wakes('staging_smoke.failed')).toBe(true)
     expect(gate.wakes('datamigration.first_success')).toBe(true)
+  })
+
+  test('high-volume internal-flow noise is suppressed (2026-06-17 directive)', () => {
+    // peer_review_verdict + task.registered are the team's internal review/
+    // creation flow — a per-event firehose on a high-volume plan the
+    // orchestrator does NOT act on. Dropped from the wake set; the evaluator
+    // decision + escalations still wake (asserted above). Co-sign requests
+    // reach the orchestrator via the coordinator's direct cc-relay, not this gate.
+    expect(gate.wakes('task.peer_review_verdict')).toBe(false)
+    expect(gate.wakes('task.registered')).toBe(false)
   })
 
   test('terminal plan outcomes wake; lifecycle echoes stay suppressed (orchestrator ruling)', () => {
