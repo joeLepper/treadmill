@@ -95,16 +95,43 @@ tmux send-keys -t "$LABEL" "exec $LAUNCHER $LABEL \"$WORKDIR\"" Enter
 # prompt and the workspace-trust prompt. Both fire on every fresh `claude`
 # start (the dev-channels gate is per-launch, not per-session), so without
 # this an unattended restart wedges waiting for the operator to press
-# "1<Enter>". We poll the pane up to 60s for either prompt's distinctive
+# "1<Enter>". We poll the pane up to ~180s for each prompt's distinctive
 # text and send the accept keystroke when we see it. Background process —
 # the foreground while-loop is what keeps the unit alive.
+#
+# The window is generous (not 60s) on purpose: an un-handled modal that
+# appears FIRST will burn the whole window before a handled modal renders,
+# so the handled one never gets its keystroke (2026-06-16: a leased config
+# dir with no skipDangerousModePermissionPrompt showed the Bypass-accept
+# modal first, ate the old 60s window, and the dev-channels prompt behind
+# it was never dismissed). We now also handle the Bypass-accept modal
+# directly as a backstop to the settings-flag seeded by claude-account-env.sh.
 (
   sent_dev=0
   sent_trust=0
-  for _ in $(seq 1 60); do
+  sent_bypass=0
+  for _ in $(seq 1 180); do
     sleep 1
     pane=$(tmux capture-pane -t "$LABEL" -p 2>/dev/null || true)
     case "$pane" in
+      *"Yes, I accept"*)
+        # The --dangerously-skip-permissions "Bypass Permissions mode"
+        # ACCEPTANCE modal (1. No, exit / 2. Yes, I accept). Its default
+        # highlight is "1. No, exit", so we MOVE the selection to option 2
+        # (Down) and THEN confirm (Enter). We deliberately do NOT send the
+        # number "2": claude's modals are not verified to honor numeric
+        # hotkeys for the non-default option, and if a "2" were dropped the
+        # trailing Enter would select the DEFAULT ("No, exit") and quit
+        # claude → restart → same modal → quit = the crash-loop this
+        # backstop exists to prevent. Down+Enter was verified live against
+        # this exact modal (2026-06-16). Rare in practice — the skip flag
+        # seeded by claude-account-env.sh means the modal normally never
+        # appears — but this backstops any config dir that slipped through.
+        if [ "$sent_bypass" -eq 0 ]; then
+          tmux send-keys -t "$LABEL" Down Enter
+          sent_bypass=1
+        fi
+        ;;
       *"Loading development channels"*)
         if [ "$sent_dev" -eq 0 ]; then
           tmux send-keys -t "$LABEL" "1" Enter
