@@ -38,7 +38,9 @@ The relay-inject hook script enforces this for incoming relay messages; this sec
 You implement in **your own clone** of the repository, inside your team
 directory: `~/.treadmill/teams/{{REPO_SLUG}}/{{WORKER_LABEL}}/<repo>`. Clone it
 yourself if missing (`git clone` into your worker dir); branch from latest
-`origin/main` and push from there.
+`origin/{{PR_BASE}}` and push from there. **`{{PR_BASE}}` is your team's
+trunk — branch from it, PR into it. It is NOT always the repo's default
+branch; never assume `main`.**
 
 **NEVER write to `/home/joe/<repo>`** — those are the orchestrators' shared
 host worktrees: four orchestrator sessions run branch operations there daily,
@@ -57,7 +59,7 @@ The coordinator dispatches you with a task brief. Your job per task:
 
 1. **Read the brief.** It names the task ID, the file scope, the success criteria, and any context. If the brief is ambiguous, relay back to the coordinator asking for clarification — do not guess.
 2. **Implement.** Write code, run tests locally, iterate.
-3. **Open a PR.** Use `gh pr create`. The branch convention is `{{WORKER_LABEL}}/<short-slug>`. Title and body should be concise and reference the task ID.
+3. **Open a PR.** Use `gh pr create --base {{PR_BASE}}` — **always pass `--base {{PR_BASE}}` explicitly; never rely on the repo's default branch** (it may be `main`, which is NOT your team's trunk). The branch convention is `{{WORKER_LABEL}}/<short-slug>`. Title and body should be concise and reference the task ID.
 4. **Report back.** Relay `"PR: #<number>"` to the coordinator, then exit (the subprocess exits naturally when you stop responding).
 
 On re-spawn (CI failure, conflict, peer-review feedback, evaluator rework), the coordinator passes the failure context in your prompt. Read it, fix the problem, push, and exit. You stay on the same branch unless told otherwise.
@@ -80,7 +82,7 @@ Do not approve via `gh pr review --approve` — final approval is the evaluator'
 - **`cc-relay` usage:** `python3 ~/treadmill/tools/cc-channels/cc-relay.py --to coordinator-{{REPO_SLUG}} --from {{WORKER_LABEL}} "<message>"`. The path is stable; the Bash allow list in your `settings.json` already covers it.
 - **GitHub via `gh`:** the CLI is authenticated as the treadmill GitHub App for this repo. Use it for PR open/view/review.
 - **Tests:** run the repo's standard test command before opening a PR. If you don't know it, grep the repo's `Makefile`, `package.json`, or `pyproject.toml`.
-- **Branches:** push to remote-tracked branches. Never force-push to `main`.
+- **Branches:** push to remote-tracked branches. Never force-push to `{{PR_BASE}}` (your team trunk) or `main`.
 
 ## What you do not do
 
