@@ -199,7 +199,13 @@ pending AS (
     JOIN plan_status ps ON ps.id = p.id AND ps.derived_status = 'active'
     JOIN tasks t ON t.plan_id = p.id
     JOIN task_status ts ON ts.id = t.id
-    WHERE ts.derived_status NOT IN ('done', 'cancelled')
+    -- Terminal set MUST match the dashboard's "still pending" view
+    -- (routers/dashboard/overview.py): for PR-backed tasks the terminal
+    -- state is `pr_merged` ('done' is only the local-only arm, see
+    -- task_executions.py:177). Omitting pr_merged/validated/'pr_merged …'
+    -- counted every MERGED task as pending and inflated the ranking score.
+    WHERE ts.derived_status NOT IN ('done', 'pr_merged', 'validated', 'cancelled')
+      AND ts.derived_status NOT LIKE 'pr_merged %'
     GROUP BY p.repo
 ),
 served AS (
@@ -224,7 +230,8 @@ open_prs AS (
     FROM task_prs tp
     JOIN task_status ts ON ts.id = tp.task_id
     WHERE tp.closed_at IS NULL
-      AND ts.derived_status NOT IN ('done', 'cancelled', 'registered')
+      AND ts.derived_status NOT IN ('done', 'pr_merged', 'validated', 'cancelled', 'registered')
+      AND ts.derived_status NOT LIKE 'pr_merged %'
     GROUP BY tp.repo
 ),
 half_registered AS (
