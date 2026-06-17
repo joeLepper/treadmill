@@ -124,6 +124,32 @@ jobs:
         working-directory: tools/cc-channel-treadmill
         run: bun test
 
+  # Server-side secret-leak gate. The local pre-commit hook
+  # (tools/dev-hooks/pre_commit_secret_leak.py) only guards the operator's
+  # own commits; agents/workers/web-edits bypass it — which is exactly how
+  # client names regressed into the public repo (PR #366). This fails any PR
+  # that ADDS a denylisted client-name/account-id token. The denylist comes
+  # from the TREADMILL_CODENAME_DENYLIST repo secret (out of source control;
+  # literals never live in the tree). Output is REDACTED (file + count, never
+  # the token — Actions logs are public). Empty secret (fork PRs don't get
+  # secrets) → no-op pass: a fork contributor can't leak names they don't have.
+  secret-leak-scan:
+    name: secret-leak scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan PR diff for client-name leaks
+        env:
+          CODENAME_DENYLIST: ${{ secrets.TREADMILL_CODENAME_DENYLIST }}
+        run: |
+          git fetch -q origin "${{ github.base_ref }}"
+          git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" \
+            | python3 tools/dev-hooks/ci_secret_leak_scan.py
+
   # The pytest job runs in the uv workspace, whose env carries transitive deps
   # a component may import without declaring. The container image installs only
   # the component's *direct* deps (`pip install .`), so a missing declaration
