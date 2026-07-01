@@ -172,6 +172,18 @@ fi
 export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999
 export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999
 
+# Disable Claude-in-Chrome for supervised sessions. These are headless tmux
+# sessions with no business driving the operator's browser, yet the global
+# config carries `claudeInChromeDefaultEnabled: true`, so every session
+# auto-enabled chrome ~5s after going ready, raced the single shared Chrome
+# extension across the whole fleet, and crash-looped — each death also popped
+# a "reconnect" tab in the operator's browser (incident 2026-06-24). This env
+# var is checked BEFORE the config key (binary fn `fVt`: CLAUDE_CODE_ENABLE_CFC
+# ===false short-circuits before `claudeInChromeDefaultEnabled` is read), so it
+# cleanly opts the fleet out without touching ~/.claude.json — the operator's
+# INTERACTIVE claude (which never sources this launcher) keeps chrome.
+export CLAUDE_CODE_ENABLE_CFC=false
+
 # ── treadmill-events channel (ADR-0068) ─────────────────────────────────────
 export TREADMILL_SESSION_LABEL="$LABEL"
 # Role for the ADR-0089 wake-class filter. Team labels already carry
@@ -272,4 +284,30 @@ echo $$ > "$PIDFILE"
 # failover surface. Default stays ~/.claude.
 # shellcheck disable=SC1091
 source "$_HERE/claude-account-env.sh"
+
+# ── auto-confirm the dev-channels startup modal ─────────────────────────────
+# `--dangerously-load-development-channels` raises a blocking "I am using this
+# for local development / Exit" confirm dialog on a config dir that hasn't
+# accepted it yet. It blocks on stdin BEFORE treadmill-events loads, so a
+# restart silently wedges — the session looks crashed but is just waiting on a
+# keypress (bert 2026-06-25; diagnose via tmux capture-pane, not logs).
+# `skipDangerousModePermissionPrompt` (settings.json) covers the *bypass* modal,
+# but there is no env/flag/persisted-key to pre-accept THIS one, so we confirm
+# it in-band: backgrounded before `exec` so it survives into the claude process
+# and watches our own tmux pane, sending Enter ONLY when the modal is on screen
+# (never a spurious key at a live prompt), and stopping once the session is up.
+if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$LABEL" 2>/dev/null; then
+  (
+    for _ in $(seq 1 45); do   # ~45s window covers a slow cold/post-crash boot
+      pane=$(tmux capture-pane -t "$LABEL" -p 2>/dev/null) || break
+      case "$pane" in
+        *"I am using this for local development"*) tmux send-keys -t "$LABEL" Enter 2>/dev/null ;;
+        *"bypass permissions on"*) break ;;   # live prompt reached → done
+      esac
+      sleep 1
+    done
+  ) &>/dev/null &
+  disown
+fi
+
 exec claude "${CHANNEL_ARGS[@]}" "${SESSION_ARGS[@]}" "$@"
