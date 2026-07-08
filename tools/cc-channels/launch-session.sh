@@ -214,6 +214,23 @@ if [[ -f "$TELEGRAM_ENV" ]]; then
   export TELEGRAM_BOT_TOKEN
   export TELEGRAM_STATE_DIR="$STATE_ROOT/telegram"
   CHANNEL_ARGS+=(--channels plugin:telegram@claude-plugins-official)
+  # ── pre-install the telegram plugin deps ONCE, serialized (durable flap fix) ──
+  # The plugin's package.json `start` runs `bun install && bun server.ts`. On a mass
+  # restart/crash every session's claude runs that install concurrently on the SHARED plugin
+  # dir; the creates EEXIST-race, node_modules is left missing, and the telegram MCP can't
+  # start — the recurring fleet flap (hand-fixed 3x on 2026-07-08). The marketplace also
+  # wipes node_modules + reverts any in-place package.json de-race on each restart, so
+  # patching the plugin isn't durable. Instead pre-install here, BEFORE `exec claude`, under a
+  # fleet-wide flock so the installs SERIALIZE (first builds node_modules, the rest are fast
+  # no-ops); the plugin's own `bun install` then finds it complete and no-ops. No race,
+  # marketplace-proof.
+  _tg_plugin="$HOME/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram"
+  if [[ -d "$_tg_plugin" ]]; then
+    _bun="$(command -v bun || echo "$HOME/.bun/bin/bun")"
+    flock "$HOME/.cc-channels/.tg-plugin-install.lock" \
+      bash -c "cd '$_tg_plugin' && '$_bun' install --no-summary" >/dev/null 2>&1 \
+      || echo "[launch-session] telegram plugin pre-install failed (continuing; may re-race)" >&2
+  fi
 else
   echo "[launch-session] no $TELEGRAM_ENV — starting without the telegram channel" >&2
 fi
@@ -284,6 +301,27 @@ echo $$ > "$PIDFILE"
 # failover surface. Default stays ~/.claude.
 # shellcheck disable=SC1091
 source "$_HERE/claude-account-env.sh"
+
+# ── heal a ghost --resume target ────────────────────────────────────────────
+# A recorded session-id whose transcript no longer exists in the ACTIVE config
+# dir makes claude exit on startup with "No conversation found with session ID"
+# → permanent crash-loop (systemd just respawns into the same dead resume).
+# Leased-account dirs (CLAUDE_CONFIG_DIR=~/.claude-<account>) lose transcripts
+# between sessions, so their ids go stale repeatedly — the ramjac team looped
+# on this twice (2026-06-24, 2026-06-26). Manually clearing session-id is only a
+# band-aid; instead, validate the resume target now that CLAUDE_CONFIG_DIR is
+# resolved, and mint a FRESH session if the transcript is gone. (Recursive find
+# covers any cwd-slug under projects/; `-quit` stops at the first hit.)
+if [[ "${SESSION_ARGS[0]:-}" == "--resume" ]]; then
+  _rid="${SESSION_ARGS[1]}"
+  _cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  if [[ -z "$(find "$_cfg/projects" -name "${_rid}.jsonl" -print -quit 2>/dev/null)" ]]; then
+    _sid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    echo "$_sid" > "$SESSION_FILE"
+    SESSION_ARGS=(--session-id "$_sid")
+    echo "[launch-session] resume target $_rid has no transcript under $_cfg — minted fresh session $_sid (was a ghost-resume crash-loop)" >&2
+  fi
+fi
 
 # ── auto-confirm the dev-channels startup modal ─────────────────────────────
 # `--dangerously-load-development-channels` raises a blocking "I am using this
