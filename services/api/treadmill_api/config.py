@@ -260,6 +260,22 @@ class Settings(BaseSettings):
         default=None, alias="TREADMILL_TELEGRAM_CHAT_ID",
     )
 
+    # ── exec_otp fabric event push sink (ADR-0087 fabric migration) ───────────
+    # ``fabric_ingress_url`` — when set, every event fanned in-process to a
+    # coordinator is ALSO POSTed to this exec_otp fabric HTTP ingress (the
+    # PUSH transport that replaces the fabric's Treadmill-events WebSocket;
+    # Joe vetoed polling). The ingress routes each POST by its
+    # ``coordinator_label`` body field into that coordinator's fabric
+    # ``:global`` inbox — ONE ingress URL serves all coordinators. Empty /
+    # unset (the default) disables the sink entirely, so this ships DARK
+    # until the fabric's ingress URL is wired. The push is additive: the
+    # dashboard WebSocket fan-out is untouched, so non-migrated coordinators
+    # keep receiving events over the WS. POST failures log + continue — the
+    # event pipeline never depends on the fabric being up.
+    fabric_ingress_url: str | None = Field(
+        default=None, alias="FABRIC_INGRESS_URL",
+    )
+
     @property
     def notification_webhook_urls(self) -> list[str]:
         """Parsed list of generic-webhook URLs. Empty list = no fan-out."""
