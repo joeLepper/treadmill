@@ -67,9 +67,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from treadmill_api.coordination import (
+        FabricEventSink,
         NotificationFanout,
         ReplayLoop,
         WebhookInboxPoller,
+        make_fabric_event_sink,
         make_notification_fanout,
     )
     from treadmill_api.eventbus import make_publisher, set_publisher
@@ -176,6 +178,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     notification_fanout: NotificationFanout = make_notification_fanout(settings)
     await notification_fanout.start()
 
+    # Fabric event push sink (ADR-0087 fabric migration). Subscribes to the
+    # same in-process eventbus broadcaster the dashboard WS rides and, when
+    # ``FABRIC_INGRESS_URL`` is set, ALSO POSTs each coordinator-fanned event
+    # to the exec_otp fabric ingress (the PUSH transport replacing the
+    # fabric's held WebSocket). Additive — the WS fan-out is untouched.
+    # ``start()`` is a no-op (no subscription, no task) when the URL is unset,
+    # so this ships dark. The sink needs a sessionmaker to resolve an event's
+    # coordinator via team_configs; it falls back to the plan.submitted
+    # payload fast path when no engine is wired.
+    fabric_session_factory = (
+        async_sessionmaker(engine, expire_on_commit=False)
+        if engine is not None
+        else None
+    )
+    fabric_event_sink: FabricEventSink = make_fabric_event_sink(
+        settings, session_factory=fabric_session_factory,
+    )
+    await fabric_event_sink.start()
+
     app.state.settings = settings
     app.state.engine = engine
     app.state.redis = redis
@@ -191,6 +212,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.replay_loop = replay_loop
     app.state.webhook_inbox_poller = webhook_inbox_poller
     app.state.notification_fanout = notification_fanout
+    app.state.fabric_event_sink = fabric_event_sink
     app.state.probes = _build_probes(
         engine, redis, webhook_inbox_poller=webhook_inbox_poller,
     )
@@ -216,6 +238,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if webhook_inbox_poller is not None:
                 await webhook_inbox_poller.stop()
             await notification_fanout.stop()
+            await fabric_event_sink.stop()
             await github_clients.aclose()
             if engine is not None:
                 await engine.dispose()
