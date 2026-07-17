@@ -6,16 +6,27 @@
 # Ctrl-b d to leave the session running. Stop the session
 # via `systemctl --user stop treadmill-channel@<label>.service`,
 # not by killing tmux from inside.
-set -euo pipefail
+# NOTE: deliberately no `set -e` — a failed `tmux a` (session restarting) must
+# NOT kill this wrapper; the loop below re-attaches instead.
+set -uo pipefail
 
 LABEL="${1:?label required}"
-if ! tmux has-session -t "$LABEL" 2>/dev/null; then
-  cat >&2 <<EOF
-No supervised tmux session for label $LABEL.
-Install + start the systemd unit:
-  systemctl --user enable --now treadmill-channel@$LABEL.service
-Then re-run: cc-attach $LABEL
-EOF
-  exit 1
-fi
-exec tmux a -t "$LABEL"
+
+# Resilient attach. The old one-shot (`exit 1` if missing, `exec tmux a`) made a
+# dashboard pane die permanently if its session was missing for even an instant
+# — e.g. when the dashboard is bounced while a label is mid-self-restart, that
+# label silently drops out of the grid and never comes back. Instead, wait for
+# the session and RE-ATTACH whenever it detaches or restarts, so every label
+# survives its own restarts and dashboard-launch/restart races.
+warned=0
+while true; do
+  if tmux has-session -t "$LABEL" 2>/dev/null; then
+    warned=0
+    tmux a -t "$LABEL"   # blocks while attached; returns on detach / restart / death
+  elif [[ "$warned" -eq 0 ]]; then
+    printf '[cc-attach] %s not up yet — waiting; auto-attaches when it appears.\n' "$LABEL" >&2
+    printf '  (start it: systemctl --user enable --now treadmill-channel@%s.service)\n' "$LABEL" >&2
+    warned=1
+  fi
+  sleep 2
+done

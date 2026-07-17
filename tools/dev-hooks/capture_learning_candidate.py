@@ -27,6 +27,7 @@ See docs/adrs/0008-learning-capture-skill-plus-hook-triggers.md.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -44,6 +45,30 @@ def _load_triggers() -> tuple[list[str], list[str]]:
         return [], []
     data = json.loads(TRIGGERS_PATH.read_text())
     return data.get("phrases", []), data.get("false_positive_skips", [])
+
+
+# Channel/relay/system content gets injected INTO the prompt the hook sees (a
+# <channel> relay, a <system-reminder>, a [from: treadmill-*] action request).
+# Scanning it yields false-positive candidates from siblings' prose or our own
+# relayed words (e.g. "fabricated" inside a relay) rather than a real operator
+# correction of THIS session — ~half the accumulated noise (triage 2026-06-25).
+_INJECTED_BLOCK = re.compile(
+    r"<channel\b.*?</channel>|<system-reminder>.*?</system-reminder>"
+    r"|<local-command-[a-z]+>.*?</local-command-[a-z]+>",
+    re.DOTALL | re.IGNORECASE,
+)
+_RELAY_MARKERS = ("[action request]", "[from: treadmill-", 'source="relay"',
+                  'source="treadmill-events"', "<channel ")
+
+
+def _strip_injected(prompt: str) -> str:
+    """Keep only the operator's own prose; drop channel/system/relay-injected
+    content. If relay markers survive (unclosed tag), it's still injected — drop."""
+    text = _INJECTED_BLOCK.sub(" ", prompt)
+    low = text.lower()
+    if any(m in low for m in _RELAY_MARKERS):
+        return ""
+    return text
 
 
 def _scan(prompt: str, phrases: list[str], skips: list[str]) -> str | None:
@@ -110,7 +135,7 @@ def main() -> int:
         return 0
 
     phrases, skips = _load_triggers()
-    matched = _scan(prompt, phrases, skips)
+    matched = _scan(_strip_injected(prompt), phrases, skips)
     if matched is None:
         return 0
 

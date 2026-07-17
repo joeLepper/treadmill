@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# cc-dashboard — one-row, four-column operator dashboard for all labelled sessions.
+# cc-dashboard — one-row, five-column operator dashboard for all labelled sessions.
 #
-# Opens a tmux session named "cc-dashboard" with four panes side-by-side,
+# Opens a tmux session named "cc-dashboard" with five panes side-by-side,
 # each showing one orchestrator session. If the dashboard already exists,
 # reattaches to it.
 #
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 DASHBOARD="cc-dashboard"
-LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna)
+LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna treadmill-ernie)
 
 # Parse optional --labels override
 while [[ $# -gt 0 ]]; do

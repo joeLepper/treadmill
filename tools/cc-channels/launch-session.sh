@@ -172,6 +172,18 @@ fi
 export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999
 export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999
 
+# Disable Claude-in-Chrome for supervised sessions. These are headless tmux
+# sessions with no business driving the operator's browser, yet the global
+# config carries `claudeInChromeDefaultEnabled: true`, so every session
+# auto-enabled chrome ~5s after going ready, raced the single shared Chrome
+# extension across the whole fleet, and crash-looped — each death also popped
+# a "reconnect" tab in the operator's browser (incident 2026-06-24). This env
+# var is checked BEFORE the config key (binary fn `fVt`: CLAUDE_CODE_ENABLE_CFC
+# ===false short-circuits before `claudeInChromeDefaultEnabled` is read), so it
+# cleanly opts the fleet out without touching ~/.claude.json — the operator's
+# INTERACTIVE claude (which never sources this launcher) keeps chrome.
+export CLAUDE_CODE_ENABLE_CFC=false
+
 # ── treadmill-events channel (ADR-0068) ─────────────────────────────────────
 export TREADMILL_SESSION_LABEL="$LABEL"
 # Role for the ADR-0089 wake-class filter. Team labels already carry
@@ -202,6 +214,23 @@ if [[ -f "$TELEGRAM_ENV" ]]; then
   export TELEGRAM_BOT_TOKEN
   export TELEGRAM_STATE_DIR="$STATE_ROOT/telegram"
   CHANNEL_ARGS+=(--channels plugin:telegram@claude-plugins-official)
+  # ── pre-install the telegram plugin deps ONCE, serialized (durable flap fix) ──
+  # The plugin's package.json `start` runs `bun install && bun server.ts`. On a mass
+  # restart/crash every session's claude runs that install concurrently on the SHARED plugin
+  # dir; the creates EEXIST-race, node_modules is left missing, and the telegram MCP can't
+  # start — the recurring fleet flap (hand-fixed 3x on 2026-07-08). The marketplace also
+  # wipes node_modules + reverts any in-place package.json de-race on each restart, so
+  # patching the plugin isn't durable. Instead pre-install here, BEFORE `exec claude`, under a
+  # fleet-wide flock so the installs SERIALIZE (first builds node_modules, the rest are fast
+  # no-ops); the plugin's own `bun install` then finds it complete and no-ops. No race,
+  # marketplace-proof.
+  _tg_plugin="$HOME/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram"
+  if [[ -d "$_tg_plugin" ]]; then
+    _bun="$(command -v bun || echo "$HOME/.bun/bin/bun")"
+    flock "$HOME/.cc-channels/.tg-plugin-install.lock" \
+      bash -c "cd '$_tg_plugin' && '$_bun' install --no-summary" >/dev/null 2>&1 \
+      || echo "[launch-session] telegram plugin pre-install failed (continuing; may re-race)" >&2
+  fi
 else
   echo "[launch-session] no $TELEGRAM_ENV — starting without the telegram channel" >&2
 fi
@@ -272,4 +301,51 @@ echo $$ > "$PIDFILE"
 # failover surface. Default stays ~/.claude.
 # shellcheck disable=SC1091
 source "$_HERE/claude-account-env.sh"
+
+# ── heal a ghost --resume target ────────────────────────────────────────────
+# A recorded session-id whose transcript no longer exists in the ACTIVE config
+# dir makes claude exit on startup with "No conversation found with session ID"
+# → permanent crash-loop (systemd just respawns into the same dead resume).
+# Leased-account dirs (CLAUDE_CONFIG_DIR=~/.claude-<account>) lose transcripts
+# between sessions, so their ids go stale repeatedly — the ramjac team looped
+# on this twice (2026-06-24, 2026-06-26). Manually clearing session-id is only a
+# band-aid; instead, validate the resume target now that CLAUDE_CONFIG_DIR is
+# resolved, and mint a FRESH session if the transcript is gone. (Recursive find
+# covers any cwd-slug under projects/; `-quit` stops at the first hit.)
+if [[ "${SESSION_ARGS[0]:-}" == "--resume" ]]; then
+  _rid="${SESSION_ARGS[1]}"
+  _cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  if [[ -z "$(find "$_cfg/projects" -name "${_rid}.jsonl" -print -quit 2>/dev/null)" ]]; then
+    _sid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    echo "$_sid" > "$SESSION_FILE"
+    SESSION_ARGS=(--session-id "$_sid")
+    echo "[launch-session] resume target $_rid has no transcript under $_cfg — minted fresh session $_sid (was a ghost-resume crash-loop)" >&2
+  fi
+fi
+
+# ── auto-confirm the dev-channels startup modal ─────────────────────────────
+# `--dangerously-load-development-channels` raises a blocking "I am using this
+# for local development / Exit" confirm dialog on a config dir that hasn't
+# accepted it yet. It blocks on stdin BEFORE treadmill-events loads, so a
+# restart silently wedges — the session looks crashed but is just waiting on a
+# keypress (bert 2026-06-25; diagnose via tmux capture-pane, not logs).
+# `skipDangerousModePermissionPrompt` (settings.json) covers the *bypass* modal,
+# but there is no env/flag/persisted-key to pre-accept THIS one, so we confirm
+# it in-band: backgrounded before `exec` so it survives into the claude process
+# and watches our own tmux pane, sending Enter ONLY when the modal is on screen
+# (never a spurious key at a live prompt), and stopping once the session is up.
+if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$LABEL" 2>/dev/null; then
+  (
+    for _ in $(seq 1 45); do   # ~45s window covers a slow cold/post-crash boot
+      pane=$(tmux capture-pane -t "$LABEL" -p 2>/dev/null) || break
+      case "$pane" in
+        *"I am using this for local development"*) tmux send-keys -t "$LABEL" Enter 2>/dev/null ;;
+        *"bypass permissions on"*) break ;;   # live prompt reached → done
+      esac
+      sleep 1
+    done
+  ) &>/dev/null &
+  disown
+fi
+
 exec claude "${CHANNEL_ARGS[@]}" "${SESSION_ARGS[@]}" "$@"

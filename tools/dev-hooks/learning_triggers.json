@@ -1,13 +1,10 @@
 {
   "_comment": "Phrase patterns that trigger a learning candidate when matched in a user prompt. Patterns are case-insensitive substring matches against the prompt. Add or remove entries here without touching the script. See ADR-0008.",
   "phrases": [
-    "actually,",
     "back that out",
     "back it out",
     "doesn't match",
-    "hold on",
     "i don't want",
-    "i don't think",
     "no wait",
     "stop doing",
     "that's not right",
@@ -19,10 +16,7 @@
     "you hallucinated",
     "fabricated",
     "made that up",
-    "made up that",
-    "wait,",
-    "we shouldn't",
-    "let's not"
+    "made up that"
   ],
   "false_positive_skips": [
     "no, that's correct",
