@@ -260,7 +260,12 @@ def test_launcher_sources_account_env() -> None:
     body = (Path(__file__).resolve().parents[1] / "launch-session.sh").read_text()
     assert "claude-account-env.sh" in body
     # Sourced AFTER pidfile write, immediately before exec claude.
-    assert body.index("claude-account-env.sh") < body.index("exec claude")
+    # Anchor to the real `exec claude` COMMAND (line start) — a prose mention
+    # of "exec claude" in a comment must not be what we order against.
+    import re
+    exec_cmd = re.search(r"^exec claude\b", body, re.MULTILINE)
+    assert exec_cmd is not None, "no `exec claude` command line in launch-session.sh"
+    assert body.index("claude-account-env.sh") < exec_cmd.start()
 
 
 # ── PR #328 rework items ─────────────────────────────────────────────
