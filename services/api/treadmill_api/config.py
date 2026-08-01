@@ -275,6 +275,13 @@ class Settings(BaseSettings):
     fabric_ingress_url: str | None = Field(
         default=None, alias="FABRIC_INGRESS_URL",
     )
+    # ``fabric_ingress_token`` — the bearer token the fabric ingress requires. #236 made the ingress
+    # FAIL-CLOSED: an unauthenticated POST is 401'd. BOTH the event sink and the #235 message-send
+    # client send it as ``Authorization: Bearer``. Unset ⇒ the producers ship dark (a URL without a
+    # token could only ever 401). Fabric-owned env name, so aliased (no ``TREADMILL_`` prefix).
+    fabric_ingress_token: str | None = Field(
+        default=None, alias="FABRIC_INGRESS_TOKEN",
+    )
 
     @property
     def notification_webhook_urls(self) -> list[str]:

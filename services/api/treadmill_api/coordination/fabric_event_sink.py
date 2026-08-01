@@ -199,6 +199,7 @@ class FabricEventSink:
         self,
         *,
         ingress_url: str | None = None,
+        token: str | None = None,
         session_factory: Any = None,
         http_client: httpx.AsyncClient | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
@@ -206,6 +207,8 @@ class FabricEventSink:
         # Normalize empty-string URL -> None so FABRIC_INGRESS_URL="" behaves
         # exactly like unset (dark by default).
         self.ingress_url = ingress_url or None
+        # #236: the ingress is fail-closed; every POST must carry this bearer token.
+        self._token = token or None
         self._session_factory = session_factory
         # An injected client (tests, shared) is left alone on shutdown; an
         # owned client is built lazily on start and closed in ``stop``.
@@ -236,7 +239,11 @@ class FabricEventSink:
             return
         self._stopped = False
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=self._timeout_seconds)
+            self._http_client = httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                # #236: the ingress is fail-closed — without the bearer token every POST 401s.
+                headers={"Authorization": f"Bearer {self._token}"} if self._token else {},
+            )
         # Subscribe BEFORE spawning the consumer task so the queue exists
         # by the time the task awaits ``queue.get()``.
         self._queue = subscribe_local()
@@ -360,5 +367,6 @@ def make_fabric_event_sink(
     """
     return FabricEventSink(
         ingress_url=settings.fabric_ingress_url,
+        token=getattr(settings, "fabric_ingress_token", None),
         session_factory=session_factory,
     )

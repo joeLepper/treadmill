@@ -28,6 +28,10 @@ from treadmill_api.coordination.fabric_event_sink import (
     FabricEventSink,
     make_fabric_event_sink,
 )
+from treadmill_api.coordination.fabric_send import (
+    FabricSend,
+    make_fabric_send,
+)
 from treadmill_api.coordination.notification_fanout import (
     NotificationFanout,
     make_notification_fanout,
@@ -37,9 +41,11 @@ from treadmill_api.coordination.webhook_inbox import WebhookInboxPoller
 
 __all__ = [
     "FabricEventSink",
+    "FabricSend",
     "NotificationFanout",
     "ReplayLoop",
     "WebhookInboxPoller",
     "make_fabric_event_sink",
+    "make_fabric_send",
     "make_notification_fanout",
 ]

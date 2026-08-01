@@ -68,10 +68,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     from treadmill_api.coordination import (
         FabricEventSink,
+        FabricSend,
         NotificationFanout,
         ReplayLoop,
         WebhookInboxPoller,
         make_fabric_event_sink,
+        make_fabric_send,
         make_notification_fanout,
     )
     from treadmill_api.eventbus import make_publisher, set_publisher
@@ -197,6 +199,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await fabric_event_sink.start()
 
+    # #235: the imperative message-send client (coordinator↔worker briefs → fabric ingress). Dark
+    # unless FABRIC_INGRESS_URL + FABRIC_INGRESS_TOKEN are set; a caller invokes app.state.fabric_send.
+    fabric_send: FabricSend = make_fabric_send(settings)
+    await fabric_send.start()
+
     app.state.settings = settings
     app.state.engine = engine
     app.state.redis = redis
@@ -213,6 +220,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.webhook_inbox_poller = webhook_inbox_poller
     app.state.notification_fanout = notification_fanout
     app.state.fabric_event_sink = fabric_event_sink
+    app.state.fabric_send = fabric_send
     app.state.probes = _build_probes(
         engine, redis, webhook_inbox_poller=webhook_inbox_poller,
     )
@@ -239,6 +247,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await webhook_inbox_poller.stop()
             await notification_fanout.stop()
             await fabric_event_sink.stop()
+            await fabric_send.stop()
             await github_clients.aclose()
             if engine is not None:
                 await engine.dispose()
