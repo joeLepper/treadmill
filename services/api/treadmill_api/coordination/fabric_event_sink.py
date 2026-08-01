@@ -237,6 +237,14 @@ class FabricEventSink:
                 "skipping start"
             )
             return
+        if self._token is None:
+            # Observability (carla #235 review): a live-but-untokened sink pushes to the #236
+            # fail-closed ingress, which 401s every POST — and the sink swallows failures, so the
+            # drop is otherwise invisible. Surface it once at start so "events just stopped" is diagnosable.
+            logger.warning(
+                "fabric event sink: FABRIC_INGRESS_URL set but FABRIC_INGRESS_TOKEN unset — the "
+                "fail-closed ingress (#236) will 401 every push; events will be silently dropped"
+            )
         self._stopped = False
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(

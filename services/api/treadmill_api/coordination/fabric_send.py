@@ -40,6 +40,16 @@ _DEFAULT_TIMEOUT_SECONDS = 5.0
 # caller's first line of defense — rather than relying only on the server.
 _TREADMILL_SENDER_RE = re.compile(r"\A(coordinator|worker|evaluator)-[a-z0-9-]{1,60}\Z")
 
+# Drift-resistant defense-in-depth (carla #235 review): the regex ALREADY subsumes this today (no
+# reserved/sibling name carries the coordinator/worker/evaluator- prefix), but mirror the ingress's
+# explicit deny so a future regex loosening can't silently re-admit a reserved bare source or a sibling.
+_RESERVED_DENIED = frozenset(
+    {
+        "operator", "telegram", "cli", "ingress", "dispatch", "obsidian", "system", "unknown",
+        "potter", "alan", "bert", "carla", "donna", "ernie",
+    }
+)
+
 
 def _now_epoch_seconds() -> int:
     """Unix seconds — the ingress message route's ``ts`` freshness gate expects an integer."""
@@ -95,8 +105,12 @@ class FabricSend:
 
     @staticmethod
     def valid_sender(sender: Any) -> bool:
-        """Defense-in-depth mirror of the ingress gate: a treadmill-team label only."""
-        return isinstance(sender, str) and _TREADMILL_SENDER_RE.match(sender) is not None
+        """Defense-in-depth mirror of the ingress gate: a treadmill-team label only, never reserved."""
+        return (
+            isinstance(sender, str)
+            and _TREADMILL_SENDER_RE.match(sender) is not None
+            and sender not in _RESERVED_DENIED
+        )
 
     async def send(self, *, to: str, sender: str, text: str) -> bool:
         """POST an attributed message; return True on a 2xx ingress ack, else False (logged).
