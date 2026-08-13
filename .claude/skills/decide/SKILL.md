@@ -71,6 +71,9 @@ Skipping this section is a smell. Even when an option seems obviously dominant, 
 
 ### Risks
 - What could make us regret this. Optionally: what signal would tell us to revisit.
+- **Falsifier:** the concrete observation a reader could witness that would show the system no longer honours this decision. Not a restatement of the decision — the symptom. Example: "if X happens, this decision is not being honoured." Required. A reviewer rejects if this line is absent or merely restates the decision rather than naming an observable symptom.
+
+> **Check mandate (deferred):** binding a deterministic check to each Falsifier is tracked in ADR-0099 (proposed) and lands when the scheduled check-runner exists. Do not add a `Check:` line to new ADRs yet; that slot is reserved for the follow-on edit.
 
 ## Diagram
 
@@ -133,6 +136,7 @@ A reviewer of an ADR (sibling orchestrator, peer worker, or the operator) checks
 
 - Does the Alternatives section name the incumbent, and is the rejection reason convincing?
 - Does the diagram (when present) pass the conformance checklist above?
+- Does this ADR name a falsifier — the symptom a reader could witness — distinct from a restatement of the decision?
 
 The first question exists because same-frame review converges within the proposer's frame — it catches flaws inside the design while never challenging the design's premise (docs/learnings/2026-06-11-check-the-incumbent-before-designing.md). Reject ADRs that fail either check; an unconvincing incumbent rejection is a design smell, not a wording nit.
 
