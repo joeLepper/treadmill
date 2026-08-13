@@ -1,0 +1,1 @@
+- Added `docs/adrs/0099-scheduled-conformance-check-runner.md` (proposed): scopes the runner that executes deterministic checks on merge-to-main and a daily sweep. Answers ADR-0098's unrun-check risk. PR link TBD (task 973f323e).
