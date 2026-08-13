@@ -44,7 +44,21 @@ def test_tailnet_bind_addr_cgnat_returned_unchanged() -> None:
     assert tailnet_bind_addr("100.101.102.103") == "100.101.102.103"
 
 
-@pytest.mark.parametrize("banned", ["0.0.0.0", "", "127.0.0.1", "localhost"])
+@pytest.mark.parametrize(
+    "banned",
+    [
+        "0.0.0.0",          # wildcard / unspecified
+        "",                  # empty string
+        "127.0.0.1",        # loopback
+        "localhost",         # loopback hostname (lowercase)
+        "LOCALHOST",         # case-variant — old denylist was case-sensitive; allowlist closes it
+        "192.168.1.50",     # LAN (RFC 1918 class C)
+        "10.0.0.5",         # LAN (RFC 1918 class A)
+        "8.8.8.8",          # public IP
+        "example.com",      # arbitrary hostname — fail-closed, no passthrough
+        "not-an-ip-host",   # non-IP hostname — fail-closed, no passthrough
+    ],
+)
 def test_tailnet_bind_addr_banned_raises(banned: str) -> None:
     with pytest.raises(ValueError):
         tailnet_bind_addr(banned)
@@ -146,4 +160,32 @@ def test_wildcard_scan_detects_violation(tmp_path: Path) -> None:
     )
     assert any(_WILDCARD_LITERAL in desc for _, _, desc in violations), (
         f"Expected a wildcard violation; got: {violations}"
+    )
+
+
+def test_funnel_scan_detects_violation(tmp_path: Path) -> None:
+    """Meta-test: prove the Funnel-enable scan is not vacuous.
+
+    Plants a Funnel-enable pattern in a temp operator_access file and asserts
+    the scanner flags it — symmetric non-vacuity check matching the wildcard gate.
+    """
+    pkg = tmp_path / "services" / "api" / "treadmill_api" / "operator_access"
+    pkg.mkdir(parents=True)
+    (pkg / "bad_funnel.py").write_text(
+        textwrap.dedent(
+            """\
+            # Accidentally enabled Funnel
+            funnel_enabled = True
+            """
+        )
+    )
+
+    violations = _scan_operator_access(tmp_path)
+
+    assert violations, (
+        "scan returned no violations for a file containing a Funnel-enable pattern. "
+        "The Funnel falsifier is broken."
+    )
+    assert any("Funnel" in desc for _, _, desc in violations), (
+        f"Expected a Funnel-enable violation; got: {violations}"
     )

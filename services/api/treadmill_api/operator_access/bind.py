@@ -1,7 +1,9 @@
 """Tailscale bind-address utilities (ADR-0097 §Decision 3 and 4).
 
-Decision 3: services bind to the Tailscale interface only — never a wildcard,
-loopback, or LAN address. tailnet_bind_addr() asserts this at startup.
+Decision 3: services bind to the Tailscale interface only. tailnet_bind_addr()
+is an ALLOWLIST — it accepts ONLY Tailscale CGNAT addresses (100.64.0.0/10)
+and raises ValueError for everything else: loopback, wildcard, LAN (192.168.x.x,
+10.x.x.x), public IPs, non-IP hostnames. Unevaluable input fails closed.
 Decision 4: Tailscale Funnel is never enabled for these services.
 """
 
@@ -9,31 +11,37 @@ from __future__ import annotations
 
 import ipaddress
 
-_BANNED_NAMES: frozenset[str] = frozenset({"localhost", ""})
+_TAILSCALE_CGNAT = ipaddress.IPv4Network("100.64.0.0/10")
 
 
 def tailnet_bind_addr(candidate: str) -> str:
-    """Return *candidate* as the bind address, or raise ValueError if banned.
+    """Return *candidate* only when it is a Tailscale CGNAT address (100.64.0.0/10).
 
-    Raises ValueError for empty string, "localhost", loopback addresses
-    (127.x.x.x, ::1), and wildcard/unspecified addresses. A Tailscale CGNAT
-    address (100.64.0.0/10) is returned unchanged (ADR-0097 §Decision 3).
+    ALLOWLIST — raises ValueError for everything outside the CGNAT range:
+    - Wildcard/unspecified and loopback addresses
+    - LAN addresses (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    - Public IP addresses
+    - Non-IP hostnames and unparseable input (fail-closed, no passthrough)
+    - IPv6 (not in scope for this implementation)
+
+    These sessions run with permissions bypassed; a LAN bind would expose a
+    permissions-bypassed shell to the entire LAN (ADR-0097 Consequences).
     """
-    if candidate in _BANNED_NAMES:
-        raise ValueError(
-            f"bind address {candidate!r} is not allowed: "
-            f"must bind to the Tailscale interface only (ADR-0097 §Decision 3)"
-        )
     try:
         addr = ipaddress.ip_address(candidate)
     except ValueError:
-        return candidate  # non-IP hostname; pass through
-    if addr.is_loopback or addr.is_unspecified:
         raise ValueError(
-            f"bind address {candidate!r} is not allowed: "
-            f"loopback and wildcard addresses are banned (ADR-0097 §Decision 3)"
-        )
-    return candidate
+            f"bind address {candidate!r} is not a valid IP address; "
+            f"must be in the Tailscale CGNAT range 100.64.0.0/10 "
+            f"(ADR-0097 §Decision 3)"
+        ) from None
+    if isinstance(addr, ipaddress.IPv4Address) and addr in _TAILSCALE_CGNAT:
+        return candidate
+    raise ValueError(
+        f"bind address {candidate!r} is not in the Tailscale CGNAT range "
+        f"(100.64.0.0/10); must bind to the Tailscale interface only "
+        f"(ADR-0097 §Decision 3)"
+    )
 
 
 def funnel_enabled() -> bool:
