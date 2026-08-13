@@ -22,6 +22,10 @@ parented to the tmux server's cgroup, invisible to `KillMode`).
   (dev-channels gate, workspace-trust, stale limit modal), then loops 30 s
   between liveness checks and usage-limit-park detections. Exits 143 on TERM
   (operator stop); exits 1 on unexpected tmux-session end (systemd restarts).
+  When `TREADMILL_HOST` is set, runs a host-binding drift-guard preflight
+  (ADR-0095) after the PID singleton check: curls the API for the label's bound
+  host and exits 1 if bound elsewhere or unbound (fail-closed). See
+  `../host_guard.py`.
 - `treadmill-channel-reap` — `ExecStopPost` script. Tears down the label's tmux
   session; TERM→KILLs the PID-file lock-holder after verifying both cmdline
   identity and `TREADMILL_SESSION_LABEL` environ (PID-reuse guard); always
@@ -85,6 +89,13 @@ parented to the tmux server's cgroup, invisible to `KillMode`).
 - **`treadmill-limit-park-recover` never invokes tmux.** Enter (the safe
   default / dismiss) is sent exclusively by the launcher's startup poller on
   relaunch. The billing options are operator-only and NEVER auto-selected.
+- **Host-guard preflight is `TREADMILL_HOST`-gated.** When `TREADMILL_HOST` is
+  unset the guard is inert — single-host setups without API bindings are
+  unaffected. When set, the guard curls `TREADMILL_API_URL` (default
+  `http://localhost:8088`) for the label's binding. If the API is unreachable or
+  returns a non-OK response, curl exits non-zero, `_BOUND_HOST` stays empty, and
+  the guard refuses start (fail-closed). `TREADMILL_HOST` is trusted without
+  cryptographic verification; host-proof auth is ADR-0097 (out of scope).
 - **`treadmill-limit-park-sweep` is a once-every-5h oneshot** — it relies on
   the `limit-park.state` file written by the launcher's own 30-s loop to
   confirm a park on a single call (no two-run delay). If the launcher's loop
@@ -96,6 +107,7 @@ parented to the tmux server's cgroup, invisible to `KillMode`).
 - **Parent:** `tools/cc-channels/` — launcher, relay, access manager.
 - **Tests:** `tools/cc-channels/tests/` — `test_limit_park.py` (park
   detection + recovery), `test_limit_park_sweep.py` (sweep), `test_channel_reap.py`,
-  `test_launcher_singleton.py`, `test_team_control.py`.
+  `test_launcher_singleton.py`, `test_team_control.py`, `test_host_guard.py`
+  (host-binding drift guard).
 - **Decisions:** ADR-0073 (persistent sessions), ADR-0091 (team scheduler +
   pause fail-safe).

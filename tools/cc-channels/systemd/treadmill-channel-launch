@@ -67,6 +67,27 @@ if [ -f "$PIDFILE" ]; then
   rm -f "$PIDFILE"
 fi
 
+# Host-binding drift guard (ADR-0095). Refuse to start label on this host
+# if the API says it is bound elsewhere, or if no binding exists (fail-closed).
+# Gate: inert when TREADMILL_HOST is unset — single-host setups without API
+# bindings are unaffected. TREADMILL_HOST is trusted without cryptographic
+# verification; host-proof auth is ADR-0097 (out of scope here).
+if [ -n "${TREADMILL_HOST:-}" ]; then
+  _API="${TREADMILL_API_URL:-http://localhost:8088}"
+  _GUARD_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+  _BINDING=$(curl -fsSL --max-time 5 \
+    "$_API/api/v1/hosts/bindings/$LABEL" 2>/dev/null || true)
+  _BOUND_HOST=""
+  if [ -n "$_BINDING" ]; then
+    _BOUND_HOST=$(printf '%s' "$_BINDING" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('host',''))" 2>/dev/null \
+      || true)
+  fi
+  if ! python3 "$_GUARD_DIR/host_guard.py" check "$LABEL" "${_BOUND_HOST:-}"; then
+    exit 1
+  fi
+fi
+
 # Ensure tmux session exists at the right cwd. systemd-user runs the wrapper
 # with cwd=$HOME by default, so a bare `tmux new -d -s` would inherit that —
 # but `claude --resume <session-id>` binds to a transcript stored under a
