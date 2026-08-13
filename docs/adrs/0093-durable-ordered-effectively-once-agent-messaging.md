@@ -37,7 +37,7 @@ Three properties define the contract:
 
 Subscription is a durable fact on the log, so a subscriber isolated at broadcast time receives the message when it drains (ADR-0094).
 
-We author a **Treadmill-owned library** for these semantics, modelled on `medicoder-events` (ADR-0014), not a runtime dependency on it (it is PHI-coupled, and cross-project coupling is what we avoid elsewhere — ADR-0095, ADR-0096). We **copy the interface fresh** — the outbox `write`/`read_pending`/`mark_published` methods and the dedup-table shape — but **port the hardened semantics as code plus medicoder's invariant tests** (the silent-crash and unscoped-dedup-collision cases), rather than re-deriving the claim/commit cycle, dedup scoping, and pump retry from prose. Re-deriving semantics from an ADR is what produced the mark-then-process bug above. Each ported unit carries a provenance comment (source + version) so a later medicoder fix stays re-portable.
+We author a **Treadmill-owned library** for these semantics, modelled on `ramjac-events` (ADR-0014), not a runtime dependency on it (it is PHI-coupled, and cross-project coupling is what we avoid elsewhere — ADR-0095, ADR-0096). We **copy the interface fresh** — the outbox `write`/`read_pending`/`mark_published` methods and the dedup-table shape — but **port the hardened semantics as code plus ramjac's invariant tests** (the silent-crash and unscoped-dedup-collision cases), rather than re-deriving the claim/commit cycle, dedup scoping, and pump retry from prose. Re-deriving semantics from an ADR is what produced the mark-then-process bug above. Each ported unit carries a provenance comment (source + version) so a later ramjac fix stays re-portable.
 
 cc-relay is **demoted to a local wake signal**, and it never crosses hosts. It may nudge an idle session on its **own** machine that work is waiting; it no longer carries the work. Cross-host reach is the event log alone (ADR-0095): the recipient's host runs a consumer for its bound labels, sees the message on the log, and wakes its local session — cc-relay is only that last, intra-host hop. A sender on one host never touches another host.
 
@@ -46,7 +46,7 @@ cc-relay is **demoted to a local wake signal**, and it never crosses hosts. It m
 - **Incumbent: cc-relay + the channel server (ADR-0084 §4), restored by the #370/#371 revert.** It works: both parties drop and read files under `~/.cc-channels/<label>/relay/`, and it is carrying operator traffic today. **Why insufficient:** it offers no delivery guarantee. There is no acknowledgement, no ordering, no deduplication, and no redelivery, so a sender cannot establish whether a message arrived. Observed on 2026-08-12: a session's brief was consumed by the channel server, the session stopped before acting on it, and nothing redelivered — a human noticed by reading the terminal.
 - **The `exec_otp` fabric (#370, #371).** Rejected: it no longer exists. The fabric was torn down on 2026-08-12, `send` is not on `PATH`, and the `fabric-messaging` skill `CLAUDE.md` pointed to was never committed. Both commits are reverted.
 - **True exactly-once delivery.** Rejected as unachievable: over an unreliable link a sender cannot distinguish "the receiver processed it and the acknowledgement was lost" from "the receiver never got it." At-least-once transport plus an idempotent receiver is the achievable form, and is what "exactly once" means operationally.
-- **Postgres `LISTEN`/`NOTIFY`.** Rejected on medicoder's finding (ADR-0014): "durability story for `NOTIFY` is 'don't trust it, poll anyway'."
+- **Postgres `LISTEN`/`NOTIFY`.** Rejected on ramjac's finding (ADR-0014): "durability story for `NOTIFY` is 'don't trust it, poll anyway'."
 - **SQS FIFO for agent traffic.** Already carries external events. Rejected for intra-host agent mail because it makes local coordination depend on a cloud round-trip; reconsider if agent traffic crosses accounts.
 
 ## Consequences
@@ -100,5 +100,5 @@ sequenceDiagram
 ## References
 
 - ADR-0084 §4 and its rejected SQLite alternative.
-- medicoder ADR-0014 (event bus, ordering keys, `dedupKey` semantics).
+- ramjac ADR-0014 (event bus, ordering keys, `dedupKey` semantics).
 - `exec_otp` postmortem, §3.3 and §4: `~/obsidian/lepper/exec-otp/exec_otp Postmortem.md`.

@@ -22,9 +22,9 @@ Concretely:
 2. **One pump per host outbox** drains pending rows to the central event log, retries indefinitely, and never drops. Each row already carries its `dedupKey` (ADR-0093), so a retry after a lost acknowledgement is harmless.
 3. **Unreachable is not dead.** Isolation is an expected state, not a failure to be corrected. No reconciler, scheduler, or peer relocates an agent on the basis of an unreachable host.
 
-We build a **Treadmill-owned outbox** modelled on `medicoder-events` (`OutboxBackend`, `service/outbox_service`, `outbox-publisher`) — we copy and adapt its proven shape, we do not depend on it at runtime (ADR-0093). Ours is a **SQLite backend** with the three methods `write`, `read_pending`, `mark_published`.
+We build a **Treadmill-owned outbox** modelled on `ramjac-events` (`OutboxBackend`, `service/outbox_service`, `outbox-publisher`) — we copy and adapt its proven shape, we do not depend on it at runtime (ADR-0093). Ours is a **SQLite backend** with the three methods `write`, `read_pending`, `mark_published`.
 
-**Invariant: exactly one pump per host outbox, enforced by `flock`.** medicoder's contract uses `SELECT … FOR UPDATE SKIP LOCKED` so concurrent pumps claim disjoint rows; SQLite has neither, so ours is the **weaker single-pump variant** — correct only because exactly one pump runs. We hold that with an OS advisory lock (`flock`) on the outbox for the pump's lifetime, released automatically on death; a pidfile is not enough (it races at startup and goes stale on crash). ADR-0093's dedup already makes a stray second pump non-corrupting — the consumer drops the duplicate publications — so the single pump's real job is preserving per-recipient **order**, not preventing loss.
+**Invariant: exactly one pump per host outbox, enforced by `flock`.** ramjac's contract uses `SELECT … FOR UPDATE SKIP LOCKED` so concurrent pumps claim disjoint rows; SQLite has neither, so ours is the **weaker single-pump variant** — correct only because exactly one pump runs. We hold that with an OS advisory lock (`flock`) on the outbox for the pump's lifetime, released automatically on death; a pidfile is not enough (it races at startup and goes stale on crash). ADR-0093's dedup already makes a stray second pump non-corrupting — the consumer drops the duplicate publications — so the single pump's real job is preserving per-recipient **order**, not preventing loss.
 
 ## Alternatives considered
 
@@ -79,4 +79,4 @@ stateDiagram-v2
 ## References
 
 - `exec_otp` postmortem §4.2, §4.3 and incident record 2026-08-11: `~/obsidian/lepper/exec-otp/`.
-- medicoder ADR-0014; `medicoder-events` `outbox.py`; `medicoder/service/outbox_service/AGENT.md`.
+- ramjac ADR-0014; `ramjac-events` `outbox.py`; `ramjac/service/outbox_service/AGENT.md`.
