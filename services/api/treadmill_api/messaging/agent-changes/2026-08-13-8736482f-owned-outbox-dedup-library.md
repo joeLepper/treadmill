@@ -1,0 +1,1 @@
+- Initial implementation of `treadmill_api/messaging/` — SQLite outbox, dedup table, and base consumer for plan 001cb672 Slice 1a. PR link TBD (task 8736482f).
