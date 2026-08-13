@@ -39,7 +39,11 @@ write path is `POST /api/v1/hosts/bindings`.
 
 ## Recent changes
 
-See `agent-changes/` directory for per-PR change fragments.
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task 5e6c2383):
+> add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside this AGENT.md —
+> one entry per file, newest by filename; format in `docs/agent-md-schema.md`.
+> Prepending here is the conflict factory that stacks same-day rework cascades
+> (every in-flight PR inserts at this same anchor).
 
 ## Pitfalls
 
