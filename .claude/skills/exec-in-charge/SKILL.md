@@ -16,6 +16,11 @@ This skill is the cycle you run from dispatch to merged. Phases A–G repeat; yo
 
 State your authority in every resume/dispatch message so the coordinator can trust it (who authorized the work + what to do). **Only resume a team when execution is authorized** — the operator lifted a stand-down or directed the work. Do not lift a stand-down on your own initiative.
 
+## Two operating modes
+
+- **Team mode** — a coordinator + evaluator + workers process the plan; you drive through the coordinator. All phases A–G apply.
+- **Direct-PR sprint mode** — the execs themselves author, review, and merge peer-to-peer, with no coordinator/worker team (the Forecast batch ran this way). Phase A does not apply — there is no team to keep alive; phases C–G apply, and cross-review is peer-to-peer via the relay co-sign in Phase D. Know which mode you are in before you look for a coordinator that is not there.
+
 ## Phase A — Confirm the team is ALIVE (team-health)
 
 Ready tasks (not `blocked`) must leave `registered` within a few minutes — to a worker label (assigned/in_progress), then `pr_open` / `pr_merged`. Nothing alerts you if they don't; you look.
@@ -63,7 +68,13 @@ The coordinator relays questions, blocks, and cleared-for-merge signals. You ans
 
 ## Phase D — Merge discipline (the part that burns you if you skip it)
 
-`auto_merge:false` on high-blast-radius plans means **human merge on sibling consensus** — you, from the driver seat, after review + evaluator approval. Before every merge:
+`auto_merge:false` on high-blast-radius plans means **human merge on sibling consensus** — you, from the driver seat.
+
+**Consensus under a shared git identity is a RELAY co-sign, not a GitHub Approve.** When the siblings all authenticate as the same GitHub user, GitHub blocks the Approve button — *"Can not approve your own pull request"* — even for a non-author sibling. So consensus is: the author + at least one non-author sibling co-signing by relay (a posted PR comment plus a relay message carrying the verdict). The driver merges on that relay consensus; do not wait for a green GitHub Approve that can never arrive.
+
+**Base ≠ always `main`.** Some plans target an integration or planning branch, not `main`. Read "main" throughout this phase as "the plan's integration base," and never silently retarget a PR to `main`.
+
+Before every merge:
 
 1. **Verify ground-truth yourself — never merge on a relayed "GO" alone.** A coordinator's clearance is input, not authority to skip checking.
    ```
@@ -71,6 +82,8 @@ The coordinator relays questions, blocks, and cleared-for-merge signals. You ans
    gh pr checks <n> --repo <owner>/<repo>          # zero failing, zero pending
    ```
    Merge only on `mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`, all checks complete and green.
+
+   **Tell a base-inherited red from a change-caused red.** "All checks green" is unsatisfiable when the integration base is already red — a broken trunk check fails on every PR, including doc-only ones. Before you chase a red, ask whether it reproduces on a no-op / doc-only PR against the same base: if it fails identically there, it is inherited from the base, not caused by your change. Do not chase it and do not let it silently gate your merge — hold it for the trunk-fix decision. Only a red your change introduced blocks you.
 
 2. **A clearance can REVERSE. Re-verify at the MOMENT of merge.** A PR cleared minutes ago can be reverted by the evaluator, or a new failing check can land. The gap between "cleared" and "you click merge" is where the bug hides. Check again, right then.
 
@@ -89,7 +102,7 @@ The coordinator relays questions, blocks, and cleared-for-merge signals. You ans
 
 ## Phase E — Sequence cross-task and cross-plan gates
 
-Treadmill has no cross-plan machine-edges, so **you enforce cross-plan dependencies by controlling merge order.** If plan Y must not start until plan X's tasks merge, hold Y's owner and release them with an explicit signal only when X's PRs are actually merged (verified, Phase D) — not when they are "cleared." Tell the downstream owner the exact gate ("I release your 0097 when 0095 Task 1 AND Task 2 merge; I ping you the instant they do"). Within a plan, `depends_on` blocks a task until its upstream reaches merged; confirm the block lifts (Phase A) after the upstream merges.
+Treadmill has no cross-plan machine-edges, so **you enforce cross-plan dependencies by controlling merge order.** If plan Y must not start until plan X's tasks merge, hold Y's owner and release them with an explicit signal only when X's PRs are actually merged (verified, Phase D) — not when they are "cleared." Tell the downstream owner the exact gate ("I release your 0097 when 0095 Task 1 AND Task 2 merge; I ping you the instant they do"). Within a plan, `depends_on` blocks a task until its upstream reaches merged; confirm the block lifts (Phase A) after the upstream merges. Do NOT encode a CROSS-plan edge in `depends_on` — plan-validate rejects an unknown-task id and the whole submission fails. Mark a cross-plan dependency in prose and enforce it by merge order; the strongest form is to hold the downstream plan's SUBMISSION until the upstream merges (exactly the 0097-on-0095 gate).
 
 ## Phase F — Hygiene gates that RED a PR (know them before they bite)
 
@@ -114,6 +127,8 @@ If tasks are moving and the coordinator is dispatching, do not nudge for the sak
 - **Merging on a relayed "GO" without checking ground-truth.** The relay is input; `gh pr view`/`checks` is the authority.
 - **Reading `active running` as "the team works."** systemd up ≠ the Claude session inside reached its work loop. Peek it.
 - **A bad example in a rework brief.** Handing a worker a placeholder filename/value propagates into a red check — give the real one.
+- **Chasing a base-inherited red.** A check that fails on every PR — including a doc-only one against the same base — is a broken trunk, not your bug. Hold it for the trunk fix; do not let it gate your merge.
+- **Waiting for a GitHub Approve that can never arrive.** Under a shared git identity GitHub blocks sibling approval; consensus is the relay co-sign. Do not stall a ready PR waiting on a green Approve button.
 
 ## Root fixes to file (via /learning or /decide if these recur)
 
