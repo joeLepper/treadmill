@@ -1,0 +1,1 @@
+- Added `services/api/treadmill_api/messaging/pump.py`: single flock-enforced `OutboxPump` (ADR-0094). Drain loop reads pending outbox rows in order, publishes via injected `RowPublisher`, marks published; retries on failure. Tests cover per-recipient ordering, exactly-once across two pumps, flock exclusion, and retry-on-failure. Task cda51037, plan 001cb672.

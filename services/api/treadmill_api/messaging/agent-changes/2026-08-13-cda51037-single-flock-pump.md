@@ -1,0 +1,1 @@
+- Added `pump.py` — `OutboxPump`: single flock-enforced pump that drains pending outbox rows to the event log in per-recipient append order. Retries publish on failure; never drops. Updated AGENT.md with pump surface, single-flock invariant, and single-consumer-per-consumer_id invariant. Task cda51037, plan 001cb672.
