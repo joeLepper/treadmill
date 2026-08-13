@@ -50,6 +50,7 @@ from treadmill_api.routers.scheduler import router as scheduler_router
 from treadmill_api.routers.team_configs import router as team_configs_router
 from treadmill_api.routers.webhooks import router as webhooks_router
 from treadmill_api.routers.task_prs import router as task_prs_router
+from treadmill_api.routers.hosts import router as hosts_router
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,7 @@ def create_app() -> FastAPI:
     app.include_router(claude_credentials_router)
     app.include_router(dashboard_router)
     app.include_router(escalations_router)
+    app.include_router(hosts_router)
     return app
 
 
