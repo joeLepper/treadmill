@@ -16,7 +16,7 @@ SQLite (WAL mode) so the component works without any external service.
   `write`. Each row carries `dedupKey`, `ordering_key`, `event_type`,
   `payload`, `created_at`, and `published_at` (NULL until drained).
 - **`dedup.py`** — `DedupBackend` + `ClaimResult`. Implements the
-  claim→commit cycle from ADR-0093 (provenance: medicoder ADR-0014).
+  claim→commit cycle from ADR-0093 (provenance: ramjac ADR-0014).
   Dedup is scoped to `(dedup_key, consumer_id)` so two consumers processing
   the same event each receive one delivery. A claimed key whose `expires_at`
   has passed is re-claimable (the previous claimant died mid-handler).
@@ -27,7 +27,11 @@ SQLite (WAL mode) so the component works without any external service.
 
 ## Recent changes
 
-See `agent-changes/` directory for per-PR fragments.
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task 8736482f):
+> add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside this AGENT.md —
+> one entry per file, newest by filename; format in `docs/agent-md-schema.md`.
+> Prepending here is the conflict factory that stacks same-day rework cascades
+> (every in-flight PR inserts at this same anchor).
 
 ## Pitfalls
 
@@ -53,7 +57,7 @@ See `agent-changes/` directory for per-PR fragments.
   message contract and Property 3: claim→process→commit).
 - **ADR-0094** — hosts survive isolation via local outbox (the outbox
   shape and SQLite backend rationale).
-- **medicoder ADR-0014** — upstream provenance for the claim/commit cycle.
+- **ramjac ADR-0014** — upstream provenance for the claim/commit cycle.
 - **Adjacent:** `treadmill_api/eventbus.py` (the existing SNS publisher
   Protocol; Task 2 of plan 001cb672 wires the outbox to it).
 - **Tests:** `services/api/tests/test_messaging_dedup.py` and

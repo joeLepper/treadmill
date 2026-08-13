@@ -1,11 +1,11 @@
-"""Idempotent dedup table with the claim/commit cycle (ADR-0093, medicoder ADR-0014).
+"""Idempotent dedup table with the claim/commit cycle (ADR-0093, ramjac ADR-0014).
 
 The cycle is: CLAIM the dedupKey → RUN the handler → COMMIT the key.
 Never mark-then-process: recording the key before the handler runs loses a
 message on a mid-handler crash (the exact bug this module exists to prevent).
 
-Provenance: the claim/commit pattern is ported from medicoder ADR-0014.
-A later medicoder fix should verify that the SQLite semantics here remain
+Provenance: the claim/commit pattern is ported from ramjac ADR-0014.
+A later ramjac fix should verify that the SQLite semantics here remain
 compatible with that ADR's durable-store guarantees.
 """
 
@@ -83,7 +83,7 @@ class DedupBackend:
         A claimed entry whose expires_at has passed is re-claimable: the
         previous claimant died mid-handler without committing.
 
-        Provenance: claim/commit cycle from medicoder ADR-0014.
+        Provenance: claim/commit cycle from ramjac ADR-0014.
         """
         expires_at = now + crash_window
         with self._connect() as conn:

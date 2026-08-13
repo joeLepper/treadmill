@@ -6,7 +6,7 @@ again. The consumer provides at-most-one execution per dedup key within
 an unexpired crash window, but CANNOT guarantee exactly-once processing
 across redeliveries. Handlers MUST be idempotent.
 
-Provenance: the claim/commit cycle follows medicoder ADR-0014.
+Provenance: the claim/commit cycle follows ramjac ADR-0014.
 """
 
 from __future__ import annotations
