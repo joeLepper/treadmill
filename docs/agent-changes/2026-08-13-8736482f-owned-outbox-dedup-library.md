@@ -1,1 +1,1 @@
-- Added `services/api/treadmill_api/messaging/` package: SQLite-backed `OutboxBackend` (ADR-0094), idempotent `DedupBackend` with claim/commit cycle (ADR-0093, medicoder ADR-0014), and `MessageConsumer` base class with crash-safety tests. PR link TBD (task 8736482f).
+- Added `services/api/treadmill_api/messaging/` package: SQLite-backed `OutboxBackend` (ADR-0094), idempotent `DedupBackend` with claim/commit cycle (ADR-0093, ramjac ADR-0014), and `MessageConsumer` base class with crash-safety tests. PR link TBD (task 8736482f).
