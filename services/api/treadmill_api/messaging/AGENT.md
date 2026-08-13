@@ -24,6 +24,11 @@ SQLite (WAL mode) so the component works without any external service.
   `handle()`. The `deliver(message)` method runs the full cycle: claim →
   handle → commit. If `handle()` raises, the claim is NOT committed; the
   crash window expires and the message redelivers.
+- **`pump.py`** — `OutboxPump`. Drains pending outbox rows to the event log
+  in per-recipient append order. Acquires `LOCK_EX | LOCK_NB` on a sidecar
+  lock file at startup; a second pump on the same lock file is refused. The
+  flock is held for the pump's lifetime and released automatically on process
+  death — no stale pidfile risk. Retries publish indefinitely; never drops.
 
 ## Recent changes
 
@@ -35,6 +40,15 @@ SQLite (WAL mode) so the component works without any external service.
 
 ## Pitfalls
 
+- **Single flock pump invariant.** Exactly one active pump per outbox at all
+  times, enforced by `flock` on a sidecar lock file. ADR-0093 dedup makes a
+  stray second pump non-corrupting (duplicates are dropped at consumers), but
+  ordering is lost. Never bypass the flock by using different lock files for
+  two pumps draining the same outbox in production.
+- **Single consumer per consumer_id invariant.** `DedupBackend.claim()` is
+  SELECT-then-INSERT/UPDATE and is safe only when exactly one consumer per
+  `consumer_id` runs concurrently. The flock ensures this for the pump. Do
+  NOT introduce multiple live consumers sharing a `consumer_id`.
 - **Handlers MUST be idempotent.** A handler that succeeds but whose process
   dies before `commit()` will be redelivered and run again. The consumer
   provides effectively-once delivery ONLY when handlers are idempotent. Do
@@ -60,5 +74,5 @@ SQLite (WAL mode) so the component works without any external service.
 - **ramjac ADR-0014** — upstream provenance for the claim/commit cycle.
 - **Adjacent:** `treadmill_api/eventbus.py` (the existing SNS publisher
   Protocol; Task 2 of plan 001cb672 wires the outbox to it).
-- **Tests:** `services/api/tests/test_messaging_dedup.py` and
-  `test_messaging_crash_safety.py`.
+- **Tests:** `services/api/tests/test_messaging_dedup.py`,
+  `test_messaging_crash_safety.py`, and `test_messaging_pump.py`.
