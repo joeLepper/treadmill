@@ -33,7 +33,11 @@ layer above this package, not part of this task.
 
 ## Recent changes
 
-> New entries are per-PR fragment files.  See `docs/agent-md-schema.md`.
+> **New entries are PER-PR FRAGMENT FILES, not prepends** (task d5c570c1):
+> add `agent-changes/YYYY-MM-DD-<task-or-pr-slug>.md` beside this AGENT.md —
+> one entry per file, newest by filename; format in `docs/agent-md-schema.md`.
+> Prepending here is the conflict factory that stacks same-day rework cascades
+> (every in-flight PR inserts at this same anchor).
 
 ## Pitfalls
 
