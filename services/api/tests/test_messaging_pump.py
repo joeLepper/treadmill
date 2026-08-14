@@ -87,14 +87,20 @@ def _write_messages(
     keys = []
     for _ in range(n):
         key = str(uuid.uuid4())
-        outbox.write(
-            {
-                "dedupKey": key,
-                "ordering_key": ordering_key,
-                "event_type": "test.event",
-                "payload": {},
-            }
-        )
+        conn = outbox.connect()
+        try:
+            outbox.write(
+                {
+                    "dedupKey": key,
+                    "ordering_key": ordering_key,
+                    "event_type": "test.event",
+                    "payload": {},
+                },
+                conn,
+            )
+            conn.commit()
+        finally:
+            conn.close()
         keys.append(key)
     return keys
 
