@@ -30,6 +30,33 @@ SQLite (WAL mode) so the component works without any external service.
   flock is held for the pump's lifetime and released automatically on process
   death — no stale pidfile risk. Retries publish indefinitely; never drops.
 
+## Invariant foils (ported from ramjac-events, task f6db308b)
+
+Two load-bearing red-then-green foils in `test_messaging_invariants.py`.
+Neither is derivable from ADR prose — re-deriving produced the mark-then-process
+bug donna found in review (2026-08-12).
+
+- **INVARIANT-1 — silent-crash / mark-then-process.**
+  `_MarkThenProcessCrashingConsumer` commits the `dedupKey` BEFORE the handler
+  runs. A mid-handler crash leaves the key permanently committed; redelivery
+  sees DUPLICATE and drops the message — the handler never runs. This is the bug
+  ADR-0093 Decision §3 ("never mark-then-process") exists to prevent.
+  RED: handler runs 0 times on broken variant.
+  GREEN: correct `MessageConsumer` redelivers; handler runs exactly once.
+
+- **INVARIANT-2 — unscoped-dedup-collision.**
+  `_UnscopedDedupConsumer` uses a shared `consumer_id` for all consumers.
+  After subscriber-A commits a `dedupKey`, subscriber-B's delivery is seen as
+  DUPLICATE and dropped — each subscriber does NOT get its own delivery slot.
+  This violates ADR-0093 per-subscriber delivery and ramjac ADR-0014 §3
+  (dedup on `event_id × subscriber_id`, never `event_id` alone).
+  RED: subscriber-B receives 0 messages on broken variant.
+  GREEN: correct per-`consumer_id` scoping gives each subscriber exactly one delivery.
+
+Provenance: ramjac-events invariant test suite, ported 2026-08-13 (task f6db308b).
+Each ported unit carries a `# Provenance: ramjac-events …` comment so a later
+ramjac fix can be re-ported without re-deriving semantics.
+
 ## Recent changes
 
 > **New entries are PER-PR FRAGMENT FILES, not prepends** (task 8736482f):
@@ -75,4 +102,5 @@ SQLite (WAL mode) so the component works without any external service.
 - **Adjacent:** `treadmill_api/eventbus.py` (the existing SNS publisher
   Protocol; Task 2 of plan 001cb672 wires the outbox to it).
 - **Tests:** `services/api/tests/test_messaging_dedup.py`,
-  `test_messaging_crash_safety.py`, and `test_messaging_pump.py`.
+  `test_messaging_crash_safety.py`, `test_messaging_pump.py`, and
+  `test_messaging_invariants.py` (ported ramjac-events invariant foils — see below).
