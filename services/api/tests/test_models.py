@@ -171,6 +171,8 @@ def test_no_unexpected_jsonb_columns():
     - repo_configs.sensitive_strings (ADR-0078 — operator-curated
       list of additional substrings the secret-leak gate blocks on
       vault writes)
+    - event_log.payload (ADR-0093 — durable agent-to-agent message payload;
+      schema-free by design, each event_type owns its own payload shape)
 
     ``workflow_run_steps.output`` and ``triage_findings.evidence_summary``
     left the list with their tables (ADR-0087 Phases 4–5).
@@ -179,6 +181,7 @@ def test_no_unexpected_jsonb_columns():
         ("events", "payload"),
         ("schedules", "payload_template"),
         ("repo_configs", "sensitive_strings"),
+        ("event_log", "payload"),
     }
     found = {
         (table.name, col.name)

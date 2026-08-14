@@ -27,10 +27,12 @@ from treadmill_api.models.llm_call import LLMCall, LLMHarvestCursor
 from treadmill_api.models.team_config import TeamConfig
 from treadmill_api.models.schedule import Schedule
 from treadmill_api.models.system_status import SystemStatus
+from treadmill_api.models.event_log import EventLog
 from treadmill_api.models.host import Host, SessionHostBinding
 
 __all__ = [
     "Event",
+    "EventLog",
     "Host",
     "Plan",
     "RepoConfigRow",
