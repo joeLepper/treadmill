@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.host_registry_store import HostRegistryStore
+from treadmill_api.operator_access.bind import is_tailnet_address  # CGNAT guard
 
 router = APIRouter()
 
@@ -62,22 +63,25 @@ class AgentsResponse(BaseModel):
 
 
 def _make_agent_entry(label: str, host: str, tailnet_addr: str | None) -> AgentEntry:
-    """Build one AgentEntry. NULL tailnet_addr => unreachable; no URL constructed.
+    """Build one AgentEntry. CGNAT-allowlist guard before any URL is constructed.
 
-    The URL uses the registry-supplied tailnet_addr. No address is ever hardcoded
-    or guessed — if tailnet_addr is NULL the client must not attempt a connect
-    (ADR-0097 §Decision 3).
+    A bridge WebSocket URL is built ONLY when is_tailnet_address() confirms the
+    registry-supplied tailnet_addr is a valid 100.64.0.0/10 CGNAT address.
+    NULL, LAN, public, hostname, IPv6 — all render UNREACHABLE with no URL.
+    The CGNAT range is defined once in operator_access.bind; no literal here.
     """
-    if tailnet_addr:
-        bridge_ws_url: str | None = f"ws://{tailnet_addr}:{BRIDGE_PORT}/"
+    if tailnet_addr is None or not is_tailnet_address(tailnet_addr):
+        bridge_ws_url: str | None = None  # UNREACHABLE — do not connect
+        reachable = False
     else:
-        bridge_ws_url = None  # UNREACHABLE — do not connect
+        bridge_ws_url = f"ws://{tailnet_addr}:{BRIDGE_PORT}/"
+        reachable = True
     return AgentEntry(
         label=label,
         host=host,
         tailnet_addr=tailnet_addr,
         bridge_ws_url=bridge_ws_url,
-        reachable=tailnet_addr is not None,
+        reachable=reachable,
     )
 
 

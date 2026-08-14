@@ -44,6 +44,26 @@ def tailnet_bind_addr(candidate: str) -> str:
     )
 
 
+def is_tailnet_address(candidate: str | None) -> bool:
+    """Return True IFF candidate is a valid Tailscale CGNAT IPv4 address (100.64.0.0/10).
+
+    Boolean sibling of tailnet_bind_addr — returns False instead of raising.
+    Used by the dashboard to validate registry-supplied tailnet_addr values before
+    constructing a bridge WebSocket URL (ADR-0097 §Decision 3). A poisoned row
+    (LAN, public IP, hostname, IPv6, empty, None) is treated as UNREACHABLE.
+
+    The 100.64.0.0/10 range is defined ONCE in this module (_TAILSCALE_CGNAT);
+    callers must import this function rather than re-implement the range check.
+    """
+    if not candidate:
+        return False
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return isinstance(addr, ipaddress.IPv4Address) and addr in _TAILSCALE_CGNAT
+
+
 def funnel_enabled() -> bool:
     """Return False — Tailscale Funnel is never enabled for these services.
 

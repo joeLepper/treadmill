@@ -118,6 +118,29 @@ def _build_app_with_spy(spy: _SpyStore) -> TestClient:
 # ── RED proof: naive implementations fail security assertions ─────────────────
 
 
+@pytest.mark.parametrize("poisoned", ["8.8.8.8", "192.168.1.50"])
+def test_red_naive_entry_builder_gives_url_for_non_cgnat(poisoned: str) -> None:
+    """RED: a naive _make_agent_entry that trusts any non-None tailnet_addr
+    returns a bridge_ws_url for poisoned (non-CGNAT) addresses — letting the
+    operator browser connect to a URL with no is_operator gate.
+
+    This proves the GREEN test below is non-vacuous (Carla's fold requirement).
+    """
+
+    def naive_make_entry(
+        label: str, host: str, tailnet_addr: str | None
+    ) -> dict[str, Any]:
+        if tailnet_addr is not None:  # naive: only checks NULL
+            return {"bridge_ws_url": f"ws://{tailnet_addr}:{BRIDGE_PORT}/", "reachable": True}
+        return {"bridge_ws_url": None, "reachable": False}
+
+    naive = naive_make_entry("worker-x", "host1", poisoned)
+    assert naive["bridge_ws_url"] is not None, (
+        f"naive builder should produce a URL for poisoned addr {poisoned!r} "
+        "(this proves the GREEN non-CGNAT test is non-vacuous)"
+    )
+
+
 def test_red_naive_entry_builder_gives_url_for_null_tailnet() -> None:
     """RED: a naive _make_agent_entry that uses a fallback address for NULL
     tailnet_addr returns a non-None bridge_ws_url — violating the
@@ -155,6 +178,24 @@ def test_red_static_host_list_misses_dynamic_registrations() -> None:
 
 
 # ── GREEN: real implementation passes security assertions ─────────────────────
+
+
+@pytest.mark.parametrize("poisoned", ["8.8.8.8", "192.168.1.50"])
+def test_green_non_cgnat_tailnet_addr_unreachable(poisoned: str) -> None:
+    """GREEN: poisoned non-CGNAT tailnet_addr in the registry → UNREACHABLE.
+
+    A registry row with a public IP ("8.8.8.8") or LAN address ("192.168.1.50")
+    must NOT produce a bridge_ws_url. The is_tailnet_address() guard in
+    _make_agent_entry rejects these via the shared _TAILSCALE_CGNAT constant.
+    """
+    entry = _make_agent_entry("worker-x", "host1", tailnet_addr=poisoned)
+    assert not entry.reachable, (
+        f"non-CGNAT addr {poisoned!r} must set reachable=False"
+    )
+    assert entry.bridge_ws_url is None, (
+        f"non-CGNAT addr {poisoned!r} must give bridge_ws_url=None; "
+        "operator browser must NOT be pointed at a non-tailnet URL"
+    )
 
 
 def test_green_null_tailnet_addr_unreachable_no_url() -> None:
@@ -300,6 +341,30 @@ def test_endpoint_is_auto_discovered_by_dashboard_package() -> None:
 
 def test_bridge_port_constant_is_7681() -> None:
     assert BRIDGE_PORT == 7681
+
+
+def test_agents_imports_is_tailnet_address_not_reimplemented() -> None:
+    """agents.py must import is_tailnet_address from operator_access.bind.
+    The CGNAT range must NOT be re-defined in the dashboard module.
+    """
+    src = (
+        Path(__file__).parents[1]
+        / "treadmill_api"
+        / "routers"
+        / "dashboard"
+        / "agents.py"
+    ).read_text()
+    assert "is_tailnet_address" in src, "agents.py must import is_tailnet_address"
+    assert "from treadmill_api.operator_access.bind import is_tailnet_address" in src, (
+        "is_tailnet_address must be imported from operator_access.bind, not re-defined"
+    )
+    # IPv4Network must not be instantiated in agents.py — re-defining the CGNAT range
+    # there would create a second source of truth that can drift from operator_access/bind.py.
+    # (Mentioning "100.64.0.0/10" in a comment is acceptable; instantiating IPv4Network is not.)
+    assert 'IPv4Network("' not in src and "IPv4Network('" not in src, (
+        "IPv4Network instantiation found in agents.py — "
+        "CGNAT range must not be redefined; import is_tailnet_address instead"
+    )
 
 
 def test_no_hardcoded_ip_address_in_agents_source() -> None:
