@@ -29,6 +29,30 @@ SQLite (WAL mode) so the component works without any external service.
   lock file at startup; a second pump on the same lock file is refused. The
   flock is held for the pump's lifetime and released automatically on process
   death — no stale pidfile risk. Retries publish indefinitely; never drops.
+- **`broadcast.py`** — `ChannelStore` + `fanout()`. Channel subscription as
+  a durable fact (join/leave are `SubscriptionEvent` records with offsets);
+  `subscribers_at(channel, up_to_offset)` folds those events to compute the
+  subscriber set at any offset. `fanout()` expands a broadcast to N unicast
+  deliveries honoring three ADR-0093 rules (see below). emit() is injected
+  so callers use any log backend (outbox, EventLogStore, test spy).
+
+## Broadcast — channel subscription + N-unicast delivery (ADR-0093)
+
+Three load-bearing rules (ADR-0093 §Broadcast, provenance: ramjac ADR-0009):
+
+1. **Subscriber set = log fold at the broadcast's offset.** Deterministic and
+   replayable. A join after that offset misses the broadcast; a leave after it
+   does not un-deliver. Use `ChannelStore.subscribers_at(channel, up_to_offset)`.
+2. **dedupKey = composite `f"{subscriber}:{broadcast_id}"`** — never a fresh UUID
+   (fresh UUID lets re-fanout reprocess) and never `broadcast_id` alone (shared
+   key + shared dedup blocks all but the first subscriber).
+3. **Order is per-subscriber** (ordering_key = subscriber label). Two subscribers
+   may see the same broadcast at different positions in their own mail.
+
+`fanout()` calls `emit(subscriber, dedup_key, payload)` for each subscriber.
+In production, emit appends a unicast event to the central log (EventLogStore);
+HostConsumer delivers it via cc-relay on that host. Broadcast is N unicast
+deliveries — no new delivery mechanism is introduced.
 
 ## Invariant foils (ported from ramjac-events, task f6db308b)
 
@@ -105,4 +129,6 @@ ramjac fix can be re-ported without re-deriving semantics.
   `test_messaging_crash_safety.py`, `test_messaging_pump.py`,
   `test_messaging_invariants.py` (ported ramjac-events invariant foils — see below),
   and `test_outbox_pump_complete.py` (slice-1a completing semantics — flock refusal,
-  write-then-crash redelivery foil, drain-on-reconnect in order; task 4ba55a27).
+  write-then-crash redelivery foil, drain-on-reconnect in order; task 4ba55a27),
+  and `test_messaging_broadcast.py` (broadcast channels — ONCE-PER-SUBSCRIBER with
+  two foils, ISOLATED-AT-BROADCAST, JOIN-AFTER, LEAVE-AFTER; task dc40b385).
