@@ -131,4 +131,8 @@ ramjac fix can be re-ported without re-deriving semantics.
   and `test_outbox_pump_complete.py` (slice-1a completing semantics — flock refusal,
   write-then-crash redelivery foil, drain-on-reconnect in order; task 4ba55a27),
   and `test_messaging_broadcast.py` (broadcast channels — ONCE-PER-SUBSCRIBER with
-  two foils, ISOLATED-AT-BROADCAST, JOIN-AFTER, LEAVE-AFTER; task dc40b385).
+  two foils, ISOLATED-AT-BROADCAST, JOIN-AFTER, LEAVE-AFTER; task dc40b385),
+  and `test_fabric_e2e.py` (definition of done — cross-host/isolation/broadcast
+  end-to-end: Req A real-Postgres read_for_labels isolation, Req B handle()
+  defense-in-depth planted-leak foil, Req C three drain-level scenarios each
+  RED-then-GREEN with decoded output; task dadbf11d).
