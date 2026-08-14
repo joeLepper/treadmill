@@ -46,6 +46,7 @@ Ready tasks (not `blocked`) must leave `registered` within a few minutes — to 
    - **Startup channel-approval prompt** — `❯ 1. I am using this for local development / 2. Exit · Enter to confirm`. The launch never auto-answered it; the session never reached its work loop. This hangs the WHOLE team on a (re)start/reboot.
    - **Stand-down hold** — *"I am holding … I wait for 'resume'."* Past startup, deliberately idle.
    - **Error / crash trace** — a different problem; read it.
+   - **Wedged / connection-lost session** — a frozen spinner (`✻ Brewed/Cooked for Xs` with the timer NOT advancing across two peeks a few seconds apart), often right after `API Error: Connection lost mid-response`. The task API still reads `executing` and the systemd unit is `active` — but the `claude` process inside is stuck. It is invisible to the coordinator; only a direct peek catches it.
 
 4. **Fix, for EVERY session (coordinator + evaluator + all workers):**
    - Startup prompt — confirm option 1 (local dev is correct for a dev-local deployment): `tmux send-keys -t <label> Enter`, then re-peek (the TUI takes a moment).
@@ -55,6 +56,7 @@ Ready tasks (not `blocked`) must leave `registered` within a few minutes — to 
      tmux send-keys -t <label> Enter
      ```
      > CRITICAL: `send-keys "text" Enter` in one call types the text but does NOT submit it. Send `Enter` as its own call. Give the coordinator the dispatch directive (plan/task ids, operator_notes to honor, merge discipline); give workers + evaluator a simple "resume, process/evaluate as normal."
+   - **Wedged / connection-lost** — first `tmux send-keys -t <label> Escape`, then a separate `Enter`, and re-peek. If the spinner is still frozen, the `claude` process is hung: `systemctl --user restart treadmill-channel@<label>.service`. The relaunch runs `claude --continue`, which resumes the session **with its work intact** — files it already wrote persist and the transcript reloads, so a re-peek shows its real progress. Then nudge it to finish the exact step it was cut off on ("your last response was cut off; your work is intact — now do X, then open the PR"), text and Enter as separate keystrokes. Confirm the spinner starts advancing again. A session that drops connection once often does it again — watch it through to its PR.
 
 5. **Verify — do not declare it fixed until you see movement.** `treadmill task list` should show worker labels / `in_progress`, and `task.ci_result` / `github.check_run_completed` events start arriving.
 
@@ -82,6 +84,8 @@ Before every merge:
    gh pr checks <n> --repo <owner>/<repo>          # zero failing, zero pending
    ```
    Merge only on `mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`, all checks complete and green.
+
+   **The gh account can drift mid-session.** On a shared box the active `gh` account may flip to one without merge permission (a parallel worklane switches the shared keyring), so a merge or `update-branch` fails with a permissions `404` / `MergePullRequest` error. Do NOT globally `gh auth switch` to fix it — that starts a flip-war with the other lane. Scope the token per command — `GH_TOKEN="$(gh auth token --user <merge-user>)" gh <write>` — and verify the identity under that token (`... gh api user`) at merge-time, every time, because it can drift again between commands.
 
    **Tell a base-inherited red from a change-caused red.** "All checks green" is unsatisfiable when the integration base is already red — a broken trunk check fails on every PR, including doc-only ones. Before you chase a red, ask whether it reproduces on a no-op / doc-only PR against the same base: if it fails identically there, it is inherited from the base, not caused by your change. Do not chase it and do not let it silently gate your merge — hold it for the trunk-fix decision. Only a red your change introduced blocks you.
 
