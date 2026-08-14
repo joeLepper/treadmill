@@ -86,6 +86,78 @@ def test_binding_row_includes_bound_by_field() -> None:
     assert "bound_by" in fields, "BindingRow wire model missing bound_by"
 
 
+# ── Write-side CGNAT guard (ADR-0097 / #296) ────────────────────────────────
+#
+# register_host must reject a non-CGNAT tailnet_addr at write time, reusing the
+# single-source-of-truth predicate operator_access.is_tailnet_address. These
+# tests are sandbox-safe: no live DB, no network. A stub AsyncSession stands in
+# for the DB.
+#
+# RED-then-GREEN proof: on the PRE-GUARD code, register_host upserted any
+# tailnet_addr unconditionally, so register_host(..., tailnet_addr="8.8.8.8")
+# would NOT raise and the stub would record an upsert. This test asserts the
+# guard rejects "8.8.8.8" before any session call, so it FAILS on pre-fix code.
+
+
+class _StubResult:
+    def __init__(self, row: object) -> None:
+        self._row = row
+
+    def scalar_one_or_none(self) -> object:
+        return self._row
+
+
+class _StubSession:
+    """Minimal async stand-in for AsyncSession — records calls, no DB."""
+
+    def __init__(self, row: object) -> None:
+        self._row = row
+        self.execute_calls: list[object] = []
+        self.scalar_calls: list[object] = []
+
+    async def execute(self, stmt: object) -> _StubResult:
+        self.execute_calls.append(stmt)
+        return _StubResult(self._row)
+
+    async def scalar(self, stmt: object) -> object:
+        self.scalar_calls.append(stmt)
+        return self._row
+
+
+@pytest.mark.parametrize("bad_addr", ["8.8.8.8", "192.168.1.50"])
+async def test_register_host_rejects_non_cgnat_tailnet_addr(bad_addr: str) -> None:
+    """A non-CGNAT tailnet_addr is rejected at write, before any DB call."""
+    store = HostRegistryStore()
+    session = _StubSession(Host(name="rainbow"))
+    with pytest.raises(ValueError, match="Tailscale CGNAT"):
+        await store.register_host(session, "rainbow", tailnet_addr=bad_addr)  # type: ignore[arg-type]
+    # Guard must fire BEFORE any DB write — nothing reached the session.
+    assert session.execute_calls == []
+    assert session.scalar_calls == []
+
+
+async def test_register_host_accepts_cgnat_tailnet_addr() -> None:
+    """A valid Tailscale CGNAT address passes the guard and upserts."""
+    store = HostRegistryStore()
+    persisted = Host(name="rainbow", tailnet_addr="100.101.102.103")
+    session = _StubSession(persisted)
+    row = await store.register_host(
+        session, "rainbow", tailnet_addr="100.101.102.103"  # type: ignore[arg-type]
+    )
+    assert row is persisted
+    assert len(session.execute_calls) == 1
+
+
+async def test_register_host_allows_null_tailnet_addr() -> None:
+    """A NULL tailnet_addr is legitimate (host not yet self-reported) and upserts."""
+    store = HostRegistryStore()
+    persisted = Host(name="rainbow", tailnet_addr=None)
+    session = _StubSession(persisted)
+    row = await store.register_host(session, "rainbow", tailnet_addr=None)  # type: ignore[arg-type]
+    assert row is persisted
+    assert len(session.execute_calls) == 1
+
+
 # ── Integration round-trips ──────────────────────────────────────────────────
 
 

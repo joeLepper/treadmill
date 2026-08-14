@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.models.host import Host, SessionHostBinding
+from treadmill_api.operator_access.bind import is_tailnet_address
 
 
 class HostRegistryStore:
@@ -27,7 +28,18 @@ class HostRegistryStore:
 
         If ``tailnet_addr`` is provided, it is written on every call so the
         host can refresh its Tailscale address on re-registration.
+
+        Write-side guard (ADR-0097 / #296): a non-NULL ``tailnet_addr`` MUST be
+        a Tailscale CGNAT address (100.64.0.0/10). A poisoned non-tailnet
+        address (LAN, public IP, hostname) is rejected at registration so it
+        can never reach the registry. A NULL ``tailnet_addr`` is legitimate —
+        a host that has not yet self-reported its address — and passes through.
         """
+        if tailnet_addr is not None and not is_tailnet_address(tailnet_addr):
+            raise ValueError(
+                f"tailnet_addr {tailnet_addr!r} is not a valid Tailscale CGNAT address "
+                f"(100.64.0.0/10); refusing to register a non-tailnet address (ADR-0097 / #296)"
+            )
         stmt = (
             pg_insert(Host)
             .values(name=name, tailnet_addr=tailnet_addr)
