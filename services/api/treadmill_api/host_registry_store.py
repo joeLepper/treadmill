@@ -102,3 +102,21 @@ class HostRegistryStore:
             sa.delete(SessionHostBinding).where(SessionHostBinding.label == label)
         )
         return (result.rowcount or 0) > 0
+
+    async def list_agents(self, session: AsyncSession) -> list:
+        """Return all (label, host, tailnet_addr) rows from the binding + host join.
+
+        LEFT OUTER JOIN: a binding without a registered host row still appears
+        with tailnet_addr=None. Used by the multi-host dashboard (ADR-0097).
+        Read-only — never writes the host store.
+        """
+        result = await session.execute(
+            sa.select(
+                SessionHostBinding.label,
+                SessionHostBinding.host,
+                Host.tailnet_addr,
+            )
+            .outerjoin(Host, Host.name == SessionHostBinding.host)
+            .order_by(SessionHostBinding.label)
+        )
+        return result.all()

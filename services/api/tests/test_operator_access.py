@@ -16,7 +16,11 @@ from pathlib import Path
 import pytest
 
 from treadmill_api.operator_access.acl import is_operator
-from treadmill_api.operator_access.bind import funnel_enabled, tailnet_bind_addr
+from treadmill_api.operator_access.bind import (
+    funnel_enabled,
+    is_tailnet_address,
+    tailnet_bind_addr,
+)
 
 # ── Behavioral: is_operator ───────────────────────────────────────────────────
 
@@ -62,6 +66,58 @@ def test_tailnet_bind_addr_cgnat_returned_unchanged() -> None:
 def test_tailnet_bind_addr_banned_raises(banned: str) -> None:
     with pytest.raises(ValueError):
         tailnet_bind_addr(banned)
+
+
+# ── Behavioral: is_tailnet_address ───────────────────────────────────────────
+
+
+def test_is_tailnet_address_cgnat_true() -> None:
+    assert is_tailnet_address("100.101.102.103") is True
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [
+        "100.64.0.0",       # /10 lower edge
+        "100.127.255.255",  # /10 upper edge
+    ],
+)
+def test_is_tailnet_address_cgnat_edges_true(edge: str) -> None:
+    assert is_tailnet_address(edge) is True
+
+
+@pytest.mark.parametrize(
+    "non_cgnat",
+    [
+        None,               # NULL from registry
+        "",                 # empty string
+        "8.8.8.8",          # public IP
+        "192.168.1.50",     # LAN (RFC 1918 class C)
+        "10.0.0.5",         # LAN (RFC 1918 class A)
+        "127.0.0.1",        # loopback
+        "0.0.0.0",          # wildcard / unspecified
+        "localhost",         # hostname
+        "not-an-ip",        # non-IP string
+        "2001:db8::1",      # IPv6 (not in scope)
+    ],
+)
+def test_is_tailnet_address_non_cgnat_false(non_cgnat: str | None) -> None:
+    assert is_tailnet_address(non_cgnat) is False
+
+
+def test_is_tailnet_address_uses_shared_tailscale_cgnat_constant() -> None:
+    """is_tailnet_address shares _TAILSCALE_CGNAT with tailnet_bind_addr.
+
+    Single source of truth — the range is defined once in bind.py so the
+    bind-side (raises) and address-side (bool) checks can never drift.
+    """
+    import treadmill_api.operator_access.bind as bind_mod
+
+    assert hasattr(bind_mod, "_TAILSCALE_CGNAT"), (
+        "_TAILSCALE_CGNAT must be defined in bind.py (shared by both functions)"
+    )
+    import ipaddress
+    assert bind_mod._TAILSCALE_CGNAT == ipaddress.IPv4Network("100.64.0.0/10")
 
 
 # ── Behavioral: funnel_enabled ────────────────────────────────────────────────
