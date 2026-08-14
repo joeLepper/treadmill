@@ -12,6 +12,7 @@ import pytest
 
 from treadmill_local.deploy_watcher import (
     DeployWatcher,
+    StaleWorkingTreeError,
     _categorize_file,
     _categorize_files,
 )
@@ -266,38 +267,36 @@ def test_api_action_builds_and_recreates(mock_run, tmp_path):
 
 
 @patch("subprocess.run")
-def test_api_action_continues_when_ff_fails(mock_run, tmp_path, caplog):
-    """ff-only failure (operator has unpushed work, or a different branch
-    checked out) must NOT break the deploy — log a warning and fall back to
-    building from current local state. Preserves today's behavior; the
-    sync step must not introduce a new silent-skip vector."""
+def test_api_action_refuses_build_when_ff_fails(mock_run, tmp_path):
+    """FAIL CLOSED: an ff-only failure (a divergent branch checked out, or
+    unpushed local work) must REFUSE the build — never fall back to building
+    from stale local state. This is the fix for the 2026-08-13 outage: the
+    primary tree sat on the revert branch, the ff-merge failed, and the old
+    behavior rebuilt the API from stale source, crash-looping alembic. The
+    action raises StaleWorkingTreeError, so the message is left un-acked (SQS
+    re-delivers → DLQ) and the running last-good container is untouched."""
     mock_run.side_effect = [
         MagicMock(returncode=0),  # fetch ok
-        MagicMock(returncode=1, stderr="error: not possible to fast-forward\n"),
-        MagicMock(returncode=0),  # docker build still runs
-        MagicMock(returncode=0, stdout="sha256:builtimage123\n"),  # image inspect
+        MagicMock(returncode=1, stderr="error: not possible to fast-forward\n"),  # ff-merge FAILS
     ]
     watcher, acked, recreate_calls = _make_watcher(
         tmp_path, pr_files=["services/api/main.py"],
     )
 
     with patch.object(watcher, "_wait_healthy"), \
-         caplog.at_level(logging.WARNING, logger="treadmill.deploy_watcher"):
+         pytest.raises(StaleWorkingTreeError):
         watcher._process_message(_sqs_msg(8, "ffnogood"))
 
-    # docker build must still have run despite the ff-only failure.
+    # NO docker build ran — we refused rather than build from stale source.
     build_calls = [
         c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
     ]
-    assert len(build_calls) == 1
-    # Recreate still ran — fallback to local state is the whole point.
-    assert recreate_calls == ["sha256:builtimage123"]
-    assert acked == ["rh-8"]
-    # The merge stderr surfaces in the warning so the operator can see why.
-    assert any(
-        "merge --ff-only" in rec.getMessage() and "not possible to fast-forward" in rec.getMessage()
-        for rec in caplog.records
-    ), f"expected ff-only warning with stderr; got {[r.getMessage() for r in caplog.records]}"
+    assert build_calls == []
+    # The container was NOT recreated — the running last-good image stays up.
+    assert recreate_calls == []
+    # Message NOT acked — SQS re-delivers → DLQ; the event is preserved for
+    # replay once the operator brings the local tree back to origin/main.
+    assert acked == []
 
 
 @patch("subprocess.run")
@@ -308,6 +307,7 @@ def test_api_action_health_url_uses_configured_port(mock_run, tmp_path):
     API serves on ``:8088``, so the old probe always timed out against
     the wrong port and falsely reported the deploy as unhealthy)."""
     configured_url = "http://localhost:8088/health/ready"
+    mock_run.side_effect = _sync_ok_then_build()  # on-main sync succeeds → build proceeds
     watcher, _, _ = _make_watcher(
         tmp_path,
         pr_files=["services/api/main.py"],
@@ -684,6 +684,9 @@ def test_idempotency_rebuilds_for_new_sha(mock_run, tmp_path):
 @patch("subprocess.run")
 def test_state_file_written_after_success(mock_run, tmp_path):
     """State file must record the SHA for each applied category."""
+    # On-main sync succeeds (every git call returns rc=0), so the action runs
+    # to completion and the state is recorded.
+    mock_run.return_value = MagicMock(returncode=0, stdout="abc1234\n", stderr="")
     watcher, _, _ = _make_watcher(tmp_path, pr_files=["workers/agent/run.py"])
     sha = "statecheck"
 
