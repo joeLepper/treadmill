@@ -44,7 +44,7 @@ Placement is therefore an act of the starting agent's intent, expressed once, en
 - A directed host that is down blocks that start (fail-closed) rather than finding another home — intentional, but it means directed placement needs the target host present.
 
 ### Risks
-- **A back-door scheduler creeping in.** Any future "helpful" auto-reroute or rebalance is this ADR's failure mode. The falsifier (ADR-0098): no code path relocates or reroutes an agent's placement on the basis of host load or reachability — the same class of check ADR-0095 already commits for adoption.
+- **A back-door scheduler creeping in.** Any future "helpful" auto-reroute or rebalance is this ADR's failure mode. The falsifier (ADR-0098): no code path relocates or reroutes an agent's placement on the basis of host load or reachability — the same class of check ADR-0095 already commits for adoption. A fail-closed *refusal* of an unreachable directed host (Decision 4) is not a reroute and is not a violation; the falsifier scopes to relocate/reroute, never to refuse.
 
 ## References
 - ADR-0095 (named agents bind to hosts) — the binding mechanism this policy writes.
