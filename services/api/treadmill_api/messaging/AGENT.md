@@ -102,5 +102,7 @@ ramjac fix can be re-ported without re-deriving semantics.
 - **Adjacent:** `treadmill_api/eventbus.py` (the existing SNS publisher
   Protocol; Task 2 of plan 001cb672 wires the outbox to it).
 - **Tests:** `services/api/tests/test_messaging_dedup.py`,
-  `test_messaging_crash_safety.py`, `test_messaging_pump.py`, and
-  `test_messaging_invariants.py` (ported ramjac-events invariant foils — see below).
+  `test_messaging_crash_safety.py`, `test_messaging_pump.py`,
+  `test_messaging_invariants.py` (ported ramjac-events invariant foils — see below),
+  and `test_outbox_pump_complete.py` (slice-1a completing semantics — flock refusal,
+  write-then-crash redelivery foil, drain-on-reconnect in order; task 4ba55a27).
