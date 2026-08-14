@@ -40,6 +40,15 @@ terminal closes, and crashes.
   If the session already exists, reattaches. Override labels with `--labels`.
 - `tests/test_launcher_singleton.py` — pytest for the launcher's
   PID-file refusal path (no tmux/systemd/claude invoked).
+- `bridge.py` — per-host WebSocket terminal bridge (ADR-0097). Binds ONLY to
+  the Tailscale CGNAT address via `tailnet_bind_addr()` (imported from
+  `treadmill_api.operator_access.bind`). Gates every connection with `is_operator()`
+  (imported from `treadmill_api.operator_access.acl`) before any PTY attach.
+  Attaches ONLY to existing local tmux sessions; never spawns a shell; cross-host
+  sessions are unreachable by construction. Fixed port 7681. Singleton started by
+  `treadmill-channel-launch` when TREADMILL_HOST + TREADMILL_OPERATOR_IDENTITY are set.
+- `tests/test_bridge.py` — pytest for bridge.py (11 tests); red-then-green proof
+  for identity gate and session gate; bind gate covers 10 banned address classes.
 
 ## Recent changes
 

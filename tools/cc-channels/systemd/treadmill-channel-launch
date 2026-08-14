@@ -88,6 +88,36 @@ if [ -n "${TREADMILL_HOST:-}" ]; then
   fi
 fi
 
+# Terminal bridge singleton (ADR-0097). One bridge per host; started by the
+# first label launcher that runs on the host. Gate: both TREADMILL_HOST and
+# TREADMILL_OPERATOR_IDENTITY must be set; single-host / no-operator setups
+# are inert. TREADMILL_BRIDGE_PORT overrides the fixed well-known port 7681.
+if [ -n "${TREADMILL_HOST:-}" ] && [ -n "${TREADMILL_OPERATOR_IDENTITY:-}" ]; then
+  _BRIDGE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+  _BRIDGE_PID="$HOME/.cc-channels/bridge.pid"
+  _BRIDGE_RUNNING=0
+  if [ -f "$_BRIDGE_PID" ]; then
+    _BPID=$(cat "$_BRIDGE_PID")
+    if kill -0 "$_BPID" 2>/dev/null; then
+      _BSTATE=$(ps -p "$_BPID" -o state= 2>/dev/null | head -c 1 || true)
+      if [ "$_BSTATE" != "Z" ]; then
+        _BRIDGE_RUNNING=1
+      fi
+    fi
+    if [ "$_BRIDGE_RUNNING" -eq 0 ]; then
+      rm -f "$_BRIDGE_PID"
+    fi
+  fi
+  if [ "$_BRIDGE_RUNNING" -eq 0 ]; then
+    python3 "$_BRIDGE_DIR/bridge.py" \
+      --host "$TREADMILL_HOST" \
+      --port "${TREADMILL_BRIDGE_PORT:-7681}" \
+      --operator-identity "$TREADMILL_OPERATOR_IDENTITY" \
+      >> "$HOME/.cc-channels/bridge.log" 2>&1 &
+    echo $! > "$_BRIDGE_PID"
+  fi
+fi
+
 # Ensure tmux session exists at the right cwd. systemd-user runs the wrapper
 # with cwd=$HOME by default, so a bare `tmux new -d -s` would inherit that —
 # but `claude --resume <session-id>` binds to a transcript stored under a
