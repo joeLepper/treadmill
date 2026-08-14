@@ -266,16 +266,20 @@ def test_api_action_builds_and_recreates(mock_run, tmp_path):
 
 
 @patch("subprocess.run")
-def test_api_action_continues_when_ff_fails(mock_run, tmp_path, caplog):
-    """ff-only failure (operator has unpushed work, or a different branch
-    checked out) must NOT break the deploy — log a warning and fall back to
-    building from current local state. Preserves today's behavior; the
-    sync step must not introduce a new silent-skip vector."""
+def test_api_action_refuses_build_when_ff_fails(mock_run, tmp_path, caplog):
+    """FAIL CLOSED: an ff-only failure (a divergent branch checked out, or
+    unpushed local work) must REFUSE the build — never fall back to building
+    from stale local state. This is the fix for the 2026-08-13 outage: the
+    primary tree sat on the revert branch, the ff-merge failed, and the old
+    behavior rebuilt the API from stale source, crash-looping alembic.
+
+    The refusal is an EXPECTED policy outcome (under ADR-0100 option (b) the
+    held branch is divergent as the standing state), so it ACKS the message,
+    SKIPS the build (last-good container untouched), and warns loudly — it is
+    NOT a DLQ source. Deploy events are level-triggered, so no work is lost."""
     mock_run.side_effect = [
         MagicMock(returncode=0),  # fetch ok
-        MagicMock(returncode=1, stderr="error: not possible to fast-forward\n"),
-        MagicMock(returncode=0),  # docker build still runs
-        MagicMock(returncode=0, stdout="sha256:builtimage123\n"),  # image inspect
+        MagicMock(returncode=1, stderr="error: not possible to fast-forward\n"),  # ff-merge FAILS
     ]
     watcher, acked, recreate_calls = _make_watcher(
         tmp_path, pr_files=["services/api/main.py"],
@@ -285,19 +289,52 @@ def test_api_action_continues_when_ff_fails(mock_run, tmp_path, caplog):
          caplog.at_level(logging.WARNING, logger="treadmill.deploy_watcher"):
         watcher._process_message(_sqs_msg(8, "ffnogood"))
 
-    # docker build must still have run despite the ff-only failure.
+    # NO docker build ran — we refused rather than build from stale source.
     build_calls = [
         c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "build"]
     ]
-    assert len(build_calls) == 1
-    # Recreate still ran — fallback to local state is the whole point.
-    assert recreate_calls == ["sha256:builtimage123"]
+    assert build_calls == []
+    # The container was NOT recreated — the running last-good image stays up.
+    assert recreate_calls == []
+    # Message IS acked — level-triggered deploy loses no work; NOT a DLQ source.
     assert acked == ["rh-8"]
-    # The merge stderr surfaces in the warning so the operator can see why.
+    # A loud WARNING surfaced the refusal so it is visible.
     assert any(
-        "merge --ff-only" in rec.getMessage() and "not possible to fast-forward" in rec.getMessage()
+        "REFUSED" in rec.getMessage() and rec.levelno == logging.WARNING
         for rec in caplog.records
-    ), f"expected ff-only warning with stderr; got {[r.getMessage() for r in caplog.records]}"
+    ), f"expected a loud refusal warning; got {[r.getMessage() for r in caplog.records]}"
+
+
+@patch("subprocess.run")
+def test_stale_refusal_warning_is_deduped(mock_run, tmp_path, caplog):
+    """A divergent held branch refuses EVERY merge (ADR-0100 option (b) standing
+    state). The full WARNING must fire once and identical repeats collapse to a
+    terse INFO, so the log is visible, not spammy."""
+    def _ff_fail_pair():
+        return [
+            MagicMock(returncode=0),  # fetch ok
+            MagicMock(returncode=1, stderr="error: not possible to fast-forward\n"),  # ff-merge FAILS
+        ]
+
+    watcher, acked, recreate_calls = _make_watcher(
+        tmp_path, pr_files=["services/api/main.py"],
+    )
+
+    with patch.object(watcher, "_wait_healthy"), \
+         caplog.at_level(logging.INFO, logger="treadmill.deploy_watcher"):
+        mock_run.side_effect = _ff_fail_pair()
+        watcher._process_message(_sqs_msg(8, "ffnogood1"))
+        mock_run.side_effect = _ff_fail_pair()
+        watcher._process_message(_sqs_msg(9, "ffnogood2"))
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "REFUSED" in r.getMessage()]
+    infos = [r for r in caplog.records if r.levelno == logging.INFO and "refused again" in r.getMessage()]
+    # Full warning ONCE for the same stale tree; the second refusal collapses.
+    assert len(warnings) == 1, f"expected one full warning; got {[r.getMessage() for r in warnings]}"
+    assert len(infos) == 1, f"expected one collapsed info; got {[r.getMessage() for r in infos]}"
+    # Both merges acked, neither built.
+    assert acked == ["rh-8", "rh-9"]
+    assert recreate_calls == []
 
 
 @patch("subprocess.run")
@@ -308,6 +345,7 @@ def test_api_action_health_url_uses_configured_port(mock_run, tmp_path):
     API serves on ``:8088``, so the old probe always timed out against
     the wrong port and falsely reported the deploy as unhealthy)."""
     configured_url = "http://localhost:8088/health/ready"
+    mock_run.side_effect = _sync_ok_then_build()  # on-main sync succeeds → build proceeds
     watcher, _, _ = _make_watcher(
         tmp_path,
         pr_files=["services/api/main.py"],
@@ -684,6 +722,9 @@ def test_idempotency_rebuilds_for_new_sha(mock_run, tmp_path):
 @patch("subprocess.run")
 def test_state_file_written_after_success(mock_run, tmp_path):
     """State file must record the SHA for each applied category."""
+    # On-main sync succeeds (every git call returns rc=0), so the action runs
+    # to completion and the state is recorded.
+    mock_run.return_value = MagicMock(returncode=0, stdout="abc1234\n", stderr="")
     watcher, _, _ = _make_watcher(tmp_path, pr_files=["workers/agent/run.py"])
     sha = "statecheck"
 

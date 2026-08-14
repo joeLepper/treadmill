@@ -186,6 +186,29 @@ def _categorize_files(paths: list[str]) -> dict[str, list[str]]:
     return by_category
 
 
+class StaleWorkingTreeError(RuntimeError):
+    """The local working tree could not be advanced to ``origin/main``.
+
+    Raised by ``_sync_local_to_origin`` when ``git fetch`` fails or the
+    ``--ff-only`` merge fails (a divergent branch is checked out, or there is
+    unpushed local work). ``_process_message`` catches it: it ACKS the message
+    and SKIPS the build (the running container is never swapped for an image
+    built from stale source), emitting a de-duped loud warning. A stale tree
+    is an EXPECTED policy outcome, not a poison message — under ADR-0100 option
+    (b) the held branch is divergent as the standing state, so refusing on
+    every merge must not fill the DLQ and mask real failures. Deploy events are
+    level-triggered, so a skipped deploy loses no work: the next on-main run
+    brings the API to latest main including the skipped PR.
+
+    This is the fail-closed fix for the 2026-08-13 outage: the watcher fired
+    on a merge while the primary tree sat on ``fix/retire-fabric-coupling``,
+    the ff-merge failed, and the previous behavior rebuilt the API from the
+    revert branch — which crash-looped because its ``alembic upgrade head``
+    could not find a revision the DB was already at. Refuse, never build from
+    stale. Same spirit as ADR-0100 (fail-closed placement), one layer down.
+    """
+
+
 # ── Core watcher class ────────────────────────────────────────────────────────
 
 
@@ -241,6 +264,13 @@ class DeployWatcher:
         self._staleness_guard = staleness_guard
         self._staleness_pid_file = staleness_pid_file
         self._stop_event = threading.Event()
+        # De-dup key for the stale-tree refusal warning. Under ADR-0100
+        # option (b) the operator's held branch is divergent from
+        # origin/main as the STANDING state, so the watcher refuses on
+        # every merge; we log the full warning once per distinct tree
+        # state and collapse identical repeats so the log is visible, not
+        # spammy. See ``_process_message``.
+        self._last_stale_warn_key: str | None = None
 
     def run(self) -> None:
         """Poll until stop() is called or a signal is received."""
@@ -332,12 +362,49 @@ class DeployWatcher:
                     category, merge_commit_sha,
                 )
                 continue
-            # May raise — if so, we do NOT ack; SQS re-delivers (maxReceiveCount=3→DLQ).
-            self._run_action(category, by_category[category])
+            # A stale/divergent local tree is an EXPECTED policy outcome, not a
+            # poison message: under ADR-0100 option (b) the held branch is
+            # divergent as the standing state, so every merge refuses. ACK +
+            # SKIP the build (fail-closed — container untouched) + warn loudly
+            # (de-duped). Deploy events are level-triggered: the next on-main
+            # run brings the API to latest main including this PR, so a skipped
+            # deploy loses no work — DLQ churn would only mask real failures.
+            try:
+                self._run_action(category, by_category[category])
+            except StaleWorkingTreeError as exc:
+                self._warn_stale_refusal(category, exc)
+                continue  # skip this category; message is still acked below
+            # Any OTHER exception (corrupt repo, docker build failure, ...) still
+            # propagates: we do NOT ack; SQS re-delivers (maxReceiveCount=3→DLQ).
             state[category] = merge_commit_sha
             self._save_state(state)
 
         self._ack_fn(receipt)
+
+    def _warn_stale_refusal(
+        self, category: str, exc: "StaleWorkingTreeError"
+    ) -> None:
+        """Loudly, but de-dupedly, surface a fail-closed deploy refusal.
+
+        The full WARNING fires on the first refusal and whenever the tree
+        state changes; identical repeats (the same divergent tree refusing
+        merge after merge) collapse to a terse INFO so the log stays
+        readable under ADR-0100 option (b).
+        """
+        key = str(exc)
+        if key == self._last_stale_warn_key:
+            logger.info(
+                "deploy refused again (same stale tree); skipping %s build",
+                category,
+            )
+            return
+        self._last_stale_warn_key = key
+        logger.warning(
+            "deploy REFUSED for category=%s: local tree is not at origin/main "
+            "— skipping the build and keeping the last-good container. Bring "
+            "the tree to origin/main to resume deploys. detail: %s",
+            category, exc,
+        )
 
     def _run_action(self, category: str, files: list[str]) -> None:
         if category == "api":
@@ -357,35 +424,37 @@ class DeployWatcher:
 
     def _sync_local_to_origin(self) -> None:
         # Sibling to ADR-0024: ``docker build`` packages the LOCAL working tree,
-        # so if the operator's clone is behind ``origin/main`` the "fresh"
-        # image is built from pre-merge source — the same silent-no-op shape
-        # the recreate fix retired, one layer down. Fast-forward the clone
-        # before building. ff-only failure (unpushed work, different branch
-        # checked out) warns + falls back to current local state to preserve
-        # today's deploy behavior; no new silent-skip vector for normal
-        # merges.
+        # so if the operator's clone is behind or divergent from ``origin/main``
+        # the "fresh" image is built from pre-merge or wrong-branch source.
+        # Fast-forward the clone before building. If the tree CANNOT be advanced
+        # to origin/main (fetch failure, or a divergent branch / unpushed work so
+        # ``--ff-only`` fails), FAIL CLOSED: raise StaleWorkingTreeError so the
+        # caller refuses the build rather than deploying stale code. The earlier
+        # design fell back to building from current local state here; that
+        # fallback IS the 2026-08-13 outage (revert branch checked out → ff-merge
+        # fails → API rebuilt from the revert branch → alembic crash-loop). A
+        # normal merge on a clone that is already on main is unaffected.
         repo_root_str = str(self._repo_root)
         fetch = subprocess.run(
             ["git", "-C", repo_root_str, "fetch", "origin", "--quiet"],
             check=False,
         )
         if fetch.returncode != 0:
-            logger.warning(
-                "git fetch origin failed (rc=%d); building from current local state",
-                fetch.returncode,
+            raise StaleWorkingTreeError(
+                f"git fetch origin failed (rc={fetch.returncode}); refusing to "
+                f"build — cannot confirm the local tree is at origin/main"
             )
-            return
         merge = subprocess.run(
             ["git", "-C", repo_root_str, "merge", "--ff-only", "origin/main"],
             check=False, capture_output=True, text=True,
         )
         if merge.returncode != 0:
-            logger.warning(
-                "git merge --ff-only origin/main failed (rc=%d); "
-                "building from current local state. stderr=%s",
-                merge.returncode, (merge.stderr or "").strip(),
+            raise StaleWorkingTreeError(
+                "git merge --ff-only origin/main failed "
+                f"(rc={merge.returncode}): local HEAD is not at origin/main "
+                "(divergent branch or unpushed work) — refusing to build from "
+                f"stale source. stderr={(merge.stderr or '').strip()}"
             )
-            return
         head = subprocess.run(
             ["git", "-C", repo_root_str, "rev-parse", "--short", "HEAD"],
             check=False, capture_output=True, text=True,
