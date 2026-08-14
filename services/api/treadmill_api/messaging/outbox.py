@@ -2,6 +2,13 @@
 
 Provides a local outbox that survives process restarts and network isolation.
 The DB is opened in WAL mode so readers do not block writers.
+
+ADR-0094 Decision #1 — atomic write: the outbox table lives in the SAME
+SQLite database as the caller's state tables. write() accepts a caller-supplied
+connection and inserts without committing. The caller owns commit/rollback, so
+the outbox event and the caller's state change are ONE atomic transaction.
+Use connect() to get a connection to this database for the caller's own
+state-change transaction.
 """
 
 from __future__ import annotations
@@ -36,6 +43,16 @@ class OutboxBackend:
         self._db_path = str(db_path)
         self._init_db()
 
+    def connect(self) -> sqlite3.Connection:
+        """Return a new connection to the outbox database.
+
+        Callers use this to obtain a connection for atomic write()+state-change
+        transactions — open a connection, do your state writes, call write(conn),
+        then commit (or rollback) to make the event and state atomic.
+        The caller owns the returned connection and must close it.
+        """
+        return self._connect()
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -60,24 +77,28 @@ class OutboxBackend:
             )
             conn.commit()
 
-    def write(self, message: dict[str, Any]) -> None:
-        """Append a message to the outbox as a pending row."""
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO outbox
-                    (dedup_key, ordering_key, event_type, payload, created_at, published_at)
-                VALUES (?, ?, ?, ?, ?, NULL)
-                """,
-                (
-                    message["dedupKey"],
-                    message["ordering_key"],
-                    message["event_type"],
-                    json.dumps(message["payload"]),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            conn.commit()
+    def write(self, message: dict[str, Any], conn: sqlite3.Connection) -> None:
+        """Append a message to the outbox on the caller's connection.
+
+        The INSERT is executed on `conn` without committing. The caller owns
+        the transaction: commit or rollback applies atomically to both this
+        event and the caller's state change (ADR-0094 Decision #1 — no
+        dual-write gap between state and event).
+        """
+        conn.execute(
+            """
+            INSERT INTO outbox
+                (dedup_key, ordering_key, event_type, payload, created_at, published_at)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                message["dedupKey"],
+                message["ordering_key"],
+                message["event_type"],
+                json.dumps(message["payload"]),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
 
     def read_pending(self, limit: int = 100) -> list[OutboxRow]:
         """Return pending rows (published_at IS NULL) in append order."""
