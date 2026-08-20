@@ -32,11 +32,20 @@ Ready tasks (not `blocked`) must leave `registered` within a few minutes — to 
    If ready tasks sit at `registered` ~10+ min with none assigned, the team is not dispatching. Diagnose.
    (List truncates UUIDs to 8 chars. Full id: `curl -s "http://localhost:8088/api/v1/tasks?plan_id=<plan-id>" | python3 -m json.tool | grep -iE '"id"|"title"'`.)
 
+   **First suspect a down CORE, not just dead sessions.** If `treadmill status` returns connection refused (or `treadmill task list` errors), the `personal`/dev-local core is down — the API + Postgres + Redis containers exited (a reboot or a stack-down). The channel sessions survive independently but have nothing to submit to, so tasks never leave `registered`. Fix by RESTARTING the exited containers, not by re-provisioning:
+   ```
+   docker start treadmill-postgres treadmill-redis treadmill-api
+   treadmill status        # liveness + readiness ok before you resubmit
+   ```
+   **Never reach for `treadmill-local up` / `cdk synth` to recover a live deployment** — that is the superseded moto/ephemeral-worker substrate (ADR-0018), not the current long-lived-team model (ADR-0087). A down core needs `docker start`, full stop.
+
 2. **Are the sessions alive?**
    ```
    systemctl --user list-units "treadmill-channel@*" --all --no-legend | grep <repo-slug>
    ```
    Expect `coordinator-<repo>`, `evaluator-<repo>`, `worker-<repo>-1..N`, all `active running`. Dead/failed → `journalctl --user -u treadmill-channel@<label> -n 40` for a crash loop.
+
+   **A label that no live session carries = an ORG MOVE.** The channel label embeds the repo's OWNER (`coordinator-<owner>-<repo>`). If a repo moved orgs, the old-org sessions keep running (stale) while your `team up <new-owner/repo>` provisions a fresh team under the NEW label. Symptom: roots stuck `registered` while the live coordinator session carries a *different owner prefix* than the one `team up` configured (e.g. `coordinator-joelepper-netlify-tapestry-experiment` still running while the plan targets `coordinator-netlify-tapestry-experiment`). `treadmill team up <new-owner/repo>` launches the new-org channel sessions (it starts the systemd `treadmill-channel@` units, not just writes config); stand down the stale old-org ones as cleanup. Confirm the new team dispatched by peeking the NEW coordinator's pane, not by an early `registered` snapshot.
 
 3. **`active running` is not enough — PEEK each session.** The systemd process can be up while the Claude session inside is wedged:
    ```
@@ -139,6 +148,7 @@ If tasks are moving and the coordinator is dispatching, do not nudge for the sak
 - **A bad example in a rework brief.** Handing a worker a placeholder filename/value propagates into a red check — give the real one.
 - **Chasing a base-inherited red.** A check that fails on every PR — including a doc-only one against the same base — is a broken trunk, not your bug. Hold it for the trunk fix; do not let it gate your merge.
 - **Waiting for a GitHub Approve that can never arrive.** Under a shared git identity GitHub blocks sibling approval; consensus is the relay co-sign. Do not stall a ready PR waiting on a green Approve button.
+- **Reaching for `treadmill-local up` / `cdk synth` to dispatch or recover.** That is the dead ephemeral-worker substrate (ADR-0018), not the current long-lived-team model (ADR-0087). Dispatch is `team up <owner/repo>` → `plan validate <doc>` → `plan submit --repo … --doc … --created-by $TREADMILL_SESSION_LABEL`; a down core is `docker start` of the exited containers. Standing up moto burns a cycle and fixes nothing. (`plan validate` / `team up` take the doc / repo positionally; `depends_on` in the `sequence_of_work` YAML must be event expressions `task.<id>.pr_merged`, not bare ids.)
 
 ## Root fixes to file (via /learning or /decide if these recur)
 
