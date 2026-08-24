@@ -140,14 +140,21 @@ After writing the plan doc and before calling `treadmill plan submit`:
 1. **Run `treadmill plan validate`** — catches schema violations, missing `description` fields,
    and `depends_on` syntax errors. Fix all findings before proceeding.
 
-2. **Relay to at least one sibling for review** — relay the plan file as an action request:
+2. **Get an adversarial review — not a read-through** — relay the plan file as an action request
+   to at least one sibling (or invoke the `adversarial-review` skill):
    ```bash
    python3 ~/treadmill/tools/cc-channels/cc-relay.py \
      --to treadmill-bert --from treadmill-alan --type action \
      --file <plan_path>
    ```
-   Follow up with a context message: what to look for (scope gaps, depends_on, sandbox safety,
-   infra gotchas). Hold submission until the sibling clears it.
+   Direct the reviewer to attack the plan's **load-bearing invariants**, not to summarize it. For
+   EACH invariant the plan claims: does a `validation` entry actually red-then-green **foil** it —
+   a behavioral test that fails before the change and passes after — or is it only named in prose?
+   A plan whose validations cannot fail proves nothing. Then: does every code task scope in its
+   touched files, its existing tests, and the component `AGENT.md` (the docs-current gate is
+   blocking)? Are the `depends_on` edges right, and is any shared-file fan-in serialized? Are
+   scope gaps, sandbox-safety, and infra assumptions real? Hold submission until the reviewer
+   clears it.
 
    **Why this step is load-bearing**: A sibling has independent context about the infrastructure
    and codebase. The authoring session has just spent time with the plan and is likely to miss
@@ -157,10 +164,17 @@ After writing the plan doc and before calling `treadmill plan submit`:
    "no existing workflow" claim. The cost of holding for 5 minutes is trivially lower than
    a worker executing broken instructions.
 
-3. **Address review findings** — for CRITICAL items, fix before submitting. For scope gaps and
+3. **Bake the discipline into the work the plan spawns** — a plan that creates or modifies code
+   must direct, in each task's `intent`, that the produced change gets an INDEPENDENT adversarial
+   review before it ships (the worker's own author-review does not count). The author-side review
+   of the plan (step 2) and the worker-side review of the code are two different layers — require
+   both. Where the runtime provides a review gate (e.g. Tapestry's evaluator), name it; elsewhere,
+   make a reviewer pass a `validation` entry.
+
+4. **Address review findings** — for CRITICAL items, fix before submitting. For scope gaps and
    minor items, either fix them or explicitly defer with a note in the Risks section.
 
-4. **Relay a patch summary** back to the reviewer if significant changes were made.
+5. **Relay a patch summary** back to the reviewer if significant changes were made.
 
 ## Status transitions
 

@@ -159,5 +159,6 @@ When the ADR includes a sequence diagram, that diagram is the *contract of inten
 
 1. Confirm the ADR file is at the correct path with the correct number.
 2. If the ADR supersedes or amends an existing ADR, update that ADR's status header in the same edit session.
-3. Tell the user the ADR number and one-line summary so they can reference it in future conversation.
-4. Do NOT commit, push, or publish — that's the human's call.
+3. **Get an adversarial review before the ADR is treated as settled** — relay it to a sibling or invoke the `adversarial-review` skill. The author is the worst-placed to see the decision's own blind spots. The review must attack, not summarize: is the decision **falsifiable** and is it exactly ONE decision per ADR? Do the Alternatives lead with the incumbent — the do-nothing / platform-native option — rejected for a real reason, not a strawman? Are the Consequences honest about the bad and the risks? Address blocking findings before you rely on the ADR to drive a plan.
+4. Tell the user the ADR number and one-line summary so they can reference it in future conversation.
+5. Do NOT commit, push, or publish — that's the human's call.
