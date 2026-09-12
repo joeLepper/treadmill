@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { assertLabel, relayDir, formatBody, injectToRelay } from './inject.mjs'
+import { assertLabel, relayDir, formatBody, injectToRelay, isWatcherEligible } from './inject.mjs'
 
 test('assertLabel accepts a plain label', () => {
   assert.equal(assertLabel('treadmill-carla'), 'treadmill-carla')
@@ -52,6 +52,37 @@ test('injectToRelay refuses a crafted label (no escape via inject)', () => {
       () => injectToRelay({ label: '../evil', text: 'x', chatId: 1, updateId: 1 }, root),
       /invalid session label/,
     )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('injectToRelay refuses a symlinked relay dir (no delivery into another session)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccroot-'))
+  try {
+    // treadmill-carla/relay is a symlink to treadmill-alan/relay — the
+    // configured-label -> wrong-session foil.
+    mkdirSync(join(root, 'treadmill-carla'), { recursive: true })
+    mkdirSync(join(root, 'treadmill-alan', 'relay'), { recursive: true })
+    symlinkSync(join(root, 'treadmill-alan', 'relay'), join(root, 'treadmill-carla', 'relay'))
+    assert.throws(
+      () => injectToRelay({ label: 'treadmill-carla', text: 'x', chatId: 1, updateId: 1 }, root),
+      /symlink|does not resolve/,
+    )
+    assert.equal(readdirSync(join(root, 'treadmill-alan', 'relay')).length, 0, 'nothing leaked into alan')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('isWatcherEligible is true only for a launcher session (session-id record present)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccroot-'))
+  try {
+    mkdirSync(join(root, 'treadmill-carla'), { recursive: true })
+    assert.equal(isWatcherEligible('treadmill-carla', root), false, 'no session-id -> ineligible')
+    writeFileSync(join(root, 'treadmill-carla', 'session-id'), 'uuid\n')
+    assert.equal(isWatcherEligible('treadmill-carla', root), true)
+    assert.equal(isWatcherEligible('nonexistent', root), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

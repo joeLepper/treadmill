@@ -60,32 +60,37 @@ export class Ledger {
 
   has(updateId) { return this._seenSet.has(updateId) }
 
-  _advanceOffset(updateId) {
-    if (!Number.isInteger(updateId)) throw new Error('updateId must be an integer')
-    if (updateId + 1 > this.offset) this.offset = updateId + 1
+  // Persist-then-mutate: compute the NEXT state, write it durably, and only then
+  // publish it into memory. If the write throws, in-memory offset/seen are
+  // unchanged, so the next getUpdates re-fetches from the un-advanced offset
+  // rather than acking an advance that never hit disk (Bert/Fran finding).
+  _apply(nextOffset, nextSeen) {
+    atomicWriteJson(this.path, { offset: nextOffset, seen: nextSeen })
+    this.offset = nextOffset
+    this.seen = nextSeen
+    this._seenSet = new Set(nextSeen)
   }
 
-  _persist() { atomicWriteJson(this.path, { offset: this.offset, seen: this.seen }) }
-
-  // A processed-but-not-injected update (unmapped chat, non-text). Advance the
+  // A processed-but-not-injected update (disallowed chat, non-text). Advance the
   // ack past it so it is not re-fetched forever, but do NOT mark it seen.
   advance(updateId) {
-    this._advanceOffset(updateId)
-    this._persist()
+    if (!Number.isInteger(updateId)) throw new Error('updateId must be an integer')
+    const nextOffset = Math.max(this.offset, updateId + 1)
+    if (nextOffset === this.offset) return // already past it; no write needed
+    this._apply(nextOffset, this.seen)
   }
 
-  // A successfully injected update: mark it seen (effectively-once) and advance
-  // the ack to updateId+1. Persist atomically. offset only moves forward.
+  // A successfully injected update: mark it seen (best-effort dedup to reduce
+  // redelivery — the contract is at-least-once, see README/ADR-0106) and advance
+  // the ack to updateId+1. offset only moves forward.
   commit(updateId) {
-    this._advanceOffset(updateId)
+    if (!Number.isInteger(updateId)) throw new Error('updateId must be an integer')
+    const nextOffset = Math.max(this.offset, updateId + 1)
+    let nextSeen = this.seen
     if (!this._seenSet.has(updateId)) {
-      this._seenSet.add(updateId)
-      this.seen.push(updateId)
-      if (this.seen.length > SEEN_CAP) {
-        const dropped = this.seen.splice(0, this.seen.length - SEEN_CAP)
-        for (const d of dropped) this._seenSet.delete(d)
-      }
+      nextSeen = this.seen.concat(updateId)
+      if (nextSeen.length > SEEN_CAP) nextSeen = nextSeen.slice(-SEEN_CAP)
     }
-    this._persist()
+    this._apply(nextOffset, nextSeen)
   }
 }

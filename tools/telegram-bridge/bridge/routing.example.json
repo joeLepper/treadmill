@@ -1,6 +1,0 @@
-{
-  "_comment": "chat_id -> session label. The routing table doubles as the inbound allowlist: an unmapped chat is dropped (fail-closed). Copy to ~/.cc-channels/.telegram-bridge/routing.json and fill in real chat_ids. Labels must run the treadmill-events channel server (launch-session.sh sessions do).",
-  "routes": {
-    "8956818786": "treadmill-carla"
-  }
-}

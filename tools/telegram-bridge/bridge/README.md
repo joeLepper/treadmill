@@ -1,59 +1,83 @@
 # telegram-bridge
 
-The sole Telegram `getUpdates` poller for the fleet (ADR-0106). It ends the
-fleet-wide 409 flap: the shared bot token permits exactly one `getUpdates`
-poll slot, so N per-session pollers collide and knock each other offline. One
-daemon owns the slot; sessions no longer poll.
+One daemon that is the sole `getUpdates` poller for every session's Telegram bot
+(ADR-0106). It ends the per-session Telegram MCP fragility: each session ran its
+own MCP poller on its own bot token, and a mass restart dropped many at once (a
+shared-plugin-dir install race plus Claude's ~15-min cached-failure cooldown),
+leaving a remote operator unable to reach any session. One supervised process,
+decoupled from session restarts, replaces N fragile per-session connections.
+
+> Note: the bots are **not** on a shared token (verified 2026-09-12 — six
+> distinct bot ids). The daemon is **multi-token**: it owns all N per-session
+> bots and runs one poll loop per token.
 
 ## How it works
 
-- **Inbound:** the daemon long-polls `getUpdates`, resolves each message's
-  `chat_id` to a session label via the routing table, and writes the message as
-  a `.md` file into that session's channel relay inbox
-  (`~/.cc-channels/<label>/relay/`). The session's `treadmill-events` channel
-  server watches that dir and injects the file as a `<channel source="relay">`
-  notification (at-least-once; `relay-inbox.ts`). No bridge session, no LLM.
-- **Outbound:** a session replies with a direct Bot API `sendMessage`. Outbound
-  does not use the poll slot, so it never contends.
-- **Effectively-once:** the ledger persists the Telegram `offset` (the ack) and
-  a bounded set of injected `update_id`s. A crash re-fetches only the
-  un-injected tail; an already-injected update is skipped.
-- **Fail-closed:** the routing table doubles as the inbound allowlist. A message
-  from an unmapped chat is logged and dropped, never delivered to a wrong
-  session (the ADR-0106 falsifier).
+- **Inbound:** one `getUpdates` loop per bot token. The bot identity IS the
+  routing key — each bot belongs to one session — so a message polled from bot X
+  is written as a `.md` into session X's relay inbox
+  (`~/.cc-channels/<label>/relay/`). That session's `treadmill-events` channel
+  server watches the dir and injects the file as a `<channel source="relay">`
+  notification. No bridge session, no LLM.
+- **Outbound:** a session replies with a direct Bot API `sendMessage` (needs only
+  the token — no MCP, no poll slot). No daemon involvement.
+- **Delivery is at-least-once**, not exactly-once: the daemon injects then acks,
+  and the channel server delivers-then-unlinks; a crash in either window
+  redelivers. The `update_id` dedup reduces duplicates but does not eliminate
+  them. Duplicates are visible and rare; loss is what we refuse.
+- **Fail-closed allowlist:** each bot injects only messages from its configured
+  `allowedChats`; any other chat is dropped and logged. Sessions run with
+  permissions bypassed, so an ungated inbound message would be code execution.
+- **Tokens** are read from the existing `~/.cc-channels/<label>/telegram.env`
+  (same UID, mode 0600). No new secret file; the daemon concentrates them only
+  at runtime.
 
-## Target eligibility (invariant)
+## Invariants / guards
 
-A session is a valid Telegram target only if it runs the `treadmill-events`
-channel server — every `launch-session.sh` session does. The treadmill CLAUDE.md
-"cc-relay is retired" note applies to pure-fabric agents that run no watcher; it
-does not apply to launcher sessions, whose relay dir is actively watched.
+- **Target eligibility:** a configured label must be a launcher-managed session
+  (a `session-id` record exists under `~/.cc-channels/<label>/`), because
+  `launch-session.sh` runs the `treadmill-events` watcher for those. An
+  unknown/pure-fabric label is refused at startup — never acked-then-lost in an
+  unwatched dir.
+- **Symlink safety:** a symlinked `<label>` or `<label>/relay` is rejected
+  (lstat + post-mkdir realpath), so a configured label cannot resolve into
+  another session's dir. Same-UID concurrent rewrite (TOCTOU) remains a disclosed
+  limit, not a defended boundary — this is a single-UID system.
+- **Single instance:** a pid-lock on the state dir refuses a second daemon (a
+  stray instance would double-poll every token → 409 on all).
+- **Head-of-line:** a failed inject is quarantined (`quarantine/<label>/`) and
+  advanced past — one poison update never stalls the rest.
+- **Persistent 409** is logged as contention (a per-session poller was not
+  disabled), not retried silently forever.
+- **Routes are loaded once at startup.** Adding/removing a bot or rotating a
+  token requires a daemon restart.
 
 ## Modules
 
 | File | Role |
 |------|------|
-| `poller.mjs` | sole `getUpdates` long-poll loop + capped-backoff supervisor |
-| `routing.mjs` | chat_id → label table (also the allowlist) |
-| `inject.mjs` | atomic relay-dir file-drop (the inbound seam) |
-| `ledger.mjs` | durable offset + `update_id` dedup (effectively-once) |
-| `bridge.mjs` | entrypoint: env + config → poller |
+| `poller.mjs` | per-token `getUpdates` loops + per-bot backoff supervisor + daemon fan-out |
+| `config.mjs` | bot list, token load from `telegram.env`, startup eligibility gate |
+| `inject.mjs` | atomic, symlink-safe relay-dir file-drop (the inbound seam) |
+| `ledger.mjs` | per-bot durable offset + `update_id` dedup (persist-then-mutate) |
+| `bridge.mjs` | entrypoint: config + pid-lock → daemon |
 
 ## Run
 
 ```bash
 mkdir -p ~/.cc-channels/.telegram-bridge
-cp bridge/routing.example.json ~/.cc-channels/.telegram-bridge/routing.json   # edit chat_ids
-printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TOKEN" > ~/.cc-channels/.telegram-bridge/telegram.env
-chmod 600 ~/.cc-channels/.telegram-bridge/telegram.env
+cp bridge/bots.example.json ~/.cc-channels/.telegram-bridge/bots.json   # edit labels + allowedChats
 node bridge/bridge.mjs           # or: systemctl --user start telegram-bridge
 ```
 
-The token stays in a mode-0600 env file, never in the committed tree or the
-unit. `node --test bridge/` runs the suites (no network — fetch is injected).
+`node --test bridge/` runs the suites (no network — fetch/inject/quarantine are
+injected).
 
 ## Cutover (Alan signs off — high blast radius)
 
-Never two pollers at once. Per-session Telegram MCPs must stop before this
-daemon starts. Sequence one label first, verify 409 disappears, then fan out.
-See `docs/plans/2026-09-12-telegram-bridge-daemon.md`.
+Never two pollers on one token. A session's per-session Telegram MCP must stop
+before this daemon polls that bot, and the session must switch outbound to direct
+`sendMessage` (disabling the MCP kills its outbound half too). Sequence
+`treadmill-alan` first, verify inbound + outbound end-to-end and that the 409
+contention log stays quiet, then fan out. See
+`docs/plans/2026-09-12-telegram-bridge-daemon.md`.

@@ -1,14 +1,13 @@
 [Unit]
-Description=Telegram bridge — sole getUpdates poller, fans inbound to session relay dirs (ADR-0106)
+Description=Telegram bridge — sole multi-token poller, fans inbound to session relay dirs (ADR-0106)
 After=default.target
 
 [Service]
 Type=simple
-# The token is the one contended slot. Keep it OUT of the unit file and the
-# committed tree: source it from a mode-0600 env file at start (never printed).
-EnvironmentFile=%h/.cc-channels/.telegram-bridge/telegram.env
+# No token here: the daemon reads each bot's token from that session's own
+# ~/.cc-channels/<label>/telegram.env (mode 0600). Config lists {label, allowedChats}.
 ExecStart=%h/.asdf/shims/node %h/treadmill/tools/telegram-bridge/bridge/bridge.mjs
-# The loop backs off in-process; a clean SIGTERM stop exits 0.
+# The per-bot loops back off in-process; a clean SIGTERM stop exits 0.
 SuccessExitStatus=0
 Restart=on-failure
 RestartSec=5s

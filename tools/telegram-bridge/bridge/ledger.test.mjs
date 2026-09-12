@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Ledger } from './ledger.mjs'
 
@@ -61,5 +61,21 @@ test('seen set is bounded (cannot grow without limit)', () => {
     assert.ok(l.seen.length <= 1000)
     assert.ok(l.has(1499), 'recent update remembered')
     assert.ok(!l.has(0), 'oldest update evicted')
+  })
+})
+
+test('persist-then-mutate: a failed write leaves the in-memory offset unchanged', { skip: process.getuid?.() === 0 && 'perms ignored as root' }, () => {
+  withDir(path => {
+    const l = new Ledger(path)
+    l.commit(50)
+    assert.equal(l.offset, 51)
+    chmodSync(dirname(path), 0o500) // read-only dir → atomic write (openSync wx) fails
+    try {
+      assert.throws(() => l.commit(60), /EACCES|EPERM|EROFS/)
+      assert.equal(l.offset, 51, 'offset must NOT advance when the durable write failed')
+      assert.ok(!l.has(60), 'update must NOT be marked seen when the write failed')
+    } finally {
+      chmodSync(dirname(path), 0o700)
+    }
   })
 })

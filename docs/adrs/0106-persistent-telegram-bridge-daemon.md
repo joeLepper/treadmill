@@ -3,7 +3,9 @@
 - **Status:** proposed
 - **Date:** 2026-09-12
 - **Amends:** ADR-0067 (one bot per session)
-- **Related:** ADR-0068 (shared channel conventions), the exec_otp fabric (`send`)
+- **Related:** ADR-0068 (shared channel conventions), ADR-0102 (fran-bridge — the relay-session
+  precedent this deliberately does not copy), the `treadmill-events` relay-inbox watcher
+  (`relay-inbox.ts`, task ecd6d6eb)
 
 ## Context
 
@@ -12,48 +14,59 @@ a "custom channel server with a routing table (chat_id → session)" was **defer
 "the correct long-term shape **if bot-per-session friction proves real**... build only after the stock
 setup has been lived with."
 
-That friction is now real and observed:
+That friction is now real and observed. On 2026-09-12 many sessions' Telegram connections dropped at
+once; the operator, **remote** (Telegram his only channel), could reach no session.
 
-- ADR-0067 chose per-session **tokens** to dodge Telegram's single-poller limit, but the fleet has in
-  practice converged on a **shared bot token**. Telegram's Bot API permits exactly **one `getUpdates`
-  long-poll per token**, so the concurrent session-pollers **409-collide and knock each other offline** —
-  the connection **flaps** fleet-wide (reconnects, then drops the moment the next poller grabs the slot).
-- A restart does **not** fix it: a session's MCP reconnects, then drops again on the next collision
-  (observed on alan and carla, 2026-09-12). The operator, **remote** (Telegram his only channel), could
-  reach no session — the exact 409-broken state ADR-0067 itself named ("single-bot sharing... broken:
-  `getUpdates` permits one poller per token, a second gets 409").
-- The fragility is **structural**, not something per-session nursing can cure: it is one contended slot,
-  and it worsens with the number of pollers on the token.
-- Note: **outbound** `sendMessage` does not use the poll slot, so a direct Bot-API send still works even
-  while inbound flaps — which is how this ADR's operator updates got through, and which makes the
-  daemon's outbound path trivial.
+We ground-truthed the cause rather than accept a first diagnosis (an early "shared token → one
+`getUpdates` slot → 409" theory was **wrong**, and verifying it is what corrected the record):
 
-The exec_otp **fabric** (`send`) is meanwhile a reliable, durable, location-transparent message bus that
-every session already uses. The trigger ADR-0067 set has fired, and the durable substrate exists.
+- Each session has a **distinct** per-session bot token (verified 2026-09-12 by comparing the six
+  `~/.cc-channels/<label>/telegram.env` tokens — distinct bot ids, long-standing). There is **no** shared
+  token and **no** cross-session `getUpdates` 409. A live probe of a session's token returned `ok`, an
+  empty poll slot, and a queued update.
+- The real fragility is **per-session MCP connection fragility that correlates on a mass restart**. Each
+  session runs its own Telegram MCP (the stock plugin) whose `start` runs `bun install` on a **shared**
+  plugin dir; a fleet restart races those installs (hand-fixed three times before the launcher's
+  serialized pre-install), and any failed MCP connect is then **cached by Claude for ~15 minutes**. So a
+  mass restart drops many sessions' Telegram MCPs together and holds them down through the cooldown —
+  which is exactly the "reach no session" state the operator hit.
+- The fragility **scales with session count**: there are N independently-fragile connections, each tied
+  to a live session and each needing manual nursing. This is the "bot-per-session friction" ADR-0067 said
+  would trigger the gateway — it just arrives as connection fragility, not as a poll-slot collision.
+- Note: **outbound** `sendMessage` is a stateless Bot-API call that needs only the token — no MCP, no
+  poll slot. A direct send works even while a session's inbound MCP is down, which is how this ADR's
+  operator updates got through and which makes the daemon's outbound path trivial (sessions send direct).
+
+ADR-0067 deferred this gateway "until bot-per-session friction proves real." It has.
 
 ## Decision
 
-We decided to build ADR-0067's deferred gateway: a **single persistent Telegram bridge daemon** that is
-the sole Telegram poller and bridges Telegram ↔ the fabric.
+We decided to build ADR-0067's deferred gateway: a **single persistent, multi-token Telegram bridge
+daemon** that is the sole Telegram poller for the whole fleet and injects inbound into each session.
 
-- **One supervised connection.** The daemon runs under systemd-user with auto-restart, holds the single
-  Telegram connection (Telegram permits one `getUpdates` poller per token — ADR-0067), and reconnects on
-  its own backoff. There is one connection to keep healthy, not N.
-- **Inbound by relay-dir file-drop; no bridge session.** The daemon is a plain poller. For each inbound
-  message it looks up the target label in a routing table (chat_id → session label) and writes the
-  message as a `.md` file into that session's channel relay inbox
-  (`~/.cc-channels/<label>/relay/`). The session's already-running `treadmill-events` channel server
+- **One supervised process owning all N bots.** The daemon runs under systemd-user with auto-restart. It
+  keeps the per-session bots (ADR-0067's chat-per-sibling UX is unchanged) but is the only process that
+  polls them: it runs **one `getUpdates` loop per token**, each supervised with its own backoff, so one
+  bot's error never stalls another. There is one process to keep healthy, not N per-session MCPs. It
+  reads each token from the **existing** `~/.cc-channels/<label>/telegram.env` (same UID, mode 0600) — no
+  new secret-concentration file; the tokens already sit on disk.
+- **Inbound by relay-dir file-drop; no bridge session.** For each inbound message the daemon writes a
+  `.md` file into the target session's channel relay inbox (`~/.cc-channels/<label>/relay/`). The bot
+  identity **is** the routing key: each bot belongs to exactly one session, so the loop's fixed label is
+  the target — no chat-to-session table. The session's already-running `treadmill-events` channel server
   watches that dir (`fs.watch`, at-least-once notify-then-unlink, 60s resweep — `relay-inbox.ts`, task
-  ecd6d6eb) and injects the file as a `<channel source="relay">` notification. This is the exact path
-  the current per-session Telegram plugin uses to surface inbound. No relay session and no LLM sit in the
-  inbound loop, because the targets are native cc-channels sessions that already run the watcher — unlike
-  fran-bridge, whose relay session exists only to reach Codex siblings off this substrate (ADR-0102).
-- **Outbound by direct Bot API.** A session sends a reply with a direct `sendMessage` call, which does
-  not use the poll slot (proven 2026-09-12). Outbound needs no daemon involvement. The phone's "chat
-  list = session list" UX (ADR-0067) is preserved by the routing table.
+  ecd6d6eb) and injects the file as a `<channel source="relay">` notification — the exact path the stock
+  Telegram plugin uses. No relay session and no LLM sit in the inbound loop, because the targets are
+  native cc-channels sessions that already run the watcher — unlike fran-bridge, whose relay session
+  exists only to reach Codex siblings off this substrate (ADR-0102).
+- **A per-bot sender allowlist is mandatory (fail-closed).** Sessions run with permissions bypassed
+  (ADR-0067), so an ungated inbound message is direct code execution. Each bot injects only messages from
+  its configured allowed chat id(s); a message from any other chat is dropped and logged, never injected.
+- **Outbound by direct Bot API.** A session replies with a direct `sendMessage` call, which needs only
+  the token — no MCP, no poll slot (proven 2026-09-12). Outbound needs no daemon involvement.
 - **Sessions stop running a per-session Telegram MCP.** They no longer poll `getUpdates`, so a session's
-  lifecycle is decoupled from the Telegram connection: a session restart no longer touches Telegram, and
-  a Telegram blip no longer needs per-session fixing.
+  lifecycle is decoupled from the Telegram connection: a session restart no longer touches Telegram, no
+  mass-restart install race, and a Telegram blip no longer needs per-session fixing.
 - **Target eligibility (verified invariant).** The relay-dir inject works only for a session that runs
   the `treadmill-events` channel server — every session started by `launch-session.sh` does, because the
   launcher appends `--dangerously-load-development-channels server:treadmill-events`. This scopes the
@@ -83,30 +96,47 @@ the sole Telegram poller and bridges Telegram ↔ the fabric.
 ## Consequences
 
 ### Good
-- One durable, supervised Telegram connection; the fragility stops scaling with session count.
-- Sessions decoupled from Telegram lifecycle — restarts and Telegram blips no longer interact.
-- Rides the already-reliable fabric for transport; preserves the chat=session phone UX.
+- One durable, supervised process replaces N fragile per-session MCP pollers; no shared-plugin-dir
+  install race, no per-session cached-failure cooldown. Fragility stops scaling with session count.
+- Sessions decoupled from the Telegram lifecycle — a session restart no longer drops Telegram.
+- Preserves the chat-per-sibling phone UX (per-session bots kept); the daemon just becomes their sole
+  poller.
 
 ### Bad / trade-offs
-- A new daemon to build, supervise, and register sessions into (a routing table to maintain as sessions
-  start, stop, and get renamed).
-- A single point of failure for Telegram (mitigated: systemd auto-restart, and the daemon is small).
+- A new daemon to build and supervise, plus a config listing which labels to bridge and each bot's
+  allowed chat(s), maintained as sessions start, stop, and get renamed.
+- The daemon holds all N bot tokens in one process. It reads them from the existing per-session
+  `telegram.env` files (same UID, mode 0600) — no new secret store — but concentrates them at runtime.
+- A single point of failure for all Telegram (mitigated: systemd auto-restart; per-token loops are
+  independent so one bot's failure is isolated).
+- **Inbound delivery is at-least-once, not exactly-once.** The daemon injects then acks, and the channel
+  server itself delivers-then-unlinks; a crash in either window redelivers. Duplicates are visible and
+  rare; the operator tolerates a repeated message far better than a lost one. The `update_id` dedup
+  reduces duplicates but does not eliminate them.
 
 ### Risks
-- A routing bug delivers a message to the wrong session.
-- **Falsifier:** after the daemon is live, a Telegram connection drop is **not** auto-recovered within
-  its backoff (the operator must again manually nurse it), OR an inbound Telegram message addressed to
-  session X is delivered to the wrong session or dropped.
+- A misconfigured route delivers a message to the wrong or an unwatched session. Mitigated: the bot
+  identity is the routing key (not a mutable table); targets are validated at startup as
+  launcher-managed (a session-id record exists) so a pure-fabric or unknown label is refused, never
+  acked-then-lost; the relay dir is symlink-checked so a configured label cannot resolve into another
+  session's dir (same-UID concurrent rewrite remains a disclosed, non-security limit).
+- **Falsifier:** after the daemon is live, either (a) a Telegram poll error is **not** auto-recovered
+  within the loop's backoff (the operator must again manually nurse it), or (b) an inbound Telegram
+  message from an allowed chat to bot X is delivered to a session other than X's, or is **dropped**
+  (never injected and never spooled for X). A duplicate delivery is **not** a falsifier — the contract is
+  at-least-once.
 
 ## Diagram
 
 ```mermaid
 flowchart LR
-    Phone[Operator phone / Telegram] <--> Daemon[Telegram bridge daemon\nsystemd-user, sole poller, routing table]
-    Daemon <--> Fabric[exec_otp fabric]
-    Fabric <--> S1[session: carla]
-    Fabric <--> S2[session: alan]
-    Fabric <--> S3[session: donna]
+    Phone[Operator phone / Telegram] -- "getUpdates (bot_carla, bot_alan, ...)" --> Daemon[Telegram bridge daemon\nsystemd-user, one poll loop per bot]
+    Daemon -- "write .md" --> R1[carla relay dir]
+    Daemon -- "write .md" --> R2[alan relay dir]
+    R1 -- "treadmill-events watcher injects" --> S1[session: carla]
+    R2 -- "treadmill-events watcher injects" --> S2[session: alan]
+    S1 -- "direct sendMessage" --> Phone
+    S2 -- "direct sendMessage" --> Phone
 ```
 
 ## References

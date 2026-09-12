@@ -1,53 +1,85 @@
 #!/usr/bin/env node
-// bridge.mjs — the Telegram bridge daemon entrypoint (ADR-0106). Wires config
-// into the sole poller: token from env (never a file), routing table + ledger
-// from the state dir. Run under systemd-user (see systemd/telegram-bridge.service).
+// bridge.mjs — the Telegram bridge daemon entrypoint (ADR-0106, multi-token).
+// One process owns all configured per-session bots, polls each, and injects
+// inbound into each session's relay dir. Run under systemd-user (see
+// systemd/telegram-bridge.service).
 //
-//   TELEGRAM_BOT_TOKEN=... node bridge.mjs
+//   node bridge.mjs
 //
 // Env:
-//   TELEGRAM_BOT_TOKEN   (required) the shared bot token — the one contended slot
 //   TG_BRIDGE_STATE_DIR  state dir (default ~/.cc-channels/.telegram-bridge)
+//   CC_CHANNELS_ROOT     relay + telegram.env root (default ~/.cc-channels)
 //   TG_BRIDGE_LONGPOLL   long-poll seconds (default 25)
-//   CC_CHANNELS_ROOT     relay root (default ~/.cc-channels)
+//
+// Tokens are NOT passed here — each bot's token is read from
+// ~/.cc-channels/<label>/telegram.env. Config lists {label, allowedChats}.
 
+import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { injectToRelay } from './inject.mjs'
-import { loadRouting, resolveLabel } from './routing.mjs'
+import { loadBots } from './config.mjs'
 import { Ledger } from './ledger.mjs'
-import { runPoller } from './poller.mjs'
+import { runDaemon } from './poller.mjs'
+
+// Single-instance pid-lock (Bert finding): "sole poller" must be enforced, not
+// just implied by the systemd unit name — a stray `node bridge.mjs` would
+// double-poll every token (409 on all). We hold an O_EXCL pidfile and treat a
+// live pid as a held lock (launcher's kill -0 pattern); a stale file is cleared.
+function acquireLock(pidfile) {
+  try {
+    const fd = openSync(pidfile, 'wx')
+    writeFileSync(fd, String(process.pid)); closeSync(fd)
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e
+    const held = Number(readFileSync(pidfile, 'utf8').trim())
+    if (Number.isInteger(held) && held > 0) {
+      try { process.kill(held, 0); throw new Error(`another telegram-bridge is alive (pid ${held})`) }
+      catch (ke) { if (ke.code !== 'ESRCH') throw ke } // ESRCH = stale
+    }
+    unlinkSync(pidfile)
+    const fd = openSync(pidfile, 'wx')
+    writeFileSync(fd, String(process.pid)); closeSync(fd)
+  }
+  return () => { try { unlinkSync(pidfile) } catch { /* best effort */ } }
+}
 
 function main() {
-  const token = process.env.TELEGRAM_BOT_TOKEN
-  if (!token) { console.error('bridge: TELEGRAM_BOT_TOKEN is required'); process.exit(2) }
-
   const stateDir = process.env.TG_BRIDGE_STATE_DIR || join(homedir(), '.cc-channels', '.telegram-bridge')
   const ccRoot = process.env.CC_CHANNELS_ROOT || join(homedir(), '.cc-channels')
   const longPollSeconds = Number(process.env.TG_BRIDGE_LONGPOLL || 25)
-
-  const table = loadRouting(join(stateDir, 'routing.json'))
-  const ledger = new Ledger(join(stateDir, 'ledger.json'))
+  mkdirSync(stateDir, { recursive: true })
   const log = msg => console.error(`[telegram-bridge] ${new Date().toISOString()} ${msg}`)
 
-  log(`start: ${table.size} route(s), offset=${ledger.offset}, longpoll=${longPollSeconds}s`)
+  const releaseLock = acquireLock(join(stateDir, 'bridge.pid'))
 
-  const { stop, done } = runPoller({
-    token,
+  // Fail-fast: bad config, ineligible label, or missing token aborts here.
+  const configured = loadBots(join(stateDir, 'bots.json'), ccRoot)
+
+  const bots = configured.map(bot => {
+    const ledger = new Ledger(join(stateDir, `ledger-${bot.label}.json`))
+    const qdir = join(stateDir, 'quarantine', bot.label)
+    const quarantine = (update, err) => {
+      mkdirSync(qdir, { recursive: true })
+      const p = join(qdir, `${Date.now()}-${update.update_id}.json`)
+      writeFileSync(p, JSON.stringify({ error: String(err?.message ?? err), update }, null, 2))
+    }
+    return { label: bot.label, token: bot.token, allowedChats: bot.allowedChats, ledger, quarantine }
+  })
+
+  log(`start: ${bots.length} bot(s) [${bots.map(b => b.label).join(', ')}], longpoll=${longPollSeconds}s`)
+
+  const { stop, done } = runDaemon({
+    bots,
     longPollSeconds,
     fetchFn: fetch,
     inject: m => injectToRelay(m, ccRoot),
-    resolveLabel: chatId => resolveLabel(table, chatId),
-    ledger,
     log,
   })
 
-  // An intentional stop (SIGTERM from systemd) ends the loop cleanly → exit 0
-  // (SuccessExitStatus in the unit). We do NOT swallow a crash: if `done`
-  // rejects, exit non-zero so systemd restarts (matches fran/gerald supervisors).
   for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => { log(`${sig} — stopping`); stop() })
-  done.then(() => { log('stopped'); process.exit(0) })
-     .catch(err => { log(`fatal: ${err.message}`); process.exit(1) })
+  done.then(() => { log('stopped'); releaseLock(); process.exit(0) })
+     .catch(err => { log(`fatal: ${err.message}`); releaseLock(); process.exit(1) })
 }
 
 main()
