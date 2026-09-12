@@ -1,6 +1,6 @@
 # ADR-0107: Fleet model gateway for mixed-model subagents
 
-- **Status:** accepted (2026-09-12; cross-model review by Fran (multi-round, cleared) + sibling co-sign by Ernie. Gerald's open-weight second cross-model pass fell back per ADR-0105's capability caveat — the open-weight model could not produce a nuanced ADR-design review; it remains a capable CODE/CONFIG-foil reviewer.)
+- **Status:** proposed (2026-09-12; a prior "accepted" was WITHDRAWN — it was merged before Gerald's second cross-model pass landed, and that pass was BLOCKING with 6 findings, two design-changing. Correction to the record: the open-weight sibling (Gerald) DID produce a rigorous, foil-driven design review — the best of the three — so the earlier claim that it "could not produce a nuanced ADR-design review" was wrong; it was slow, not incapable. Re-opened to incorporate B1–B6 below; re-review pending.)
 - **Date:** 2026-09-12
 - **Related:** ADR-0104 (Gerald / the Responses→Chat shim), ADR-0102 (Fran), ADR-0105 (cross-model review)
 
@@ -31,10 +31,23 @@ sibling/subagent authenticates with its own **virtual key**. A key's policy has
 three parts, all load-bearing:
 
 1. **Model access by served IDENTITY, not name.** The allowlist is enforced
-   against the actual deployment/provider each permitted name resolves to — every
-   alias and fallback reachable from an open-weight key must itself be
-   open-weight. Empty/wildcard model policy is rejected (an empty allowlist is
-   unrestricted in LiteLLM). Verified by UPSTREAM RECEIPTS, not response labels.
+   against the actual deployment each permitted name resolves to — every alias and
+   fallback (LiteLLM `router_settings.fallbacks` / `context_window_fallbacks`
+   included) reachable from an open-weight key must itself be open-weight.
+   Empty/wildcard model policy is rejected (an empty allowlist is unrestricted in
+   LiteLLM). Verified by UPSTREAM RECEIPTS, not response labels.
+   - **OpenCode Go is a DUAL catalog** (Gerald B1): it serves proprietary models
+     (`gpt-*`, `grok-*`) alongside open-weight ones, so "provider == opencode_go"
+     is NOT the open-weight predicate. For Go, the identity check must bind the
+     model NAME-WITHIN-GO **and** the `api_base`, never provider alone.
+   - **This enforcement does NOT exist today** (Gerald B2). Gerald's shipped
+     `auth-guard.sh` is NAME-only: it strips the provider tag, validates the bare
+     name, and never reads `api_base` or `router_settings`. Executed foils passed
+     it with `openai/qwen3.8-max`+`api_base=api.openai.com`, with
+     `anthropic/qwen3.8-max`, and with a `router_settings` fallback to Claude. So
+     the migration must PORT three NEW checks that do not yet exist: an `api_base`
+     allowlist, provider-tag validation, and fallback/alias closure over
+     `router_settings`. The ADR must not imply identity enforcement is in place.
 2. **A defined budget contract**, not just "a budget": named supported endpoints,
    price mappings for Go aliases, a stated budget window + aggregation, and an
    explicit choice of hard-ceiling (fail-closed) vs admitted-request accounting
@@ -105,9 +118,44 @@ Two conditions make the policy real rather than advisory:
   Postgres) are therefore load-bearing, not optional, and add a stateful
   component (Postgres + the proxy) to operate and supervise.
 - The Responses/Chat wire-format split (ADR-0104) still applies: Codex consumers
-  need the gateway's `use_chat_completions_api` bridging for chat-only models.
+  need the gateway's `use_chat_completions_api` bridging for chat-only models, and
+  the Go path additionally REQUIRES the `x-opencode-session` header (ADR-0104) —
+  see the per-caller-attribution risk below (Gerald B6, N1).
 
 ### Risks
+- **Enabling the DB turns on cross-caller PROMPT PERSISTENCE, by default, that the
+  Codex path depends on (Gerald B4 — design-level).** The virtual-key DB is not
+  just accounting: on the Responses→Chat bridge Codex needs, LiteLLM rebuilds
+  multi-turn history for `previous_response_id` by reading spend logs, and its
+  `SpendLogsPayload` carries `messages`, `response`, and `proxy_server_request`.
+  So the DB we REQUIRE for policy is simultaneously a store of every caller's
+  prompt+response content, in the same-UID-readable Postgres. That makes the
+  separate-UID boundary a DATA-CONFIDENTIALITY requirement, not just credential
+  hygiene. The spike must determine whether message bodies persist by default and
+  whether that is disable-able WITHOUT breaking `previous_response_id`; if it is
+  not disable-able, treat the DB as a prompt-content store.
+- **Static per-deployment `x-opencode-session` collapses per-caller attribution
+  (Gerald B6 — design-level).** The header is set per DEPLOYMENT in
+  `litellm_params` (a fixed value today); LiteLLM has no per-virtual-key header
+  injection path found. So once several siblings share ONE Go deployment behind
+  the gateway, every caller presents the same header and Go-side per-caller
+  attribution is lost — the opposite of per-caller policy. Resolve by keeping
+  per-caller Go deployments (one per sibling, each with its own header) or by
+  specifying a per-virtual-key header-injection mechanism before sharing a
+  deployment.
+- **Credential isolation is same-UID-bounded, and the gateway ESCALATES this vs
+  ADR-0104.** Gerald concentrated one key; the gateway concentrates EVERY provider
+  key, readable by any same-UID sibling (siblings run with a bypassed sandbox, so
+  "could read the store" is "any sibling can cat the file"). Virtual keys scope
+  what the gateway *serves*, not who can read its key store — so the separate-UID
+  hard boundary is MORE urgent here than for Gerald, not equal-priority. Until it
+  exists, minimize the key set the gateway holds and keep budgets tight; do not
+  put the high-value funded Anthropic/OpenAI production keys behind a
+  same-UID-readable store.
+- **Proxy compromise is not contained by virtual keys.** A caller key limits an
+  ordinary caller; it does nothing if the proxy itself (holding all provider
+  creds) is compromised — add cross-caller prompt/output/log exposure and
+  key-revocation/accounting-recovery to the threat model.
 - **Credential isolation is same-UID-bounded, and the gateway ESCALATES this vs
   ADR-0104.** Gerald concentrated one key; the gateway concentrates EVERY provider
   key, readable by any same-UID sibling (siblings run with a bypassed sandbox, so
@@ -142,7 +190,7 @@ Two conditions make the policy real rather than advisory:
 flowchart LR
     sib[Sibling / subagent / workflow] -->|virtual key + model choice| gw[Fleet model gateway - LiteLLM + Postgres]
     gw -->|allowlist + budget check| pol{policy}
-    pol -->|qwen/kimi/glm...| go[OpenCode Go - open-weight]
+    pol -->|qwen/kimi/glm/minimax ONLY| go[OpenCode Go - DUAL catalog: also serves gpt-*, grok-*]
     pol -->|claude-*| anth[Anthropic]
     pol -->|gpt-*| oai[OpenAI]
     pol -->|denied / over budget| rej[reject]
@@ -154,8 +202,19 @@ flowchart LR
   gateway to any real caller or retiring Gerald's shim, not a later nicety.** It
   must prove, by upstream receipts and against the pinned config:
   - *Identity routing:* a key confined to open-weight is refused a Claude model
-    directly AND via a permitted alias/fallback that resolves to a forbidden
-    provider; an empty/wildcard model policy is rejected.
+    directly AND via a permitted alias/fallback (`router_settings`) that resolves
+    to a forbidden provider; a Go dual-catalog proprietary name (`gpt-*` inside Go)
+    is refused; an empty/wildcard model policy is rejected. The RECEIPT mechanism
+    is LiteLLM `SpendLogsPayload` (records `model`, `model_id`, `api_base`,
+    `custom_llm_provider`) — so spend-logging + Postgres must be ON for the
+    receipt to exist, and a scheduled receipt-vs-policy sweep is the DETECTOR that
+    makes falsifier (a) catchable (Gerald B3). Without both, the falsifier
+    describes a state nothing would ever detect.
+  - *Prompt persistence (Gerald B4):* confirm whether message bodies persist in
+    the spend-log DB by default, and whether that is disable-able WITHOUT breaking
+    `previous_response_id` history-rebuild on the Responses→Chat path.
+  - *Per-caller Go attribution (Gerald B6):* confirm whether `x-opencode-session`
+    can be injected per virtual key; if not, per-caller Go deployments are required.
   - *Budget contract:* the chosen semantics (hard-ceiling vs accounting overshoot)
     hold under concurrent near-limit requests, interrupted streaming, stale/unavailable
     counters, missing model pricing, and a proxy restart after paid-but-unaccounted
@@ -167,11 +226,21 @@ flowchart LR
     behavior (the shim's `drop_params` can silently discard features).
   A failure of any of these changes the design; it does not ship config-only with
   shared credentials.
-- Single-source the open-weight allowlist (Ernie's ADR-0104 note): today it lives
-  in the auth-guard, the shim config, and deliver-inbound — drift fails closed but
-  is a paper-cut.
-- Migrate Gerald's shim to a gateway virtual key once the gateway is live.
-- The hard (separate-UID/container) isolation boundary — shared with ADR-0104.
+- **Migration must PORT identity enforcement that does not exist yet (Gerald B2/B5).**
+  Gerald's `auth-guard.sh` is name-only; migrating the shim to a gateway virtual key
+  requires adding: an `api_base` allowlist, provider-tag validation, and
+  fallback/alias closure over `router_settings`. It must ALSO repoint (not drop)
+  the auth-guard's `base_url` pin from the shim to the gateway — the guard fails
+  closed on the current exact `127.0.0.1:4141` pin, so migration without repointing
+  bricks Gerald's boot; keep the pin, it is the check that stops an arbitrary
+  endpoint.
+- Single-source the open-weight allowlist (Ernie's ADR-0104 note + Gerald N4): it
+  lives in FIVE sites today — `auth-guard.sh`, `shim/config.yaml`,
+  `deliver-inbound.mjs`, `session/AGENTS.md`, and `codex/isolated-home-config.toml`
+  — drift fails closed but is a paper-cut.
+- The hard (separate-UID/container) isolation boundary — shared with ADR-0104, and
+  ELEVATED here by Gerald B4 (the DB is a prompt-content store, so isolation is a
+  data-confidentiality requirement, not just credential hygiene).
 
 ## References
 
