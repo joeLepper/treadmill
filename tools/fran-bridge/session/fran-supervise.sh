@@ -40,4 +40,9 @@ else
 fi
 
 # Foreground liveness loop: keep the unit alive while the tmux session lives.
+# Intentional stop => SIGTERM (exit 143, whitelisted). Unexpected session loss
+# (e.g. a tmux-server churn) => exit non-zero so Restart=on-failure recovers Fran
+# rather than leaving her down (matches the gerald-supervise fix).
 while tmux has-session -t "$LABEL" 2>/dev/null; do sleep 5; done
+echo "fran tmux session '$LABEL' vanished unexpectedly" >&2
+exit 1
