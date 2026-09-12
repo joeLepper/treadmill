@@ -26,7 +26,16 @@ decoupled from session restarts, replaces N fragile per-session connections.
   redelivers. The `update_id` dedup reduces duplicates but does not eliminate
   them. Duplicates are visible and rare; loss is what we refuse.
 - **Fail-closed allowlist:** each bot injects only messages from its configured
-  `allowedChats`; any other chat is dropped and logged. Sessions run with
+  `allowedChats`; any other chat is dropped and logged.
+- **Content:** plain text passes through. A media message (photo, voice,
+  document, …) from an allowed chat is delivered as a text **stub** with its
+  caption (`[photo received via Telegram — this channel relays text only]
+  caption: …`), so an operator's non-text message surfaces instead of being
+  silently dropped — the channel injects text, so the image itself is not
+  viewable in-session. **Every** drop is logged with a reason (`allowlist-miss`,
+  `no-chat`, `undisplayable`), and per-bot counters (`injected/dropped/
+  quarantined/malformed`) are logged periodically so drops are visible in
+  aggregate. Sessions run with
   permissions bypassed, so an ungated inbound message would be code execution.
 - **Tokens** are read from the existing `~/.cc-channels/<label>/telegram.env`
   (same UID, mode 0600). No new secret file; the daemon concentrates them only
@@ -43,8 +52,10 @@ decoupled from session restarts, replaces N fragile per-session connections.
   (lstat + post-mkdir realpath), so a configured label cannot resolve into
   another session's dir. Same-UID concurrent rewrite (TOCTOU) remains a disclosed
   limit, not a defended boundary — this is a single-UID system.
-- **Single instance:** a pid-lock on the state dir refuses a second daemon (a
-  stray instance would double-poll every token → 409 on all).
+- **Single instance:** a kernel-held lock — an abstract-namespace unix socket
+  keyed on `uid + realpath(stateDir)`, released by the kernel on process death —
+  refuses a second daemon (a stray instance would double-poll every token → 409
+  on all). No pidfile, so no stale-file or pid-reuse race.
 - **Head-of-line:** a failed inject is quarantined (`quarantine/<label>/`) and
   advanced past — one poison update never stalls the rest.
 - **Persistent 409** is logged as contention (a per-session poller was not
@@ -52,8 +63,8 @@ decoupled from session restarts, replaces N fragile per-session connections.
 - **Routes are loaded once at startup.** Adding/removing a bot or rotating a
   token requires a daemon restart. Eligibility is checked at startup only, so a
   session torn down *after* start still has messages spooled into its relay dir
-  (harmless — drained on its next start, or cleared at the daemon's next
-  restart). Offsets are keyed by stable bot id, never by label: rotating a bot's
+  (harmless — the files persist and are drained on that session's next start).
+  Offsets are keyed by stable bot id, never by label: rotating a bot's
   SECRET keeps its bot id and correctly RETAINS its ledger; only replacing the
   bot (a new bot id) yields a fresh ledger.
 - **Duplicate bot rejected.** Two labels resolving to the same token/bot id is
@@ -68,7 +79,7 @@ decoupled from session restarts, replaces N fragile per-session connections.
 | `config.mjs` | bot list, token load from `telegram.env`, startup eligibility gate |
 | `inject.mjs` | atomic, symlink-safe relay-dir file-drop (the inbound seam) |
 | `ledger.mjs` | per-bot durable offset + `update_id` dedup (persist-then-mutate) |
-| `bridge.mjs` | entrypoint: config + pid-lock → daemon |
+| `bridge.mjs` | entrypoint: config + kernel lock (abstract socket) → daemon |
 
 ## Run
 

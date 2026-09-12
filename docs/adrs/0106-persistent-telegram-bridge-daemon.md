@@ -113,6 +113,9 @@ daemon** that is the sole Telegram poller for the whole fleet and injects inboun
   server itself delivers-then-unlinks; a crash in either window redelivers. Duplicates are visible and
   rare; the operator tolerates a repeated message far better than a lost one. The `update_id` dedup
   reduces duplicates but does not eliminate them.
+- **The channel relays text only.** A media message (photo, voice, document) is delivered as a text stub
+  with its caption so it surfaces, but the media itself is not viewable in-session. Every drop is logged
+  with a reason and counted, so a silent content-type drop cannot recur.
 
 ### Risks
 - A misconfigured route delivers a message to the wrong or an unwatched session. Mitigated: the bot

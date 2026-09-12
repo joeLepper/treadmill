@@ -43,6 +43,11 @@ function atomicWriteJson(path, value) {
 export class Ledger {
   constructor(path) {
     this.path = resolve(path)
+    // The containing dir (the daemon's state dir) is created DURABLY by
+    // bridge.mjs (mkdirpDurable) before any Ledger is constructed, so this
+    // recursive mkdir is only a standalone/test convenience. Each write is
+    // atomic + fsync (payload and parent dir), so the ack-of-record is durable
+    // given that pre-existing dir. (Gerald N1 — deliberate, ordering-owned.)
     mkdirSync(dirname(this.path), { recursive: true })
     this.offset = 0
     this.seen = []

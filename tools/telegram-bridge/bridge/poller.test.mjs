@@ -18,6 +18,7 @@ const msg = (update_id, chatId, text, extra = {}) => ({ update_id, message: { ch
 function harness(body, opts = {}) {
   const injects = []
   const quarantined = []
+  const logs = []
   const ledger = opts.ledger ?? fakeLedger()
   const deps = {
     token: 'T',
@@ -27,9 +28,9 @@ function harness(body, opts = {}) {
     inject: opts.inject ?? (m => injects.push(m)),
     quarantine: opts.quarantine ?? ((u, e) => quarantined.push({ u, e })),
     ledger,
-    log: () => {},
+    log: m => logs.push(m),
   }
-  return { injects, quarantined, ledger, deps }
+  return { injects, quarantined, logs, ledger, deps }
 }
 
 test('injects an allowed text message to its fixed label and advances', async () => {
@@ -43,12 +44,13 @@ test('injects an allowed text message to its fixed label and advances', async ()
   assert.equal(ledger.offset, 101)
 })
 
-test('drops a chat not in the allowlist (fail-closed), never injects', async () => {
-  const { injects, ledger, deps } = harness({ ok: true, result: [msg(5, 999, 'who am I')] })
+test('drops a chat not in the allowlist (fail-closed), logs the reason', async () => {
+  const { injects, logs, ledger, deps } = harness({ ok: true, result: [msg(5, 999, 'who am I')] })
   const r = await pollOnce(deps)
   assert.equal(r.dropped, 1)
   assert.equal(injects.length, 0)
   assert.deepEqual(ledger.advanced, [5])
+  assert.ok(logs.some(l => /allowlist-miss/.test(l)), 'the drop must be logged with a reason')
 })
 
 test('at-least-once dedup: an already-seen update is skipped, not re-injected', async () => {
@@ -60,12 +62,59 @@ test('at-least-once dedup: an already-seen update is skipped, not re-injected', 
   assert.deepEqual(ledger.advanced, [100])
 })
 
-test('a non-text update is dropped and advanced', async () => {
-  const { injects, ledger, deps } = harness({ ok: true, result: [{ update_id: 8, edited_message: { chat: { id: 42 }, text: 'e' } }] })
+test('an edited_message with text is forwarded (not dropped)', async () => {
+  const { injects, deps } = harness({ ok: true, result: [{ update_id: 8, edited_message: { chat: { id: 42 }, text: 'edited', date: 0 } }] })
+  const r = await pollOnce(deps)
+  assert.equal(r.injected, 1)
+  assert.equal(injects[0].text, 'edited')
+})
+
+test('a photo from an allowed chat is forwarded as a text stub (Gerald B1 — no silent drop)', async () => {
+  const { injects, deps } = harness({ ok: true, result: [
+    { update_id: 9, message: { chat: { id: 42 }, photo: [{ file_id: 'x' }], caption: 'the chart', date: 0 } },
+  ] })
+  const r = await pollOnce(deps)
+  assert.equal(r.injected, 1, 'a photo must surface, not be dropped')
+  assert.equal(r.dropped, 0)
+  assert.match(injects[0].text, /photo received/)
+  assert.match(injects[0].text, /caption: the chart/)
+})
+
+test('an update with a message but no renderable content is dropped WITH a logged reason', async () => {
+  const { injects, logs, ledger, deps } = harness({ ok: true, result: [
+    { update_id: 10, message: { chat: { id: 42 }, date: 0 } }, // no text, no media
+  ] })
   const r = await pollOnce(deps)
   assert.equal(r.dropped, 1)
   assert.equal(injects.length, 0)
-  assert.deepEqual(ledger.advanced, [8])
+  assert.deepEqual(ledger.advanced, [10])
+  assert.ok(logs.some(l => /undisplayable/.test(l)), 'content-type drop must be logged (not silent)')
+})
+
+test('malformed updates (no update_id) are counted, logged, and cannot advance', async () => {
+  const { logs, ledger, deps } = harness({ ok: true, result: [{ message: { chat: { id: 42 }, text: 'no id' } }] })
+  const r = await pollOnce(deps)
+  assert.equal(r.malformed, 1)
+  assert.equal(r.injected, 0)
+  assert.equal(ledger.offset, 0, 'no ackable id → offset cannot advance')
+  assert.ok(logs.some(l => /malformed/.test(l)))
+})
+
+test('runBot throttles a no-progress batch (malformed-only) instead of hot-looping (Gerald B2)', async () => {
+  const sleeps = []
+  const ledger = fakeLedger()
+  let polls = 0
+  const { stop, done } = runBot({
+    token: 'T', label: 'treadmill-carla', allowedChats: new Set(['42']), ledger,
+    fetchFn: async () => { polls++; return { ok: true, status: 200, json: async () => ({ ok: true, result: [{ message: { chat: { id: 42 }, text: 'no id' } }] }) } },
+    inject: () => {}, quarantine: () => {},
+    minBackoffMs: 1, maxBackoffMs: 1, noProgressFloorMs: 5,
+    sleep: async ms => { sleeps.push(ms); if (sleeps.length >= 3) stop() },
+    log: () => {},
+  })
+  await done
+  assert.ok(sleeps.length >= 3 && sleeps.every(ms => ms === 5), 'each no-progress round hits the floor sleep, not a hot loop')
+  assert.ok(polls >= 3)
 })
 
 test('a poison update does NOT stall the batch (head-of-line): quarantined + advanced, later update still delivered', async () => {

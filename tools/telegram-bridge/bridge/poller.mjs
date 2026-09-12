@@ -18,6 +18,22 @@ const TELEGRAM_API = 'https://api.telegram.org'
 // silently retry forever.
 export class ConflictError extends Error {}
 
+// Renderable content for a message. Plain text passes through. A media message
+// (photo, document, voice, …) surfaces as a stub with its caption, so an
+// operator's non-text message is delivered, not silently dropped (Gerald B1).
+// Returns null only when there is nothing to render at all.
+export function displayText(m) {
+  if (typeof m.text === 'string' && m.text.length > 0) return m.text
+  const kind = m.photo ? 'photo' : m.document ? 'document' : m.voice ? 'voice'
+    : m.video ? 'video' : m.audio ? 'audio' : m.sticker ? 'sticker'
+    : m.animation ? 'animation' : m.location ? 'location' : m.contact ? 'contact' : null
+  const caption = typeof m.caption === 'string' && m.caption.length > 0 ? m.caption : null
+  if (kind || caption) {
+    return `[${kind ?? 'non-text'} received via Telegram — this channel relays text only]${caption ? ` caption: ${caption}` : ''}`
+  }
+  return null
+}
+
 // One getUpdates round for ONE bot. The target label is fixed. Returns
 // { injected, dropped, quarantined }. Throws only on a transport / Bot-API
 // error (so the caller backs off) — never on a single bad update.
@@ -42,23 +58,34 @@ export async function pollOnce({
     throw new Error(`getUpdates not ok for ${label}: ${body.description ?? 'unknown'}`)
   }
 
-  let injected = 0, dropped = 0, quarantined = 0
-  for (const update of body.result ?? []) {
+  const updates = body.result ?? []
+  let injected = 0, dropped = 0, quarantined = 0, malformed = 0
+  for (const update of updates) {
     const updateId = update.update_id
-    if (!Number.isInteger(updateId)) continue
+    if (!Number.isInteger(updateId)) { malformed++; continue } // no id → can't ack; counted, logged after loop
     if (ledger.has(updateId)) { ledger.advance(updateId); continue }
 
-    const msg = update.message
-    const text = msg?.text
+    const msg = update.message ?? update.edited_message
     const chatId = msg?.chat?.id
 
     // Mandatory per-bot sender allowlist (bypassed-permission sessions: ungated
-    // inbound = code execution). A disallowed chat or non-text update is dropped
-    // — advanced past, delivered nowhere.
-    if (chatId == null || !allowedChats.has(String(chatId)) || typeof text !== 'string' || text.length === 0) {
-      if (chatId != null && !allowedChats.has(String(chatId))) {
-        log(`drop: chat_id=${chatId} not in allowlist for ${label} (update ${updateId})`)
-      }
+    // inbound = code execution). EVERY drop is logged with its reason (Gerald
+    // finding B1 — a silent content-type drop fires the ADR-0106 falsifier).
+    if (chatId == null) {
+      log(`drop: ${label} update ${updateId} has no message chat (reason=no-chat)`)
+      ledger.advance(updateId); dropped++; continue
+    }
+    if (!allowedChats.has(String(chatId))) {
+      log(`drop: ${label} update ${updateId} chat_id=${chatId} not in allowlist (reason=allowlist-miss)`)
+      ledger.advance(updateId); dropped++; continue
+    }
+
+    // Content: plain text, or a stub for media so an operator's non-text message
+    // (a screenshot, a voice note) SURFACES rather than being silently dropped
+    // (Gerald B1). Only an update with no renderable content at all is dropped.
+    const text = displayText(msg)
+    if (text == null) {
+      log(`drop: ${label} update ${updateId} has no renderable content (reason=undisplayable)`)
       ledger.advance(updateId); dropped++; continue
     }
 
@@ -88,21 +115,40 @@ export async function pollOnce({
       log(`quarantine: ${label} update ${updateId} inject failed: ${err.message}`)
     }
   }
-  return { injected, dropped, quarantined }
+  if (malformed > 0) log(`skipped ${malformed} malformed update(s) with no update_id for ${label}`)
+  return { injected, dropped, quarantined, malformed, seen: updates.length }
 }
 
 // Supervised loop for ONE bot. Long-polls forever; on error, capped exponential
 // backoff, then resumes. A persistent 409 is logged as contention on each retry.
 export function runBot(opts) {
-  const { label, minBackoffMs = 1000, maxBackoffMs = 60000,
-    sleep = ms => new Promise(r => setTimeout(r, ms)), log = () => {} } = opts
+  const { label, ledger, minBackoffMs = 1000, maxBackoffMs = 60000,
+    noProgressFloorMs = 1000, summaryEveryMs = 60000,
+    sleep = ms => new Promise(r => setTimeout(r, ms)), now = () => Date.now(), log = () => {} } = opts
   let backoff = minBackoffMs
   let stopped = false
+  // Rolling counters, logged periodically so drops/quarantines are visible in
+  // aggregate even when individual lines scroll past (Gerald N2, pairs with B1).
+  const totals = { injected: 0, dropped: 0, quarantined: 0, malformed: 0 }
+  let lastSummary = now()
   const run = async () => {
     while (!stopped) {
       try {
-        await pollOnce({ ...opts, log })
+        const before = ledger.offset
+        const r = await pollOnce({ ...opts, log })
+        for (const k of Object.keys(totals)) totals[k] += r[k] ?? 0
         backoff = minBackoffMs
+        // No-progress floor (Gerald B2): a batch that returned updates but did
+        // not advance the offset (e.g. all malformed, no ackable id) would
+        // otherwise hot-loop. Throttle so it cannot spin.
+        if (!stopped && r.seen > 0 && ledger.offset === before) {
+          log(`no-progress: ${label} saw ${r.seen} update(s) but advanced 0 — throttling ${noProgressFloorMs}ms`)
+          await sleep(noProgressFloorMs)
+        }
+        if (now() - lastSummary >= summaryEveryMs) {
+          log(`counters ${label}: injected=${totals.injected} dropped=${totals.dropped} quarantined=${totals.quarantined} malformed=${totals.malformed}`)
+          lastSummary = now()
+        }
       } catch (err) {
         if (stopped) break
         if (err instanceof ConflictError) {

@@ -56,7 +56,7 @@ function durableQuarantine(qdir, anchor, update, err) {
   // Anchor at the (pre-durable) state dir; syncs the quarantine/<label> chain
   // durably on EVERY call, including retries after a prior fsync failure.
   mkdirpDurable(qdir, anchor)
-  const finalPath = join(qdir, `${Date.now()}-${update.update_id}.json`)
+  const finalPath = join(qdir, `${Date.now()}-${update?.update_id ?? 'noid'}.json`)
   const tmp = `${finalPath}.${randomUUID()}.tmp`
   const payload = JSON.stringify({ error: String(err?.message ?? err), update }, null, 2)
   let fd
@@ -87,18 +87,27 @@ async function main() {
   // identity aborts here (before any poller starts).
   const configured = loadBots(join(stateDir, 'bots.json'), ccRoot)
 
-  const bots = configured.map(bot => {
-    // Ledger is keyed by the STABLE bot id, not the label. Rotating the SECRET
-    // of the SAME bot keeps the bot id, so its ledger (and update_id space) is
-    // correctly RETAINED; only replacing the bot itself (a new bot id) yields a
-    // fresh ledger. Keying by label would break both cases. (Fran finding.)
-    const ledger = new Ledger(join(stateDir, `ledger-bot-${bot.botId}.json`))
-    const qdir = join(stateDir, 'quarantine', bot.label)
-    const quarantine = (update, err) => durableQuarantine(qdir, stateDir, update, err)
-    return { label: bot.label, token: bot.token, allowedChats: bot.allowedChats, ledger, quarantine }
-  })
+  // A corrupt ledger for ONE bot skips THAT bot (logged), not the whole fleet
+  // (Gerald N3 — deliberate choice: one bad ack file must not black out Joe's
+  // entire Telegram). If EVERY bot fails, we exit non-zero.
+  const bots = []
+  for (const bot of configured) {
+    try {
+      // Ledger is keyed by the STABLE bot id, not the label. Rotating the SECRET
+      // of the SAME bot keeps the bot id, so its ledger (and update_id space) is
+      // correctly RETAINED; only replacing the bot itself (a new bot id) yields a
+      // fresh ledger. Keying by label would break both cases. (Fran finding.)
+      const ledger = new Ledger(join(stateDir, `ledger-bot-${bot.botId}.json`))
+      const qdir = join(stateDir, 'quarantine', bot.label)
+      const quarantine = (update, err) => durableQuarantine(qdir, stateDir, update, err)
+      bots.push({ label: bot.label, token: bot.token, allowedChats: bot.allowedChats, ledger, quarantine })
+    } catch (err) {
+      log(`SKIP bot ${bot.label} (bot ${bot.botId}): ledger unusable — ${err.message}`)
+    }
+  }
+  if (bots.length === 0) throw new Error('no usable bots (every configured ledger failed to load)')
 
-  log(`start: ${bots.length} bot(s) [${bots.map(b => b.label).join(', ')}], longpoll=${longPollSeconds}s`)
+  log(`start: ${bots.length}/${configured.length} bot(s) [${bots.map(b => b.label).join(', ')}], longpoll=${longPollSeconds}s`)
 
   const { stop, done } = runDaemon({
     bots,
