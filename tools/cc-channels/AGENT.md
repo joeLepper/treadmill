@@ -19,7 +19,12 @@ terminal closes, and crashes.
   the Telegram channel, and `exec`s `claude`. Writes its own PID to
   `~/.cc-channels/<label>/launcher.pid` immediately before `exec` and refuses
   to start when a live PID is already present (ADR-0073 single-instance
-  contract).
+  contract). **ADR-0106 cutover gate:** if `~/.cc-channels/<label>/telegram-bridged`
+  exists, the launcher attaches NO Telegram channel — the single bridge daemon
+  (`tools/telegram-bridge`) owns the one `getUpdates` slot for that bot and
+  injects inbound via the relay dir; the session sends outbound via direct
+  `sendMessage`. The marker cuts sessions over one at a time (blast radius = one
+  label); remove it and relaunch to restore the per-session poller.
 - `cc-access.py` — per-session Telegram access manager. Targets the
   per-session `access.json` that the channel server actually reads; use this
   instead of the stock `/telegram:access` skill, which hardcodes the
