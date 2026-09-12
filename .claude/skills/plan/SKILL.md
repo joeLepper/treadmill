@@ -171,6 +171,14 @@ After writing the plan doc and before calling `treadmill plan submit`:
    both. Where the runtime provides a review gate (e.g. Tapestry's evaluator), name it; elsewhere,
    make a reviewer pass a `validation` entry.
 
+   **Cross-model reviews route to the sibling reviewers, not Tapestry evaluators, and a plan
+   submission gets TWO independent cross-model passes** (ADR-0105). `SendMessage gerald-bridge`
+   (Gerald, open-weight) AND `SendMessage fran-bridge` (Fran, GPT/`gpt-6-astra`) — two different
+   model families, both non-Anthropic voices that catch failure modes the Claude-Code siblings
+   share. That is in ADDITION to a same-family sibling review. If a reviewer model returns weak or
+   empty output, re-route to another Go model or to Fran and record who actually reviewed. Routine
+   changes still get at least one cross-model pass; high-stakes (this plan submission) gets two.
+
 4. **Address review findings** — for CRITICAL items, fix before submitting. For scope gaps and
    minor items, either fix them or explicitly defer with a note in the Risks section.
 

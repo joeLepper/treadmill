@@ -1,0 +1,44 @@
+# Gerald Responses->Chat shim (ADR-0104 Path A). LiteLLM exposes an OpenAI
+# Responses API that Codex speaks; it translates to OpenCode Go Chat Completions
+# and injects the required x-opencode-session routing header.
+#
+# OPEN-WEIGHT ONLY: this file is Gerald's single model path, so it must list ONLY
+# open-weight models. The OpenCode Go catalog also serves proprietary models
+# (gpt-*, grok-*, …) — NEVER add one here. Gerald's auth-guard refuses to start
+# if it finds a denylisted family (gpt/chatgpt/o-series/claude/grok/gemini/hunyuan).
+model_list:
+  - model_name: qwen3.8-max
+    litellm_params:
+      model: openai/qwen3.8-max
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_API_KEY
+      extra_headers:
+        x-opencode-session: gerald-sibling
+      use_chat_completions_api: true
+  - model_name: kimi-k2.7-code
+    litellm_params:
+      model: openai/kimi-k2.7-code
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_API_KEY
+      extra_headers:
+        x-opencode-session: gerald-sibling
+      use_chat_completions_api: true
+  - model_name: glm-5.3
+    litellm_params:
+      model: openai/glm-5.3
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_API_KEY
+      extra_headers:
+        x-opencode-session: gerald-sibling
+      use_chat_completions_api: true
+  - model_name: minimax-m3
+    litellm_params:
+      model: openai/minimax-m3
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_API_KEY
+      extra_headers:
+        x-opencode-session: gerald-sibling
+      use_chat_completions_api: true
+
+litellm_settings:
+  drop_params: true

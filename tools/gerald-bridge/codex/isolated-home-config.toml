@@ -1,0 +1,22 @@
+# Gerald's ISOLATED Codex home (ADR-0104). Open-weight enforcement on the
+# configured route: this home has NO auth.json (no ChatGPT) and defines NO
+# openai/anthropic provider — only opencode_go via the local shim. On the normal
+# route there are no proprietary credentials to select. Separate from
+# Fran's default ~/.codex daemon (own control socket), so no shared-daemon
+# coupling. This is configured-route isolation + cooperative policy (same UID),
+# NOT a hard sandbox — see ADR-0104.
+model = "qwen3.8-max"
+model_provider = "opencode_go"
+
+[projects."/home/joe/gerald"]
+trust_level = "trusted"
+
+[model_providers.opencode_go]
+name = "OpenCode Go"
+base_url = "http://127.0.0.1:4141/v1"
+env_key = "OPENCODE_API_KEY"
+wire_api = "responses"
+
+[mcp_servers.gerald_msg]
+command = "node"
+args = ["/home/joe/gerald/bridge/msg-server.mjs"]

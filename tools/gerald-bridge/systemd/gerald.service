@@ -1,0 +1,26 @@
+[Unit]
+Description=Gerald — open-weight Codex sibling on OpenCode Go (ADR-0104)
+After=default.target gerald-shim.service
+# The shim must be up: Codex 0.154 speaks Responses only; the shim bridges to
+# Go's chat-only open-weight models.
+Requires=gerald-shim.service
+
+[Service]
+Type=simple
+# Gerald runs in his ISOLATED Codex home — his own daemon, no ChatGPT auth, only
+# the opencode_go provider (structural open-weight enforcement, ADR-0104).
+Environment=CODEX_HOME=%h/gerald/.codex
+# Never let a proprietary provider key reach Gerald or his daemon.
+UnsetEnvironment=OPENAI_API_KEY ANTHROPIC_API_KEY
+# Auth guard first: refuse to start without the Go key, a healthy shim, an
+# isolated home with no ChatGPT auth, and an open-weight-only allowlist.
+ExecStartPre=%h/gerald/auth-guard.sh
+ExecStart=%h/gerald/gerald-supervise.sh
+ExecStopPost=%h/gerald/gerald-reap.sh
+# An intentional stop delivers SIGTERM; the foreground loop exits 143.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

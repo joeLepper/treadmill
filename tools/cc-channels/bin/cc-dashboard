@@ -18,7 +18,9 @@ set -euo pipefail
 DASHBOARD="cc-dashboard"
 # `fran` is the experimental Codex sibling (ADR-0102) — her tmux session is
 # named `fran` (own systemd unit fran.service, not treadmill-channel@).
-LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna treadmill-ernie fran)
+# `gerald` is the open-weight Codex sibling (ADR-0104) — tmux session `gerald`
+# (own unit gerald.service; his shim + bridge run as gerald-shim/gerald-bridge).
+LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna treadmill-ernie fran gerald)
 
 # Parse optional --labels override
 while [[ $# -gt 0 ]]; do

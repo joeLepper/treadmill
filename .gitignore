@@ -42,3 +42,6 @@ docs/analysis/
 # ADR-0072: managed-host IAM credentials (mode 0600, never committed)
 managed-host-credentials*.json
 **/managed-host-credentials*.json
+
+# Never commit agent API-key files (ADR-0104)
+**/secret.env

@@ -1,0 +1,17 @@
+[Unit]
+Description=gerald-bridge — bus relay for the Gerald Codex sibling (ADR-0104)
+After=default.target gerald.service
+
+[Service]
+Type=simple
+# The relay's deliver-inbound -> inbound -> `codex queue` must target Gerald's
+# ISOLATED daemon (ADR-0104 structural open-weight enforcement), not the shared one.
+Environment=CODEX_HOME=%h/gerald/.codex
+ExecStart=%h/gerald/bridge-session/gerald-bridge-supervise.sh
+ExecStopPost=%h/gerald/bridge-session/gerald-bridge-reap.sh
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Gerald Responses->Chat shim (ADR-0104 Path A) — LiteLLM in front of OpenCode Go
+After=default.target
+
+[Service]
+Type=simple
+# Never let a stray OpenAI key reach the shim or its process tree.
+UnsetEnvironment=OPENAI_API_KEY
+ExecStart=%h/gerald/shim/gerald-shim-supervise.sh
+Restart=on-failure
+RestartSec=5s
+# A permanent config error (bad YAML / missing key) exits 78 — do not crash-loop.
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=default.target
