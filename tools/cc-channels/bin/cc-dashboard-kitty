@@ -16,7 +16,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna treadmill-ernie)
+# `fran` is the experimental Codex sibling (ADR-0102) — a normal tmux session
+# named `fran` on the shared server (own unit fran.service, not treadmill-channel@);
+# cc-attach is harness-agnostic, so she attaches like any label.
+LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna treadmill-ernie fran)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

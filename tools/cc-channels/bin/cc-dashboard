@@ -16,7 +16,9 @@
 set -euo pipefail
 
 DASHBOARD="cc-dashboard"
-LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna treadmill-ernie)
+# `fran` is the experimental Codex sibling (ADR-0102) — her tmux session is
+# named `fran` (own systemd unit fran.service, not treadmill-channel@).
+LABELS=(treadmill-alan treadmill-bert treadmill-carla treadmill-donna treadmill-ernie fran)
 
 # Parse optional --labels override
 while [[ $# -gt 0 ]]; do
@@ -55,16 +57,37 @@ attach_cmd() {
 
 # Create a new detached session and start the first attach in pane 0.
 tmux new-session -d -s "$DASHBOARD"
+# Clean up a HALF-BUILT dashboard on ANY early exit during construction (set -e
+# tripping on a failed split OR layout command), so the next run never reattaches
+# to a partial session. Armed only for the session we just created — a
+# pre-existing session took the reattach path above and never reaches here.
+# Disarmed on successful completion, just before we attach.
+trap 'tmux kill-session -t "$DASHBOARD" 2>/dev/null' EXIT
 tmux send-keys -t "$DASHBOARD:0.0" "$(attach_cmd "${LABELS[0]}")" Enter
 
-# Add one pane per remaining label, splitting horizontally each time.
+# Add one pane per remaining label. A single-orientation split ("-h") errors
+# ("no room for new pane") once the terminal cannot fit another column, and a
+# plain re-tile does NOT guarantee the next split fits either. So try horizontal,
+# then vertical, then a tiled reflow; only if ALL fail is the terminal genuinely
+# too small — in which case KILL the partial session (so the next run cannot
+# reattach to a broken, incomplete dashboard — the silent-partial bug hit over
+# SSH) and error with actionable guidance.
 for label in "${LABELS[@]:1}"; do
-    tmux split-window -t "$DASHBOARD:0" -h
+    if ! tmux split-window -t "$DASHBOARD:0" -h 2>/dev/null \
+       && ! tmux split-window -t "$DASHBOARD:0" -v 2>/dev/null; then
+        tmux select-layout -t "$DASHBOARD:0" tiled 2>/dev/null
+        if ! tmux split-window -t "$DASHBOARD:0" 2>/dev/null; then
+            echo "cc-dashboard: this terminal is too small for ${#LABELS[@]} panes." >&2
+            echo "  Show fewer, e.g.: cc-dashboard --labels \"treadmill-alan fran\"  — or use a larger window." >&2
+            exit 1  # the EXIT trap removes the partial session
+        fi
+    fi
+    tmux select-layout -t "$DASHBOARD:0" tiled
     tmux send-keys -t "$DASHBOARD:0" "$(attach_cmd "$label")" Enter
 done
 
-# Even out all panes into a single row.
-tmux select-layout -t "$DASHBOARD:0" even-horizontal
+# Tiled arranges the panes into a grid that adapts to the terminal size.
+tmux select-layout -t "$DASHBOARD:0" tiled
 
 # Mouse: click to focus, scroll wheel to scroll, drag borders to resize.
 tmux set-option -t "$DASHBOARD" mouse on
@@ -72,4 +95,6 @@ tmux set-option -t "$DASHBOARD" mouse on
 # Focus the leftmost pane.
 tmux select-pane -t "$DASHBOARD:0.0"
 
+# Construction succeeded — keep the session; disarm the cleanup trap.
+trap - EXIT
 exec tmux attach-session -t "$DASHBOARD"
