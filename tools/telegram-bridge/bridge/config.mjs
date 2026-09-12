@@ -14,7 +14,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { assertLabel, isWatcherEligible } from './inject.mjs'
+import { assertLabel, isWatcherEligible, isBridged } from './inject.mjs'
 
 // Parse + validate the config object into a list of { label, allowedChats:Set }.
 export function parseConfig(obj) {
@@ -78,6 +78,13 @@ export function loadBots(configPath, ccRoot = join(homedir(), '.cc-channels')) {
   const loaded = bots.map(bot => {
     if (!isWatcherEligible(bot.label, ccRoot)) {
       throw new Error(`bot ${bot.label} is not a launcher-managed session (no session-id record) — refusing to bridge a label whose relay dir no watcher consumes`)
+    }
+    // The label must carry the telegram-bridged marker: otherwise its session
+    // still launches its own Telegram poller, and the daemon polling that bot
+    // would be a SECOND poller on the token → 409 contention (Gerald follow-up).
+    // Fail fast at startup with the fix, rather than a runtime 409.
+    if (!isBridged(bot.label, ccRoot)) {
+      throw new Error(`bot ${bot.label} has no telegram-bridged marker — its session still runs a per-session poller. Create ~/.cc-channels/${bot.label}/telegram-bridged and relaunch that session BEFORE adding it to the daemon (else two pollers → 409).`)
     }
     const token = loadToken(bot.label, ccRoot)
     const botId = botIdOf(token)

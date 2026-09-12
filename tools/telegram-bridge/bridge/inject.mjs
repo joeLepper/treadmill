@@ -96,6 +96,19 @@ export function isWatcherEligible(label, ccRoot = join(homedir(), '.cc-channels'
   catch (e) { if (e.code === 'ENOENT') return false; throw e }
 }
 
+// True when the label carries the ADR-0106 cutover marker
+// (~/.cc-channels/<label>/telegram-bridged), which is what makes launch-session.sh
+// launch that session WITHOUT its own Telegram poller. The daemon must only poll
+// a bot whose session is bridged — otherwise two pollers share the token and 409
+// (Gerald follow-up). Presence of the marker is the necessary precondition the
+// daemon checks at startup; the operator still restarts the session so the gate
+// actually takes effect.
+export function isBridged(label, ccRoot = join(homedir(), '.cc-channels')) {
+  assertLabel(label)
+  try { return lstatSync(join(resolve(ccRoot), label, 'telegram-bridged')).isFile() }
+  catch (e) { if (e.code === 'ENOENT') return false; throw e }
+}
+
 // Write one message into the target session's relay inbox. Returns the path.
 // mkdir is recursive+idempotent so a not-yet-started (but eligible) target still
 // receives the file (the channel server drains the dir on its next start — the

@@ -39,9 +39,10 @@ test('loadToken throws when no token present', () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-function seedSession(root, label, { eligible, token = '9:tok' } = {}) {
+function seedSession(root, label, { eligible, bridged = true, token = '9:tok' } = {}) {
   mkdirSync(join(root, label), { recursive: true })
   if (eligible) writeFileSync(join(root, label, 'session-id'), 'uuid\n')
+  if (bridged) writeFileSync(join(root, label, 'telegram-bridged'), '') // ADR-0106 cutover marker
   writeFileSync(join(root, label, 'telegram.env'), `TELEGRAM_BOT_TOKEN=${token}\n`)
 }
 
@@ -65,6 +66,16 @@ test('loadBots refuses a non-launcher (pure-fabric/unknown) label — no session
     seedSession(root, 'treadmill-carla', { eligible: false })
     writeFileSync(cfg, JSON.stringify({ bots: [{ label: 'treadmill-carla', allowedChats: [42] }] }))
     assert.throws(() => loadBots(cfg, root), /not a launcher-managed session/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('loadBots refuses a label with no telegram-bridged marker (its session still polls → 409 guard)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccroot-'))
+  const cfg = join(root, 'bots.json')
+  try {
+    seedSession(root, 'treadmill-carla', { eligible: true, bridged: false })
+    writeFileSync(cfg, JSON.stringify({ bots: [{ label: 'treadmill-carla', allowedChats: [42] }] }))
+    assert.throws(() => loadBots(cfg, root), /no telegram-bridged marker/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
