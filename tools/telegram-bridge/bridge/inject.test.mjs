@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { assertLabel, relayDir, formatBody, injectToRelay, isWatcherEligible } from './inject.mjs'
+import { assertLabel, relayDir, formatBody, injectToRelay, isWatcherEligible, isBridged } from './inject.mjs'
 
 test('assertLabel accepts a plain label', () => {
   assert.equal(assertLabel('treadmill-carla'), 'treadmill-carla')
@@ -83,6 +83,18 @@ test('isWatcherEligible is true only for a launcher session (session-id record p
     writeFileSync(join(root, 'treadmill-carla', 'session-id'), 'uuid\n')
     assert.equal(isWatcherEligible('treadmill-carla', root), true)
     assert.equal(isWatcherEligible('nonexistent', root), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('isBridged is true only when the telegram-bridged marker is present', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccroot-'))
+  try {
+    mkdirSync(join(root, 'treadmill-carla'), { recursive: true })
+    assert.equal(isBridged('treadmill-carla', root), false, 'no marker -> not bridged')
+    writeFileSync(join(root, 'treadmill-carla', 'telegram-bridged'), '')
+    assert.equal(isBridged('treadmill-carla', root), true)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

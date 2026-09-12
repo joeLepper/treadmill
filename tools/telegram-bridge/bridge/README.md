@@ -48,6 +48,11 @@ decoupled from session restarts, replaces N fragile per-session connections.
   `launch-session.sh` runs the `treadmill-events` watcher for those. An
   unknown/pure-fabric label is refused at startup — never acked-then-lost in an
   unwatched dir.
+- **Bridged-marker cross-check:** a configured label must also carry the
+  `telegram-bridged` marker (the ADR-0106 cutover gate that stops its session
+  from launching its own poller). Without it the session still polls, so the
+  daemon polling that bot would be a second poller on the token → 409. The
+  daemon refuses at startup with the fix, rather than a runtime contention loop.
 - **Symlink safety:** a symlinked `<label>` or `<label>/relay` is rejected
   (lstat + post-mkdir realpath), so a configured label cannot resolve into
   another session's dir. Same-UID concurrent rewrite (TOCTOU) remains a disclosed
