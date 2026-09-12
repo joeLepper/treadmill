@@ -52,8 +52,10 @@ function lockName(stateDir) {
 // so the caller retains the offset and retries — a thrown quarantine is never
 // counted as handled, and a fsynced ledger advance can never outlive a
 // non-durable quarantine copy after a machine crash.
-function durableQuarantine(qdir, update, err) {
-  mkdirpDurable(qdir) // durable dir-entry creation up the chain (fsync each new parent)
+function durableQuarantine(qdir, anchor, update, err) {
+  // Anchor at the (pre-durable) state dir; syncs the quarantine/<label> chain
+  // durably on EVERY call, including retries after a prior fsync failure.
+  mkdirpDurable(qdir, anchor)
   const finalPath = join(qdir, `${Date.now()}-${update.update_id}.json`)
   const tmp = `${finalPath}.${randomUUID()}.tmp`
   const payload = JSON.stringify({ error: String(err?.message ?? err), update }, null, 2)
@@ -76,7 +78,7 @@ async function main() {
   const stateDir = process.env.TG_BRIDGE_STATE_DIR || join(homedir(), '.cc-channels', '.telegram-bridge')
   const ccRoot = process.env.CC_CHANNELS_ROOT || join(homedir(), '.cc-channels')
   const longPollSeconds = Number(process.env.TG_BRIDGE_LONGPOLL || 25)
-  mkdirpDurable(stateDir)
+  mkdirpDurable(stateDir, homedir()) // anchor at $HOME (durable, predates the daemon)
   const log = msg => console.error(`[telegram-bridge] ${new Date().toISOString()} ${msg}`)
 
   const releaseLock = await acquireLock(lockName(stateDir))
@@ -92,7 +94,7 @@ async function main() {
     // fresh ledger. Keying by label would break both cases. (Fran finding.)
     const ledger = new Ledger(join(stateDir, `ledger-bot-${bot.botId}.json`))
     const qdir = join(stateDir, 'quarantine', bot.label)
-    const quarantine = (update, err) => durableQuarantine(qdir, update, err)
+    const quarantine = (update, err) => durableQuarantine(qdir, stateDir, update, err)
     return { label: bot.label, token: bot.token, allowedChats: bot.allowedChats, ledger, quarantine }
   })
 

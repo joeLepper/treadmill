@@ -105,8 +105,10 @@ export function injectToRelay(
   { label, text, from, chatId, updateId, date },
   ccRoot = join(homedir(), '.cc-channels'),
 ) {
-  const { labelDir, dir } = safeRelayDir(label, ccRoot)
-  mkdirpDurable(dir) // durable dir-entry creation if the relay dir is missing
+  const { root, labelDir, dir } = safeRelayDir(label, ccRoot)
+  // Anchor at ccRoot (predates the daemon, assumed durable); this makes the
+  // <label> and relay entries durable on every call, not just when created.
+  mkdirpDurable(dir, root)
   // Post-mkdir realpath check: the created (or pre-existing) relay dir must
   // still resolve under <root>/<label>, i.e. no symlink slipped in. Rejects the
   // configured-label -> wrong-session-dir foil.
