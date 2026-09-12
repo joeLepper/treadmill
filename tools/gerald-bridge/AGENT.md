@@ -83,7 +83,9 @@ Gerald's home must have NO `auth.json`. He runs his OWN daemon under
   as a ledger capability; the shipped bridge runs fire-and-forget `deliver`;
   outbound is at-least-once, duplicate possible). See that AGENT.md's Contract.
   Includes the ADR-0102 orphan-spool reaper: `outbound-next.mjs` sweeps
-  `*.json.tmp` on each `peek` (age-gated, JSON-validated, `link`-promoted), and
+  `*.json.tmp` on each `peek` (age-gated; a bad tmp is quarantined to
+  `outbox/quarantine/` with a logged reason, never silently dropped; an id already
+  in `sent/` is not re-spooled; otherwise `link`-promoted), and
   `msg-server.mjs` ends cleanly on a stdout error instead of a "Transport closed"
   crash — a lost response usually means the message is already spooled, so check
   the outbox before a retry.

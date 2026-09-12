@@ -69,24 +69,60 @@ const STALE_MS = 30_000;
 // not delivered; promote a complete orphan with link()+unlink() so an existing
 // <id>.json (already spooled) is never clobbered.
 export async function reapOrphans(outbox = OUTBOX, now = Date.now(), staleMs = STALE_MS) {
+  const counts = { promoted: 0, deduped: 0, quarantined: 0 };
   let names;
-  try { names = await readdir(outbox); } catch { return; }
+  try { names = await readdir(outbox); } catch { return counts; }
+  const sent = join(outbox, 'sent');
+  const quarantine = join(outbox, 'quarantine');
+  // Never silently discard bytes: a truncated or malformed tmp is a SIGNAL (disk
+  // full, an fs bug, a SIGKILL mid-writeFile), and this is the only code that ever
+  // sees it. Quarantine it for the operator and log the reason (mirrors poller.mjs;
+  // the lesson is #403 B1 — a silent drop is the defect this bridge exists to avoid).
+  const quarantineTmp = async (n, tmp, reason) => {
+    try {
+      await mkdir(quarantine, { recursive: true, mode: 0o700 });
+      await rename(tmp, join(quarantine, n));
+      counts.quarantined++;
+      console.error(`reapOrphans: quarantined ${n} (${reason})`);
+    } catch { /* leave it; a later sweep retries */ }
+  };
   for (const n of names) {
     if (!tmpRe.test(n)) continue;
     const tmp = join(outbox, n);
     let info;
     try { info = await stat(tmp); } catch { continue; }
     if (now - info.mtimeMs < staleMs) continue; // maybe an in-flight write; leave it
+    const id = n.replace(/\.json\.tmp$/i, '');
     let msg;
     try { msg = JSON.parse(await readFile(tmp, 'utf8')); }
-    catch { await unlink(tmp).catch(() => {}); continue; } // partial/garbage, never acked
+    catch { await quarantineTmp(n, tmp, 'invalid JSON'); continue; }
     if (!msg || typeof msg.to !== 'string' || typeof msg.text !== 'string') {
-      await unlink(tmp).catch(() => {}); continue;
+      await quarantineTmp(n, tmp, 'bad shape'); continue;
     }
-    const dest = join(outbox, n.replace(/\.tmp$/i, ''));
-    try { await link(tmp, dest); await unlink(tmp); }         // atomic no-clobber promote
-    catch (error) { if (error.code === 'EEXIST') await unlink(tmp).catch(() => {}); } // already spooled
+    // Already delivered (acked to sent/): the orphan is a stale duplicate. Drop it
+    // WITHOUT re-promoting — otherwise a crash in the link->unlink window below
+    // re-spools a sent message once the dest ages out of the pending set (NIT 1).
+    try {
+      await stat(join(sent, `${id}.json`));
+      await unlink(tmp).catch(() => {});
+      counts.deduped++;
+      console.error(`reapOrphans: dropped ${n} (already in sent/)`);
+      continue;
+    } catch { /* not in sent/ — promote it */ }
+    const dest = join(outbox, `${id}.json`);
+    try {
+      await link(tmp, dest); await unlink(tmp);               // atomic no-clobber promote
+      counts.promoted++;
+      console.error(`reapOrphans: promoted ${n} -> ${id}.json (was undeliverable)`);
+    } catch (error) {
+      if (error.code === 'EEXIST') {                          // already spooled and pending
+        await unlink(tmp).catch(() => {});
+        counts.deduped++;
+        console.error(`reapOrphans: dropped ${n} (dest already spooled)`);
+      }
+    }
   }
+  return counts;
 }
 
 async function peekNext() {

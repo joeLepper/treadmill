@@ -78,8 +78,10 @@ with ADR-0103) is the goal, but it is NOT a ready action — see Known gaps #1.
   `<id>.json.tmp`, fsyncs, then renames to `<id>.json`. A crash in that window (a
   daemon restart) left a durable but pump-invisible orphan — silent loss.
   `outbound-next.mjs` now sweeps `*.json.tmp` on each `peek` (`reapOrphans`):
-  age-gated (never touches an in-flight write), JSON-validated (a partial write,
-  never acked to the caller, is discarded), and promoted with `link()`+`unlink()`
+  age-gated (never touches an in-flight write), JSON- and shape-validated (a partial
+  write is moved to `outbox/quarantine/` with a logged reason, never silently
+  discarded — the #403 B1 lesson), skipped if the id is already in `sent/` (never
+  re-spool a delivered message), and otherwise promoted with `link()`+`unlink()`
   (an existing `<id>.json` is never clobbered). `msg-server.mjs` also ends the read
   loop cleanly on a stdout error, so a dead parent yields a clean stop, not a
   "Transport closed" crash — and on such a lost response the message is usually
