@@ -42,31 +42,53 @@ export function parseConfig(obj) {
   })
 }
 
-// Read TELEGRAM_BOT_TOKEN from a session's telegram.env. Minimal KEY=VALUE parse
-// (strips optional surrounding quotes); no shell evaluation.
+// Read TELEGRAM_BOT_TOKEN from a session's telegram.env. Minimal KEY=VALUE parse;
+// no shell evaluation. A quoted value is used verbatim; an unquoted value is
+// taken up to the first whitespace, so a trailing inline comment or trailing
+// spaces are not captured into the token (Bert finding).
 export function loadToken(label, ccRoot = join(homedir(), '.cc-channels')) {
   assertLabel(label)
   const path = join(ccRoot, label, 'telegram.env')
   const text = readFileSync(path, 'utf8')
   for (const line of text.split('\n')) {
-    const m = line.match(/^\s*(?:export\s+)?TELEGRAM_BOT_TOKEN\s*=\s*(.*)\s*$/)
-    if (m) {
-      let v = m[1].trim()
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
-      if (v) return v
-    }
+    const m = line.match(/^\s*(?:export\s+)?TELEGRAM_BOT_TOKEN\s*=\s*(.*)$/)
+    if (!m) continue
+    let v = m[1].trim()
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
+    else v = v.split(/\s/)[0] // unquoted: token has no whitespace; drop inline comment/trailing ws
+    if (v) return v
   }
   throw new Error(`no TELEGRAM_BOT_TOKEN in ${path}`)
 }
 
+// The public bot id — the integer prefix of a "<botId>:<secret>" token. Stable
+// per bot; safe to log and to key state by (it is NOT the secret).
+export function botIdOf(token) {
+  const id = String(token).split(':', 1)[0]
+  if (!/^\d+$/.test(id)) throw new Error('token is not in <botId>:<secret> form')
+  return id
+}
+
 // Load the full bot config: parse, gate each label on watcher-eligibility, load
-// each token. Returns [{ label, allowedChats:Set, token }]. Fail-fast.
+// each token, and REJECT duplicate bot identity. Returns
+// [{ label, allowedChats:Set, token, botId }]. Fail-fast; errors never print a token.
 export function loadBots(configPath, ccRoot = join(homedir(), '.cc-channels')) {
   const bots = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')))
-  return bots.map(bot => {
+  const byBotId = new Map()
+  const loaded = bots.map(bot => {
     if (!isWatcherEligible(bot.label, ccRoot)) {
       throw new Error(`bot ${bot.label} is not a launcher-managed session (no session-id record) — refusing to bridge a label whose relay dir no watcher consumes`)
     }
-    return { ...bot, token: loadToken(bot.label, ccRoot) }
+    const token = loadToken(bot.label, ccRoot)
+    const botId = botIdOf(token)
+    // Two labels on the SAME bot would put two pollers on one token (recreates
+    // 409 contention) and cross-deliver. Reject; name the labels + botId, never
+    // the token.
+    if (byBotId.has(botId)) {
+      throw new Error(`bots ${byBotId.get(botId)} and ${bot.label} share bot id ${botId} (same token) — refusing to run two pollers on one bot`)
+    }
+    byBotId.set(botId, bot.label)
+    return { ...bot, token, botId }
   })
+  return loaded
 }

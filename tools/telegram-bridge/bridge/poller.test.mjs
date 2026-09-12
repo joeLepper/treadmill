@@ -18,14 +18,14 @@ const msg = (update_id, chatId, text, extra = {}) => ({ update_id, message: { ch
 function harness(body, opts = {}) {
   const injects = []
   const quarantined = []
-  const ledger = fakeLedger()
+  const ledger = opts.ledger ?? fakeLedger()
   const deps = {
     token: 'T',
     label: 'treadmill-carla',
     allowedChats: new Set(['42']),
     fetchFn: opts.fetchFn ?? fetchReturning(body),
     inject: opts.inject ?? (m => injects.push(m)),
-    quarantine: (u, e) => quarantined.push({ u, e }),
+    quarantine: opts.quarantine ?? ((u, e) => quarantined.push({ u, e })),
     ledger,
     log: () => {},
   }
@@ -95,9 +95,39 @@ test('a non-409 Bot-API error throws a generic error', async () => {
   await assert.rejects(() => pollOnce(deps), /not ok/)
 })
 
-test('a 409 throws ConflictError (surfaced as contention, not silent retry)', async () => {
+test('an HTTP-409 status throws ConflictError (classified by status, before the generic throw)', async () => {
+  const { deps } = harness(null, { fetchFn: fetchReturning({}, { ok: false, status: 409 }) })
+  await assert.rejects(() => pollOnce(deps), ConflictError)
+})
+
+test('a body-level 409 (HTTP 200, ok:false error_code 409) also throws ConflictError', async () => {
   const { deps } = harness({ ok: false, error_code: 409, description: 'terminated by other getUpdates request' })
   await assert.rejects(() => pollOnce(deps), ConflictError)
+})
+
+test('NO DATA LOSS: a failed inject AND a failed quarantine does not advance the offset', async () => {
+  const { ledger, deps } = harness(
+    { ok: true, result: [msg(70, 42, 'poison')] },
+    { inject: () => { throw new Error('inject boom') }, quarantine: () => { throw new Error('disk full') } },
+  )
+  await assert.rejects(() => pollOnce(deps), /disk full/)
+  assert.deepEqual(ledger.advanced, [], 'offset must NOT advance when neither delivery nor quarantine succeeded')
+  assert.deepEqual(ledger.injected, [])
+  assert.equal(ledger.offset, 0)
+})
+
+test('a delivered message whose ledger write then fails is NOT quarantined (offset retained, retried)', async () => {
+  const ledger = fakeLedger()
+  ledger.commit = () => { throw new Error('ledger write failed') }
+  const injects = []
+  const { quarantined, deps } = harness(
+    { ok: true, result: [msg(80, 42, 'delivered')] },
+    { ledger, inject: m => injects.push(m) },
+  )
+  await assert.rejects(() => pollOnce(deps), /ledger write failed/)
+  assert.equal(injects.length, 1, 'it WAS delivered')
+  assert.equal(quarantined.length, 0, 'a delivered message must not be quarantined')
+  assert.equal(ledger.offset, 0, 'offset retained → retries (at-least-once duplicate on retry)')
 })
 
 test('runBot backs off on error then stops cleanly', async () => {

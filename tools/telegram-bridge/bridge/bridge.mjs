@@ -14,56 +14,76 @@
 // Tokens are NOT passed here — each bot's token is read from
 // ~/.cc-channels/<label>/telegram.env. Config lists {label, allowedChats}.
 
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { injectToRelay } from './inject.mjs'
 import { loadBots } from './config.mjs'
 import { Ledger } from './ledger.mjs'
 import { runDaemon } from './poller.mjs'
 
-// Single-instance pid-lock (Bert finding): "sole poller" must be enforced, not
-// just implied by the systemd unit name — a stray `node bridge.mjs` would
-// double-poll every token (409 on all). We hold an O_EXCL pidfile and treat a
-// live pid as a held lock (launcher's kill -0 pattern); a stale file is cleared.
-function acquireLock(pidfile) {
-  try {
-    const fd = openSync(pidfile, 'wx')
-    writeFileSync(fd, String(process.pid)); closeSync(fd)
-  } catch (e) {
-    if (e.code !== 'EEXIST') throw e
-    const held = Number(readFileSync(pidfile, 'utf8').trim())
-    if (Number.isInteger(held) && held > 0) {
-      try { process.kill(held, 0); throw new Error(`another telegram-bridge is alive (pid ${held})`) }
-      catch (ke) { if (ke.code !== 'ESRCH') throw ke } // ESRCH = stale
-    }
-    unlinkSync(pidfile)
-    const fd = openSync(pidfile, 'wx')
-    writeFileSync(fd, String(process.pid)); closeSync(fd)
-  }
-  return () => { try { unlinkSync(pidfile) } catch { /* best effort */ } }
+// Single-instance lock via a Linux ABSTRACT-namespace unix socket (Fran + Bert
+// converge): "sole poller" must be kernel-enforced, not a pidfile. A pidfile
+// has a create-then-write race (an empty file looks stale) and a pid-reuse race
+// (a recycled pid reads as alive). An abstract socket has neither: the name is
+// held only while this process lives and the kernel releases it on death (no
+// file to go stale, no pid to parse). A second instance gets EADDRINUSE.
+function acquireLock(name) {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', e => reject(e.code === 'EADDRINUSE'
+      ? new Error('another telegram-bridge is already running (lock held)') : e))
+    server.listen(`\0${name}`, () => resolve(() => server.close()))
+  })
 }
 
-function main() {
+// Durable quarantine (Fran finding): a failed inject is written to disk with
+// atomic rename + fsync BEFORE the offset advances, and this THROWS on failure
+// so the caller retains the offset and retries — a thrown quarantine is never
+// counted as handled, and a fsynced ledger advance can never outlive a
+// non-durable quarantine copy after a machine crash.
+function durableQuarantine(qdir, update, err) {
+  mkdirSync(qdir, { recursive: true })
+  const finalPath = join(qdir, `${Date.now()}-${update.update_id}.json`)
+  const tmp = `${finalPath}.${randomUUID()}.tmp`
+  const payload = JSON.stringify({ error: String(err?.message ?? err), update }, null, 2)
+  let fd
+  try {
+    fd = openSync(tmp, 'wx', 0o600)
+    writeFileSync(fd, payload)
+    fsyncSync(fd)
+    closeSync(fd); fd = undefined
+    renameSync(tmp, finalPath)
+    const d = openSync(qdir, 'r')
+    try { fsyncSync(d) } finally { closeSync(d) }
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+    try { unlinkSync(tmp) } catch (e) { if (e.code !== 'ENOENT') throw e }
+  }
+}
+
+async function main() {
   const stateDir = process.env.TG_BRIDGE_STATE_DIR || join(homedir(), '.cc-channels', '.telegram-bridge')
   const ccRoot = process.env.CC_CHANNELS_ROOT || join(homedir(), '.cc-channels')
   const longPollSeconds = Number(process.env.TG_BRIDGE_LONGPOLL || 25)
   mkdirSync(stateDir, { recursive: true })
   const log = msg => console.error(`[telegram-bridge] ${new Date().toISOString()} ${msg}`)
 
-  const releaseLock = acquireLock(join(stateDir, 'bridge.pid'))
+  const releaseLock = await acquireLock(`telegram-bridge:${stateDir}`)
 
-  // Fail-fast: bad config, ineligible label, or missing token aborts here.
+  // Fail-fast: bad config, ineligible label, missing token, or duplicate bot
+  // identity aborts here (before any poller starts).
   const configured = loadBots(join(stateDir, 'bots.json'), ccRoot)
 
   const bots = configured.map(bot => {
-    const ledger = new Ledger(join(stateDir, `ledger-${bot.label}.json`))
+    // Ledger is keyed by the STABLE bot id, not the label: a rotated token is a
+    // new bot with a fresh update_id space, so it must not inherit the old
+    // bot's offset (which would skip the new bot's early updates). (Fran finding.)
+    const ledger = new Ledger(join(stateDir, `ledger-bot-${bot.botId}.json`))
     const qdir = join(stateDir, 'quarantine', bot.label)
-    const quarantine = (update, err) => {
-      mkdirSync(qdir, { recursive: true })
-      const p = join(qdir, `${Date.now()}-${update.update_id}.json`)
-      writeFileSync(p, JSON.stringify({ error: String(err?.message ?? err), update }, null, 2))
-    }
+    const quarantine = (update, err) => durableQuarantine(qdir, update, err)
     return { label: bot.label, token: bot.token, allowedChats: bot.allowedChats, ledger, quarantine }
   })
 
@@ -82,4 +102,4 @@ function main() {
      .catch(err => { log(`fatal: ${err.message}`); releaseLock(); process.exit(1) })
 }
 
-main()
+main().catch(err => { console.error(`[telegram-bridge] fatal: ${err.message}`); process.exit(1) })

@@ -119,7 +119,11 @@ daemon** that is the sole Telegram poller for the whole fleet and injects inboun
   identity is the routing key (not a mutable table); targets are validated at startup as
   launcher-managed (a session-id record exists) so a pure-fabric or unknown label is refused, never
   acked-then-lost; the relay dir is symlink-checked so a configured label cannot resolve into another
-  session's dir (same-UID concurrent rewrite remains a disclosed, non-security limit).
+  session's dir (same-UID concurrent rewrite remains a disclosed, non-security limit); two labels on one
+  bot token are refused at startup (else two pollers on one bot → 409 + cross-delivery); a failed inject
+  is durably quarantined before the offset advances, and a failed quarantine retains the offset (no
+  acked-but-lost update); a kernel-held single-instance lock refuses a second daemon; offsets are keyed
+  by bot id so a rotated token does not inherit another bot's ack.
 - **Falsifier:** after the daemon is live, either (a) a Telegram poll error is **not** auto-recovered
   within the loop's backoff (the operator must again manually nurse it), or (b) an inbound Telegram
   message from an allowed chat to bot X is delivered to a session other than X's, or is **dropped**

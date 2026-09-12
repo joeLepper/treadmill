@@ -27,10 +27,14 @@ export async function pollOnce({
 }) {
   const url = `${TELEGRAM_API}/bot${token}/getUpdates?offset=${ledger.offset}&timeout=${longPollSeconds}`
   const res = await fetchFn(url, { signal: AbortSignal.timeout((longPollSeconds + 10) * 1000) })
+  // Classify a 409 by HTTP STATUS first — Telegram returns the "terminated by
+  // other getUpdates request" conflict as HTTP 409, so this must precede the
+  // generic !res.ok throw or a real conflict never reaches ConflictError.
+  if (res.status === 409) throw new ConflictError(`409 for ${label} (another poller holds the slot)`)
   if (!res.ok) throw new Error(`getUpdates HTTP ${res.status} for ${label}`)
   const body = await res.json()
   if (!body.ok) {
-    if (body.error_code === 409) throw new ConflictError(`409 for ${label}: ${body.description ?? ''}`)
+    if (body.error_code === 409) throw new ConflictError(`409 for ${label} (another poller holds the slot)`)
     throw new Error(`getUpdates not ok for ${label}: ${body.description ?? 'unknown'}`)
   }
 
@@ -58,15 +62,24 @@ export async function pollOnce({
       ? `@${msg.from.username}`
       : [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || undefined
 
-    // Per-update try/catch: a failed inject must NOT throw out and stall every
-    // later update forever (head-of-line poison, Bert finding). Quarantine the
-    // raw update for manual replay, advance past it, and keep going.
+    // Ordering matters for no-loss (Fran findings):
+    //  - A failed inject is QUARANTINED before the offset advances. Quarantine
+    //    must be DURABLE and must SUCCEED; if it throws, we do NOT advance —
+    //    the throw propagates, the bot backs off, and the batch retries from
+    //    the un-advanced offset. Never count a thrown quarantine as handled.
+    //  - Once a message is delivered (inject returned), a later ledger-write
+    //    failure must NOT quarantine an already-delivered message; it
+    //    propagates so the batch retries (a duplicate on retry is fine —
+    //    at-least-once), and the offset stays until the ack persists.
+    let delivered = false
     try {
       inject({ label, text, from, chatId, updateId, date: msg.date })
+      delivered = true
       ledger.commit(updateId); injected++
       log(`inject: ${label} (update ${updateId})`)
     } catch (err) {
-      try { quarantine(update, err) } catch (qe) { log(`quarantine failed for ${label} update ${updateId}: ${qe.message}`) }
+      if (delivered) throw err // ledger write failed AFTER delivery — retain offset, retry; do not quarantine
+      quarantine(update, err)  // durable; THROWS on failure → propagates, offset retained
       ledger.advance(updateId); quarantined++
       log(`quarantine: ${label} update ${updateId} inject failed: ${err.message}`)
     }

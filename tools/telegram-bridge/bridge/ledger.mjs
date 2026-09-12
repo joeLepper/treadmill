@@ -1,14 +1,17 @@
-// ledger.mjs — durable inbound state (ADR-0106 / ADR-0093 effectively-once).
+// ledger.mjs — durable inbound state (ADR-0106). Delivery is AT-LEAST-ONCE (see
+// ADR-0106 / README); this ledger reduces duplicates and gives correct resume,
+// it does NOT make delivery exactly-once.
 //
 // Two facts persist across restarts:
 //   * offset  — the Telegram getUpdates ack. Passing offset=N confirms every
 //     update < N and returns updates >= N, so advancing offset to updateId+1
 //     AFTER each successful inject means a crash mid-batch re-fetches only the
 //     un-injected tail. Offset alone gives correct resume.
-//   * seen    — a bounded set of recently-injected update_ids. Belt-and-
-//     suspenders effectively-once: even if the offset logic regressed, a
-//     re-fetched update that was already injected is skipped. This is the
-//     computable guard behind the ADR-0106 falsifier ("delivered twice").
+//   * seen    — a bounded set of recently-injected update_ids. Best-effort
+//     dedup: a re-fetched update that was already injected is skipped, cutting
+//     the common redelivery case. It does not eliminate duplicates (the
+//     inject-then-ack window and the channel server's own deliver-then-unlink
+//     both remain at-least-once).
 //
 // Writes are atomic (tmp + fsync + rename) so a crash never leaves a torn
 // ledger. The seen set is capped so the file cannot grow without bound.
