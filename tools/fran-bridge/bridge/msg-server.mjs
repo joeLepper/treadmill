@@ -53,7 +53,7 @@ export function createTools(root = home) {
 const toolDefinitions = [
   {
     name: 'send_message',
-    description: 'Queue an outbound message from Fran to a fleet peer. Success means spooled, not delivered. Do not retry blindly after a lost response.',
+    description: 'Queue an outbound message from Fran to a fleet peer. Success means spooled, not delivered. On a lost response (e.g. "Transport closed") the message is usually already spooled — do not blind-retry; check the outbox first.',
     inputSchema: {
       type: 'object', properties: { to: { type: 'string', minLength: 1 }, text: { type: 'string', minLength: 1 } },
       required: ['to', 'text'], additionalProperties: false,
@@ -67,6 +67,11 @@ const toolDefinitions = [
 
 export async function serve(input = process.stdin, output = process.stdout, root = home) {
   const tools = createTools(root);
+  // A dead parent (a daemon restart) destroys stdout; without this, reply()'s bare
+  // output.write throws an unhandled EPIPE and the MCP client reports the scary
+  // "Transport closed" instead of a clean stop. End the read loop on any stdout
+  // error so serve() returns cleanly (ADR-0102).
+  output.on('error', () => { try { input.destroy(); } catch { /* ignore */ } });
   let initialized = false;
   let ready = false;
   const reply = message => output.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');

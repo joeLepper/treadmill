@@ -74,6 +74,16 @@ with ADR-0103) is the goal, but it is NOT a ready action — see Known gaps #1.
   exactly-once — the `sent/` archive only stops re-peeking an already-acked
   file. Content-stable operation-key dedup for divergent re-execution is
   deferred (`bridge/README.md` follow-up 4).
+- **Orphan spool temp files are reaped (ADR-0102).** `send_message` writes
+  `<id>.json.tmp`, fsyncs, then renames to `<id>.json`. A crash in that window (a
+  daemon restart) left a durable but pump-invisible orphan — silent loss.
+  `outbound-next.mjs` now sweeps `*.json.tmp` on each `peek` (`reapOrphans`):
+  age-gated (never touches an in-flight write), JSON-validated (a partial write,
+  never acked to the caller, is discarded), and promoted with `link()`+`unlink()`
+  (an existing `<id>.json` is never clobbered). `msg-server.mjs` also ends the read
+  loop cleanly on a stdout error, so a dead parent yields a clean stop, not a
+  "Transport closed" crash — and on such a lost response the message is usually
+  already spooled, so callers must check the outbox before a retry.
 - **Bus address is unstable.** The harness derives the relay's bus name from the
   workdir plus a random suffix. The relay announces its current address on
   startup (see `bridge-session/CLAUDE.md`).

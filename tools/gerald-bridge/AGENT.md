@@ -82,6 +82,11 @@ Gerald's home must have NO `auth.json`. He runs his OWN daemon under
 - **Inbound / outbound** semantics match `tools/fran-bridge/` (exactly-once COMMIT
   as a ledger capability; the shipped bridge runs fire-and-forget `deliver`;
   outbound is at-least-once, duplicate possible). See that AGENT.md's Contract.
+  Includes the ADR-0102 orphan-spool reaper: `outbound-next.mjs` sweeps
+  `*.json.tmp` on each `peek` (age-gated, JSON-validated, `link`-promoted), and
+  `msg-server.mjs` ends cleanly on a stdout error instead of a "Transport closed"
+  crash — a lost response usually means the message is already spooled, so check
+  the outbox before a retry.
 - **Per-message model.** A `[[model: <name>]]` marker (open-weight allowlist:
   `qwen3.8-max`, `kimi-k2.7-code`, `glm-5.3`, `minimax-m3`) makes the bridge set
   `codex queue --model` for that turn. Default is `qwen3.8-max`.

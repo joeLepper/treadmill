@@ -22,7 +22,7 @@
 // Identical-resend dedup (operation key) is a follow-up that needs send_message
 // to stamp a stable op id.
 
-import { readdir, rename, mkdir, readFile } from 'node:fs/promises';
+import { readdir, rename, mkdir, readFile, stat, unlink, link } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -54,21 +54,63 @@ async function validPeers() {
   try { return new Set(JSON.parse(await readFile(PEERS_FILE, 'utf8'))); } catch { return null; }
 }
 
-const cmd = process.argv[2];
+const tmpRe = /^[0-9a-f-]{8,}\.json\.tmp$/i;
+// A .tmp younger than this may be an in-flight write; older means the writer died.
+const STALE_MS = 30_000;
 
-if (cmd === 'peek') {
+// Recover orphan spool temp files. msg-server writes <id>.json.tmp, fsyncs, then
+// renames to <id>.json (open -> sync -> rename). A crash in that window — e.g. a
+// daemon restart — leaves a fully-fsynced <id>.json.tmp that pending() cannot see
+// (idRe requires .json$), so the message is durable but undeliverable forever with
+// no trace. ADR-0102 outbound must not silently lose a spooled message, so sweep on
+// each peek. Age-gate so a concurrent live write is never touched; validate the JSON
+// so a partial write (crash mid-writeFile, never acked to the caller) is discarded,
+// not delivered; promote a complete orphan with link()+unlink() so an existing
+// <id>.json (already spooled) is never clobbered.
+export async function reapOrphans(outbox = OUTBOX, now = Date.now(), staleMs = STALE_MS) {
+  let names;
+  try { names = await readdir(outbox); } catch { return; }
+  for (const n of names) {
+    if (!tmpRe.test(n)) continue;
+    const tmp = join(outbox, n);
+    let info;
+    try { info = await stat(tmp); } catch { continue; }
+    if (now - info.mtimeMs < staleMs) continue; // maybe an in-flight write; leave it
+    let msg;
+    try { msg = JSON.parse(await readFile(tmp, 'utf8')); }
+    catch { await unlink(tmp).catch(() => {}); continue; } // partial/garbage, never acked
+    if (!msg || typeof msg.to !== 'string' || typeof msg.text !== 'string') {
+      await unlink(tmp).catch(() => {}); continue;
+    }
+    const dest = join(outbox, n.replace(/\.tmp$/i, ''));
+    try { await link(tmp, dest); await unlink(tmp); }         // atomic no-clobber promote
+    catch (error) { if (error.code === 'EEXIST') await unlink(tmp).catch(() => {}); } // already spooled
+  }
+}
+
+async function peekNext() {
+  await reapOrphans();
   const list = await pending();
   const peers = await validPeers();
-  const next = list.find((m) => !peers || peers.has(m.to));
-  if (next) process.stdout.write(JSON.stringify({ id: next.id, to: next.to, text: next.text }) + '\n');
-  process.exit(0);
-} else if (cmd === 'ack') {
-  const id = process.argv[3];
-  if (!id || !/^[0-9a-f-]{8,}$/i.test(id)) { console.error('ack requires a message id'); process.exit(2); }
-  await mkdir(SENT, { recursive: true, mode: 0o700 });
-  try { await rename(join(OUTBOX, `${id}.json`), join(SENT, `${id}.json`)); } catch { /* already acked = idempotent */ }
-  process.exit(0);
-} else {
-  console.error('usage: outbound-next.mjs peek | ack <id>');
-  process.exit(2);
+  return list.find((m) => !peers || peers.has(m.to)) || null;
 }
+
+async function runCli() {
+  const cmd = process.argv[2];
+  if (cmd === 'peek') {
+    const next = await peekNext();
+    if (next) process.stdout.write(JSON.stringify({ id: next.id, to: next.to, text: next.text }) + '\n');
+    process.exit(0);
+  } else if (cmd === 'ack') {
+    const id = process.argv[3];
+    if (!id || !/^[0-9a-f-]{8,}$/i.test(id)) { console.error('ack requires a message id'); process.exit(2); }
+    await mkdir(SENT, { recursive: true, mode: 0o700 });
+    try { await rename(join(OUTBOX, `${id}.json`), join(SENT, `${id}.json`)); } catch { /* already acked = idempotent */ }
+    process.exit(0);
+  } else {
+    console.error('usage: outbound-next.mjs peek | ack <id>');
+    process.exit(2);
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runCli();

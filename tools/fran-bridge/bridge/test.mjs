@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { createTools, serve } from './msg-server.mjs';
+import { reapOrphans } from './outbound-next.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'fran-msg-test-'));
 try {
@@ -55,11 +56,31 @@ try {
   assert.equal(replies[6].result.isError, true);
   assert.equal((await readdir(join(root, 'outbox'))).length, 2);
 
+  // Finding A (ADR-0102): reapOrphans recovers an orphan <id>.json.tmp left by a
+  // crash between fsync and rename, and never touches an in-flight write.
+  {
+    const ob = join(root, 'reap-outbox');
+    await mkdir(ob, { recursive: true });
+    const u = (c) => `${c}0000000-0000-4000-8000-000000000000`;
+    const complete = u('a'), fresh = u('b'), dup = u('c'), partial = u('d');
+    const line = (mid, to) => JSON.stringify({ id: mid, ts: new Date().toISOString(), from: 'fran', to, text: 'hi' }) + '\n';
+    await writeFile(join(ob, `${complete}.json.tmp`), line(complete, 'alan')); // stale complete -> promote
+    await writeFile(join(ob, `${fresh}.json.tmp`), line(fresh, 'alan'));        // fresh -> leave (in-flight)
+    await writeFile(join(ob, `${dup}.json`), line(dup, 'alan'));                // already spooled
+    await writeFile(join(ob, `${dup}.json.tmp`), line(dup, 'alan'));            // stale dup -> unlink
+    await writeFile(join(ob, `${partial}.json.tmp`), '{ partial');             // stale garbage -> unlink
+    const old = new Date(Date.now() - 120_000);
+    for (const f of [`${complete}.json.tmp`, `${dup}.json.tmp`, `${partial}.json.tmp`]) await utimes(join(ob, f), old, old);
+    await reapOrphans(ob);
+    assert.deepEqual((await readdir(ob)).sort(), [`${complete}.json`, `${dup}.json`, `${fresh}.json.tmp`].sort());
+    assert.equal(JSON.parse(await readFile(join(ob, `${complete}.json`), 'utf8')).to, 'alan');
+  }
+
   // A broken spool must return an error, never a successful message id.
   await rm(join(root, 'outbox'), { recursive: true });
   await writeFile(join(root, 'outbox'), 'not a directory');
   await assert.rejects(tools.sendMessage({ to: 'alan', text }));
-  console.log('PASS: spool JSON, input refusal, MCP lifecycle, notifications, and write failure');
+  console.log('PASS: spool JSON, input refusal, MCP lifecycle, notifications, write failure, and orphan-tmp reaper');
 } finally {
   await rm(root, { recursive: true, force: true });
 }
