@@ -123,21 +123,25 @@ Two conditions make the policy real rather than advisory:
   see the per-caller-attribution risk below (Gerald B6, N1).
 
 ### Risks
-- **Enabling the DB turns on cross-caller PROMPT PERSISTENCE, by default, that the
-  Codex path depends on (Gerald B4 — design-level).** The virtual-key DB is not
-  just accounting: on the Responses→Chat bridge Codex needs, LiteLLM rebuilds
-  multi-turn history for `previous_response_id` by reading spend logs, and its
-  `SpendLogsPayload` carries `messages`, `response`, and `proxy_server_request`.
-  So the DB we REQUIRE for policy is simultaneously a store of every caller's
-  prompt+response content, in the same-UID-readable Postgres. That makes the
-  separate-UID boundary a DATA-CONFIDENTIALITY requirement, not just credential
-  hygiene. The spike must determine whether message bodies persist by default and
-  whether that is disable-able WITHOUT breaking `previous_response_id`; if it is
-  not disable-able, treat the DB as a prompt-content store. Interim trust model
-  (what "accepted" means until separate-UID lands): cross-agent prompt visibility
-  is accepted AMONG the operator's own trusted fleet agents; separate-UID
-  isolation is a prerequisite before any caller handles content that must be
-  confidential FROM other fleet agents (e.g. third-party/customer data).
+- **Prompt persistence is an opt-in TRADE-OFF, not a default (Gerald B4, empirically
+  corrected against litellm 1.100.1 — supersedes his earlier "default-on/depends-on"
+  framing).** `SpendLogsPayload.messages/.response/.proxy_server_request` are gated
+  by `store_prompts_in_spend_logs` (env `STORE_PROMPTS_IN_SPEND_LOGS`), which
+  DEFAULTS OFF — enabling the virtual-key DB does NOT itself persist prompt content.
+  And the Codex path does NOT depend on spend-log history: `get_all_spend_logs_for_
+  previous_response_id` short-circuits when there is no DB, and a caller that sends
+  full `input` each turn (as Codex demonstrably does — a DB-less shim runs long
+  multi-turn sessions fine) never consults it. The real either/or:
+  - **OFF (recommended default):** no prompt content in Postgres (confidentiality),
+    BUT a caller that uses `previous_response_id` chaining gets empty history and
+    SILENTLY falls back to the new input only — a silent multi-turn-context loss.
+  - **ON:** `previous_response_id` chaining works, but every caller's prompt+response
+    lands in the same-UID-readable Postgres — then the separate-UID boundary becomes
+    a DATA-CONFIDENTIALITY requirement, not just credential hygiene.
+  Interim trust model: with persistence OFF (the default) there is no cross-caller
+  prompt store; separate-UID isolation becomes a prerequisite only if the operator
+  turns persistence ON (e.g. to support `previous_response_id`), or before any
+  caller handles content that must be confidential FROM other fleet agents.
 - **Static per-deployment `x-opencode-session` collapses per-caller attribution
   (Gerald B6 — design-level).** The header is set per DEPLOYMENT in
   `litellm_params` (a fixed value today); LiteLLM has no per-virtual-key header
@@ -201,9 +205,13 @@ flowchart LR
     receipt to exist, and a scheduled receipt-vs-policy sweep is the DETECTOR that
     makes falsifier (a) catchable (Gerald B3). Without both, the falsifier
     describes a state nothing would ever detect.
-  - *Prompt persistence (Gerald B4):* confirm whether message bodies persist in
-    the spend-log DB by default, and whether that is disable-able WITHOUT breaking
-    `previous_response_id` history-rebuild on the Responses→Chat path.
+  - *Prompt persistence (Gerald B4 — mostly answered):* persistence defaults OFF
+    (`store_prompts_in_spend_logs`) and the Codex path does not need spend-log
+    history. Remaining spike item: confirm whether the gateway's actual callers use
+    `previous_response_id` chaining or send full `input` each turn. If full input
+    (as Codex does), run the gateway with persistence OFF — confidentiality AND
+    correct multi-turn. Only turn it ON if a caller needs chaining, and then treat
+    the DB as a same-UID prompt store (separate-UID prerequisite).
   - *Per-caller Go attribution (Gerald B6):* confirm whether `x-opencode-session`
     can be injected per virtual key; if not, per-caller Go deployments are required.
   - *Budget contract:* the chosen semantics (hard-ceiling vs accounting overshoot)
