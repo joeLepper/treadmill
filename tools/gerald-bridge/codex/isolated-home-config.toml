@@ -5,7 +5,7 @@
 # Fran's default ~/.codex daemon (own control socket), so no shared-daemon
 # coupling. This is configured-route isolation + cooperative policy (same UID),
 # NOT a hard sandbox — see ADR-0104.
-model = "qwen3.8-max"
+model = "glm-5.2"
 model_provider = "opencode_go"
 
 [projects."/home/joe/gerald"]
