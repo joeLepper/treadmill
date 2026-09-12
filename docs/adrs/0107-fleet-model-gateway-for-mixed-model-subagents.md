@@ -1,6 +1,6 @@
 # ADR-0107: Fleet model gateway for mixed-model subagents
 
-- **Status:** proposed (2026-09-12; a prior "accepted" was WITHDRAWN — it was merged before Gerald's second cross-model pass landed, and that pass was BLOCKING with 6 findings, two design-changing. Correction to the record: the open-weight sibling (Gerald) DID produce a rigorous, foil-driven design review — the best of the three — so the earlier claim that it "could not produce a nuanced ADR-design review" was wrong; it was slow, not incapable. Re-opened to incorporate B1–B6 below; re-review pending.)
+- **Status:** accepted (2026-09-12, on the SECOND review round. A first "accepted" was WITHDRAWN — merged before Gerald's cross-model pass, which was BLOCKING with 6 foil-driven findings (two design-changing), all now folded. Cleared by Gerald (open-weight, cross-model — who raised the findings and delivered the best of the three reviews) + Ernie (sibling, re-confirmed) + Fran (cross-model, prior rounds). Correction to the record: the open-weight sibling produced a rigorous nuanced design review — it was slow, not incapable.)
 - **Date:** 2026-09-12
 - **Related:** ADR-0104 (Gerald / the Responses→Chat shim), ADR-0102 (Fran), ADR-0105 (cross-model review)
 
@@ -133,7 +133,11 @@ Two conditions make the policy real rather than advisory:
   separate-UID boundary a DATA-CONFIDENTIALITY requirement, not just credential
   hygiene. The spike must determine whether message bodies persist by default and
   whether that is disable-able WITHOUT breaking `previous_response_id`; if it is
-  not disable-able, treat the DB as a prompt-content store.
+  not disable-able, treat the DB as a prompt-content store. Interim trust model
+  (what "accepted" means until separate-UID lands): cross-agent prompt visibility
+  is accepted AMONG the operator's own trusted fleet agents; separate-UID
+  isolation is a prerequisite before any caller handles content that must be
+  confidential FROM other fleet agents (e.g. third-party/customer data).
 - **Static per-deployment `x-opencode-session` collapses per-caller attribution
   (Gerald B6 — design-level).** The header is set per DEPLOYMENT in
   `litellm_params` (a fixed value today); LiteLLM has no per-virtual-key header
@@ -143,19 +147,6 @@ Two conditions make the policy real rather than advisory:
   per-caller Go deployments (one per sibling, each with its own header) or by
   specifying a per-virtual-key header-injection mechanism before sharing a
   deployment.
-- **Credential isolation is same-UID-bounded, and the gateway ESCALATES this vs
-  ADR-0104.** Gerald concentrated one key; the gateway concentrates EVERY provider
-  key, readable by any same-UID sibling (siblings run with a bypassed sandbox, so
-  "could read the store" is "any sibling can cat the file"). Virtual keys scope
-  what the gateway *serves*, not who can read its key store — so the separate-UID
-  hard boundary is MORE urgent here than for Gerald, not equal-priority. Until it
-  exists, minimize the key set the gateway holds and keep budgets tight; do not
-  put the high-value funded Anthropic/OpenAI production keys behind a
-  same-UID-readable store.
-- **Proxy compromise is not contained by virtual keys.** A caller key limits an
-  ordinary caller; it does nothing if the proxy itself (holding all provider
-  creds) is compromised — add cross-caller prompt/output/log exposure and
-  key-revocation/accounting-recovery to the threat model.
 - **Credential isolation is same-UID-bounded, and the gateway ESCALATES this vs
   ADR-0104.** Gerald concentrated one key; the gateway concentrates EVERY provider
   key, readable by any same-UID sibling (siblings run with a bypassed sandbox, so
