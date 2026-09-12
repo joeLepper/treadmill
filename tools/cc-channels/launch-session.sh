@@ -206,9 +206,19 @@ export TREADMILL_RELAY_LEVEL="${TREADMILL_RELAY_LEVEL:-quiet}"
 export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-8}"
 
 # ── telegram channel (ADR-0067), only when this label has a bot ─────────────
+# ADR-0106 cutover gate: if the per-label marker ~/.cc-channels/<label>/telegram-bridged
+# exists, this session runs NO telegram poller — the single bridge daemon
+# (tools/telegram-bridge) owns the one getUpdates slot for this bot and injects
+# inbound via the relay dir; the session sends outbound via direct sendMessage.
+# The marker lets us cut sessions over ONE at a time (blast radius = one label);
+# remove it and relaunch to restore the per-session poller. Default (no marker)
+# is unchanged, so this edit changes nothing until a label is explicitly bridged.
 CHANNEL_ARGS=()
 TELEGRAM_ENV="$STATE_ROOT/telegram.env"
-if [[ -f "$TELEGRAM_ENV" ]]; then
+TELEGRAM_BRIDGED_MARKER="$STATE_ROOT/telegram-bridged"
+if [[ -f "$TELEGRAM_ENV" && -f "$TELEGRAM_BRIDGED_MARKER" ]]; then
+  echo "[launch-session] telegram BRIDGED for $LABEL (ADR-0106 daemon owns the poll slot) — no per-session telegram poller" >&2
+elif [[ -f "$TELEGRAM_ENV" ]]; then
   # shellcheck disable=SC1090
   source "$TELEGRAM_ENV"          # provides TELEGRAM_BOT_TOKEN
   export TELEGRAM_BOT_TOKEN
