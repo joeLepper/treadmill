@@ -94,8 +94,15 @@ Gerald's home must have NO `auth.json`. He runs his OWN daemon under
   directory on a non-zero `quarantined`/`failed` count (nothing drains it
   automatically). See `tools/fran-bridge/AGENT.md` for the full quarantine lifecycle.
 - **Per-message model.** A `[[model: <name>]]` marker (open-weight allowlist:
-  `qwen3.8-max`, `kimi-k2.7-code`, `glm-5.3`, `minimax-m3`) makes the bridge set
-  `codex queue --model` for that turn. Default is `qwen3.8-max`.
+  `qwen3.8-max`, `kimi-k2.7-code`, `glm-5.2`, `glm-5.3`, `minimax-m3`) makes the
+  bridge set `codex queue --model` for that turn. Default is `glm-5.2` (operator
+  choice 2026-09-12). To change the default or the allowlist, edit all four sites:
+  `codex/isolated-home-config.toml` (`model =`), `shim/config.yaml`,
+  `bridge/deliver-inbound.mjs` (`MODELS`), and `session/auth-guard.sh` (`APPROVED`);
+  the auth-guard fails closed if the shim lists a model outside `APPROVED`.
+  Note: `glm-5.2`/`glm-5.3` are REASONING models — they spend most tokens on hidden
+  reasoning, so a small output budget yields an empty visible reply (`finish=length`).
+  This is the "empty output" symptom in gap 3; give the turn adequate output tokens.
 
 ## Known gaps
 1. Bridge/session code is duplicated from `tools/fran-bridge/` (ADR-0102/0104

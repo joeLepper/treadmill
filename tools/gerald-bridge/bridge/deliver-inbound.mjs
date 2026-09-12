@@ -26,7 +26,7 @@ process.env.CODEX_HOME ||= '/home/joe/gerald/.codex';
 // which OpenCode Go model handles this turn. The bridge sets it via `codex queue
 // --model` (deterministic), so we strip the marker from the text Gerald sees.
 // Only allowlisted models pass through; anything else falls back to the default.
-const MODELS = new Set(['qwen3.8-max', 'kimi-k2.7-code', 'glm-5.3', 'minimax-m3']);
+const MODELS = new Set(['qwen3.8-max', 'kimi-k2.7-code', 'glm-5.2', 'glm-5.3', 'minimax-m3']);
 let text = rawText, model;
 const mk = rawText.match(/^\s*\[\[model:\s*([A-Za-z0-9._-]{1,64})\]\]\s*/);
 if (mk) {

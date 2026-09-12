@@ -29,7 +29,7 @@ done
 # grep). Gerald's config must define only opencode_go and default to it.
 "$SHIM_PY" - "$GHOME/shim/config.yaml" "$CODEX_HOME/config.toml" <<'PY' || exit 1
 import sys, yaml, tomllib
-APPROVED = {"qwen3.8-max", "kimi-k2.7-code", "glm-5.3", "minimax-m3"}
+APPROVED = {"qwen3.8-max", "kimi-k2.7-code", "glm-5.2", "glm-5.3", "minimax-m3"}
 shim_path, cfg_path = sys.argv[1], sys.argv[2]
 def die(m): print("GERALD AUTH GUARD FAIL:", m, file=sys.stderr); sys.exit(1)
 y = yaml.safe_load(open(shim_path))
