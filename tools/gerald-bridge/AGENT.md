@@ -26,10 +26,11 @@ Responses→Chat and injects the required `x-opencode-session` routing header.
 | `bridge/outbound-next.mjs` | Gerald→peer. `peek` / `ack` the outbox spool. |
 | `bridge/msg-server.mjs` | Gerald's outbound MCP server (`gerald_msg`): `send_message`, `list_peers`. `from: "gerald"`. |
 | `bridge/inbound.test.mjs`, `bridge/test.mjs` | tests (11 inbound + msg-server). |
+| `bridge/supervise-path.test.mjs` | test: `session/gerald-supervise.sh` PATH resolves the `node` that spawns `gerald_msg`. |
 | `bridge-session/CLAUDE.md` | the `gxbridge` relay session spec. |
 | `bridge-session/gerald-bridge-{supervise,reap}.sh` | supervise/reap the `gxbridge` relay (named `gxbridge`, NOT `gerald-bridge`, to avoid a tmux prefix-collision with `gerald`). |
 | `session/gerald-{supervise,reap}.sh` | supervise/reap Gerald's `gerald` Codex session (starts the shared daemon with the Go key; launches `codex --profile gerald`). |
-| `session/auth-guard.sh` | ExecStartPre: Go key present, shim serving (waits for it), profile pins `opencode_go` via the shim, and **open-weight-only denylist** (refuses a shim config naming any gpt/claude/grok/… model). |
+| `session/auth-guard.sh` | ExecStartPre: Go key present, shim serving (waits for it), profile pins `opencode_go` via the shim, and **open-weight-only allowlist** (parses the shim config; fails closed unless every model is in the approved open-weight set). |
 | `session/AGENTS.md` | Gerald's Codex operating brief (reviewer role, `send_message` reply protocol, open-weight-only rule). |
 | `session/secret.env.example` | template for `~/gerald/secret.env` (the Go key; never committed). |
 | `shim/config.yaml` | LiteLLM model list — **open-weight models only**. |

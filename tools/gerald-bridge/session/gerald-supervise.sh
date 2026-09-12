@@ -4,7 +4,12 @@
 # (CODEX_HOME=~/gerald/.codex) with its OWN app-server daemon that has no ChatGPT
 # auth and only the opencode_go provider — structural open-weight enforcement.
 set -uo pipefail
-export PATH="$HOME/.local/bin:$PATH"
+# $HOME/.asdf/shims must be on PATH: the isolated home's config.toml spawns the
+# gerald_msg MCP server as `node ...msg-server.mjs`, and this daemon's env is what
+# Codex resolves that command against. Without it, node is ENOENT, the MCP server
+# never starts, and send_message/list_peers are silently absent from the session
+# (matches the bridge-session PATH below).
+export PATH="$HOME/.asdf/shims:$HOME/.local/bin:$PATH"
 LABEL=gerald
 GERALD_HOME="$HOME/gerald"
 export CODEX_HOME="$GERALD_HOME/.codex"
