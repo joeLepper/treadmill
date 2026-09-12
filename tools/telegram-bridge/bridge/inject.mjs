@@ -15,10 +15,11 @@
 // only ever sees the complete `.md`. (The rename lands in the watched dir, so
 // fs.watch still fires for it.)
 
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, fsyncSync, lstatSync, openSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { mkdirpDurable } from './durable.mjs'
 
 // A session label is used as a filesystem path segment. Reject anything that is
 // not a plain label so a crafted config can never escape the relay root.
@@ -105,7 +106,7 @@ export function injectToRelay(
   ccRoot = join(homedir(), '.cc-channels'),
 ) {
   const { labelDir, dir } = safeRelayDir(label, ccRoot)
-  mkdirSync(dir, { recursive: true })
+  mkdirpDurable(dir) // durable dir-entry creation if the relay dir is missing
   // Post-mkdir realpath check: the created (or pre-existing) relay dir must
   // still resolve under <root>/<label>, i.e. no symlink slipped in. Rejects the
   // configured-label -> wrong-session-dir foil.

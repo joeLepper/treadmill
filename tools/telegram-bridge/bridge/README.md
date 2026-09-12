@@ -53,8 +53,9 @@ decoupled from session restarts, replaces N fragile per-session connections.
   token requires a daemon restart. Eligibility is checked at startup only, so a
   session torn down *after* start still has messages spooled into its relay dir
   (harmless — drained on its next start, or cleared at the daemon's next
-  restart). A rotated token is a new bot id, so its ledger starts fresh (offsets
-  are keyed by bot id, never by label).
+  restart). Offsets are keyed by stable bot id, never by label: rotating a bot's
+  SECRET keeps its bot id and correctly RETAINS its ledger; only replacing the
+  bot (a new bot id) yields a fresh ledger.
 - **Duplicate bot rejected.** Two labels resolving to the same token/bot id is
   refused at startup (it would put two pollers on one bot — 409 + cross-
   delivery); the error names the labels and bot id, never the token.

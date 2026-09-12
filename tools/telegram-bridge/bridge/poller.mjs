@@ -23,7 +23,11 @@ export class ConflictError extends Error {}
 // error (so the caller backs off) — never on a single bad update.
 export async function pollOnce({
   token, label, allowedChats, longPollSeconds = 25,
-  fetchFn, inject, ledger, quarantine = () => {}, log = () => {},
+  fetchFn, inject, ledger,
+  // Default THROWS, not a no-op: a caller that supplies no durable quarantine
+  // must not silently ack (advance past) a failed inject and lose it.
+  quarantine = () => { throw new Error('no quarantine handler configured — refusing to drop a failed inject') },
+  log = () => {},
 }) {
   const url = `${TELEGRAM_API}/bot${token}/getUpdates?offset=${ledger.offset}&timeout=${longPollSeconds}`
   const res = await fetchFn(url, { signal: AbortSignal.timeout((longPollSeconds + 10) * 1000) })
