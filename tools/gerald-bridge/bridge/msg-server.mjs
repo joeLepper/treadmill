@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -125,6 +126,8 @@ export async function serve(input = process.stdin, output = process.stdout, root
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Realpath both sides so a symlinked invocation (ADR-0104 canonical-checkout
+// follow-up) still starts the server; resolve() alone does not follow symlinks.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   serve().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

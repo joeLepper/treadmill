@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { createTools, serve } from './msg-server.mjs';
 import { reapOrphans } from './outbound-next.mjs';
@@ -74,6 +76,20 @@ try {
     await reapOrphans(ob);
     assert.deepEqual((await readdir(ob)).sort(), [`${complete}.json`, `${dup}.json`, `${fresh}.json.tmp`].sort());
     assert.equal(JSON.parse(await readFile(join(ob, `${complete}.json`), 'utf8')).to, 'alan');
+  }
+
+  // The CLI main-guard must fire through a symlink (the ADR-0104 follow-up symlinks
+  // bridge code to a canonical checkout). A no-arg run prints usage and exits 2; a
+  // guard using resolve() instead of realpath would silently exit 0 through a link.
+  {
+    const linkDir = await mkdtemp(join(tmpdir(), 'reap-link-'));
+    const real = fileURLToPath(new URL('./outbound-next.mjs', import.meta.url));
+    const via = join(linkDir, 'outbound-next.mjs');
+    await symlink(real, via);
+    const exitCode = (p) => new Promise((res) => spawn(process.execPath, [p], { stdio: 'ignore' }).on('exit', res));
+    assert.equal(await exitCode(real), 2); // direct invocation runs the CLI
+    assert.equal(await exitCode(via), 2);  // symlinked invocation must too
+    await rm(linkDir, { recursive: true, force: true });
   }
 
   // A broken spool must return an error, never a successful message id.

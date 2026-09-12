@@ -23,6 +23,7 @@
 // to stamp a stable op id.
 
 import { readdir, rename, mkdir, readFile, stat, unlink, link } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -113,4 +114,8 @@ async function runCli() {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runCli();
+// Compare realpaths: import.meta.url is already the realpath, but process.argv[1]
+// is the path as invoked, and resolve() does NOT follow symlinks — so a symlinked
+// invocation (the ADR-0104 canonical-checkout follow-up) would leave this false and
+// silently no-op peek/ack, re-introducing the very silent loss this file now guards.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) runCli();
