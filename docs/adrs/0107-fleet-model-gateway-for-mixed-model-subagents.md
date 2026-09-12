@@ -1,6 +1,6 @@
 # ADR-0107: Fleet model gateway for mixed-model subagents
 
-- **Status:** accepted (2026-09-12, on the SECOND review round. A first "accepted" was WITHDRAWN — merged before Gerald's cross-model pass, which was BLOCKING with 6 foil-driven findings (two design-changing), all now folded. Cleared by Gerald (open-weight, cross-model — who raised the findings and delivered the best of the three reviews) + Ernie (sibling, re-confirmed) + Fran (cross-model, prior rounds). Correction to the record: the open-weight sibling produced a rigorous nuanced design review — it was slow, not incapable.)
+- **Status:** accepted (2026-09-12, on the SECOND review round. A first "accepted" was WITHDRAWN — merged before Gerald's cross-model pass, which was BLOCKING with 6 foil-driven findings (two design-changing), all now folded. Cleared by Gerald (open-weight, cross-model — who raised the findings and delivered the best of the three reviews) + Ernie (sibling, re-confirmed) + Fran (cross-model, prior rounds). Correction to the record: the open-weight sibling produced a rigorous, nuanced design review — the apparent delay was a bridge delivery-tracking defect (queue acceptance acked as if it were turn delivery), not the reviewer. See docs/learnings/2026-09-12-bridge-acks-acceptance-not-delivery.md.)
 - **Date:** 2026-09-12
 - **Related:** ADR-0104 (Gerald / the Responses→Chat shim), ADR-0102 (Fran), ADR-0105 (cross-model review)
 
