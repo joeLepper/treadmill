@@ -39,3 +39,5 @@ done
 
 # Foreground liveness loop keeps the unit alive while the tmux session lives.
 while tmux has-session -t "$LABEL" 2>/dev/null; do sleep 5; done
+echo "relay tmux session '$LABEL' vanished unexpectedly" >&2
+exit 1
