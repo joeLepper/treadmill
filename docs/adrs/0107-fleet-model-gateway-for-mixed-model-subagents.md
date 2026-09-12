@@ -243,6 +243,29 @@ flowchart LR
 
 ## References
 
-- Spike, 2026-09-12: one LiteLLM proxy routed qwen3.8-max→Go, claude-sonnet-4-5→
-  Anthropic, gpt-4.1-mini→OpenAI (config-only; per-caller policy not yet spiked).
+- Spike, 2026-09-12 (routing): one LiteLLM proxy routed qwen3.8-max→Go,
+  claude-sonnet-4-5→Anthropic, gpt-4.1-mini→OpenAI (config-only).
+- **Spike, 2026-09-12 (DB-backed per-caller policy — the decision-gating one, RUN;
+  LiteLLM 1.100.1 + Postgres virtual keys). Core gate PASSED:**
+  - *Allowlist ENFORCED:* an open-weight-only key (`models:["qwen3.8-max"]`) served
+    qwen but got **HTTP 403** on `claude-sonnet-4-5` ("key not allowed to access
+    model"). Virtual keys DENY out-of-allowlist models — not route them. The
+    load-bearing unknown is resolved.
+  - *Management authority ENFORCED:* minting or updating a key with an inference
+    key returned **HTTP 401** ("Only proxy admin can generate/update keys").
+  - *Budget:* ENFORCES with a per-model price mapping (**HTTP 429** past ceiling),
+    but is VACUOUS without one — `qwen3.8-max` is absent from LiteLLM's cost map,
+    so spend stayed 0 and the budget never triggered until `input/output_cost_per_
+    token` was set on the Go alias (confirms Fran B2: Go aliases need price
+    mappings). It is admitted-request accounting with a BOUNDED OVERSHOOT (one call
+    exceeded the ceiling before the next was refused), matching the disclosed-
+    overshoot contract, NOT a hard pre-call ceiling.
+  - *Not yet spiked (remaining, per the follow-ups):* alias/fallback →
+    forbidden-provider identity binding (the config-side guard checks, since the
+    runtime virtual-key allowlist is name-based); concurrent/streaming budget
+    edges; and confirming the gateway's callers use full `input` vs
+    `previous_response_id` (persistence stays OFF if full input).
+  Conclusion: per-caller allowlist + management-authority enforcement are real in
+  LiteLLM DB mode; opening the gateway to callers additionally requires Go price
+  mappings (for budgets) and the migration guard checks (B2/B5).
 - ADR-0104 (the shim + same-UID isolation conclusion), ADR-0105 (two-pass review).
