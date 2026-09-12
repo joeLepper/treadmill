@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram bridge — sole multi-token poller, fans inbound to session relay dirs (ADR-0106)
+After=default.target
+
+[Service]
+Type=simple
+# No token here: the daemon reads each bot's token from that session's own
+# ~/.cc-channels/<label>/telegram.env (mode 0600). Config lists {label, allowedChats}.
+ExecStart=%h/.asdf/shims/node %h/treadmill/tools/telegram-bridge/bridge/bridge.mjs
+# The per-bot loops back off in-process; a clean SIGTERM stop exits 0.
+SuccessExitStatus=0
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

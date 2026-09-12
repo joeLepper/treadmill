@@ -1,0 +1,7 @@
+{
+  "_comment": "One entry per session bot the daemon bridges. Copy to ~/.cc-channels/.telegram-bridge/bots.json. The token is NOT here — the daemon reads it from ~/.cc-channels/<label>/telegram.env. allowedChats is the MANDATORY sender allowlist (bypassed-permission sessions: ungated inbound = code execution); a message from any other chat is dropped. Each label must be a launcher-managed session (a session-id record exists) or the daemon refuses to start.",
+  "bots": [
+    { "label": "treadmill-alan", "allowedChats": [8956818786] },
+    { "label": "treadmill-carla", "allowedChats": [8956818786] }
+  ]
+}

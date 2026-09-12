@@ -1,6 +1,6 @@
 # ADR-0067 — Claude Code Channels, one bot per session, for phone access to concurrent sessions
 
-- **Status:** proposed
+- **Status:** amended by ADR-0106
 - **Date:** 2026-06-03
 
 ## Context
