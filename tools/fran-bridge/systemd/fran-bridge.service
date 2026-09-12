@@ -1,0 +1,14 @@
+[Unit]
+Description=Fran bridge — Claude Code relay bus-hop for the Codex sibling (ADR-0102)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/fran/bridge-session/fran-bridge-supervise.sh
+ExecStopPost=%h/fran/bridge-session/fran-bridge-reap.sh
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

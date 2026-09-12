@@ -1,0 +1,3 @@
+[mcp_servers.fran_msg]
+command = "node"
+args = ["/home/joe/fran/bridge/msg-server.mjs"]

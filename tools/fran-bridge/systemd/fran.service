@@ -1,0 +1,22 @@
+[Unit]
+Description=Fran — experimental Codex sibling (ADR-0102)
+After=default.target
+
+[Service]
+Type=simple
+# Defense in depth (ADR-0102): never let the no-credit API key reach Fran or
+# the daemon she starts, even if it leaks into the systemd user manager env.
+UnsetEnvironment=OPENAI_API_KEY
+# Auth guard first: refuse to start on the no-credit API key or a contaminated daemon.
+ExecStartPre=%h/fran/auth-guard.sh
+# Idempotent tmux launcher; foreground loop keeps the unit alive.
+ExecStart=%h/fran/fran-supervise.sh
+# Reap the tmux tree on stop/restart (it lives outside this unit's cgroup).
+ExecStopPost=%h/fran/fran-reap.sh
+# An intentional stop delivers SIGTERM; the foreground loop exits 143.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
