@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,7 +84,24 @@ try {
     assert.equal(JSON.parse(await readFile(join(ob, `${complete}.json`), 'utf8')).to, 'alan');
     assert.deepEqual(await readdir(join(ob, 'quarantine')), [`${partial}.json.tmp`]); // garbage preserved, not lost
     assert.equal(existsSync(join(ob, `${acked}.json`)), false);                       // a sent message is never re-spooled
-    assert.deepEqual(counts, { promoted: 1, deduped: 2, quarantined: 1 });
+    assert.deepEqual(counts, { promoted: 1, deduped: 2, quarantined: 1, failed: 0 });
+  }
+
+  // NIT 3: a reaper fs failure (e.g. EACCES) must be counted and logged, not silent,
+  // and must not lose the tmp — the next sweep retries it. Skip as root (no perms).
+  if (!(process.getuid && process.getuid() === 0)) {
+    const ob = join(root, 'reap-fail');
+    await mkdir(ob, { recursive: true });
+    const id = 'f0000000-0000-4000-8000-000000000000';
+    await writeFile(join(ob, `${id}.json.tmp`), '{ truncated');
+    const old = new Date(Date.now() - 120_000);
+    await utimes(join(ob, `${id}.json.tmp`), old, old);
+    await chmod(ob, 0o555); // block the quarantine mkdir/rename
+    const counts = await reapOrphans(ob);
+    await chmod(ob, 0o700); // restore so the tmpdir can be cleaned
+    assert.equal(counts.failed, 1);
+    assert.equal(counts.quarantined, 0);
+    assert.ok(existsSync(join(ob, `${id}.json.tmp`))); // preserved for the retry, not lost
   }
 
   // The CLI main-guard must fire through a symlink (the ADR-0104 follow-up symlinks

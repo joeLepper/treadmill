@@ -86,6 +86,13 @@ with ADR-0103) is the goal, but it is NOT a ready action — see Known gaps #1.
   loop cleanly on a stdout error, so a dead parent yields a clean stop, not a
   "Transport closed" crash — and on such a lost response the message is usually
   already spooled, so callers must check the outbox before a retry.
+  **Quarantine lifecycle:** `reapOrphans` returns `{promoted,deduped,quarantined,failed}`
+  counts and logs each outcome to stderr (surfaced by `peek`). A file in
+  `outbox/quarantine/` was a truncated or malformed spool that was never acked to the
+  caller, so its content never reached a peer and resending the original intent is
+  safe. The operator inspects `outbox/quarantine/` on a non-zero `quarantined`/`failed`
+  count; nothing drains it automatically. `failed` means a quarantine or promote hit
+  an fs error (e.g. EACCES) and the tmp is retried on the next sweep — no loss.
 - **Bus address is unstable.** The harness derives the relay's bus name from the
   workdir plus a random suffix. The relay announces its current address on
   startup (see `bridge-session/CLAUDE.md`).

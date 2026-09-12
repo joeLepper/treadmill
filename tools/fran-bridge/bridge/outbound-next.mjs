@@ -69,7 +69,7 @@ const STALE_MS = 30_000;
 // not delivered; promote a complete orphan with link()+unlink() so an existing
 // <id>.json (already spooled) is never clobbered.
 export async function reapOrphans(outbox = OUTBOX, now = Date.now(), staleMs = STALE_MS) {
-  const counts = { promoted: 0, deduped: 0, quarantined: 0 };
+  const counts = { promoted: 0, deduped: 0, quarantined: 0, failed: 0 };
   let names;
   try { names = await readdir(outbox); } catch { return counts; }
   const sent = join(outbox, 'sent');
@@ -84,7 +84,10 @@ export async function reapOrphans(outbox = OUTBOX, now = Date.now(), staleMs = S
       await rename(tmp, join(quarantine, n));
       counts.quarantined++;
       console.error(`reapOrphans: quarantined ${n} (${reason})`);
-    } catch { /* leave it; a later sweep retries */ }
+    } catch (error) {
+      counts.failed++;
+      console.error(`reapOrphans: FAILED to quarantine ${n} (${reason}): ${error.code || error.message} — will retry next sweep`);
+    }
   };
   for (const n of names) {
     if (!tmpRe.test(n)) continue;
@@ -119,6 +122,9 @@ export async function reapOrphans(outbox = OUTBOX, now = Date.now(), staleMs = S
         await unlink(tmp).catch(() => {});
         counts.deduped++;
         console.error(`reapOrphans: dropped ${n} (dest already spooled)`);
+      } else {                                                 // e.g. EACCES: recoverable, retry next sweep
+        counts.failed++;
+        console.error(`reapOrphans: FAILED to promote ${n}: ${error.code || error.message} — will retry next sweep`);
       }
     }
   }
@@ -126,7 +132,10 @@ export async function reapOrphans(outbox = OUTBOX, now = Date.now(), staleMs = S
 }
 
 async function peekNext() {
-  await reapOrphans();
+  const counts = await reapOrphans();
+  if (counts && (counts.promoted || counts.deduped || counts.quarantined || counts.failed)) {
+    console.error(`reapOrphans: ${JSON.stringify(counts)}`); // surface a summary the relay can see
+  }
   const list = await pending();
   const peers = await validPeers();
   return list.find((m) => !peers || peers.has(m.to)) || null;
