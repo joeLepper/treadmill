@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -53,7 +54,7 @@ export function createTools(root = home) {
 const toolDefinitions = [
   {
     name: 'send_message',
-    description: 'Queue an outbound message from Fran to a fleet peer. Success means spooled, not delivered. Do not retry blindly after a lost response.',
+    description: 'Queue an outbound message from Fran to a fleet peer. Success means spooled, not delivered. On a lost response (e.g. "Transport closed") the message is usually already spooled — do not blind-retry; check the outbox first.',
     inputSchema: {
       type: 'object', properties: { to: { type: 'string', minLength: 1 }, text: { type: 'string', minLength: 1 } },
       required: ['to', 'text'], additionalProperties: false,
@@ -67,6 +68,11 @@ const toolDefinitions = [
 
 export async function serve(input = process.stdin, output = process.stdout, root = home) {
   const tools = createTools(root);
+  // A dead parent (a daemon restart) destroys stdout; without this, reply()'s bare
+  // output.write throws an unhandled EPIPE and the MCP client reports the scary
+  // "Transport closed" instead of a clean stop. End the read loop on any stdout
+  // error so serve() returns cleanly (ADR-0102).
+  output.on('error', () => { try { input.destroy(); } catch { /* ignore */ } });
   let initialized = false;
   let ready = false;
   const reply = message => output.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
@@ -120,6 +126,8 @@ export async function serve(input = process.stdin, output = process.stdout, root
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Realpath both sides so a symlinked invocation (ADR-0104 canonical-checkout
+// follow-up) still starts the server; resolve() alone does not follow symlinks.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   serve().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

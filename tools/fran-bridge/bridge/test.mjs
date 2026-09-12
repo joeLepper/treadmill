@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { createTools, serve } from './msg-server.mjs';
+import { reapOrphans } from './outbound-next.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'fran-msg-test-'));
 try {
@@ -55,11 +59,70 @@ try {
   assert.equal(replies[6].result.isError, true);
   assert.equal((await readdir(join(root, 'outbox'))).length, 2);
 
+  // Finding A (ADR-0102): reapOrphans recovers an orphan <id>.json.tmp left by a
+  // crash between fsync and rename, without touching an in-flight write, without
+  // silently discarding bytes (quarantine, not unlink), and without re-spooling a
+  // message already acked to sent/ (NIT 1).
+  {
+    const ob = join(root, 'reap-outbox');
+    await mkdir(join(ob, 'sent'), { recursive: true });
+    const u = (c) => `${c}0000000-0000-4000-8000-000000000000`;
+    const complete = u('a'), fresh = u('b'), dup = u('c'), partial = u('d'), acked = u('e');
+    const line = (mid, to) => JSON.stringify({ id: mid, ts: new Date().toISOString(), from: 'fran', to, text: 'hi' }) + '\n';
+    await writeFile(join(ob, `${complete}.json.tmp`), line(complete, 'alan'));  // stale complete -> promote
+    await writeFile(join(ob, `${fresh}.json.tmp`), line(fresh, 'alan'));         // fresh -> leave (in-flight)
+    await writeFile(join(ob, `${dup}.json`), line(dup, 'alan'));                 // already spooled + pending
+    await writeFile(join(ob, `${dup}.json.tmp`), line(dup, 'alan'));             // stale dup -> drop (dest exists)
+    await writeFile(join(ob, `${partial}.json.tmp`), '{ partial');              // stale garbage -> quarantine, NOT unlink
+    await writeFile(join(ob, 'sent', `${acked}.json`), line(acked, 'alan'));     // already delivered
+    await writeFile(join(ob, `${acked}.json.tmp`), line(acked, 'alan'));         // stale orphan of a sent msg -> drop, NOT re-promote
+    const old = new Date(Date.now() - 120_000);
+    for (const f of [`${complete}.json.tmp`, `${dup}.json.tmp`, `${partial}.json.tmp`, `${acked}.json.tmp`]) await utimes(join(ob, f), old, old);
+    const counts = await reapOrphans(ob);
+    assert.deepEqual((await readdir(ob)).filter((n) => n.endsWith('.json') || n.endsWith('.tmp')).sort(),
+      [`${complete}.json`, `${dup}.json`, `${fresh}.json.tmp`].sort());
+    assert.equal(JSON.parse(await readFile(join(ob, `${complete}.json`), 'utf8')).to, 'alan');
+    assert.deepEqual(await readdir(join(ob, 'quarantine')), [`${partial}.json.tmp`]); // garbage preserved, not lost
+    assert.equal(existsSync(join(ob, `${acked}.json`)), false);                       // a sent message is never re-spooled
+    assert.deepEqual(counts, { promoted: 1, deduped: 2, quarantined: 1, failed: 0 });
+  }
+
+  // NIT 3: a reaper fs failure (e.g. EACCES) must be counted and logged, not silent,
+  // and must not lose the tmp — the next sweep retries it. Skip as root (no perms).
+  if (!(process.getuid && process.getuid() === 0)) {
+    const ob = join(root, 'reap-fail');
+    await mkdir(ob, { recursive: true });
+    const id = 'f0000000-0000-4000-8000-000000000000';
+    await writeFile(join(ob, `${id}.json.tmp`), '{ truncated');
+    const old = new Date(Date.now() - 120_000);
+    await utimes(join(ob, `${id}.json.tmp`), old, old);
+    await chmod(ob, 0o555); // block the quarantine mkdir/rename
+    const counts = await reapOrphans(ob);
+    await chmod(ob, 0o700); // restore so the tmpdir can be cleaned
+    assert.equal(counts.failed, 1);
+    assert.equal(counts.quarantined, 0);
+    assert.ok(existsSync(join(ob, `${id}.json.tmp`))); // preserved for the retry, not lost
+  }
+
+  // The CLI main-guard must fire through a symlink (the ADR-0104 follow-up symlinks
+  // bridge code to a canonical checkout). A no-arg run prints usage and exits 2; a
+  // guard using resolve() instead of realpath would silently exit 0 through a link.
+  {
+    const linkDir = await mkdtemp(join(tmpdir(), 'reap-link-'));
+    const real = fileURLToPath(new URL('./outbound-next.mjs', import.meta.url));
+    const via = join(linkDir, 'outbound-next.mjs');
+    await symlink(real, via);
+    const exitCode = (p) => new Promise((res) => spawn(process.execPath, [p], { stdio: 'ignore' }).on('exit', res));
+    assert.equal(await exitCode(real), 2); // direct invocation runs the CLI
+    assert.equal(await exitCode(via), 2);  // symlinked invocation must too
+    await rm(linkDir, { recursive: true, force: true });
+  }
+
   // A broken spool must return an error, never a successful message id.
   await rm(join(root, 'outbox'), { recursive: true });
   await writeFile(join(root, 'outbox'), 'not a directory');
   await assert.rejects(tools.sendMessage({ to: 'alan', text }));
-  console.log('PASS: spool JSON, input refusal, MCP lifecycle, notifications, and write failure');
+  console.log('PASS: spool JSON, input refusal, MCP lifecycle, notifications, write failure, and orphan-tmp reaper');
 } finally {
   await rm(root, { recursive: true, force: true });
 }
