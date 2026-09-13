@@ -177,6 +177,14 @@ post-mortem if the panel cannot be made to degrade safely under a Go cap.
 - **Deploy is a success criterion, not a note** (panel claude#2).
 - **Diff-only cross-model is weakest on cross-file/semantic issues** (Ernie Q2): that
   class stays the same-family evaluator's job; necessary-not-sufficient by design.
+- **HOLD is withhold-verdict + orchestrator relay, not a coordinator-parsed outcome**
+  (Ernie template review): the coordinator only routes approve→merge / rework→worker,
+  so "escalate to the orchestrator" was over-claimed. Corrected: a load-bearing HOLD
+  withholds the verdict (never `approve`, never a worker-mis-routing `rework`) and
+  relays to the orchestrator; merge SAFETY holds (no approve → no merge), backstopped
+  by the §9.6 evaluator-timeout. A first-class coordinator hold/escalate route is a
+  follow-up (ADR-0108 Follow-ups) — OUT OF SCOPE here (it changes the single-writer
+  lifecycle contract and needs its own careful review).
 
 ## Post-mortem
 

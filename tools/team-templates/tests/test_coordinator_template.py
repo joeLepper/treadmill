@@ -281,11 +281,16 @@ def test_evaluator_template_pins_panel_backed_review() -> None:
     assert "panel.py review" in body
     assert "--author-family claude" in body
     assert "--min-cross-model 2" in body
-    # BLOCK → rework, with a SURFACED override that escalates for load-bearing PRs.
+    # BLOCK → rework; panel approve is necessary-not-sufficient; routine override allowed.
     assert "NECESSARY-NOT-SUFFICIENT" in body
-    assert "OVERRIDE" in body
-    assert "ESCALATE to the orchestrator" in body
-    # Reduced-coverage is surfaced and holds load-bearing PRs.
+    assert "override" in body.lower()
+    # Load-bearing HOLD: withhold the verdict + escalate to the orchestrator; never
+    # merge past, never mis-route to the worker. Interim wiring named honestly.
+    assert "HOLD" in body
+    assert "withhold the verdict" in body
+    assert "escalation to the orchestrator" in body.lower()
+    assert "INTERIM WIRING" in body
+    # Reduced-coverage surfaced (and a config-refusal exit-2 counts as reduced).
     assert "reduced-coverage" in body.lower()
     # Large diffs: input-truncation size-check, not output finish_reason.
     assert "truncated on INPUT" in body
