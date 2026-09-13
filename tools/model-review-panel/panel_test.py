@@ -114,4 +114,32 @@ check("gate all-degraded -> 1 (fail closed)",
 check("gate open-weight vendors meet quorum -> 0",
       panel.gate_exit_code([rr("qwen", "approve"), rr("glm", "approve")]) == 0)
 
+# Cross-model coverage (Go-cap blind spot): the author's own family is EXCLUDED, and
+# reduced coverage fails closed even on an all-approve panel that meets the quorum.
+capped = [rr("gpt", "approve"), rr("claude", "approve")]      # Go cap: open-weight dropped
+full = [rr("gpt", "approve"), rr("qwen", "approve"), rr("claude", "approve")]
+check("xmf excludes author family", panel.cross_model_families(capped, "claude") == {"gpt"})
+check("reduced when 1 < 2", panel.reduced_coverage(capped, "claude", 2) is True)
+check("not reduced when 2 >= 2", panel.reduced_coverage(full, "claude", 2) is False)
+check("reduced off when threshold None", panel.reduced_coverage(capped, "claude", None) is False)
+check("gate fails closed on Go-cap reduced coverage (approve+quorum but 1 non-author)",
+      panel.gate_exit_code(capped, min_quorum_families=2, author_family="claude", min_cross_model=2) == 1)
+check("gate passes with full cross-model coverage",
+      panel.gate_exit_code(full, min_quorum_families=2, author_family="claude", min_cross_model=2) == 0)
+check("coverage check inert when not requested (backward compat)",
+      panel.gate_exit_code(capped, min_quorum_families=2) == 0)
+# author-family match is case/whitespace-insensitive so a typo cannot fail open.
+check("xmf normalizes case (Claude == claude)",
+      panel.cross_model_families(capped, "Claude") == {"gpt"})
+check("xmf normalizes whitespace", panel.cross_model_families(capped, " claude ") == {"gpt"})
+# validate_coverage_args fails closed on misconfig (Ernie fail-open).
+check("validate: min-cross-model without author-family errors",
+      panel.validate_coverage_args(None, 2) is not None)
+check("validate: unknown author-family errors (fails open otherwise)",
+      panel.validate_coverage_args("anthropic", 2) is not None)
+check("validate: mis-cased known family is accepted",
+      panel.validate_coverage_args("Claude", 2) is None)
+check("validate: valid config ok", panel.validate_coverage_args("claude", 2) is None)
+check("validate: no coverage flags ok", panel.validate_coverage_args(None, None) is None)
+
 print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate")
