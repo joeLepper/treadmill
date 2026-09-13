@@ -52,9 +52,10 @@ DEFAULT_FAMILIES = ["open-weight", "gpt", "claude"]
 # A PASS (exit 0) requires verdicts from at least this many distinct families, so a
 # gate never passes on one surviving reviewer as if the full cross-family panel ran.
 MIN_QUORUM_FAMILIES = 2
-# A reasoning model burns ~1000 tokens before any visible text (measured on
-# glm-5.2/5.3), so the ceiling must clear reasoning AND a full review.
-MAX_TOKENS = 4000
+# A reasoning model burns ~1000+ tokens before any visible text (measured on
+# glm-5.2/5.3) and a full adversarial review adds more; 4000 truncated glm-5.3
+# (finish_reason=length), so give the ceiling headroom for reasoning AND the review.
+MAX_TOKENS = 8000
 
 RUBRIC = """You are one reviewer on an adversarial cross-model panel. Review the ARTIFACT below.
 
