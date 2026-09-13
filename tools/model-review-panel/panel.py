@@ -291,12 +291,34 @@ def panel_verdict(results):
     return max(seen, key=lambda v: VERDICT_RANK.get(v, 0))
 
 
+# Every family label the panel can emit (vendor_of outputs + the two paid legs). A
+# --author-family outside this set would exclude nothing and fail OPEN, so it is
+# rejected up front (validate_coverage_args).
+KNOWN_FAMILIES = {"qwen", "glm", "kimi", "minimax", "deepseek", "longcat", "mimo",
+                  "gpt", "claude"}
+
+
 def cross_model_families(results, author_family):
     """Distinct families that returned a verdict, EXCLUDING the author's own family —
     the genuinely-independent voices. On a Go cap the open-weight tier drops out, so
-    this is the honest count of cross-model coverage (not "did the panel run")."""
+    this is the honest count of cross-model coverage (not "did the panel run").
+    Case/whitespace-normalized so a mis-cased --author-family cannot fail open."""
+    af = (author_family or "").lower().strip()
     return {r["family"] for r in results
-            if r["verdict"] and (not author_family or r["family"] != author_family)}
+            if r["verdict"] and (not af or r["family"].lower().strip() != af)}
+
+
+def validate_coverage_args(author_family, min_cross_model):
+    """Fail-closed guard on the coverage flags: a misconfiguration must ERROR, never
+    silently pass. Returns an error string, or None when the args are safe."""
+    if min_cross_model and not author_family:
+        return ("--min-cross-model requires --author-family, else the author's own "
+                "family is counted as a cross-model voice (silent no-op)")
+    if author_family and author_family.lower().strip() not in KNOWN_FAMILIES:
+        return (f"--author-family {author_family!r} is not a known family "
+                f"({', '.join(sorted(KNOWN_FAMILIES))}); a wrong value excludes nothing "
+                f"and fails open")
+    return None
 
 
 def reduced_coverage(results, author_family, min_cross_model):
@@ -397,6 +419,10 @@ def main():
                   f"{', '.join(bad)}. Allowed: {', '.join(sorted(OPEN_WEIGHT_ALLOWED))}",
                   file=sys.stderr)
             return 2
+    cov_err = validate_coverage_args(args.author_family, args.min_cross_model)
+    if cov_err:
+        print(f"refusing to run with an unsafe coverage config: {cov_err}", file=sys.stderr)
+        return 2
     master_key = load_gateway_secret(GATEWAY_SECRET)
     roster = build_roster(families, open_weight_models, prompt, args.timeout, master_key)
 

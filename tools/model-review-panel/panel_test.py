@@ -128,5 +128,18 @@ check("gate passes with full cross-model coverage",
       panel.gate_exit_code(full, min_quorum_families=2, author_family="claude", min_cross_model=2) == 0)
 check("coverage check inert when not requested (backward compat)",
       panel.gate_exit_code(capped, min_quorum_families=2) == 0)
+# author-family match is case/whitespace-insensitive so a typo cannot fail open.
+check("xmf normalizes case (Claude == claude)",
+      panel.cross_model_families(capped, "Claude") == {"gpt"})
+check("xmf normalizes whitespace", panel.cross_model_families(capped, " claude ") == {"gpt"})
+# validate_coverage_args fails closed on misconfig (Ernie fail-open).
+check("validate: min-cross-model without author-family errors",
+      panel.validate_coverage_args(None, 2) is not None)
+check("validate: unknown author-family errors (fails open otherwise)",
+      panel.validate_coverage_args("anthropic", 2) is not None)
+check("validate: mis-cased known family is accepted",
+      panel.validate_coverage_args("Claude", 2) is None)
+check("validate: valid config ok", panel.validate_coverage_args("claude", 2) is None)
+check("validate: no coverage flags ok", panel.validate_coverage_args(None, None) is None)
 
 print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate")
