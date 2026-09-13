@@ -1,6 +1,6 @@
 # ADR-0104: Open-weight sibling (Gerald) — Codex harness on the OpenCode Go endpoint
 
-- **Status:** accepted (2026-09-11; cross-model review by Fran cleared over two rounds + sibling co-sign by Ernie, verified live)
+- **Status:** accepted (2026-09-11; cross-model review by Fran cleared over two rounds + sibling co-sign by Ernie, verified live). OPERATIONAL NOTE (2026-09-12): the persistent Gerald agent was stood down (services stopped + disabled) by operator decision. Open-weight capability is now consumed as REVIEW via the ADR-0107 model gateway + cross-model panel, not as a persistent agent — this reserves the OpenCode Go budget for reviews. The Gerald substrate (this ADR's harness/shim/bridge) still underlies the gateway's open-weight access and the runtime is revivable; the decision here is not reversed, only the always-on agent is retired.
 - **Date:** 2026-09-11
 - **Related:** ADR-0102 (non-Claude-Code sibling via the Codex App Server), ADR-0103 (shared agent skills)
 
