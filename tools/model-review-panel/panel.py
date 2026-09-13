@@ -291,20 +291,44 @@ def panel_verdict(results):
     return max(seen, key=lambda v: VERDICT_RANK.get(v, 0))
 
 
-def gate_exit_code(results, min_quorum_families=MIN_QUORUM_FAMILIES):
-    """Fail closed. A gate passes (exit 0) ONLY when the panel neither blocks nor
-    falls short of a cross-family quorum:
-      - `block` -> 1.
-      - `no-verdict` (every leg degraded) -> 1.
-      - an approve / approve-with-notes but with verdicts from fewer than
-        `min_quorum_families` distinct families -> 1 (a lone surviving reviewer must
-        not pass as if the whole cross-family panel reviewed the artifact).
-      - approve / approve-with-notes with the quorum met -> 0."""
+def cross_model_families(results, author_family):
+    """Distinct families that returned a verdict, EXCLUDING the author's own family —
+    the genuinely-independent voices. On a Go cap the open-weight tier drops out, so
+    this is the honest count of cross-model coverage (not "did the panel run")."""
+    return {r["family"] for r in results
+            if r["verdict"] and (not author_family or r["family"] != author_family)}
+
+
+def reduced_coverage(results, author_family, min_cross_model):
+    """True when cross-model coverage enforcement is on and too few genuinely
+    independent (non-author) families returned a verdict. A Go cap that leaves only
+    the author's family + one other trips this even though the panel's own quorum is
+    met and it returned a clean verdict."""
+    if not min_cross_model:
+        return False
+    return len(cross_model_families(results, author_family)) < min_cross_model
+
+
+def gate_exit_code(results, min_quorum_families=MIN_QUORUM_FAMILIES,
+                   author_family=None, min_cross_model=None):
+    """Fail closed. A gate passes (exit 0) ONLY when the panel neither blocks, falls
+    short of a cross-family quorum, NOR has reduced cross-model coverage:
+      - `block` -> 1; `no-verdict` (every leg degraded) -> 1.
+      - approve/approve-with-notes with fewer than `min_quorum_families` distinct
+        families -> 1 (a lone surviving reviewer must not pass for the whole panel).
+      - reduced cross-model coverage (fewer than `min_cross_model` non-author
+        families voted) -> 1 EVEN with no block — a Go cap silently drops the
+        open-weight tier, so this is the load-bearing enforcement.
+      - otherwise -> 0."""
     verdict = panel_verdict(results)
     if verdict not in ("approve", "approve-with-notes"):
         return 1
     families = {r["family"] for r in results if r["verdict"]}
-    return 0 if len(families) >= min_quorum_families else 1
+    if len(families) < min_quorum_families:
+        return 1
+    if reduced_coverage(results, author_family, min_cross_model):
+        return 1
+    return 0
 
 
 # --- output ------------------------------------------------------------------
@@ -346,6 +370,14 @@ def main():
     rv.add_argument("--timeout", type=int, default=240)
     rv.add_argument("--min-quorum-families", type=int, default=MIN_QUORUM_FAMILIES,
                     help="distinct families that must return a verdict for a PASS (exit 0)")
+    rv.add_argument("--author-family", default=None,
+                    help="the requesting author's model family (e.g. claude); excluded "
+                         "from the cross-model coverage count so a same-family voice "
+                         "does not inflate it")
+    rv.add_argument("--min-cross-model", type=int, default=None,
+                    help="require at least N genuinely-independent (non-author) "
+                         "families to return a verdict; fewer is reduced-coverage and "
+                         "fails closed even with no BLOCK")
     args = ap.parse_args()
 
     try:
@@ -374,13 +406,22 @@ def main():
         for f in futures.as_completed(fut):
             results.append(f.result())
 
+    reduced = reduced_coverage(results, args.author_family, args.min_cross_model)
+    xmf = sorted(cross_model_families(results, args.author_family))
     if args.format == "json":
         print(json.dumps({"artifact": args.artifact,
                           "panel_verdict": panel_verdict(results),
+                          "cross_model_families": xmf,
+                          "reduced_coverage": reduced,
                           "reviewers": results}, indent=2))
     else:
         print(render_human(args.artifact, results))
-    return gate_exit_code(results, args.min_quorum_families)
+        if args.min_cross_model:
+            note = "OK" if not reduced else f"REDUCED-COVERAGE (need {args.min_cross_model})"
+            print(f"Cross-model coverage: {len(xmf)} non-author families "
+                  f"[{', '.join(xmf) or 'none'}] — {note}")
+    return gate_exit_code(results, args.min_quorum_families,
+                          args.author_family, args.min_cross_model)
 
 
 if __name__ == "__main__":
