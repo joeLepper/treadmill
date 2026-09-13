@@ -185,6 +185,11 @@ After writing the plan doc and before calling `treadmill plan submit`:
    panel reports any reviewer that returned weak/empty output and never counts it as approval;
    re-run or record who actually reviewed. Routine changes still get the panel; high-stakes
    (a plan submission) additionally gets the sibling pass.
+   **Capacity caveat:** while the open-weight leg is capped (OpenCode Go 5-hour cap → 401),
+   the panel yields only GPT as a genuinely non-Anthropic voice (Claude is same-family as
+   the author), so "two cross-model passes" degrades to one. The panel still fails closed (it
+   will not falsely PASS), but for high-stakes work during a cap, wait for the open-weight leg
+   or obtain a second non-Anthropic voice another way.
 
 4. **Address review findings** — for CRITICAL items, fix before submitting. For scope gaps and
    minor items, either fix them or explicitly defer with a note in the Risks section.
