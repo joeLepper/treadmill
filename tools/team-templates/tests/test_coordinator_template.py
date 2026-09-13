@@ -269,6 +269,30 @@ def test_evaluator_template_pins_batch_per_wake() -> None:
     assert "every queued PR in one wake" in body
 
 
+def test_evaluator_template_pins_panel_backed_review() -> None:
+    """ADR-0108: the evaluator's review is panel-backed. Pin the load-bearing
+    clauses (whitespace-normalized) so a template edit can't silently drop the
+    cross-model gate, the coverage flags, the override-surface/escalate rule, the
+    reduced-coverage handling, or the large-diff input-truncation guard."""
+    body = " ".join(
+        (TEMPLATES_DIR / "evaluator" / "CLAUDE.md.tmpl").read_text().split()
+    )
+    # The panel step + the coverage-enforcement flags (fail-closed on a Go cap).
+    assert "panel.py review" in body
+    assert "--author-family claude" in body
+    assert "--min-cross-model 2" in body
+    # BLOCK → rework, with a SURFACED override that escalates for load-bearing PRs.
+    assert "NECESSARY-NOT-SUFFICIENT" in body
+    assert "OVERRIDE" in body
+    assert "ESCALATE to the orchestrator" in body
+    # Reduced-coverage is surfaced and holds load-bearing PRs.
+    assert "reduced-coverage" in body.lower()
+    # Large diffs: input-truncation size-check, not output finish_reason.
+    assert "truncated on INPUT" in body
+    # The diff-only coverage bound is stated.
+    assert "Diff-only bound" in body
+
+
 # ── Workspace isolation (task 801256e3) ──────────────────────────────
 
 
