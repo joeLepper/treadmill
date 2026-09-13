@@ -1,0 +1,12 @@
+[Unit]
+Description=Fleet model gateway (ADR-0107) — LiteLLM in front of OpenCode Go open-weight models
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/model-gateway/gateway-supervise.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

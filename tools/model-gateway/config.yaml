@@ -1,0 +1,22 @@
+# Fleet model gateway (ADR-0107) — v1 CONFIG-MODE. Fronts ONLY OpenCode Go
+# open-weight models; the model_list IS the allowlist (a proprietary model is not
+# listed, so it 404s). GPT/Claude route via their own OAuth CLIs, NOT this gateway,
+# so no Go budget is ever spent on gpt-*/grok-*. No router fallbacks are configured,
+# so there is no fallback path to an out-of-list model.
+model_list:
+  - model_name: qwen3.8-max
+    litellm_params: {model: openai/qwen3.8-max, api_base: https://opencode.ai/zen/go/v1, api_key: os.environ/OPENCODE_API_KEY, extra_headers: {x-opencode-session: fleet-panel}}
+  - model_name: glm-5.2
+    litellm_params: {model: openai/glm-5.2, api_base: https://opencode.ai/zen/go/v1, api_key: os.environ/OPENCODE_API_KEY, extra_headers: {x-opencode-session: fleet-panel}}
+  - model_name: glm-5.3
+    litellm_params: {model: openai/glm-5.3, api_base: https://opencode.ai/zen/go/v1, api_key: os.environ/OPENCODE_API_KEY, extra_headers: {x-opencode-session: fleet-panel}}
+  - model_name: kimi-k2.7-code
+    litellm_params: {model: openai/kimi-k2.7-code, api_base: https://opencode.ai/zen/go/v1, api_key: os.environ/OPENCODE_API_KEY, extra_headers: {x-opencode-session: fleet-panel}}
+  - model_name: kimi-k3
+    litellm_params: {model: openai/kimi-k3, api_base: https://opencode.ai/zen/go/v1, api_key: os.environ/OPENCODE_API_KEY, extra_headers: {x-opencode-session: fleet-panel}}
+  - model_name: minimax-m3
+    litellm_params: {model: openai/minimax-m3, api_base: https://opencode.ai/zen/go/v1, api_key: os.environ/OPENCODE_API_KEY, extra_headers: {x-opencode-session: fleet-panel}}
+litellm_settings:
+  drop_params: true
+general_settings:
+  master_key: os.environ/GATEWAY_MASTER_KEY

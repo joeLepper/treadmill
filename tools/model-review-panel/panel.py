@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""Cross-model review panel (ADR-0107 / ADR-0105).
+
+Fan a review artifact (an ADR, a plan, a diff, a design note) out to a panel of
+models spanning THREE provider families, collect an adversarial review from each,
+and print ranked verdicts plus a synthesis. One command; single-shot calls, not
+heavyweight agentic sessions.
+
+Routing (operator directive 2026-09-12) — each family goes to the provider we
+already pay for, and OpenCode Go budget is spent ONLY on open-weight models:
+  - open-weight (Qwen/GLM/Kimi/MiniMax) -> the fleet gateway (LiteLLM -> OpenCode Go)
+  - gpt        -> `codex exec` on the Codex CLI OAuth session (NOT an API key)
+  - claude     -> `claude -p` on the Claude Code subscription (ANTHROPIC_API_KEY
+                  is unset so the subscription login is used, NOT the API key)
+
+The panel degrades: a reviewer that errors or returns no visible text is reported
+as such and never counted as a silent approval; the panel still returns the rest.
+
+Usage:
+  panel.py review --artifact PATH [--models qwen3.8-max,glm-5.3,...]
+                  [--families open-weight,gpt,claude]
+                  [--format human|json] [--timeout SECONDS]
+"""
+import argparse
+import concurrent.futures as futures
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+# --- configuration -----------------------------------------------------------
+
+GATEWAY_URL = os.environ.get("PANEL_GATEWAY_URL", "http://127.0.0.1:4250/v1")
+GATEWAY_SECRET = os.environ.get(
+    "PANEL_GATEWAY_SECRET", os.path.expanduser("~/model-gateway/secret.env")
+)
+# One model per open-weight FAMILY (genuine cross-family diversity), plus the two
+# paid families. Override the open-weight set with --models.
+DEFAULT_OPEN_WEIGHT = ["qwen3.8-max", "glm-5.3", "kimi-k3", "minimax-m3"]
+# The open-weight models the gateway actually serves. --models is validated against
+# this so a paid-family or unknown model id can never be labelled open-weight and
+# routed to the gateway (the gateway also 404s it, but fail early and clearly).
+OPEN_WEIGHT_ALLOWED = {"qwen3.8-max", "glm-5.2", "glm-5.3",
+                       "kimi-k2.7-code", "kimi-k3", "minimax-m3"}
+DEFAULT_FAMILIES = ["open-weight", "gpt", "claude"]
+# A PASS (exit 0) requires verdicts from at least this many distinct families, so a
+# gate never passes on one surviving reviewer as if the full cross-family panel ran.
+MIN_QUORUM_FAMILIES = 2
+# A reasoning model burns ~1000 tokens before any visible text (measured on
+# glm-5.2/5.3), so the ceiling must clear reasoning AND a full review.
+MAX_TOKENS = 4000
+
+RUBRIC = """You are one reviewer on an adversarial cross-model panel. Review the ARTIFACT below.
+
+Rules:
+- A finding is a claim you can demonstrate. State the trigger (inputs/state) and the wrong outcome.
+- Cite the exact section or line the artifact contradicts. If no invariant is at risk, it is a preference; label it.
+- Rank each finding BLOCKING (an invariant an adversary or an ordinary accident can walk through) or NON-BLOCKING.
+- Do not pad. Fewer, harder findings beat many speculative ones.
+
+Output EXACTLY this shape and nothing before it:
+VERDICT: block | approve-with-notes | approve
+1. [BLOCKING|NON-BLOCKING] <one-line claim> - <trigger> - <where in the artifact>
+2. ...
+(If there are no findings, write "No findings." after the VERDICT line.)
+"""
+
+VERDICT_RANK = {"block": 2, "approve-with-notes": 1, "approve": 0}
+
+
+# --- helpers -----------------------------------------------------------------
+
+def load_gateway_secret(path):
+    """Read GATEWAY_MASTER_KEY from the gateway secret.env without echoing it."""
+    key = os.environ.get("GATEWAY_MASTER_KEY")
+    if key:
+        return key
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                m = re.match(r"^(?:export\s+)?GATEWAY_MASTER_KEY=(.+)$", line)
+                if m:
+                    return m.group(1).strip().strip('"').strip("'")
+    except OSError:
+        return None
+    return None
+
+
+def strip_reasoning(text):
+    """Remove inline reasoning some models emit (e.g. MiniMax <think>...</think>)."""
+    if not text:
+        return text
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # A dangling open tag (truncated mid-reasoning) means no usable answer — strip to
+    # end so a partial "<reasoning>VERDICT: approve" cannot parse as a real verdict.
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<reasoning>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
+
+def parse_verdict(text):
+    if not text:
+        return None
+    # Anchor to LINE START (the rubric requires the verdict as its own line), so a
+    # quoted "VERDICT: approve" inside prose is ignored. (?![\w-]) rejects "approved"
+    # / "approve-with-notes-pending". Return the WORST of all line-start matches
+    # (fail-closed): a reviewer that blocks anywhere blocks.
+    matches = re.findall(r"^\s*VERDICT:\s*(block|approve-with-notes|approve)(?![\w-])",
+                         text, re.IGNORECASE | re.MULTILINE)
+    if not matches:
+        return None
+    return max((m.lower() for m in matches), key=lambda v: VERDICT_RANK.get(v, 0))
+
+
+def build_prompt(artifact_path, artifact_text):
+    return f"{RUBRIC}\n\nARTIFACT ({artifact_path}):\n\n{artifact_text}\n"
+
+
+# --- provider legs -----------------------------------------------------------
+
+def call_gateway(model, prompt, timeout, master_key):
+    """Open-weight leg: POST to the fleet gateway (LiteLLM -> OpenCode Go)."""
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": MAX_TOKENS,
+    }).encode()
+    req = urllib.request.Request(
+        f"{GATEWAY_URL}/chat/completions", data=body,
+        headers={"Authorization": f"Bearer {master_key}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        d = json.load(resp)
+    ch = (d.get("choices") or [{}])[0]
+    if ch.get("finish_reason") == "length":
+        # A truncated review is untrustworthy (its verdict/findings may be cut off);
+        # degrade rather than count a partial "VERDICT: approve" — raise MAX_TOKENS.
+        raise RuntimeError("gateway response truncated (finish_reason=length)")
+    return (ch.get("message", {}) or {}).get("content") or ""
+
+
+def call_codex(prompt, timeout, model=None):
+    """GPT leg: `codex exec` on the Codex CLI OAuth session. Runs in an ISOLATED
+    minimal CODEX_HOME holding only a fresh copy of the OAuth token — the default
+    home loads MCP servers (Fran's fran_msg, etc.) whose startup pushed this leg
+    past a 240s timeout; a clean home returns in ~9s. `-o` writes the final message
+    to a file, so we never parse the event stream.
+
+    SECURITY: the artifact is UNTRUSTED, so we run `-s read-only -c
+    approval_policy=never` — never `--dangerously-bypass-approvals-and-sandbox`. A
+    prompt-injection payload in the artifact can then not write, execute, or reach
+    the network from the review; model-generated commands are auto-denied, not run."""
+    if not shutil.which("codex"):
+        raise RuntimeError("codex CLI not found")
+    src_auth = os.path.expanduser("~/.codex/auth.json")
+    if not os.path.exists(src_auth):
+        raise RuntimeError("no Codex OAuth token (~/.codex/auth.json)")
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.join(td, "home")
+        work = os.path.join(td, "work")  # cwd, kept EMPTY and off the token's path
+        os.makedirs(home)
+        os.makedirs(work)
+        shutil.copy(src_auth, os.path.join(home, "auth.json"))  # fresh token, no MCP
+        out = os.path.join(work, "last.txt")
+        env = dict(os.environ)
+        env["CODEX_HOME"] = home
+        cmd = ["codex", "exec", "--skip-git-repo-check",
+               "-s", "read-only", "-c", "approval_policy=never", "-o", out]
+        if model:
+            cmd += ["-m", model]
+        cmd += [prompt]
+        # cwd=work (empty, does not contain CODEX_HOME) so a crafted artifact cannot
+        # surface the OAuth token from the working directory.
+        proc = subprocess.run(cmd, cwd=work, timeout=timeout, capture_output=True, text=True,
+                              env=env, stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            # A failed run's output is untrustworthy; degrade rather than risk
+            # counting a partial "VERDICT: approve" as a real verdict.
+            raise RuntimeError(f"codex exec exited {proc.returncode}: "
+                               f"{(proc.stderr or '').strip()[:200] or 'no stderr'}")
+        try:
+            with open(out) as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+
+def call_claude(prompt, timeout, model="sonnet"):
+    """Claude leg: `claude -p` on the subscription. Unset ANTHROPIC_API_KEY so the
+    claude.ai login is used, not a stray API key (operator: subscription, not key)."""
+    if not shutil.which("claude"):
+        raise RuntimeError("claude CLI not found")
+    env = dict(os.environ)
+    env.pop("ANTHROPIC_API_KEY", None)
+    # SECURITY: the artifact is UNTRUSTED and inlined in the prompt. A DENYLIST is
+    # fail-open on this boundary — it left Agent/Workflow/Skill/ToolSearch/Read
+    # exposed, and Agent/Workflow spawn subagents that do NOT inherit the denylist
+    # (execution + exfil). Use a positive ALLOWLIST that grants NOTHING: a non-empty
+    # allowlist of a single nonexistent tool is honoured and denies every real tool
+    # (verified: Bash refused, Read denied). The review needs no tools — the artifact
+    # is already in the prompt. (`--allowedTools ""` is IGNORED, so Bash still ran;
+    # the sentinel name is required.)
+    proc = subprocess.run(
+        ["claude", "-p", prompt, "--model", model, "--allowedTools", "__panel_no_tools__"],
+        env=env, timeout=timeout, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude -p exited {proc.returncode}: "
+                           f"{(proc.stderr or '').strip()[:200] or 'no stderr'}")
+    # Drop the one-off connector/auth warning lines claude may print to stdout.
+    lines = [l for l in proc.stdout.splitlines()
+             if not l.strip().startswith(("⚠", "Warning:"))]
+    return "\n".join(lines).strip()
+
+
+# --- reviewer orchestration --------------------------------------------------
+
+def run_reviewer(name, family, fn, timeout):
+    start = time.time()
+    result = {"name": name, "family": family, "verdict": None,
+              "status": "ok", "error": None, "latency_s": None, "review": ""}
+    try:
+        raw = fn()
+        review = strip_reasoning(raw)
+        result["review"] = review
+        if not review:
+            result["status"] = "no-output"  # reasoning consumed the budget, or empty
+        else:
+            v = parse_verdict(review)
+            result["verdict"] = v
+            if v is None:
+                result["status"] = "no-verdict"
+    except subprocess.TimeoutExpired as e:
+        result["status"], result["error"] = "timeout", str(e)
+    except TimeoutError as e:  # socket timeout from the gateway leg
+        result["status"], result["error"] = "timeout", str(e)
+    except (urllib.error.HTTPError,) as e:
+        detail = ""
+        try:
+            detail = json.loads(e.read()).get("error", {}).get("message", "")
+        except Exception:
+            pass
+        result["status"], result["error"] = "error", f"HTTP {e.code}: {detail or e.reason}"
+    except Exception as e:  # noqa: BLE001 - a leg failure must degrade, not crash the panel
+        result["status"], result["error"] = "error", str(e)
+    result["latency_s"] = round(time.time() - start, 1)
+    return result
+
+
+def vendor_of(model):
+    """The model's VENDOR family, for cross-family quorum — the open-weight models
+    span distinct vendors, so they must not collapse to one "open-weight" family."""
+    m = model.lower()
+    for pref in ("qwen", "glm", "kimi", "minimax", "deepseek", "longcat", "mimo"):
+        if m.startswith(pref):
+            return pref
+    return model
+
+
+def build_roster(families, open_weight_models, prompt, timeout, master_key):
+    roster = []
+    if "open-weight" in families:
+        if master_key:
+            for m in open_weight_models:
+                roster.append((m, vendor_of(m),
+                               lambda m=m: call_gateway(m, prompt, timeout, master_key)))
+        else:
+            roster.append(("open-weight", "open-weight",
+                           lambda: (_ for _ in ()).throw(RuntimeError(
+                               "no gateway master key; is the gateway configured?"))))
+    if "gpt" in families:
+        roster.append(("gpt", "gpt", lambda: call_codex(prompt, timeout)))
+    if "claude" in families:
+        roster.append(("claude", "claude", lambda: call_claude(prompt, timeout)))
+    return roster
+
+
+def panel_verdict(results):
+    seen = [r["verdict"] for r in results if r["verdict"]]
+    if not seen:
+        return "no-verdict"
+    return max(seen, key=lambda v: VERDICT_RANK.get(v, 0))
+
+
+def gate_exit_code(results, min_quorum_families=MIN_QUORUM_FAMILIES):
+    """Fail closed. A gate passes (exit 0) ONLY when the panel neither blocks nor
+    falls short of a cross-family quorum:
+      - `block` -> 1.
+      - `no-verdict` (every leg degraded) -> 1.
+      - an approve / approve-with-notes but with verdicts from fewer than
+        `min_quorum_families` distinct families -> 1 (a lone surviving reviewer must
+        not pass as if the whole cross-family panel reviewed the artifact).
+      - approve / approve-with-notes with the quorum met -> 0."""
+    verdict = panel_verdict(results)
+    if verdict not in ("approve", "approve-with-notes"):
+        return 1
+    families = {r["family"] for r in results if r["verdict"]}
+    return 0 if len(families) >= min_quorum_families else 1
+
+
+# --- output ------------------------------------------------------------------
+
+def render_human(artifact, results):
+    out = [f"Cross-model review panel — {artifact}",
+           f"Reviewers: {len(results)} | Panel verdict: {panel_verdict(results).upper()}", ""]
+    order = {"block": 0, "approve-with-notes": 1, "approve": 2, None: 3}
+    for r in sorted(results, key=lambda r: order.get(r["verdict"], 3)):
+        tag = r["verdict"].upper() if r["verdict"] else r["status"].upper()
+        head = f"[{tag}] {r['name']} ({r['family']}, {r['latency_s']}s)"
+        out.append(head)
+        if r["status"] != "ok":
+            out.append(f"    ! {r['status']}: {r['error'] or 'no usable output'}")
+        if r["review"]:
+            body = "\n".join("    " + l for l in r["review"].splitlines() if l.strip())
+            out.append(body)
+        out.append("")
+    blocking = sum(1 for r in results if r["verdict"] == "block")
+    degraded = [r["name"] for r in results if r["status"] != "ok"]
+    out.append(f"Synthesis: {blocking} reviewer(s) blocking; "
+               f"{sum(1 for r in results if r['verdict']=='approve-with-notes')} with notes; "
+               f"{sum(1 for r in results if r['verdict']=='approve')} approve.")
+    if degraded:
+        out.append(f"Degraded (not counted): {', '.join(degraded)}.")
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Cross-model review panel")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    rv = sub.add_parser("review", help="review an artifact with the panel")
+    rv.add_argument("--artifact", required=True, help="path to the file to review")
+    rv.add_argument("--models", default=",".join(DEFAULT_OPEN_WEIGHT),
+                    help="comma-separated open-weight models")
+    rv.add_argument("--families", default=",".join(DEFAULT_FAMILIES),
+                    help="comma-separated: open-weight,gpt,claude")
+    rv.add_argument("--format", choices=["human", "json"], default="human")
+    rv.add_argument("--timeout", type=int, default=240)
+    rv.add_argument("--min-quorum-families", type=int, default=MIN_QUORUM_FAMILIES,
+                    help="distinct families that must return a verdict for a PASS (exit 0)")
+    args = ap.parse_args()
+
+    try:
+        with open(args.artifact) as fh:
+            artifact_text = fh.read()
+    except OSError as e:
+        print(f"cannot read artifact: {e}", file=sys.stderr)
+        return 2
+
+    prompt = build_prompt(args.artifact, artifact_text)
+    families = [f.strip() for f in args.families.split(",") if f.strip()]
+    open_weight_models = [m.strip() for m in args.models.split(",") if m.strip()]
+    if "open-weight" in families:
+        bad = [m for m in open_weight_models if m not in OPEN_WEIGHT_ALLOWED]
+        if bad:
+            print(f"refusing to route non-open-weight model(s) through the gateway: "
+                  f"{', '.join(bad)}. Allowed: {', '.join(sorted(OPEN_WEIGHT_ALLOWED))}",
+                  file=sys.stderr)
+            return 2
+    master_key = load_gateway_secret(GATEWAY_SECRET)
+    roster = build_roster(families, open_weight_models, prompt, args.timeout, master_key)
+
+    results = []
+    with futures.ThreadPoolExecutor(max_workers=len(roster) or 1) as ex:
+        fut = {ex.submit(run_reviewer, n, fam, fn, args.timeout): n for n, fam, fn in roster}
+        for f in futures.as_completed(fut):
+            results.append(f.result())
+
+    if args.format == "json":
+        print(json.dumps({"artifact": args.artifact,
+                          "panel_verdict": panel_verdict(results),
+                          "reviewers": results}, indent=2))
+    else:
+        print(render_human(args.artifact, results))
+    return gate_exit_code(results, args.min_quorum_families)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
