@@ -165,9 +165,11 @@ def call_codex(prompt, timeout, model=None):
         raise RuntimeError("no Codex OAuth token (~/.codex/auth.json)")
     with tempfile.TemporaryDirectory() as td:
         home = os.path.join(td, "home")
+        work = os.path.join(td, "work")  # cwd, kept EMPTY and off the token's path
         os.makedirs(home)
+        os.makedirs(work)
         shutil.copy(src_auth, os.path.join(home, "auth.json"))  # fresh token, no MCP
-        out = os.path.join(td, "last.txt")
+        out = os.path.join(work, "last.txt")
         env = dict(os.environ)
         env["CODEX_HOME"] = home
         cmd = ["codex", "exec", "--skip-git-repo-check",
@@ -175,7 +177,9 @@ def call_codex(prompt, timeout, model=None):
         if model:
             cmd += ["-m", model]
         cmd += [prompt]
-        proc = subprocess.run(cmd, cwd=td, timeout=timeout, capture_output=True, text=True,
+        # cwd=work (empty, does not contain CODEX_HOME) so a crafted artifact cannot
+        # surface the OAuth token from the working directory.
+        proc = subprocess.run(cmd, cwd=work, timeout=timeout, capture_output=True, text=True,
                               env=env, stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
             # A failed run's output is untrustworthy; degrade rather than risk
@@ -196,11 +200,16 @@ def call_claude(prompt, timeout, model="sonnet"):
         raise RuntimeError("claude CLI not found")
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)
-    # SECURITY: the artifact is UNTRUSTED. Deny the execution/exfiltration tools so a
-    # prompt-injection payload in the artifact cannot run commands or reach out.
+    # SECURITY: the artifact is UNTRUSTED and inlined in the prompt. A DENYLIST is
+    # fail-open on this boundary — it left Agent/Workflow/Skill/ToolSearch/Read
+    # exposed, and Agent/Workflow spawn subagents that do NOT inherit the denylist
+    # (execution + exfil). Use a positive ALLOWLIST that grants NOTHING: a non-empty
+    # allowlist of a single nonexistent tool is honoured and denies every real tool
+    # (verified: Bash refused, Read denied). The review needs no tools — the artifact
+    # is already in the prompt. (`--allowedTools ""` is IGNORED, so Bash still ran;
+    # the sentinel name is required.)
     proc = subprocess.run(
-        ["claude", "-p", prompt, "--model", model,
-         "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"],
+        ["claude", "-p", prompt, "--model", model, "--allowedTools", "__panel_no_tools__"],
         env=env, timeout=timeout, capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0:

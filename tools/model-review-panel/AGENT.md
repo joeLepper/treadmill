@@ -49,6 +49,14 @@ then a synthesis. The panel verdict is the WORST reviewer verdict.
   removed before parsing, so a reasoning model's plan never leaks into the verdict.
 - **No API keys.** gpt and claude use OAuth/subscription; only the gateway holds the
   Go API key.
+- **Untrusted-artifact safe.** The artifact is untrusted input inlined in the prompt.
+  Both paid legs are fail-closed: the codex leg runs `-s read-only -c
+  approval_policy=never` (no execute/write/network) in an empty cwd off the token's
+  path; the claude leg uses a POSITIVE allowlist that grants NO tools
+  (`--allowedTools __panel_no_tools__`). A denylist is fail-open on this boundary —
+  it left Agent/Workflow/Skill/ToolSearch exposed, and Agent/Workflow spawn subagents
+  that do not inherit it (execution + exfil). `--allowedTools ""` is ignored (Bash
+  still ran), so a non-empty sentinel is required.
 
 ## Config
 
@@ -72,3 +80,8 @@ no-verdict / all-degraded). The live legs are exercised by running the tool.
    keys + budgets (ADR-0107 DB-mode) are a governance follow-up.
 3. The gpt leg copies `~/.codex/auth.json` per call; if that token is expired the
    leg degrades (report), it does not refresh it.
+4. Wiring as a CI gate: pin `--min-quorum-families >= 2` and do NOT expose the flag
+   to the gate caller (a caller could set 1 for a lone-reviewer pass).
+5. Truncation is caught only on the gateway leg (`finish_reason=length`). The codex
+   and claude legs have no truncation check — safe today only because the rubric puts
+   the VERDICT line first (truncation cuts findings, not the verdict), not parity.
