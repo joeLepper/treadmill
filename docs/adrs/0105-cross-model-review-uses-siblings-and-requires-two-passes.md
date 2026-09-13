@@ -1,6 +1,6 @@
 # ADR-0105: Cross-model review uses the sibling reviewers and requires two independent passes
 
-- **Status:** accepted (2026-09-11; operator-directed; evidenced by the ADR-0104 review round where two cross-model passes found disjoint defects)
+- **Status:** accepted (2026-09-11; operator-directed; evidenced by the ADR-0104 review round where two cross-model passes found disjoint defects). MECHANISM UPDATE (2026-09-13, operator-directed): the cross-model passes are now run by the ADR-0107 review PANEL (`tools/model-review-panel/panel.py`), which convenes multiple cross-family reviewers (open-weight via the gateway + GPT + Claude) in one command and fails closed on a cross-family quorum. This REPLACES both the Tapestry evaluator agents (the original "away from Tapestry" intent) and the now-retired per-sibling relay (gerald-bridge/fran-bridge; Gerald stood down per ADR-0104). The two-pass requirement stands and is satisfied by the panel's cross-family quorum; a context-rich same-family sibling review remains the complementary layer. The /plan, /decide, and adversarial-review skills were rewired accordingly.
 - **Date:** 2026-09-11
 - **Related:** ADR-0104 (Gerald, open-weight sibling), ADR-0102 (Fran, GPT sibling)
 

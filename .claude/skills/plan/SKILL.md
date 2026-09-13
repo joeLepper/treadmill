@@ -140,14 +140,19 @@ After writing the plan doc and before calling `treadmill plan submit`:
 1. **Run `treadmill plan validate`** — catches schema violations, missing `description` fields,
    and `depends_on` syntax errors. Fix all findings before proceeding.
 
-2. **Get an adversarial review — not a read-through** — relay the plan file as an action request
-   to at least one sibling (or invoke the `adversarial-review` skill):
+2. **Get an adversarial review — not a read-through.** Run the cross-model review panel on the
+   plan file. It convenes independent cross-family reviewers (open-weight via the gateway + GPT
+   + Claude) in one command and fails closed. This IS the adversarial-review mechanism; it
+   REPLACES the Tapestry evaluators and the retired gerald-bridge/fran-bridge relay
+   (ADR-0105, ADR-0107):
    ```bash
-   python3 ~/treadmill/tools/cc-channels/cc-relay.py \
-     --to treadmill-bert --from treadmill-alan --type action \
-     --file <plan_path>
+   python3 ~/treadmill/tools/model-review-panel/panel.py review --artifact <plan_path>
    ```
-   Direct the reviewer to attack the plan's **load-bearing invariants**, not to summarize it. For
+   ALSO relay the plan to at least one sibling for a context-rich same-family pass
+   (`send <sibling> "review <plan_path>: attack the load-bearing invariants, do not summarize"`) —
+   the panel reviewers are single-shot and context-light, while a sibling has independent
+   repo/infra context (the layer that caught the errors described below).
+   Direct every reviewer to attack the plan's **load-bearing invariants**, not to summarize it. For
    EACH invariant the plan claims: does a `validation` entry actually red-then-green **foil** it —
    a behavioral test that fails before the change and passes after — or is it only named in prose?
    A plan whose validations cannot fail proves nothing. Then: does every code task scope in its
@@ -171,13 +176,15 @@ After writing the plan doc and before calling `treadmill plan submit`:
    both. Where the runtime provides a review gate (e.g. Tapestry's evaluator), name it; elsewhere,
    make a reviewer pass a `validation` entry.
 
-   **Cross-model reviews route to the sibling reviewers, not Tapestry evaluators, and a plan
-   submission gets TWO independent cross-model passes** (ADR-0105). `SendMessage gerald-bridge`
-   (Gerald, open-weight) AND `SendMessage fran-bridge` (Fran, GPT/`gpt-6-astra`) — two different
-   model families, both non-Anthropic voices that catch failure modes the Claude-Code siblings
-   share. That is in ADDITION to a same-family sibling review. If a reviewer model returns weak or
-   empty output, re-route to another Go model or to Fran and record who actually reviewed. Routine
-   changes still get at least one cross-model pass; high-stakes (this plan submission) gets two.
+   **The cross-model passes are the review panel, not Tapestry evaluators** (ADR-0105, ADR-0107).
+   `panel.py review --artifact <plan>` convenes multiple non-Anthropic voices (open-weight
+   families via the gateway + GPT) alongside Claude in one command, satisfying the
+   TWO-independent-cross-model-passes requirement — its fail-closed gate needs a cross-family
+   quorum, so a single surviving reviewer never passes. This REPLACES the retired
+   gerald-bridge/fran-bridge relay. That is in ADDITION to a same-family sibling review. The
+   panel reports any reviewer that returned weak/empty output and never counts it as approval;
+   re-run or record who actually reviewed. Routine changes still get the panel; high-stakes
+   (a plan submission) additionally gets the sibling pass.
 
 4. **Address review findings** — for CRITICAL items, fix before submitting. For scope gaps and
    minor items, either fix them or explicitly defer with a note in the Risks section.
