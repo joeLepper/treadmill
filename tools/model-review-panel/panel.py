@@ -43,7 +43,15 @@ GATEWAY_SECRET = os.environ.get(
 # One model per open-weight FAMILY (genuine cross-family diversity), plus the two
 # paid families. Override the open-weight set with --models.
 DEFAULT_OPEN_WEIGHT = ["qwen3.8-max", "glm-5.3", "kimi-k3", "minimax-m3"]
+# The open-weight models the gateway actually serves. --models is validated against
+# this so a paid-family or unknown model id can never be labelled open-weight and
+# routed to the gateway (the gateway also 404s it, but fail early and clearly).
+OPEN_WEIGHT_ALLOWED = {"qwen3.8-max", "glm-5.2", "glm-5.3",
+                       "kimi-k2.7-code", "kimi-k3", "minimax-m3"}
 DEFAULT_FAMILIES = ["open-weight", "gpt", "claude"]
+# A PASS (exit 0) requires verdicts from at least this many distinct families, so a
+# gate never passes on one surviving reviewer as if the full cross-family panel ran.
+MIN_QUORUM_FAMILIES = 2
 # A reasoning model burns ~1000 tokens before any visible text (measured on
 # glm-5.2/5.3), so the ceiling must clear reasoning AND a full review.
 MAX_TOKENS = 4000
@@ -91,16 +99,25 @@ def strip_reasoning(text):
         return text
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    # A dangling open tag (truncated mid-reasoning) means no usable answer.
+    # A dangling open tag (truncated mid-reasoning) means no usable answer — strip to
+    # end so a partial "<reasoning>VERDICT: approve" cannot parse as a real verdict.
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<reasoning>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
 
 
 def parse_verdict(text):
     if not text:
         return None
-    m = re.search(r"VERDICT:\s*(block|approve-with-notes|approve)", text, re.IGNORECASE)
-    return m.group(1).lower() if m else None
+    # Anchor to LINE START (the rubric requires the verdict as its own line), so a
+    # quoted "VERDICT: approve" inside prose is ignored. (?![\w-]) rejects "approved"
+    # / "approve-with-notes-pending". Return the WORST of all line-start matches
+    # (fail-closed): a reviewer that blocks anywhere blocks.
+    matches = re.findall(r"^\s*VERDICT:\s*(block|approve-with-notes|approve)(?![\w-])",
+                         text, re.IGNORECASE | re.MULTILINE)
+    if not matches:
+        return None
+    return max((m.lower() for m in matches), key=lambda v: VERDICT_RANK.get(v, 0))
 
 
 def build_prompt(artifact_path, artifact_text):
@@ -122,8 +139,12 @@ def call_gateway(model, prompt, timeout, master_key):
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         d = json.load(resp)
-    choices = d.get("choices") or [{}]
-    return (choices[0].get("message", {}) or {}).get("content") or ""
+    ch = (d.get("choices") or [{}])[0]
+    if ch.get("finish_reason") == "length":
+        # A truncated review is untrustworthy (its verdict/findings may be cut off);
+        # degrade rather than count a partial "VERDICT: approve" — raise MAX_TOKENS.
+        raise RuntimeError("gateway response truncated (finish_reason=length)")
+    return (ch.get("message", {}) or {}).get("content") or ""
 
 
 def call_codex(prompt, timeout, model=None):
@@ -131,7 +152,12 @@ def call_codex(prompt, timeout, model=None):
     minimal CODEX_HOME holding only a fresh copy of the OAuth token — the default
     home loads MCP servers (Fran's fran_msg, etc.) whose startup pushed this leg
     past a 240s timeout; a clean home returns in ~9s. `-o` writes the final message
-    to a file, so we never parse the event stream."""
+    to a file, so we never parse the event stream.
+
+    SECURITY: the artifact is UNTRUSTED, so we run `-s read-only -c
+    approval_policy=never` — never `--dangerously-bypass-approvals-and-sandbox`. A
+    prompt-injection payload in the artifact can then not write, execute, or reach
+    the network from the review; model-generated commands are auto-denied, not run."""
     if not shutil.which("codex"):
         raise RuntimeError("codex CLI not found")
     src_auth = os.path.expanduser("~/.codex/auth.json")
@@ -145,12 +171,17 @@ def call_codex(prompt, timeout, model=None):
         env = dict(os.environ)
         env["CODEX_HOME"] = home
         cmd = ["codex", "exec", "--skip-git-repo-check",
-               "--dangerously-bypass-approvals-and-sandbox", "-o", out]
+               "-s", "read-only", "-c", "approval_policy=never", "-o", out]
         if model:
             cmd += ["-m", model]
         cmd += [prompt]
-        subprocess.run(cmd, cwd=td, timeout=timeout, capture_output=True, text=True,
-                       env=env, stdin=subprocess.DEVNULL)
+        proc = subprocess.run(cmd, cwd=td, timeout=timeout, capture_output=True, text=True,
+                              env=env, stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            # A failed run's output is untrustworthy; degrade rather than risk
+            # counting a partial "VERDICT: approve" as a real verdict.
+            raise RuntimeError(f"codex exec exited {proc.returncode}: "
+                               f"{(proc.stderr or '').strip()[:200] or 'no stderr'}")
         try:
             with open(out) as fh:
                 return fh.read()
@@ -165,10 +196,16 @@ def call_claude(prompt, timeout, model="sonnet"):
         raise RuntimeError("claude CLI not found")
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)
+    # SECURITY: the artifact is UNTRUSTED. Deny the execution/exfiltration tools so a
+    # prompt-injection payload in the artifact cannot run commands or reach out.
     proc = subprocess.run(
-        ["claude", "-p", prompt, "--model", model],
+        ["claude", "-p", prompt, "--model", model,
+         "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"],
         env=env, timeout=timeout, capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude -p exited {proc.returncode}: "
+                           f"{(proc.stderr or '').strip()[:200] or 'no stderr'}")
     # Drop the one-off connector/auth warning lines claude may print to stdout.
     lines = [l for l in proc.stdout.splitlines()
              if not l.strip().startswith(("⚠", "Warning:"))]
@@ -192,9 +229,9 @@ def run_reviewer(name, family, fn, timeout):
             result["verdict"] = v
             if v is None:
                 result["status"] = "no-verdict"
-    except futures.TimeoutError:
-        result["status"], result["error"] = "timeout", f"timed out after {timeout}s"
-    except (subprocess.TimeoutExpired,) as e:
+    except subprocess.TimeoutExpired as e:
+        result["status"], result["error"] = "timeout", str(e)
+    except TimeoutError as e:  # socket timeout from the gateway leg
         result["status"], result["error"] = "timeout", str(e)
     except (urllib.error.HTTPError,) as e:
         detail = ""
@@ -209,12 +246,22 @@ def run_reviewer(name, family, fn, timeout):
     return result
 
 
+def vendor_of(model):
+    """The model's VENDOR family, for cross-family quorum — the open-weight models
+    span distinct vendors, so they must not collapse to one "open-weight" family."""
+    m = model.lower()
+    for pref in ("qwen", "glm", "kimi", "minimax", "deepseek", "longcat", "mimo"):
+        if m.startswith(pref):
+            return pref
+    return model
+
+
 def build_roster(families, open_weight_models, prompt, timeout, master_key):
     roster = []
     if "open-weight" in families:
         if master_key:
             for m in open_weight_models:
-                roster.append((m, "open-weight",
+                roster.append((m, vendor_of(m),
                                lambda m=m: call_gateway(m, prompt, timeout, master_key)))
         else:
             roster.append(("open-weight", "open-weight",
@@ -232,6 +279,22 @@ def panel_verdict(results):
     if not seen:
         return "no-verdict"
     return max(seen, key=lambda v: VERDICT_RANK.get(v, 0))
+
+
+def gate_exit_code(results, min_quorum_families=MIN_QUORUM_FAMILIES):
+    """Fail closed. A gate passes (exit 0) ONLY when the panel neither blocks nor
+    falls short of a cross-family quorum:
+      - `block` -> 1.
+      - `no-verdict` (every leg degraded) -> 1.
+      - an approve / approve-with-notes but with verdicts from fewer than
+        `min_quorum_families` distinct families -> 1 (a lone surviving reviewer must
+        not pass as if the whole cross-family panel reviewed the artifact).
+      - approve / approve-with-notes with the quorum met -> 0."""
+    verdict = panel_verdict(results)
+    if verdict not in ("approve", "approve-with-notes"):
+        return 1
+    families = {r["family"] for r in results if r["verdict"]}
+    return 0 if len(families) >= min_quorum_families else 1
 
 
 # --- output ------------------------------------------------------------------
@@ -271,6 +334,8 @@ def main():
                     help="comma-separated: open-weight,gpt,claude")
     rv.add_argument("--format", choices=["human", "json"], default="human")
     rv.add_argument("--timeout", type=int, default=240)
+    rv.add_argument("--min-quorum-families", type=int, default=MIN_QUORUM_FAMILIES,
+                    help="distinct families that must return a verdict for a PASS (exit 0)")
     args = ap.parse_args()
 
     try:
@@ -283,6 +348,13 @@ def main():
     prompt = build_prompt(args.artifact, artifact_text)
     families = [f.strip() for f in args.families.split(",") if f.strip()]
     open_weight_models = [m.strip() for m in args.models.split(",") if m.strip()]
+    if "open-weight" in families:
+        bad = [m for m in open_weight_models if m not in OPEN_WEIGHT_ALLOWED]
+        if bad:
+            print(f"refusing to route non-open-weight model(s) through the gateway: "
+                  f"{', '.join(bad)}. Allowed: {', '.join(sorted(OPEN_WEIGHT_ALLOWED))}",
+                  file=sys.stderr)
+            return 2
     master_key = load_gateway_secret(GATEWAY_SECRET)
     roster = build_roster(families, open_weight_models, prompt, args.timeout, master_key)
 
@@ -298,8 +370,7 @@ def main():
                           "reviewers": results}, indent=2))
     else:
         print(render_human(args.artifact, results))
-    # Exit non-zero if the panel blocks, so a gate can key on it.
-    return 1 if panel_verdict(results) == "block" else 0
+    return gate_exit_code(results, args.min_quorum_families)
 
 
 if __name__ == "__main__":

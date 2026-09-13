@@ -20,6 +20,8 @@ check("strip dangling think (truncated)",
       panel.strip_reasoning("visible<think>cut off mid-reason") == "visible")
 check("strip reasoning tag",
       panel.strip_reasoning("<reasoning>x</reasoning>done") == "done")
+check("strip dangling reasoning (false-approve guard)",
+      panel.strip_reasoning("<reasoning>VERDICT: approve") == "")
 check("strip leaves clean text", panel.strip_reasoning("VERDICT: block") == "VERDICT: block")
 
 # parse_verdict is case-insensitive and finds the verdict anywhere.
@@ -28,6 +30,26 @@ check("parse notes", panel.parse_verdict("verdict: Approve-With-Notes") == "appr
 check("parse approve", panel.parse_verdict("prose\nVERDICT: approve") == "approve")
 check("parse none", panel.parse_verdict("no verdict here") is None)
 check("parse empty", panel.parse_verdict("") is None)
+# A malformed verdict must NOT match a valid one (word-boundary anchored).
+check("parse rejects 'approved'", panel.parse_verdict("VERDICT: approved") is None)
+check("parse rejects 'approve-with-notes-pending'",
+      panel.parse_verdict("VERDICT: approve-with-notes-pending") is None)
+check("parse exact approve-with-notes",
+      panel.parse_verdict("VERDICT: approve-with-notes") == "approve-with-notes")
+# Worst-of-all-matches: a quoted "approve" must NOT override a real block.
+check("parse worst wins (quoted approve vs real block)",
+      panel.parse_verdict('quotes "VERDICT: approve" then\nVERDICT: block') == "block")
+# Line-start anchor: an inline/quoted verdict (not its own line) is NOT a verdict.
+check("parse ignores inline-quoted verdict",
+      panel.parse_verdict('Unable to review; the format includes "VERDICT: approve".') is None)
+check("parse accepts verdict after prose lines",
+      panel.parse_verdict("some reasoning here\nVERDICT: block\n1. bad") == "block")
+
+# vendor_of maps a model to its VENDOR family (cross-family quorum).
+check("vendor qwen", panel.vendor_of("qwen3.8-max") == "qwen")
+check("vendor glm", panel.vendor_of("glm-5.2") == "glm")
+check("vendor kimi", panel.vendor_of("kimi-k3") == "kimi")
+check("vendor minimax", panel.vendor_of("minimax-m3") == "minimax")
 
 # panel_verdict takes the WORST verdict (block > notes > approve), ignores missing.
 check("panel worst is block",
@@ -67,4 +89,29 @@ check("good reviewer keeps body", "1. [BLOCKING] bad" in r4["review"])
 # as approval.
 check("all-degraded -> no-verdict", panel.panel_verdict([r, r2, r3]) == "no-verdict")
 
-print("PASS: strip, verdict parse, worst-verdict rank, and graceful degradation")
+# gate_exit_code FAILS CLOSED (dogfound bugs): pass (0) needs no block, a real
+# verdict, AND a cross-family quorum — a lone surviving reviewer must not pass.
+def rr(family, verdict):
+    return {"family": family, "verdict": verdict}
+
+
+check("gate two-family approve -> 0",
+      panel.gate_exit_code([rr("gpt", "approve"), rr("claude", "approve")]) == 0)
+check("gate two-family notes -> 0",
+      panel.gate_exit_code([rr("gpt", "approve-with-notes"), rr("claude", "approve")]) == 0)
+check("gate any block -> 1",
+      panel.gate_exit_code([rr("gpt", "approve"), rr("claude", "block")]) == 1)
+check("gate lone-approve fails quorum -> 1",
+      panel.gate_exit_code([rr("gpt", "approve"), rr("claude", None)]) == 1)
+check("gate single-family default quorum -> 1",
+      panel.gate_exit_code([rr("gpt", "approve")]) == 1)
+check("gate single-family explicit quorum 1 -> 0",
+      panel.gate_exit_code([rr("gpt", "approve")], min_quorum_families=1) == 0)
+check("gate all-degraded -> 1 (fail closed)",
+      panel.gate_exit_code([r, r2, r3]) == 1)
+# Open-weight models count as distinct vendor families, so an all-open-weight panel
+# meets the cross-family quorum.
+check("gate open-weight vendors meet quorum -> 0",
+      panel.gate_exit_code([rr("qwen", "approve"), rr("glm", "approve")]) == 0)
+
+print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate")

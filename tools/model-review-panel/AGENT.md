@@ -29,7 +29,12 @@ panel.py review --artifact PATH
                 [--format human|json] [--timeout 240]
 ```
 
-Exit code is 1 when the panel verdict is `block`, so a gate can key on it. Output
+Exit code is 0 ONLY when the panel does not block, returns a real verdict, AND has
+a cross-family quorum (verdicts from >= `--min-quorum-families` distinct families,
+default 2). `block`, a fully-degraded `no-verdict`, and an approve that lacks the
+quorum (e.g. one lone surviving reviewer) all exit non-zero, so a gate FAILS CLOSED
+— silence, total failure, or a one-model pass is never read as a full-panel
+approval. Output
 lists each reviewer's VERDICT (block > approve-with-notes > approve) and findings,
 then a synthesis. The panel verdict is the WORST reviewer verdict.
 
