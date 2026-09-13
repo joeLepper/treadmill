@@ -1,6 +1,6 @@
 # Plan: Evaluator code review via the cross-model panel
 
-- **Status:** active
+- **Status:** completed
 - **Date:** 2026-09-13
 - **Related ADRs:** ADR-0087 (team execution / evaluator role), ADR-0105 (cross-model review), ADR-0107 (gateway + panel)
 
@@ -188,4 +188,24 @@ post-mortem if the panel cannot be made to degrade safely under a Go cap.
 
 ## Post-mortem
 
-(pending)
+- **What worked.** Merged to main (19228a3) and deployed: all 5 live team evaluator
+  renders re-rendered + verified to carry the panel step and the exact coverage flag;
+  the shared template refreshed for future `treadmill team up`. Panel + Ernie two-pass
+  review ran on the PLAN itself and caught the load-bearing holes before any code.
+- **What surprised us.** The review (panel + Ernie) found three real invariant holes
+  the first draft missed: (1) a Go cap silently drops the open-weight tier while
+  gpt+claude keep quorum → "panel failed" never fires → fixed at the panel source with
+  `--author-family`/`--min-cross-model` (which also retrofits the shipped authoring
+  reviews); (2) a case/spelling typo in `--author-family` failed OPEN → normalize +
+  validate; (3) "escalate to the orchestrator" was UNWIRED (coordinator routes rework
+  to the worker) and override→rework was incoherent → corrected to a HOLD (withhold
+  verdict + orchestrator relay; merge-safe; §9.6 backstop).
+- **What should become an ADR/learning/rule.** ADR-0108 (panel-backed code review)
+  landed. Follow-up ADR: the coordinator-side first-class hold/escalate outcome (it
+  changes the single-writer lifecycle — deliberately deferred).
+- **What this teaches about future plans.** Reviewing the PLAN with the panel + a
+  sibling BEFORE implementing paid off — every blocking finding was cheaper to fix in
+  prose than in code. "Fail closed" needs the trigger to actually fire (the Go-cap
+  case) and the escalation to actually be wired (the HOLD case) — name the mechanism,
+  don't assume it. Adoption note: running evaluator sessions pick up the re-rendered
+  CLAUDE.md on their next restart.
