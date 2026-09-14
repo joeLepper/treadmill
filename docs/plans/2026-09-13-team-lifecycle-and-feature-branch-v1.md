@@ -81,6 +81,14 @@ run unfettered on repos that forbid agent-merge-to-main. Cross-model workers are
 ### Out of scope
 - Cross-model workers (separate capacity-gated ADR).
 - Changing the evaluator (already panel-backed, ADR-0108) or the review discipline.
+- **PRESERVED, must not be dropped:** the ADR-0087 §8 sibling-worker peer-review inner
+  loop (1–2 peer workers buy in on a PR BEFORE it reaches the evaluator) and the
+  intra-team fabric messaging (workers ↔ peer workers ↔ coordinator via `send`). The
+  build modifies the coordinator template (git-push integration + handoff), so a
+  regression test must assert the re-rendered coordinator/worker templates STILL carry
+  §8 peer review. Order stays: PR → §8 sibling buy-in → §9 evaluator (panel-backed
+  cross-model) → integrate. The panel is the cross-model layer AFTER same-family buy-in,
+  never a replacement for it.
 - The `main`-merge-target path beyond leaving ADR-0087's behavior for permissive repos.
 
 ### Budget
