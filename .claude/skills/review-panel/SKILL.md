@@ -92,6 +92,14 @@ The gate passes only on exit 0 (non-block + quorum). A block, a degraded panel, 
 one-model pass fails it closed. Reference the canonical skill path so every harness runs the
 same versioned copy (ADR-0103), never a per-worktree copy.
 
+**The panel only sees what the artifact contains.** `review-pr.sh` excludes generated/vendored
+paths (`*.baseline.json`, `dist/`, `build/`, lockfiles, `*.min.*`, snapshots) so they do not pad
+the review — but a change that lives ONLY in an excluded path is never seen by the panel, so the
+gate cannot vouch for it. Pass `--exclude`/`--base` deliberately, and do not rely on the gate for a
+supply-chain-shaped change hidden in a lockfile or a minified file. One edge: when a PR's head branch
+cannot be resolved, the helper falls back to `gh pr diff`, which applies NO exclusions (it announces
+this on stderr) — so that path reviews a different, wider scope than the branch/PR-fetch path.
+
 ## Routing, auth, and safety (inherited from the panel)
 
 - **No API keys.** open-weight → fleet gateway (OpenCode Go budget); gpt → `codex exec`
