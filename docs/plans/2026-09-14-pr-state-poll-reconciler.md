@@ -71,12 +71,16 @@ surface's gaps would leak downstream).
    conclusion-change re-emit vs same-conclusion no-op. Both foils red-then-green
    verified by mutation (suite-not-completed, conclusion-dropped-from-key). (Ernie
    CI-leg co-sign pending.)
-3. **Poller CLI** `treadmill pr poll <repo> --account <acct>`: GET open `task_prs` (+
-   PRs with unsettled CI) for the repo; per PR, `gh pr view <n> --json
-   mergeCommitOid,headRefOid,merged,state` and `gh api .../commits/<sha>/check-runs`
-   under `GH_TOKEN=$(gh auth token --user <acct>)` — NEVER `gh auth switch`; call the
-   ingest endpoint on a new transition; skip on no change or ANY gh non-zero
-   (fail-closed); flock single-flight. CLI foils (mocked gh + API).
+3. **Poller CLI** `treadmill pr poll <repo> --account <acct>`: GET open `task_prs` for
+   the repo (new `GET /api/v1/task_prs?repo=&open=true`); per PR, `gh pr view <n>
+   --json mergeCommitOid,headRefOid,merged,state` and `gh api
+   .../commits/<sha>/check-suites` under `GH_TOKEN=$(gh auth token --user <acct>)` —
+   NEVER `gh auth switch`; call the ingest endpoint on a new transition; skip on no
+   change or ANY gh non-zero (fail-closed, per-leg); per-repo flock single-flight.
+   DONE — 8 CLI foils (injected gh + fake client): merge+CI ingest, no-change→nothing,
+   gh-error→fail-closed (both legs, independent), token-error→abort, idempotent
+   re-poll not counted, only completed suites ingest, per-repo single-flight. Ernie
+   CLI co-sign pending.
 4. **Timer + dogfood**: a `--user` timer for the poll repo; then onboard
    `netlify/agent-runner-orchestrator` (`team up`, feature-branch mode), and run
    Donna's P0 plan 1-then-4 — one investigation task first to prove PR-open + CI +

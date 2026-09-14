@@ -44,15 +44,26 @@ already relay-driven — the worker reports the PR, the coordinator registers `t
   (terminal — a PR merges once).
 - **CI leg:** the seam does NOT take a `task.ci_result` directly — it emits
   `github.check_run_completed` and DERIVES `task.ci_result` via `maybe_emit_ci_result`
-  (Ernie). So the poller synthesizes `github.check_run_completed`, one per check-run,
-  and downstream (the `ci_observer` per-suite rollup) is identical. Its required fields
-  — `check_suite.id` (int), `app.slug`, `conclusion`, `head_sha` — are NOT in
-  `statusCheckRollup`; they come from a DIFFERENT read: `gh api
-  /repos/{owner}/{repo}/commits/<head_sha>/check-runs`. Dedup key = `(check_suite_id,
-  head_sha, conclusion)` — NOT "any prior event for the PR" — so a CI RE-RUN whose
-  conclusion changes (success→failure) is a NEW transition and DOES emit (panel). And
-  CI is polled while a suite is UNSETTLED, decoupled from the PR's open/merged state,
-  so a suite that completes right after merge is not missed (panel).
+  (Ernie). So the poller synthesizes `github.check_run_completed` and downstream (the
+  `ci_observer` per-suite rollup) is identical. The observer keys the rollup on the
+  embedded SUITE snapshot reading `completed` with a conclusion, so the poller reads
+  the aggregate directly: `gh api /repos/{owner}/{repo}/commits/<head_sha>/check-suites`
+  gives each suite's `id` (int), `status`, `conclusion`, and `app.slug` — none of which
+  `statusCheckRollup` carries. It synthesizes ONE event per COMPLETED suite. Dedup key
+  = `(check_suite_id, head_sha, conclusion)` — NOT "any prior event for the PR" — so a
+  CI RE-RUN whose conclusion changes (success→failure) is a NEW transition and DOES
+  emit (panel). CI is polled from the observed head, decoupled from the PR's
+  open/merged state, so a suite that completes right after merge is not missed (panel).
+- **Attribution on a poll repo (the head_sha gap):** the `ci_observer` resolves the
+  task by `(repo, head_sha)` via `task_prs.head_sha`, with an events-join fallback on
+  `pr_opened`/`pr_synchronize` events. On a webhookless repo NEITHER exists — the
+  seam's `head_sha` writer fires only on those webhook events, and the coordinator's
+  `task_prs` registration carries no head. So a synthesized `check_run_completed` would
+  be UNATTRIBUTABLE. The CI-leg ingest therefore writes `task_prs.head_sha` from the
+  poller-supplied head (keyed on the `(repo, pr_number)` bridge the coordinator did
+  register) BEFORE running the seam — the poll-repo equivalent of the webhook writer.
+  This is the one place a synthesized CI event is not byte-for-byte a webhook's, but
+  its OUTCOME (task_prs.head_sha populated, observer attributes) is identical.
 
 ## Alternatives considered
 

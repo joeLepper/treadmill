@@ -207,10 +207,14 @@ async def test_poll_ingest_is_idempotent_on_re_poll(
 
 
 async def _seed_task_with_pr(
-    session: AsyncSession, repo: str, pr_number: int, head_sha: str
+    session: AsyncSession, repo: str, pr_number: int
 ) -> uuid.UUID:
-    """Register a task + its task_prs row with head_sha set, so the ci_observer's
-    resolve_task_by_head_sha attributes the derived ci_result (webhook-free path)."""
+    """Register a task + its task_prs row EXACTLY as the coordinator does on a poll
+    repo: (repo, pr_number, task_id) with head_sha LEFT NULL. On a webhookless repo
+    nothing else populates head_sha (no pr_opened/pr_synchronize webhook, no seam
+    writer), so the CI-leg endpoint's OWN head_sha write is what lets the observer's
+    resolve_task_by_head_sha attribute the ci_result. Seeding NULL keeps that
+    load-bearing: a foil that pre-set head_sha would MASK an attribution regression."""
     plan_id = (
         await session.execute(
             sa.text("INSERT INTO plans (repo) VALUES (:r) RETURNING id"), {"r": repo}
@@ -225,12 +229,12 @@ async def _seed_task_with_pr(
             {"p": plan_id, "r": repo},
         )
     ).scalar_one()
+    # head_sha deliberately omitted → NULL, the real poll-repo registration state.
     await session.execute(
         sa.text(
-            "INSERT INTO task_prs (repo, pr_number, task_id, head_sha) "
-            "VALUES (:r, :n, :t, :h)"
+            "INSERT INTO task_prs (repo, pr_number, task_id) VALUES (:r, :n, :t)"
         ),
-        {"r": repo, "n": pr_number, "t": task_id, "h": head_sha},
+        {"r": repo, "n": pr_number, "t": task_id},
     )
     await session.commit()
     return task_id
@@ -253,7 +257,7 @@ async def test_poll_ingest_check_run_derives_ci_result_like_a_webhook(
     app_slug = "github-actions"
 
     async with session_factory() as session:
-        task_id = await _seed_task_with_pr(session, repo, pr_number, head_sha)
+        task_id = await _seed_task_with_pr(session, repo, pr_number)
 
         resp = await poll_ingest_check_run(
             PollCheckRunIngestRequest(
@@ -333,7 +337,7 @@ async def test_poll_ingest_check_run_re_emits_on_conclusion_change(
         )
 
     async with session_factory() as session:
-        task_id = await _seed_task_with_pr(session, repo, pr_number, head_sha)
+        task_id = await _seed_task_with_pr(session, repo, pr_number)
 
         r_ok1 = await poll_ingest_check_run(
             _body("success"), session=session, request=_fake_request()
@@ -373,3 +377,53 @@ async def test_poll_ingest_check_run_re_emits_on_conclusion_change(
         ).scalars().all()
     assert cr_count == 2  # success + failure, NOT the redundant success re-poll
     assert list(ci_rows) == ["success", "failure"]  # conclusion-change re-emit
+
+
+@integration
+@pytest.mark.asyncio
+async def test_list_task_prs_returns_open_poll_set(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The poll set (GET /api/v1/task_prs) returns only OPEN rows by default, with
+    head_sha, newest first — so the poller polls open PRs and drops closed ones. A
+    closed row is excluded unless open=false is requested."""
+    from treadmill_api.routers.task_prs import list_task_prs
+
+    repo = f"o/set-{uuid.uuid4().hex[:6]}"
+    async with session_factory() as session:
+        plan_id = (
+            await session.execute(
+                sa.text("INSERT INTO plans (repo) VALUES (:r) RETURNING id"), {"r": repo}
+            )
+        ).scalar_one()
+
+        async def _mk_pr(pr_number: int, *, closed: bool, head: str | None) -> None:
+            task_id = (
+                await session.execute(
+                    sa.text(
+                        "INSERT INTO tasks (plan_id, repo, title) "
+                        "VALUES (:p, :r, 'set') RETURNING id"
+                    ),
+                    {"p": plan_id, "r": repo},
+                )
+            ).scalar_one()
+            closed_at = "now()" if closed else "NULL"
+            await session.execute(
+                sa.text(
+                    "INSERT INTO task_prs (repo, pr_number, task_id, head_sha, closed_at) "
+                    f"VALUES (:r, :n, :t, :h, {closed_at})"
+                ),
+                {"r": repo, "n": pr_number, "t": task_id, "h": head},
+            )
+
+        await _mk_pr(10, closed=False, head="aaa10")
+        await _mk_pr(20, closed=False, head="bbb20")
+        await _mk_pr(5, closed=True, head="ccc05")  # merged/closed — not in the set
+        await session.commit()
+
+        open_set = await list_task_prs(session=session, repo=repo, open_only=True)
+        all_set = await list_task_prs(session=session, repo=repo, open_only=False)
+
+    open_prs = [(p.pr_number, p.head_sha) for p in open_set.task_prs]
+    assert open_prs == [(20, "bbb20"), (10, "aaa10")]  # open only, newest first, head
+    assert {p.pr_number for p in all_set.task_prs} == {5, 10, 20}  # open=false → all

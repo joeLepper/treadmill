@@ -229,6 +229,24 @@ async def poll_ingest_check_run(
             ),
         },
     }
+    # ATTRIBUTION on a webhookless repo: the ci_observer resolves the task via
+    # `resolve_task_by_head_sha` (task_prs.head_sha), with an events-join fallback on
+    # pr_opened/pr_synchronize events. On a POLL repo NEITHER is populated — the seam's
+    # head_sha writer fires only on those webhook events (which never arrive) and the
+    # coordinator's task_prs registration carries no head_sha. So the ci_result would be
+    # UNATTRIBUTABLE. The poller supplies the observed head + the pr_number it is polling,
+    # so we write task_prs.head_sha here — the poll-repo equivalent of the seam's writer,
+    # keyed on the (repo, pr_number) bridge the coordinator already registered. This runs
+    # BEFORE the seam so the observer (invoked inside it) resolves the task by head_sha.
+    if body.pr_number is not None:
+        await session.execute(
+            text(
+                "UPDATE task_prs SET head_sha = :h "
+                "WHERE lower(repo) = lower(:r) AND pr_number = :n"
+            ),
+            {"h": body.head_sha, "r": body.repo, "n": body.pr_number},
+        )
+        await session.commit()
     event_id = _poll_check_run_event_id(
         body.repo, body.check_suite_id, body.head_sha, body.conclusion
     )
