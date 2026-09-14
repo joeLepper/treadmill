@@ -205,3 +205,16 @@ sequenceDiagram
   coordinator label." This is the invariant that makes `plans.created_by` external to
   the worker team by construction; the self-kill guards are defense-in-depth for a
   violation of it.
+
+## Review provenance (ADR-0111 fallback, recorded)
+
+This high-stakes Claude-authored change used a SAME-FAMILY depth verifier (Ernie, a
+Claude sibling), because the cross-model verifier ADR-0111 prefers (Fran, the Codex
+sibling) was unavailable (capacity-gated). Per ADR-0111 this fallback is recorded, not
+silent. Cross-model coverage still happened: the review PANEL's healthy GPT leg (a
+non-Claude family) reviewed every one of four rounds and caught real findings each time
+(externality self-kill, the TOCTOU race, the teardown/reconcile interleave, and the
+forged-label scope) — all folded. The panel could not reach its two-cross-family quorum
+because the open-weight gateway degraded (truncation/timeout) across all four runs — an
+INFRA condition (the OpenCode 5-hour cap), not an ADR defect. A clean cross-model
+verifier pass (Fran, or a recovered panel) remains a cheap follow-up if desired.
