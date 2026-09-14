@@ -148,11 +148,33 @@ def test_not_live_with_work_is_revived(fake_api, systemctl) -> None:
     assert _acted(systemctl, "disable") == []
 
 
+def _mark_live(systemctl, repo: str) -> None:
+    """Mark a team FULLY live: all its member unit labels active (ADR-0112 all-units
+    liveness — a partially-live team is not 'live')."""
+    slug = repo.replace("/", "-").lower()
+    for lbl in (
+        f"coordinator-{slug}", f"evaluator-{slug}",
+        f"worker-{slug}-1", f"worker-{slug}-2", f"worker-{slug}-3",
+    ):
+        systemctl.live.add(lbl)
+
+
 def test_live_with_work_is_left_alone(fake_api, systemctl) -> None:
-    """Live + has work → the team is working; do nothing."""
-    systemctl.live.add("coordinator-o-live")
+    """FULLY live + has work → the team is working; do nothing."""
+    _mark_live(systemctl, "o/live")
     _run(fake_api, [_cfg("o/live")], {"o/live": _drain(clean=False)})
     assert systemctl.calls == []  # no enable/start/disable — only is-active
+
+
+def test_partially_live_with_work_is_revived(fake_api, systemctl) -> None:
+    """ADR-0112 (Fran): a PARTIAL revive — coordinator up but a worker down — reads as
+    NOT fully live, so the backstop re-runs enable+start to finish it, rather than
+    leaving it stuck coordinator-up/workers-down."""
+    # Only the coordinator is live; a worker failed to start earlier.
+    systemctl.live.add("coordinator-o-part")
+    _run(fake_api, [_cfg("o/part")], {"o/part": _drain(clean=False)})
+    assert len(_acted(systemctl, "enable")) == 5  # re-enables every unit
+    assert len(_acted(systemctl, "start")) == 5
 
 
 def test_clean_and_idle_live_team_is_torn_down(fake_api, systemctl) -> None:
@@ -213,7 +235,7 @@ def test_single_flight_skips_when_lock_held(fake_api, systemctl, tmp_lock) -> No
         result = runner.invoke(team_app, ["reconcile"])
         assert result.exit_code == 0, result.output
         assert systemctl.calls == []  # never acted — lock was held
-        assert "already running" in result.output
+        assert "skipping this tick" in result.output
     finally:
         fcntl.flock(holder, fcntl.LOCK_UN)
         holder.close()
@@ -238,3 +260,38 @@ def test_live_persistent_clean_team_reads_as_running_not_down(
     down_line = next(ln for ln in out.splitlines() if "left down" in ln)
     assert "o/persist" in running_line
     assert "o/persist" not in down_line
+
+
+def test_partial_teardown_of_done_team_is_completed(fake_api, systemctl) -> None:
+    """ADR-0112 (Fran): a done, sweepable team left partially torn (coordinator down,
+    a worker still up) is COMPLETED by the reconcile — any-live → teardown re-runs
+    (idempotent) → fully down, not leaked."""
+    systemctl.live.add("worker-o-rem-1")  # coordinator down, one worker up
+    _run(fake_api, [_cfg("o/rem")], {"o/rem": _drain(clean=True, last_activity_at=_OLD)})
+    assert len(_acted(systemctl, "disable")) == 5  # finishes the teardown
+
+
+def test_teardown_aborts_if_coordinator_stop_fails(monkeypatch) -> None:
+    """ADR-0112 (Fran): _teardown_team_units stops the COORDINATOR first and ABORTS if
+    that fails, so a failed teardown never leaves the un-healable coordinator-up/
+    workers-down state — the other units are NOT disabled."""
+    calls: list[list[str]] = []
+
+    def _fake_run(argv, **_):
+        result = MagicMock()
+        result.stderr = "boom"
+        # Fail the coordinator's disable; succeed for anything else.
+        disabling_coord = argv[:2] == ["systemctl", "--user"] and "disable" in argv and (
+            "@coordinator-" in argv[-1]
+        )
+        calls.append(argv[2:] if argv[:2] == ["systemctl", "--user"] else argv)
+        result.returncode = 3 if disabling_coord else 0
+        return result
+
+    monkeypatch.setattr(team_module.subprocess, "run", _fake_run)
+    cfg = _cfg("o/abort")
+    warnings = team_module._teardown_team_units(cfg)
+    disables = [c for c in calls if c and c[0] == "disable"]
+    assert len(disables) == 1  # only the coordinator was attempted, then abort
+    assert "@coordinator-o-abort" in disables[0][-1]
+    assert warnings and "ABORTED" in warnings[0]

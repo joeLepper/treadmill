@@ -6,6 +6,7 @@ disable every unit) when clean or forced; parked-on-human work does NOT block.
 """
 from __future__ import annotations
 
+import fcntl
 from unittest.mock import MagicMock
 
 import pytest
@@ -64,8 +65,24 @@ def _drain(clean: bool, blocking=None, parked=None) -> dict:
     return {"repo": "o/r", "clean": clean, "blocking": blocking or [], "parked": parked or []}
 
 
+def _route(fake, *, cfg=None, drain=None, config_error=None) -> None:
+    """Route _request by path so `team down`'s re-reads under the lock (a second
+    GET config + GET drain) are served the same values as the pre-lock reads."""
+    the_cfg = cfg if cfg is not None else _CONFIG
+    the_drain = drain if drain is not None else _drain(clean=True)
+
+    def _req(method, path, **_):
+        if path.endswith("/drain"):
+            return the_drain
+        if config_error is not None:
+            raise config_error
+        return the_cfg
+
+    fake._request.side_effect = _req
+
+
 def test_clean_drain_tears_down_all_units(fake_api, systemctl_calls) -> None:
-    fake_api._request.side_effect = [_CONFIG, _drain(clean=True)]
+    _route(fake_api, drain=_drain(clean=True))
     result = runner.invoke(team_app, ["down", "o/r"])
     assert result.exit_code == 0, result.output
     # disable --now fired once per label (coordinator + evaluator + 3 workers = 5).
@@ -73,25 +90,21 @@ def test_clean_drain_tears_down_all_units(fake_api, systemctl_calls) -> None:
     assert all("disable" in c and "--now" in c for c in systemctl_calls)
 
 
+_BLOCKING_DRAIN = _drain(
+    clean=False,
+    blocking=[{"task_id": "t1", "derived_status": "wf: executing", "reason": "team_active"}],
+)
+
+
 def test_blocking_drain_refuses_and_leaves_systemd_untouched(fake_api, systemctl_calls) -> None:
-    fake_api._request.side_effect = [
-        _CONFIG,
-        _drain(clean=False, blocking=[
-            {"task_id": "t1", "derived_status": "wf: executing", "reason": "team_active"}
-        ]),
-    ]
+    _route(fake_api, drain=_BLOCKING_DRAIN)
     result = runner.invoke(team_app, ["down", "o/r"])
     assert result.exit_code == 2, result.output
     assert systemctl_calls == []  # never stops a team with in-flight work
 
 
 def test_force_tears_down_despite_blocking(fake_api, systemctl_calls) -> None:
-    fake_api._request.side_effect = [
-        _CONFIG,
-        _drain(clean=False, blocking=[
-            {"task_id": "t1", "derived_status": "wf: executing", "reason": "team_active"}
-        ]),
-    ]
+    _route(fake_api, drain=_BLOCKING_DRAIN)
     result = runner.invoke(team_app, ["down", "o/r", "--force"])
     assert result.exit_code == 0, result.output
     assert len(systemctl_calls) == 5
@@ -99,14 +112,14 @@ def test_force_tears_down_despite_blocking(fake_api, systemctl_calls) -> None:
 
 def test_parked_only_does_not_block(fake_api, systemctl_calls) -> None:
     # An escalated (parked-on-human) task with clean=True must NOT block teardown.
-    fake_api._request.side_effect = [_CONFIG, _drain(clean=True, parked=["t-escalated"])]
+    _route(fake_api, drain=_drain(clean=True, parked=["t-escalated"]))
     result = runner.invoke(team_app, ["down", "o/r"])
     assert result.exit_code == 0, result.output
     assert len(systemctl_calls) == 5
 
 
 def test_missing_team_config_is_noop(fake_api, systemctl_calls) -> None:
-    fake_api._request.side_effect = ApiError(404, "not found")
+    _route(fake_api, config_error=ApiError(404, "not found"))
     result = runner.invoke(team_app, ["down", "o/r"])
     assert result.exit_code == 0, result.output
     assert systemctl_calls == []
@@ -116,3 +129,86 @@ def test_non_slash_repo_rejected(fake_api, systemctl_calls) -> None:
     result = runner.invoke(team_app, ["down", "justname"])
     assert result.exit_code == 1
     assert systemctl_calls == []
+
+
+@pytest.fixture(autouse=True)
+def _clear_invoker_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the invoking session to EXTERNAL (no member label) so the self-kill
+    guard is deterministic; the guard tests set TREADMILL_LABEL explicitly."""
+    monkeypatch.delenv("TREADMILL_LABEL", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _tmp_lock(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Redirect the host lifecycle lock into a per-test tmp file so teardown does not
+    touch the real ~/.treadmill lock."""
+    monkeypatch.setattr(team_module, "_RECONCILE_LOCK", tmp_path / "team-reconcile.lock")
+
+
+def test_teardown_holds_the_host_lock_against_reconcile(
+    fake_api, systemctl_calls, monkeypatch
+) -> None:
+    """ADR-0112 (gpt panel finding): team down holds the host lifecycle lock ACROSS
+    the teardown, so a concurrent reconcile revive cannot interleave. Proven by
+    checking the lock is un-acquirable from a second fd while _teardown_team_units
+    runs."""
+    _route(fake_api, drain=_drain(clean=True))
+    observed = {}
+
+    def _spy(cfg):
+        fh = open(team_module._RECONCILE_LOCK, "w")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed["held"] = False  # acquired → team down did NOT hold it (bug)
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        except BlockingIOError:
+            observed["held"] = True  # blocked → team down holds it (correct)
+        finally:
+            fh.close()
+        return []
+
+    monkeypatch.setattr(team_module, "_teardown_team_units", _spy)
+    result = runner.invoke(team_app, ["down", "o/r"])
+    assert result.exit_code == 0, result.output
+    assert observed.get("held") is True
+
+
+@pytest.mark.parametrize(
+    "member_label",
+    ["coordinator-o-r", "evaluator-o-r", "worker-o-r-2"],
+)
+def test_self_kill_guard_refuses_a_team_member(
+    fake_api, systemctl_calls, monkeypatch, member_label
+) -> None:
+    """ADR-0112 self-kill guard (defense-in-depth): a session whose TREADMILL_LABEL is
+    ANY of the team's labels — coordinator, EVALUATOR, or a worker — cannot run
+    `team down` on its own team; refuse (exit 2) and touch no systemd. Enforced by the
+    tool, not just the caller's self-check. Includes the evaluator (Ernie: the role a
+    hand-enumerated check drops)."""
+    _route(fake_api)  # self-kill fires before the drain call
+    monkeypatch.setenv("TREADMILL_LABEL", member_label)
+    result = runner.invoke(team_app, ["down", "o/r"])
+    assert result.exit_code == 2, result.output
+    assert systemctl_calls == []
+    assert "self-kill" in result.output
+
+
+def test_self_kill_guard_not_overridden_by_force(
+    fake_api, systemctl_calls, monkeypatch
+) -> None:
+    """--force overrides the DRAIN-guard, never the self-kill guard."""
+    _route(fake_api)
+    monkeypatch.setenv("TREADMILL_LABEL", "worker-o-r-1")
+    result = runner.invoke(team_app, ["down", "o/r", "--force"])
+    assert result.exit_code == 2, result.output
+    assert systemctl_calls == []
+
+
+def test_external_actor_passes_self_kill_guard(fake_api, systemctl_calls, monkeypatch) -> None:
+    """An external actor (an orchestrator label) is not a member → guard passes,
+    teardown proceeds on a clean drain."""
+    _route(fake_api, drain=_drain(clean=True))
+    monkeypatch.setenv("TREADMILL_LABEL", "treadmill-alan")
+    result = runner.invoke(team_app, ["down", "o/r"])
+    assert result.exit_code == 0, result.output
+    assert len(systemctl_calls) == 5

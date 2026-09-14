@@ -619,3 +619,22 @@ def test_handoff_section_opens_records_and_surfaces_once() -> None:
     assert "Do NOT merge the handoff PR" in body
     # Parked-on-human: the open handoff does not block teardown.
     assert "PARKED-ON-HUMAN" in body or "parked-on-human" in body.lower()
+
+
+def test_handoff_signals_exec_in_charge_to_tear_down() -> None:
+    """ADR-0112: the coordinator cannot tear down its own team (self-kill), so §9.7
+    must signal the exec-in-charge (plans.created_by) to run team down — the PRIMARY
+    teardown trigger. Anchor on the signal shape + the self-kill rationale."""
+    body = _coordinator_plain()
+    assert "cannot tear it down yourself" in body
+    assert "team-implemented:" in body
+    assert "team safe to tear down" in body
+    # Routed to created_by (the external actor) over the §10 channel.
+    assert "plans.created_by" in body
+    # The coordinator knows plan_id, not created_by — it must resolve the address
+    # (Ernie Finding C), not infer it.
+    assert "GET /api/v1/plans/{plan_id}` → `created_by`" in body
+    # Externality edge (kimi BLOCKING): a self-submitted plan makes created_by a team
+    # member — do NOT relay a teardown it can't safely run; leave it to the backstop.
+    assert "self-submitted this plan" in body
+    assert "leave teardown to the backstop" in body

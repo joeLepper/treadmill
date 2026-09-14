@@ -125,6 +125,21 @@ Treadmill has no cross-plan machine-edges, so **you enforce cross-plan dependenc
 
 Relay level is `quiet` by default (ADR-0071). Relay only the **significant** set to the operator (via Telegram if a chat is active): `pr_merged` (clean terminal success) and any unexpected terminal state (terminal_step_failure, cap_reached, gate_broken, architect amend-exhausted, unresolved conflict, cancelled). Relay structured facts (entity/action/ids), never raw event prose. Skip everything else — no firehose. Reports to Joe use ASD-STE100 Simplified Technical English.
 
+## Phase H — Tear down the ephemeral team when the plan is done (ADR-0112)
+
+For an **ephemeral** team, teardown on completion is normally YOURS, because the coordinator is a *member* of its own team and would kill itself mid-teardown — an EXTERNAL party must run it, and you (`plans.created_by`, the submitting orchestrator) are external. This is the PRIMARY teardown path; the `team reconcile` timer is only a backstop for when you miss it.
+
+Trigger — the coordinator relays to you, on reaching "implemented" (its §9.7):
+`team-implemented: <repo> plan=<plan_id> on joes-agents/<slug> — handoff PR #<n> open + recorded; team safe to tear down`. (You act on that RELAY — you do not receive the `plan.handoff_pr_opened` DB event on your channel; the durable route is the coordinator's relay to your inbox, with the backstop covering a missed relay. A durable server-routed event is an ADR-0112 follow-up.) On a **terminal plan failure** you escalated and triaged, the same applies — a failed plan must not pin the team up.
+
+Act:
+1. **VERIFY YOU ARE EXTERNAL to the team (ADR-0112 hard invariant).** `team down` disables EVERY member unit — coordinator, evaluator, AND all workers. So the check is: your own label must NOT be ANY of the team's labels. Read the full set from `GET /api/v1/team_configs/{repo}` — `coordinator_label`, `evaluator_label`, and every entry in `worker_labels` — and confirm `TREADMILL_LABEL` is not in it. (Do not enumerate role prefixes by hand — that is how the evaluator gets missed; use the config's actual label set.) This fails only in the unusual case where a coordinator or evaluator was `plans.created_by` for its own team's plan. If you ARE in the set: do NOT run `team down` — you would self-kill. Leave teardown to the backstop reconcile (external by construction — a systemd-timer process, not a team session).
+2. Confirm the repo's lifecycle is `ephemeral` (a `persistent` team stays up; `manual` is command-only). `GET /api/v1/team_configs/{repo}` → `lifecycle`.
+3. Run `treadmill team down <repo>`. It is **drain-guarded** — if a late plan arrived and left team-active work, teardown refuses (exit 2) and you leave the team up. That is the safety: never `--force` here. (The drain-check and shutdown are not one transaction, so a plan.submitted in the gap is caught by the backstop's revive, not lost — but do not force past a refusal.)
+4. Do NOT tear down while YOU still owe the team a decision (an open escalation you haven't answered) — that is parked-on-human, and the drain-guard already treats it as not-blocking, but you resolve it first so the team isn't torn down with your own unanswered question pending.
+
+Skip if you are a team member (step 1), the repo is `persistent`/`manual`, or `team down` refuses (real in-flight work — let it finish; the backstop or the next `team-implemented` signal will catch it).
+
 ## When NOT to intervene
 
 If tasks are moving and the coordinator is dispatching, do not nudge for the sake of it — verify and let it run. Intervene when work stalls (Phase A), when an escalation needs a decision (Phase C), or at a merge/gate you own (Phases D–E). Over-nudging a working team wastes cycles and muddies the coordinator's queue.
