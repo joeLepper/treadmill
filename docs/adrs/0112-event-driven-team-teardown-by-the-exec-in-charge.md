@@ -94,7 +94,12 @@ reconcile demoted to a backstop (operator-directed, 2026-09-14):
   the race. So teardown and revive run to completion one at a time, never overlapped.
   The lock wait is NOT time-bounded — `systemctl` has no timeout, so a stuck unit can
   hold it indefinitely (acceptable for a host-local admin tool; noted, not hidden).
-  This is a HOST-LOCAL guard,
+  SCOPE (Fran): this covers the TEARDOWN entry points, not `team up` (standup, which
+  also mutates units via enable/start). A standup that races a reconcile teardown/revive
+  on the same team is NOT a permanent strand — all-member liveness converges it on the
+  next tick (a team with work → revive all; a done team → complete teardown) — so we
+  do not block on it; locking `team up` too, for fully coherent reconfiguration, is a
+  Follow-up. This is a HOST-LOCAL guard,
   which is sufficient because a team and its lifecycle actors run on ONE operator host
   (all `treadmill-channel@*` units and the reconcile timer are `systemctl --user` on
   that host); a future multi-host substrate would replace the flock with a per-repo DB
@@ -189,6 +194,12 @@ sequenceDiagram
 
 ## Follow-ups
 
+- **Lock `team up` (standup) on the same host lifecycle lock (Fran).** Standup mutates
+  units (enable/start) outside the teardown serialization, so a standup racing a
+  reconcile teardown/revive on one team can produce a transient mixed state (repairable
+  by all-member liveness on the next tick, hence not a blocker). Wrapping standup's
+  render + systemctl in the same `_host_reconcile_lock` makes ALL lifecycle mutations
+  serialize for fully coherent reconfiguration.
 - **Durable server-routed done-signal (robustness upgrade).** The primary trigger is
   today the coordinator's soft relay to `created_by` (agent-initiated; the backstop
   covers a missed relay). To make the fast path prompt-BY-CONSTRUCTION, a server-side

@@ -578,10 +578,14 @@ def _teardown_team_units(cfg: dict) -> list[str]:
     coord_unit = _SYSTEMD_UNIT_TEMPLATE.format(label=coordinator)
     rc, err = _run_systemctl(["disable", "--now", coord_unit])
     if rc != 0:
-        # Abort: do not create a coordinator-up/workers-down remnant.
+        # Abort: do not create a coordinator-up/workers-down remnant. We leave the
+        # OTHER units untouched (the team may already have been partial, or the
+        # coordinator's `disable --now` may have partly acted before reporting
+        # failure); the all-member-liveness reconcile recovers whatever state remains
+        # once the underlying error clears.
         return [
             f"systemctl --user disable --now {coord_unit}: rc={rc} stderr={err!r} "
-            "— ABORTED teardown (coordinator stop failed; team left fully up)"
+            "— ABORTED teardown (coordinator stop failed; other units left as-is)"
         ]
     for label in labels[1:]:
         unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
@@ -689,8 +693,8 @@ def down(
     # gpt panel finding) — otherwise a revive between disabling the coordinator and a
     # worker leaves a broken coordinator-up/workers-down team. Blocking: we WAIT for an
     # in-flight reconcile pass to finish, then tear down (never skip the teardown). The
-    # wait is bounded by ONE full reconcile pass (team-count × drain-HTTP latency), not
-    # literally instant — fine against a 2-min backstop cadence.
+    # wait is NOT time-bounded — `systemctl` has no timeout, so a stuck unit can hold
+    # the lock indefinitely (acceptable for a host-local admin tool; noted, not hidden).
     # Acquire the host lock, then RE-VERIFY under it right before stopping (ADR-0112,
     # Fran): a plan can land, or the config change, during the lock wait, so the
     # pre-lock cfg/drain snapshot may be stale. Re-read both under the lock and re-run
