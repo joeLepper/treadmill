@@ -99,16 +99,63 @@ Compose them with §4 (worker routing) and §5 (state writes).
 Payload: `{plan_id, repo, coordinator_label, task_count}`.
 
 1. If `coordinator_label != TREADMILL_LABEL`: ignore (different team).
-2. Query `GET /api/v1/plans/{plan_id}/tasks` to read the task list.
-3. Query `GET /api/v1/task_dependencies?plan_id=<plan_id>` to read
+2. Read the team's merge target: `GET /api/v1/team_configs/{repo}`
+   → `merge_target` (`feature-branch` default | `main`). This decides
+   how tasks integrate — see §3.1a (feature-branch standup) and §9.3.
+3. **If `merge_target == feature-branch`: STAND UP THE INTEGRATION
+   BRANCH FIRST (§3.1a) and PREFLIGHT it before dispatching ANY task.**
+   If the preflight fails, do NOT dispatch — escalate and stop
+   (ADR-0110: never silently stall the team on a false push premise).
+4. Query `GET /api/v1/plans/{plan_id}/tasks` to read the task list.
+5. Query `GET /api/v1/task_dependencies?plan_id=<plan_id>` to read
    the dependency graph.
-4. For each task with no unsatisfied dependency expression:
-   dispatch via §5 (POST task_execution + brief).
-5. Tasks with unblocked dependencies stay in `registered` state;
+6. For each task with no unsatisfied dependency expression:
+   dispatch via §5 (POST task_execution + brief). Feature-branch mode:
+   the brief tells the worker to base its PR on the integration branch
+   (`gh pr create --base joes-agents/<branch-slug>`), not `main`.
+7. Tasks with unblocked dependencies stay in `registered` state;
    they get dispatched when their dependencies satisfy (via §3.3 or
    §3.4 handlers below).
-6. Log: `plan.submitted: plan_id=<plan_id> task_count=<n>
-   dispatched=<m> blocked=<k>`.
+8. Log: `plan.submitted: plan_id=<plan_id> task_count=<n>
+   dispatched=<m> blocked=<k> merge_target=<mode>`.
+
+### 3.1a Feature-branch standup + PREFLIGHT (ADR-0110)
+
+Only in `feature-branch` mode. The integration branch is per-plan:
+`joes-agents/<branch-slug>`, where `<branch-slug>` is the plan doc's
+basename WITH its date prefix and WITHOUT the `.md` extension — e.g.
+`docs/plans/2026-09-13-fix-auth.md` → `2026-09-13-fix-auth`. KEEP the
+date: it is the per-plan disambiguator. Two plans with the same short
+name (`fix-auth`) on one repo MUST NOT collide onto one branch — that
+is the ADR-0110 falsifier (two plans sharing an integration branch).
+If two plan docs ever share a full basename, append the plan id short
+(`<basename>-<plan_id[:8]>`) to guarantee uniqueness. Do this ONCE per
+plan, idempotently.
+
+1. Create the branch off the latest `main` if it does not exist:
+   `git fetch origin main` then push a new ref —
+   `git push origin origin/main:refs/heads/joes-agents/<branch-slug>`
+   (creating the ref IS a write; a read-only identity fails here).
+2. **PREFLIGHT — verify WRITE access, not read.** A branch-exists or
+   read check passes while push is blocked. Prove the agent can update
+   the ref: push an empty commit to the branch and then reset it back
+   (`git commit --allow-empty` → push → push the prior sha back), OR
+   confirm step 1's ref-create push actually succeeded (it exercises
+   the same ref-update permission). Leave NO junk commit on the branch.
+3. **If push is denied** (no write at all, or a ruleset/protection
+   covers `joes-agents/*`): feature-branch mode does NOT help. FAIL
+   LOUD — escalate to the orchestrator (`created_by`) with reason
+   `standup_preflight_failed` naming the repo + the exact git error —
+   and do NOT dispatch tasks. A repo that blocks all agent writes needs
+   a human in the loop (ADR-0110 honest scope).
+4. On success, log `standup: joes-agents/<branch-slug> created +
+   preflight OK` and proceed to dispatch.
+
+**Drift.** While the plan runs, merge `main` into the integration
+branch on each observed `main` advance (else daily). A textual conflict
+you can resolve trivially: resolve + push. Otherwise open a
+conflict-resolution TASK (reviewed like any task) or escalate — never
+force-push, never let drift grow unbounded (ADR-0110).
 
 ### 3.2 `task.registered`
 
@@ -458,7 +505,35 @@ worker's next brief>
 On receipt: write `task.evaluator_verdict` event via
 `POST /api/v1/events`.
 
-### 9.3 Approve → merge
+### 9.3 Approve → integrate
+
+The integration mechanism depends on the team's `merge_target` (read
+in §3.1). Pick the matching path.
+
+#### 9.3-feature-branch (`merge_target == feature-branch`, the default)
+
+Integrate the approved task into the plan's integration branch
+`joes-agents/<branch-slug>` by **git merge + push — NOT `gh pr
+merge`**. The block on most repos is the agent identity lacking the
+PR-merge API permission or `main` protection; a plain push to the
+unprotected `joes-agents/*` branch (write-verified at standup, §3.1a)
+sidesteps both.
+
+1. In your clone: `git fetch origin`, check out
+   `joes-agents/<branch-slug>`, `git merge` the task PR's head sha.
+2. **Conflict handling** (task-PR-into-branch): if the merge conflicts
+   and you can resolve it trivially, resolve + continue. Otherwise open
+   a conflict-resolution TASK (reviewed like any task) or escalate —
+   NEVER force, never `-X ours/theirs` blindly, never wedge.
+3. `git push origin joes-agents/<branch-slug>`. The task is INTEGRATED
+   when its commits are on the branch (GitHub auto-closes the task PR
+   as merged when its head lands on the base).
+4. `PATCH /api/v1/task_executions/{id}` with
+   `{status: "completed", completed_at: <now>}`.
+5. Do NOT merge anything to `main` — the human owns the `main` gate.
+   When ALL the plan's tasks are integrated, open the handoff (§9.7).
+
+#### 9.3-main (`merge_target == main`; the rare permissive repo)
 
 1. READ THE PLAN'S MERGE POLICY first: `GET /api/v1/plans/{plan_id}`
    → `auto_merge` (a plain boolean — the API coalesces "unspecified"
@@ -507,6 +582,40 @@ re-brief: escalate to the orchestrator. Emit a
 `task.evaluator_timeout` event with elapsed time. The audit trail
 distinguishes timeout escalations (no verdict) from rework
 escalations (verdict=rework, max cycles exceeded).
+
+### 9.7 Feature-branch handoff (branch → main)
+
+Only in `feature-branch` mode. The plan is **"implemented"** when ALL
+its tasks are integrated into `joes-agents/<branch-slug>` (§9.3) AND
+this handoff is opened + recorded + surfaced. Teardown (ADR-0109) is
+gated on the RECORDED handoff — never on "last task merged" alone — so
+the branch is never orphaned by a team that dissolved before the gate
+existed. This is the team's LAST act; do it exactly once per plan.
+
+1. Confirm every task of the plan is terminal (integrated or
+   cancelled) — `GET /api/v1/plans/{plan_id}/tasks` and the
+   `task_status` view. If any task is still team-active, WAIT.
+2. Open the handoff PR: `gh pr create --base main --head
+   joes-agents/<branch-slug> --title "Plan <id> implemented on
+   joes-agents/<branch-slug>" --body "<summary + task list>"`. If a PR
+   for that head already exists, reuse it (idempotent — a restart must
+   not open a second).
+3. **RECORD + SURFACE — once only.** Before emitting, check no
+   `plan.handoff_pr_opened` event already exists for this plan
+   (`GET /api/v1/events?plan_id=<id>&action=handoff_pr_opened`); if it
+   does, STOP (a restart re-entered — do not re-surface). Otherwise
+   `POST /api/v1/events` with
+   `{entity_type: "plan", action: "handoff_pr_opened", plan_id: <id>,
+   payload: {repo, branch: "joes-agents/<branch-slug>", pr_url,
+   pr_number}}`. This event is what the drain-guard reads as the
+   "implemented" signal, and the fabric sink surfaces it to the
+   operator ("plan X implemented on joes-agents/<slug>; ready for your
+   branch → main PR").
+4. Do NOT merge the handoff PR — the operator owns the `main` gate
+   (full `main` CI + human review; a semantic break vs the current
+   `main` surfaces there, not on the green integration branch). Once
+   recorded, the open handoff PR is PARKED-ON-HUMAN — it does NOT block
+   teardown; the team may tear down (ADR-0109).
 
 ## 10. Escalations to orchestrator
 

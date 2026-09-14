@@ -453,6 +453,54 @@ def test_merge_step_reads_auto_merge_and_holds_when_false() -> None:
     assert "when the `github.pr_merged` webhook arrives from THEIR merge" in body
 
 
+# ── §8 peer-review FLOW preservation (ADR-0110 step 3 guard) ─────────
+#
+# The step-3 feature-branch rewrite edits the coordinator's integration path
+# (§9.3). ADR-0087 §8 sibling peer review — the inner buy-in loop that runs
+# BEFORE the evaluator — must survive that edit intact. These guards anchor on
+# the FLOW and its ordering, not just header strings, so a rewrite that keeps a
+# `## 8.` header while gutting the loop still fails (Ernie's semantic-anchor
+# requirement).
+
+
+def test_peer_review_runs_before_evaluator() -> None:
+    """Order is PR → §8 sibling buy-in → §9 evaluator. §8 must instruct opening
+    peer review BEFORE briefing the evaluator; a rewrite that jumps CI straight
+    to the evaluator drops the inner loop."""
+    body = _coordinator_plain()
+    assert "open peer review BEFORE briefing the evaluator" in body
+    # §8 is the inner loop; §9 is the outer evaluator pass — both named in order.
+    assert "## 8. Peer review" in body
+    assert "## 9. Evaluator handoff" in body
+
+
+def test_peer_review_reviewer_is_not_the_author() -> None:
+    """The buy-in must come from a SIBLING, not the author reviewing themselves."""
+    body = _coordinator_plain()
+    assert "NOT the PR author" in body
+
+
+def test_peer_review_dispatch_is_via_intra_team_relay_with_fixed_verdict() -> None:
+    """The intra-team messaging + fixed verdict tokens IN CONTEXT — the substance
+    of the loop, not just its heading. A reviewer is briefed via cc-relay and
+    relays a `lgtm` / `needs-changes:` verdict back."""
+    body = _coordinator_plain()
+    assert "Brief the reviewer via cc-relay" in body
+    assert "`lgtm` OR `needs-changes: <one-sentence summary>`" in body
+    # The peer-review trigger keeps reviewer rows out of the author's rework metric.
+    assert "trigger='peer-review'" in body
+
+
+def test_peer_review_collation_gates_the_evaluator() -> None:
+    """The buy-in gate: all-lgtm → brief the evaluator; any needs-changes →
+    coordinator-rework (back to CI), NOT forward to the evaluator."""
+    body = _coordinator_plain()
+    assert "All `lgtm`" in body
+    assert "brief evaluator per §9" in body
+    assert "Any `needs-changes`" in body
+    assert "Open coordinator-rework" in body
+
+
 def test_pr_synchronize_handler_is_marked_filtered_by_default() -> None:
     """§3.6 became a DEAD HANDLER when the ADR-0090 wake filter (#340)
     dropped `github.pr_synchronize` from the coordinator default set —
@@ -477,3 +525,97 @@ def test_pr_synchronize_handler_is_marked_filtered_by_default() -> None:
     assert "Re-poll `task_mergeability` for that PR" not in body
     # Widened-allowlist sessions get the noise-tolerance rule.
     assert "harmless but redundant" in body
+
+
+# ── ADR-0110 feature-branch integration (step 3b) ────────────────────
+
+
+def test_9_3_integration_branches_on_merge_target() -> None:
+    """§9.3 must fork on merge_target: feature-branch integrates by git merge+push
+    (NOT gh pr merge), main-mode keeps the existing gh-pr-merge + auto_merge hold."""
+    body = _coordinator_plain()
+    # The fork is explicit and reads merge_target (set in §3.1).
+    assert "merge_target" in body
+    # Feature-branch path: git merge + push, explicitly NOT gh pr merge.
+    assert "git merge + push — NOT `gh pr merge`" in body
+    assert "joes-agents/<branch-slug>" in body
+    # Main-mode path preserved verbatim (the #335 auto_merge hold + gh pr merge).
+    assert "gh pr merge <n> --squash --delete-branch" in body
+    assert "do NOT merge. HOLD for the operator" in body
+
+
+def test_feature_branch_task_pr_conflict_policy_is_defined() -> None:
+    """A task PR that conflicts merging into the branch must have a defined path —
+    trivial-resolve else a reviewed conflict task / escalate — never force, never
+    wedge (Ernie: the task→branch analog of the drift-conflict path). Anchor on the
+    SEMANTICS, not just the header, so a gutted instruction still reddens."""
+    body = _coordinator_plain()
+    assert "Conflict handling" in body
+    # trivial-resolve … else a reviewed conflict TASK … or escalate.
+    assert "resolve it trivially" in body
+    assert "conflict-resolution TASK" in body
+    assert "escalate" in body
+    # never force / never wedge — the safety rails.
+    assert "NEVER force" in body or "never force" in body
+    assert "never wedge" in body
+
+
+def test_feature_branch_slug_keeps_date_for_uniqueness() -> None:
+    """ADR-0110 falsifier guard: the integration branch-slug must be UNIQUE per
+    plan. Stripping the date collides two same-short-name plans onto one branch, so
+    the template must KEEP the date prefix (and offer a plan-id-short fallback)
+    (Ernie 3b BLOCKING)."""
+    body = _coordinator_plain()
+    # The date is kept, illustrated by the worked example.
+    assert "2026-09-13-fix-auth" in body
+    assert "KEEP the date" in body
+    # The falsifier is named so the rule's purpose can't be edited away.
+    assert "two plans sharing an integration branch" in body
+    # The uniqueness fallback exists.
+    assert "plan_id[:8]" in body
+    # The old date-stripping derivation must NOT survive.
+    assert "without the date" not in body
+
+
+def test_standup_preflight_tests_write_access_and_fails_loud() -> None:
+    """§3.1a preflight must verify WRITE access (a real push), not a read/exists
+    check, and FAIL LOUD + escalate on denial — never silently stall (Ernie #2,
+    ADR-0110)."""
+    body = _coordinator_plain()
+    assert "### 3.1a" in body
+    assert "verify WRITE access, not read" in body
+    # It creates the branch off main and proves the ref-update permission.
+    assert "refs/heads/joes-agents/<branch-slug>" in body
+    # Fail-loud + the named escalation reason; no junk left behind.
+    assert "standup_preflight_failed" in body
+    assert "Leave NO junk" in body
+    assert "do NOT dispatch" in body.lower() or "do NOT dispatch tasks" in body
+
+
+def test_drift_merge_policy_is_defined() -> None:
+    """ADR-0110 drift: merge main→branch on cadence; trivial-resolve else conflict
+    task/escalate; never force-push."""
+    body = _coordinator_plain()
+    assert "Drift" in body
+    assert "merge `main` into the integration branch" in body
+    assert "never force-push" in body
+
+
+def test_handoff_section_opens_records_and_surfaces_once() -> None:
+    """§9.7: the team's last act — open branch→main PR, record via the
+    plan.handoff_pr_opened event (the drain-guard's implemented signal), surface,
+    once-only, and DO NOT merge to main (human gate)."""
+    body = _coordinator_plain()
+    assert "### 9.7" in body
+    assert "gh pr create --base main --head" in body
+    # The recorded event is the terminal/implemented signal for the drain-guard.
+    assert "handoff_pr_opened" in body
+    assert '"entity_type": "plan"' in body or "entity_type: \"plan\"" in body \
+        or 'action: "handoff_pr_opened"' in body
+    # Once-only guard against a restart re-surfacing.
+    assert "once" in body.lower()
+    assert "do not re-surface" in body.lower() or "do not open a second" in body.lower()
+    # The human owns the main gate — the coordinator does NOT merge the handoff.
+    assert "Do NOT merge the handoff PR" in body
+    # Parked-on-human: the open handoff does not block teardown.
+    assert "PARKED-ON-HUMAN" in body or "parked-on-human" in body.lower()
