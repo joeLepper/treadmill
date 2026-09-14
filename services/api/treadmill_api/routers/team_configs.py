@@ -65,6 +65,25 @@ class TeamConfigUpsert(BaseModel):
     merge_target: MergeTarget | None = Field(default=None)
 
 
+class TeamConfigClaim(BaseModel):
+    """Body of the atomic standup-lease claim (ADR-0109/0110 step 4). ``repo`` is
+    the path; these are the labels/modes to write iff this caller wins the lease."""
+
+    coordinator_label: str = Field(min_length=1, max_length=64)
+    evaluator_label: str | None = Field(default=None, max_length=64)
+    worker_labels: list[str] = Field(default_factory=list)
+    lifecycle: Lifecycle | None = Field(default=None)
+    merge_target: MergeTarget | None = Field(default=None)
+
+
+class TeamConfigClaimResult(BaseModel):
+    config: TeamConfigRow
+    claimed: bool
+    """True → this caller WON the standup lease and must perform the host-side
+    side-effects (render templates + start systemd). False → a team was already
+    standing; ATTACH to ``config`` (the standing team), do NOT stand up a second."""
+
+
 class QueueDepth(BaseModel):
     visible: int
     in_flight: int
@@ -123,6 +142,41 @@ async def upsert_team_config(
     )
     await session.commit()
     return TeamConfigRow.model_validate(row, from_attributes=True)
+
+
+@router.post(
+    "/team_configs/{repo:path}/claim",
+    response_model=TeamConfigClaimResult,
+    status_code=status.HTTP_200_OK,
+)
+async def claim_team_config(
+    repo: str,
+    body: TeamConfigClaim,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TeamConfigClaimResult:
+    """Atomic per-repo STANDUP-LEASE claim (ADR-0109/0110 step 4).
+
+    The watcher calls this on ``plan.submitted`` before standing a team up. Under
+    two concurrent claims for one repo, EXACTLY ONE gets ``claimed=True`` (it must
+    do the host-side standup); the other gets ``claimed=False`` and the standing
+    team's config (attach). ``INSERT ... ON CONFLICT DO NOTHING`` — a conflict does
+    NOT mutate the standing team. Runs in the request's default (READ COMMITTED)
+    transaction, which the loser's post-insert read requires.
+    """
+    row, claimed = await _store.claim(
+        session,
+        repo=repo,
+        coordinator_label=body.coordinator_label,
+        worker_labels=body.worker_labels,
+        evaluator_label=body.evaluator_label,
+        lifecycle=body.lifecycle,
+        merge_target=body.merge_target,
+    )
+    await session.commit()
+    return TeamConfigClaimResult(
+        config=TeamConfigRow.model_validate(row, from_attributes=True),
+        claimed=claimed,
+    )
 
 
 async def _in_flight_task_executions_for_labels(
