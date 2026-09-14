@@ -42,6 +42,13 @@ run unfettered on repos that forbid agent-merge-to-main. Cross-model workers are
    the open handoff PR is parked-on-human (criterion 1), so it does NOT re-block teardown.
    Ephemeral teardown also fires on all-terminal-failure. Idle-grace prevents thrash.
 6. Idle-sweep tears down any team idle > N hours that passes the drain-guard.
+   **Scope (v1):** the sweep tears down WORKED-then-idle teams — those with a real
+   last-activity signal (an event, or a task). A stood-up-but-NEVER-worked team
+   (`last_activity_at` null: zero tasks) is NOT swept — it has no age to measure and
+   may be freshly awaiting its first plan; the step-4 watcher owns that team's
+   teardown-on-terminal / standup lifecycle. So step-1+2 closes the idle-team
+   incident for worked-then-idle teams; task-less idle teams need the watcher or a
+   manual `team down` (Ernie, do not over-claim "incident fixed").
 7. FOILS — red-then-green, not prose (the drain-guard is the safety invariant, so a
    test that checks only `executing` while `post-merge-observation` ships unguarded is
    the exact gap to avoid):

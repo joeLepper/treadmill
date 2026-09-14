@@ -72,6 +72,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -520,6 +521,29 @@ def up(
             err_console.print(f"[yellow]  {w}[/yellow]")
 
 
+def _all_team_labels(cfg: dict) -> list[str]:
+    """Coordinator + evaluator (if any) + workers, in teardown order."""
+    labels = [cfg["coordinator_label"]]
+    if cfg.get("evaluator_label"):
+        labels.append(cfg["evaluator_label"])
+    labels.extend(cfg.get("worker_labels", []))
+    return labels
+
+
+def _teardown_team_units(cfg: dict) -> list[str]:
+    """Stop + disable every team unit. Returns systemd warnings (empty on success).
+    Shared by ``team down`` and ``team sweep`` so both tear down identically."""
+    warnings: list[str] = []
+    for label in _all_team_labels(cfg):
+        unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
+        rc, err = _run_systemctl(["disable", "--now", unit])
+        if rc != 0:
+            warnings.append(
+                f"systemctl --user disable --now {unit}: rc={rc} stderr={err!r}"
+            )
+    return warnings
+
+
 @team_app.command("down")
 def down(
     repo: Annotated[
@@ -592,18 +616,8 @@ def down(
         raise typer.Exit(code=2)
 
     # Stop + disable every team unit; keep the rendered dir + config (revivable).
-    all_labels = [cfg["coordinator_label"]]
-    if cfg.get("evaluator_label"):
-        all_labels.append(cfg["evaluator_label"])
-    all_labels.extend(cfg.get("worker_labels", []))
-    systemd_warnings: list[str] = []
-    for label in all_labels:
-        unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
-        rc, err = _run_systemctl(["disable", "--now", unit])
-        if rc != 0:
-            systemd_warnings.append(
-                f"systemctl --user disable --now {unit}: rc={rc} stderr={err!r}"
-            )
+    all_labels = _all_team_labels(cfg)
+    systemd_warnings = _teardown_team_units(cfg)
 
     console.print(f"[green]team down[/green]         {repo}")
     console.print(f"[green]stopped labels[/green]    {all_labels}")
@@ -620,3 +634,112 @@ def down(
         )
         for w in systemd_warnings:
             err_console.print(f"[yellow]  {w}[/yellow]")
+
+
+_DEFAULT_IDLE_HOURS = 6.0
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp from the API into an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # Treat a naive timestamp as UTC (the API serializes tz-aware).
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+@team_app.command("sweep")
+def sweep(
+    idle_hours: Annotated[
+        float,
+        typer.Option(
+            "--idle-hours",
+            min=0.0,
+            help=(
+                "Idle-grace threshold. A team is swept only when its last activity "
+                "is older than this many hours. Prevents thrash right after a plan "
+                f"ends. Default: {_DEFAULT_IDLE_HOURS}."
+            ),
+        ),
+    ] = _DEFAULT_IDLE_HOURS,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Report which teams WOULD be swept without tearing any down.",
+        ),
+    ] = False,
+) -> None:
+    """Idle-sweep (ADR-0109): tear down every EPHEMERAL team that is drain-clean
+    and idle beyond the grace threshold.
+
+    Only ``ephemeral`` teams are swept — ``persistent`` and ``manual`` teams are
+    never auto-torn-down. A team is swept only when BOTH hold: the drain-guard
+    reports it clean (no team-active work, no unsettled post-merge deploy), AND its
+    last activity is older than ``--idle-hours``. A team with in-flight work, or one
+    whose last activity is within the grace window, or one with no tasks yet (no age
+    to measure), is left alone. Safe to run on a timer.
+    """
+    now = datetime.now(timezone.utc)
+    swept: list[str] = []
+    skipped_mode: list[str] = []
+    skipped_active: list[str] = []
+    skipped_grace: list[str] = []
+    skipped_new: list[str] = []
+    errors: list[str] = []
+
+    with ApiClient(load_config()) as client:
+        try:
+            configs = client._request("GET", "/api/v1/team_configs")
+        except ApiError as exc:
+            err_console.print(
+                f"[red]team_configs list failed: {exc.status_code} {exc.detail}[/red]"
+            )
+            raise typer.Exit(code=2)
+
+        for cfg in configs:
+            repo = cfg["repo"]
+            if cfg.get("lifecycle") != "ephemeral":
+                skipped_mode.append(repo)
+                continue
+            try:
+                drain = client._request(
+                    "GET", f"/api/v1/team_configs/{repo}/drain"
+                )
+            except ApiError as exc:
+                errors.append(f"{repo}: drain {exc.status_code} {exc.detail}")
+                continue
+            if not drain.get("clean", False):
+                skipped_active.append(repo)
+                continue
+            last = _parse_ts(drain.get("last_activity_at"))
+            if last is None:
+                skipped_new.append(repo)  # no tasks yet → no age to measure
+                continue
+            idle_h = (now - last).total_seconds() / 3600.0
+            if idle_h < idle_hours:
+                skipped_grace.append(repo)
+                continue
+            # Qualifies: ephemeral + clean + idle beyond grace.
+            if dry_run:
+                swept.append(repo)
+                continue
+            warnings = _teardown_team_units(cfg)
+            swept.append(repo)
+            if warnings:
+                for w in warnings:
+                    err_console.print(f"[yellow]  {repo}: {w}[/yellow]")
+
+    verb = "would sweep" if dry_run else "swept"
+    console.print(f"[green]{verb}[/green]            {swept}")
+    console.print(f"[dim]skipped non-ephemeral {skipped_mode}[/dim]")
+    console.print(f"[dim]skipped in-flight     {skipped_active}[/dim]")
+    console.print(f"[dim]skipped within grace  {skipped_grace}[/dim]")
+    console.print(f"[dim]skipped no-activity   {skipped_new}[/dim]")
+    if errors:
+        err_console.print("[yellow]drain errors (left standing):[/yellow]")
+        for e in errors:
+            err_console.print(f"[yellow]  {e}[/yellow]")

@@ -176,6 +176,11 @@ class DrainStatus(BaseModel):
     clean: bool
     blocking: list[DrainItem]  # team-active OR merged-but-deploy-unsettled → BLOCK
     parked: list[str]          # escalated task ids → allow-with-tracking (do NOT block)
+    last_activity_at: datetime | None = None
+    """Most recent activity for this team — the max event time across the team's
+    tasks (fallback: the newest team task's creation). NULL when the team has no
+    tasks. The idle-sweep applies an idle-grace against this; a clean team whose
+    last activity is recent is NOT swept, to avoid thrash right after a plan ends."""
 
 
 # Terminal-good derived_status set — the exact predicate the dashboard uses
@@ -340,6 +345,32 @@ async def _relation_missing(session: AsyncSession, name: str) -> bool:
     return exists.scalar_one_or_none() is None
 
 
+async def _last_activity_at(
+    session: AsyncSession, coordinator_label: str
+) -> datetime | None:
+    """The team's most recent activity: the greatest event ``created_at`` across
+    the team's tasks, falling back to the newest team task's ``created_at`` when a
+    team has tasks but no events. NULL when the team has no tasks. The idle-sweep
+    reads this to apply an idle-grace before tearing an idle-but-clean team down.
+    """
+    row = await session.execute(
+        text(
+            """
+            WITH team_tasks AS (
+                SELECT id, created_at FROM tasks WHERE created_by = :coordinator_label
+            )
+            SELECT GREATEST(
+                (SELECT MAX(e.created_at) FROM events e
+                  WHERE e.task_id IN (SELECT id FROM team_tasks)),
+                (SELECT MAX(tt.created_at) FROM team_tasks tt)
+            )
+            """
+        ),
+        {"coordinator_label": coordinator_label},
+    )
+    return row.scalar_one_or_none()
+
+
 @router.get("/team_configs/{repo:path}/drain", response_model=DrainStatus)
 async def get_team_drain(
     repo: str,
@@ -397,7 +428,14 @@ async def get_team_drain(
                               reason="post_merge_unsettled")
                 )
 
-    return DrainStatus(repo=repo, clean=not blocking, blocking=blocking, parked=parked)
+    last_activity = await _last_activity_at(session, cfg.coordinator_label)
+    return DrainStatus(
+        repo=repo,
+        clean=not blocking,
+        blocking=blocking,
+        parked=parked,
+        last_activity_at=last_activity,
+    )
 
 
 @router.get("/team_configs", response_model=list[TeamConfigRow])
