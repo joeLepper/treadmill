@@ -73,7 +73,8 @@ surface's gaps would leak downstream).
    CI-leg co-sign pending.)
 3. **Poller CLI** `treadmill pr poll <repo> --account <acct>`: GET open `task_prs` for
    the repo (new `GET /api/v1/task_prs?repo=&open=true`); per PR, `gh pr view <n>
-   --json mergeCommitOid,headRefOid,merged,state` and `gh api
+   --json mergeCommit,headRefOid,state` (state==MERGED; merge sha = mergeCommit.oid —
+   the live dogfood caught the earlier wrong field names) and `gh api
    .../commits/<sha>/check-suites` under `GH_TOKEN=$(gh auth token --user <acct>)` —
    NEVER `gh auth switch`; call the ingest endpoint on a new transition; skip on no
    change or ANY gh non-zero (fail-closed, per-leg); per-repo flock single-flight.

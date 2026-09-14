@@ -24,6 +24,17 @@ def _cp(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess[st
     )
 
 
+# The `gh pr view --json` fields the poller may request. Mirrors the REAL gh
+# available-field set (verified live 2026-09-14): there is NO `merged` field and the
+# merge sha is `mergeCommit` (an object with `.oid`), NOT `mergeCommitOid`. The fake
+# validates the requested fields exactly as gh does — a request for an invalid field
+# exits non-zero — so a foil catches a wrong field name (the bug the dogfood surfaced)
+# instead of masking it behind a mock that accepts any key.
+_VALID_PR_VIEW_FIELDS = frozenset(
+    {"mergeCommit", "headRefOid", "state", "number", "title", "mergeable"}
+)
+
+
 def _make_run_gh(
     *,
     token_rc: int = 0,
@@ -32,7 +43,8 @@ def _make_run_gh(
 ):
     """A fake gh runner. Serves ``gh auth token``, ``gh pr view``, and ``gh api
     .../check-suites`` from canned data; returns exit 1 for anything unmapped so
-    fail-closed paths are exercised by simply omitting an entry."""
+    fail-closed paths are exercised by simply omitting an entry. `gh pr view`
+    validates the requested `--json` fields against the real available set."""
     pr_views = pr_views or {}
     suites = suites or {}
 
@@ -40,6 +52,12 @@ def _make_run_gh(
         if args[:3] == ["auth", "token", "--user"]:
             return _cp(token_rc, "gh-token-value" if token_rc == 0 else "")
         if args[:2] == ["pr", "view"]:
+            # Emulate gh's field validation: `--json <a,b,c>` with any unknown field
+            # exits non-zero (the poller then fail-closes). Catches wrong field names.
+            if "--json" in args:
+                requested = args[args.index("--json") + 1].split(",")
+                if any(f not in _VALID_PR_VIEW_FIELDS for f in requested):
+                    return _cp(1, "")
             n = int(args[2])
             if n not in pr_views:
                 return _cp(1, "")  # fail-closed trigger
@@ -85,8 +103,7 @@ def test_merged_pr_with_completed_suite_ingests_both() -> None:
     run_gh = _make_run_gh(
         pr_views={
             7: {
-                "merged": True,
-                "mergeCommitOid": "merge0abc",
+                "mergeCommit": {"oid": "merge0abc"},
                 "headRefOid": "head0xyz",
                 "state": "MERGED",
             }
@@ -128,8 +145,7 @@ def test_no_transition_emits_nothing() -> None:
     run_gh = _make_run_gh(
         pr_views={
             3: {
-                "merged": False,
-                "mergeCommitOid": None,
+                "mergeCommit": None,
                 "headRefOid": "head3",
                 "state": "OPEN",
             }
@@ -163,8 +179,7 @@ def test_check_suites_error_fails_closed_but_merge_proceeds() -> None:
     run_gh = _make_run_gh(
         pr_views={
             8: {
-                "merged": True,
-                "mergeCommitOid": "m8",
+                "mergeCommit": {"oid": "m8"},
                 "headRefOid": "h8",
                 "state": "MERGED",
             }
@@ -201,8 +216,7 @@ def test_already_ingested_is_not_counted() -> None:
     run_gh = _make_run_gh(
         pr_views={
             7: {
-                "merged": True,
-                "mergeCommitOid": "m7",
+                "mergeCommit": {"oid": "m7"},
                 "headRefOid": "h7",
                 "state": "MERGED",
             }
@@ -227,7 +241,7 @@ def test_only_completed_suites_with_a_conclusion_ingest() -> None:
     client = _FakeClient([{"pr_number": 4}])
     run_gh = _make_run_gh(
         pr_views={
-            4: {"merged": False, "mergeCommitOid": None, "headRefOid": "h4", "state": "OPEN"}
+            4: {"mergeCommit": None, "headRefOid": "h4", "state": "OPEN"}
         },
         suites={
             "h4": [

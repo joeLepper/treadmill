@@ -39,7 +39,9 @@ webhook one.
 Concretely, two legs, each synthesizing the SAME event the webhook would (PR-OPEN is
 already relay-driven — the worker reports the PR, the coordinator registers `task_prs`
 — so it needs no polling):
-- **Merge leg:** `gh pr view <n> --json mergeCommitOid,headRefOid,merged,state`; on a
+- **Merge leg:** `gh pr view <n> --json mergeCommit,headRefOid,state` (there is NO
+  `merged` field — use `state == "MERGED"`; the merge sha is `mergeCommit.oid`, not
+  `mergeCommitOid`; verified live 2026-09-14); on a
   merge → synthesize `github.pr_merged` (merge sha). Dedup key = the merge sha
   (terminal — a PR merges once).
 - **CI leg:** the seam does NOT take a `task.ci_result` directly — it emits

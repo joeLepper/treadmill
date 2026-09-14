@@ -154,10 +154,15 @@ def run_poll(
         pr_number = int(pr["pr_number"])
         summary.polled += 1
         try:
+            # gh JSON field names, verified against a live repo (ADR-0113 dogfood):
+            # there is NO `merged` field (use state == MERGED) and the merge sha is
+            # `mergeCommit.oid`, NOT `mergeCommitOid` — both wrong names make gh exit
+            # non-zero, which would fail-close EVERY PR and silently disable the merge
+            # leg. Only `mergeCommit`, `headRefOid`, `state` are valid here.
             view = _gh_json(
                 [
                     "pr", "view", str(pr_number), "--repo", repo,
-                    "--json", "mergeCommitOid,headRefOid,merged,state",
+                    "--json", "mergeCommit,headRefOid,state",
                 ],
                 token,
                 run_gh=run_gh,
@@ -168,8 +173,8 @@ def run_poll(
             summary.notes.append(f"pr #{pr_number}: gh pr view failed; skipped")
             continue
 
-        merged = bool(view.get("merged"))
-        merge_sha = view.get("mergeCommitOid") or None
+        merged = view.get("state") == "MERGED"
+        merge_sha = (view.get("mergeCommit") or {}).get("oid") or None
         head_sha = view.get("headRefOid") or None
 
         # MERGE leg — a PR merges once; the endpoint dedups on the merge sha.
