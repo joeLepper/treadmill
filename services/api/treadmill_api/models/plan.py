@@ -54,6 +54,18 @@ class Plan(Base):
     """Per ADR-0031 Q31.c: NULL/True = auto-merge enabled (default);
     False = plan has opted out via front-matter ``auto_merge: false``."""
 
+    integration_base: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        default=None,
+    )
+    """The git ref the coordinator cuts + drifts the per-plan integration branch
+    against (ADR-0114, amends ADR-0110). NULL = ``origin/main`` (the default,
+    unchanged behavior). A non-NULL ref (e.g. ``joes-agents/run-shape-telemetry-design``)
+    makes the plan's tasks base on that ref AND makes the integration branch itself the
+    deliverable (no branch→main handoff PR). Set via plan-doc front-matter
+    ``integration_base:``."""
+
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

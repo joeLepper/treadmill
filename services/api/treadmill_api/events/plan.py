@@ -107,4 +107,10 @@ class PlanHandoffPrOpened(EventPayload):
     repo: str
     branch: str
     pr_url: str
-    pr_number: int
+    """The deliverable's URL. For the default (`origin/main`-based) handoff this is the
+    branch→main PR. For a non-main `integration_base` (ADR-0114) there is NO handoff PR —
+    the integration branch IS the deliverable — and this is the branch's tree URL."""
+    pr_number: int | None = None
+    """The handoff PR number, or NULL when there is no PR (a non-main `integration_base`
+    deliverable — ADR-0114). The drain-guard keys teardown on the EXISTENCE of this
+    recorded event, not on `pr_number`, so a NULL is safe."""

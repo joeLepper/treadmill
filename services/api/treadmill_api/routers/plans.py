@@ -130,6 +130,13 @@ class PlanResponse(BaseModel):
     merge race was missing.
     """
 
+    integration_base: str | None = None
+    """The git ref the coordinator cuts + drifts the per-plan integration branch
+    against (ADR-0114, amends ADR-0110). ``None`` means ``origin/main`` (the default,
+    unchanged behavior); the coordinator's §3.1a reads this and, when non-null, bases +
+    drifts the branch on this ref AND treats the integration branch as the deliverable
+    (no branch→main handoff PR). Set via plan-doc front-matter ``integration_base:``."""
+
 
 class TaskResponse(BaseModel):
     id: uuid.UUID
@@ -297,6 +304,8 @@ def _to_plan_response(plan: Plan, derived_status: str | None = None) -> PlanResp
         # None (unspecified) coalesces to enabled — ADR-0031 default;
         # only an explicit frontmatter ``auto_merge: false`` holds.
         auto_merge=plan.auto_merge is not False,
+        # NULL column → the coordinator defaults to origin/main (ADR-0114).
+        integration_base=plan.integration_base,
     )
 
 
@@ -349,6 +358,7 @@ async def create_plan_from_doc(
         "doc_path": doc_path,
         "created_by": created_by,
         "auto_merge": frontmatter.auto_merge,
+        "integration_base": frontmatter.integration_base,
     }
     if plan_id is not None:
         plan_kwargs["id"] = plan_id
@@ -425,13 +435,14 @@ async def create_plan(
       * One ``TaskRegistered`` per spawned task.
     """
     frontmatter_auto_merge: bool | None = None
+    frontmatter_integration_base: str | None = None
     if body.doc_content is not None:
         try:
             specs = parse_plan_doc(body.doc_content)
             validate_unique_task_ids(specs)
-            frontmatter_auto_merge = parse_plan_doc_frontmatter(
-                body.doc_content
-            ).auto_merge
+            _fm = parse_plan_doc_frontmatter(body.doc_content)
+            frontmatter_auto_merge = _fm.auto_merge
+            frontmatter_integration_base = _fm.integration_base
         except (PlanDocFormatError, ValidationError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -457,6 +468,7 @@ async def create_plan(
         doc_path=body.doc_path,
         created_by=body.created_by,
         auto_merge=frontmatter_auto_merge,
+        integration_base=frontmatter_integration_base,
     )
     session.add(plan)
     await session.flush()
@@ -601,6 +613,7 @@ async def submit_plan_doc(
 
     plan.doc_path = body.doc_path
     plan.auto_merge = frontmatter.auto_merge
+    plan.integration_base = frontmatter.integration_base
     # Activating an existing drafting plan — emit PlanActivated then
     # spawn + dispatch. Mirrors Scenario 1 ordering inside create_plan.
     await dispatcher.persist_and_publish(

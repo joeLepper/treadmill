@@ -511,6 +511,30 @@ def test_parse_plan_doc_frontmatter_auto_merge_false() -> None:
     assert fm.auto_merge is False
 
 
+def test_parse_plan_doc_frontmatter_integration_base_absent_is_none() -> None:
+    """No frontmatter, or none naming integration_base → None (ADR-0114 default:
+    the coordinator uses origin/main). Unchanged behavior for every existing plan."""
+    assert parse_plan_doc_frontmatter("# Plan: Test\n").integration_base is None
+    assert (
+        parse_plan_doc_frontmatter("---\nauto_merge: false\n---\n").integration_base
+        is None
+    )
+
+
+def test_parse_plan_doc_frontmatter_integration_base_set() -> None:
+    """A non-main integration_base is parsed verbatim (ADR-0114) and coexists with
+    auto_merge — the netlify run-shape case: base on the design branch."""
+    md = (
+        "---\n"
+        "auto_merge: false\n"
+        "integration_base: joes-agents/run-shape-telemetry-design\n"
+        "---\n\n# Plan: Test\n"
+    )
+    fm = parse_plan_doc_frontmatter(md)
+    assert fm.integration_base == "joes-agents/run-shape-telemetry-design"
+    assert fm.auto_merge is False
+
+
 def test_parse_plan_doc_frontmatter_yaml_yes_no_coerce_to_bool() -> None:
     """PyYAML 1.1 coerces bare ``yes`` / ``no`` to Python booleans BEFORE
     pydantic sees them. StrictBool then accepts them correctly."""

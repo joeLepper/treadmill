@@ -593,11 +593,14 @@ def test_standup_preflight_tests_write_access_and_fails_loud() -> None:
 
 
 def test_drift_merge_policy_is_defined() -> None:
-    """ADR-0110 drift: merge main→branch on cadence; trivial-resolve else conflict
-    task/escalate; never force-push."""
+    """ADR-0110/0114 drift: merge origin/<base> → branch on cadence (the SAME ref the
+    branch was cut from — `main` by default, never `main` for a non-main base);
+    trivial-resolve else conflict task/escalate; never force-push."""
     body = _coordinator_plain()
     assert "Drift" in body
-    assert "merge `main` into the integration branch" in body
+    # ADR-0114: drift against the plan's integration base, not a hardcoded main.
+    assert "merge `origin/<base>`" in body
+    assert "you must NOT merge `main` in" in body  # the non-main-base boundary
     assert "never force-push" in body
 
 
@@ -607,16 +610,24 @@ def test_handoff_section_opens_records_and_surfaces_once() -> None:
     once-only, and DO NOT merge to main (human gate)."""
     body = _coordinator_plain()
     assert "### 9.7" in body
+    # main-base handoff: open the branch→main PR (default, unchanged).
     assert "gh pr create --base main --head" in body
+    # ADR-0114: a non-main integration_base opens NO PR — the integration branch IS
+    # the deliverable and that repo's main must not be touched.
+    assert "open NO PR" in body
+    assert "integration branch IS the deliverable" in body
+    assert "do NOT touch `main` at all" in body
     # The recorded event is the terminal/implemented signal for the drain-guard.
     assert "handoff_pr_opened" in body
     assert '"entity_type": "plan"' in body or "entity_type: \"plan\"" in body \
         or 'action: "handoff_pr_opened"' in body
+    # The event is keyed on existence, not pr_number — omit pr_number for the no-PR case.
+    assert "OMIT `pr_number`" in body
     # Once-only guard against a restart re-surfacing.
     assert "once" in body.lower()
     assert "do not re-surface" in body.lower() or "do not open a second" in body.lower()
-    # The human owns the main gate — the coordinator does NOT merge the handoff.
-    assert "Do NOT merge the handoff PR" in body
+    # The coordinator does NOT merge the handoff (human owns the main gate).
+    assert "Do NOT merge" in body
     # Parked-on-human: the open handoff does not block teardown.
     assert "PARKED-ON-HUMAN" in body or "parked-on-human" in body.lower()
 

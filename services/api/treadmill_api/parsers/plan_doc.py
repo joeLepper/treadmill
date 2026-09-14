@@ -83,6 +83,16 @@ class PlanFrontmatter(BaseModel):
 
     auto_merge: StrictBool | None = None
 
+    integration_base: str | None = None
+    """The git ref the coordinator cuts the per-plan integration branch FROM and
+    drifts it AGAINST (ADR-0114, amends ADR-0110). ``None`` (omitted) means
+    ``origin/main`` — the default, unchanged behavior. Set it to a non-main ref (e.g.
+    ``joes-agents/run-shape-telemetry-design``) when a plan's tasks must READ docs/code
+    that live only on that branch, or when the deliverable layers on a base we do not
+    own the ``main`` of. When it is non-default, the integration branch ITSELF is the
+    deliverable — the coordinator opens NO branch→main handoff PR (§9.7). A bare string;
+    the coordinator validates it resolves at standup (a bad ref fails the preflight)."""
+
 
 # ── Pydantic schemas (strict) ─────────────────────────────────────────────────
 

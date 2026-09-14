@@ -132,10 +132,18 @@ If two plan docs ever share a full basename, append the plan id short
 (`<basename>-<plan_id[:8]>`) to guarantee uniqueness. Do this ONCE per
 plan, idempotently.
 
-1. Create the branch off the latest `main` if it does not exist:
-   `git fetch origin main` then push a new ref —
-   `git push origin origin/main:refs/heads/joes-agents/<branch-slug>`
-   (creating the ref IS a write; a read-only identity fails here).
+0. **Read the plan's integration base (ADR-0114).** `GET /api/v1/plans/{plan_id}`
+   → `integration_base` — a git BRANCH name the integration branch is cut from and
+   drifted against. `null` means `main` (the default; unchanged behavior). Call the
+   resolved value `<base>` (e.g. `main`, or `joes-agents/run-shape-telemetry-design`
+   when a plan's tasks must read docs/code that live only on that branch). A non-`main`
+   `<base>` ALSO changes the handoff — the integration branch becomes the deliverable
+   (§9.7). Use `origin/<base>` as the source ref below.
+1. Create the branch off the latest `<base>` if it does not exist:
+   `git fetch origin <base>` then push a new ref —
+   `git push origin origin/<base>:refs/heads/joes-agents/<branch-slug>`
+   (creating the ref IS a write; a read-only identity fails here). A `<base>` that does
+   not resolve after fetch is a standup failure — escalate `standup_preflight_failed`.
 2. **PREFLIGHT — verify WRITE access, not read.** A branch-exists or
    read check passes while push is blocked. Prove the agent can update
    the ref: push an empty commit to the branch and then reset it back
@@ -151,11 +159,13 @@ plan, idempotently.
 4. On success, log `standup: joes-agents/<branch-slug> created +
    preflight OK` and proceed to dispatch.
 
-**Drift.** While the plan runs, merge `main` into the integration
-branch on each observed `main` advance (else daily). A textual conflict
-you can resolve trivially: resolve + push. Otherwise open a
-conflict-resolution TASK (reviewed like any task) or escalate — never
-force-push, never let drift grow unbounded (ADR-0110).
+**Drift.** While the plan runs, merge `origin/<base>` (the plan's
+integration base — `main` by default, ADR-0114) into the integration branch on each
+observed `<base>` advance (else daily). Drift against the SAME ref you cut from — for a
+non-`main` `<base>` you must NOT merge `main` in (that repo's `main` may be one we never
+touch). A textual conflict you can resolve trivially: resolve + push. Otherwise open a
+conflict-resolution TASK (reviewed like any task) or escalate — never force-push, never
+let drift grow unbounded (ADR-0110).
 
 ### 3.2 `task.registered`
 
@@ -583,23 +593,28 @@ re-brief: escalate to the orchestrator. Emit a
 distinguishes timeout escalations (no verdict) from rework
 escalations (verdict=rework, max cycles exceeded).
 
-### 9.7 Feature-branch handoff (branch → main)
+### 9.7 Feature-branch handoff (branch → `<base>`)
 
 Only in `feature-branch` mode. The plan is **"implemented"** when ALL
 its tasks are integrated into `joes-agents/<branch-slug>` (§9.3) AND
-this handoff is opened + recorded + surfaced. Teardown (ADR-0109) is
+this handoff is recorded + surfaced. Teardown (ADR-0109) is
 gated on the RECORDED handoff — never on "last task merged" alone — so
 the branch is never orphaned by a team that dissolved before the gate
 existed. This is the team's LAST act; do it exactly once per plan.
 
+The handoff SHAPE depends on `<base>` (the plan's `integration_base`, §3.1a step 0):
+
 1. Confirm every task of the plan is terminal (integrated or
    cancelled) — `GET /api/v1/plans/{plan_id}/tasks` and the
    `task_status` view. If any task is still team-active, WAIT.
-2. Open the handoff PR: `gh pr create --base main --head
-   joes-agents/<branch-slug> --title "Plan <id> implemented on
-   joes-agents/<branch-slug>" --body "<summary + task list>"`. If a PR
-   for that head already exists, reuse it (idempotent — a restart must
-   not open a second).
+2. **Open the handoff PR — ONLY when `<base>` is `main`** (the default). `gh pr create
+   --base main --head joes-agents/<branch-slug> --title "Plan <id> implemented on
+   joes-agents/<branch-slug>" --body "<summary + task list>"`. Reuse an existing PR for
+   that head (idempotent). **When `<base>` is NON-`main` (ADR-0114): open NO PR.** The
+   integration branch IS the deliverable — it already holds every integrated task PR,
+   based on `<base>` — and that repo's `main` is one we must NOT touch. Skip straight to
+   step 3 with `pr_url` = the branch's tree URL
+   (`https://github.com/<repo>/tree/joes-agents/<branch-slug>`) and NO `pr_number`.
 3. **RECORD + SURFACE — once only.** Before emitting, check no
    `plan.handoff_pr_opened` event already exists for this plan
    (`GET /api/v1/events?plan_id=<id>&action=handoff_pr_opened`); if it
@@ -607,15 +622,17 @@ existed. This is the team's LAST act; do it exactly once per plan.
    `POST /api/v1/events` with
    `{entity_type: "plan", action: "handoff_pr_opened", plan_id: <id>,
    payload: {repo, branch: "joes-agents/<branch-slug>", pr_url,
-   pr_number}}`. This event is what the drain-guard reads as the
-   "implemented" signal, and the fabric sink surfaces it to the
-   operator ("plan X implemented on joes-agents/<slug>; ready for your
-   branch → main PR").
-4. Do NOT merge the handoff PR — the operator owns the `main` gate
-   (full `main` CI + human review; a semantic break vs the current
-   `main` surfaces there, not on the green integration branch). Once
-   recorded, the open handoff PR is PARKED-ON-HUMAN — it does NOT block
-   teardown; the team may tear down (ADR-0109).
+   pr_number}}` — OMIT `pr_number` for the non-`main`-base deliverable (it has no PR).
+   This event is the drain-guard's "implemented" signal (keyed on its EXISTENCE, not
+   `pr_number`), and the fabric sink surfaces it to the operator. Surface text:
+   `main` base → "plan X implemented on joes-agents/<slug>; ready for your branch →
+   main PR"; non-`main` base → "plan X implemented on joes-agents/<slug> (based on
+   <base>); the integration branch IS the deliverable — no main PR".
+4. **Do NOT merge, and for a non-`main` base do NOT touch `main` at all.** For the
+   `main`-base handoff PR: the operator owns the `main` gate (full `main` CI + human
+   review); the open PR is PARKED-ON-HUMAN. For a non-`main` base: there is no PR and no
+   `main` involvement — the base owner reviews the integration branch directly. Either
+   way the handoff does NOT block teardown; the team may tear down (ADR-0109).
 5. **Signal the exec-in-charge to tear the team down (ADR-0112).** You
    are a MEMBER of this team, so you cannot tear it down yourself — you
    would kill your own session mid-teardown. The submitting orchestrator
