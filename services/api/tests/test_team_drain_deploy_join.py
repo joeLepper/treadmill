@@ -1,7 +1,7 @@
 """DB-backed foils for the drain-guard (ADR-0109). A pure test cannot cover these —
 they run the real SQL against real rows.
 
-Three foils, one per untested link in the drain-guard's single safety chain:
+One foil per untested link in the drain-guard's single safety chain:
   1. ``_unsettled_deploy_shas`` — the two DISTINCT event streams (deploy:
      started/succeeded/failed; staging_smoke: passed/failed, NO 'started'), settled
      PER stream (Ernie BLOCKING 2).
@@ -10,6 +10,8 @@ Three foils, one per untested link in the drain-guard's single safety chain:
      which overview.py's aggregate test does NOT exercise (Ernie BLOCKING 1a).
   3. the WIRED endpoint ``GET /drain`` end-to-end — proves ``_merge_shas_for_tasks``
      hands the deploy check the RIGHT sha and the parts compose (Ernie BLOCKING 1b).
+  4. ``_last_activity_at`` — the idle-sweep's age signal: max event time across the
+     team's tasks, falling back to the newest task's creation, NULL when no tasks.
 
 All gated on the integration DB.
 """
@@ -33,6 +35,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from treadmill_api.routers.team_configs import (
     _TEAM_DRAIN_SQL,
+    _last_activity_at,
     _unsettled_deploy_shas,
     get_team_drain,
 )
@@ -299,3 +302,81 @@ async def test_get_team_drain_end_to_end(
     assert str(t_parked) not in blocking_ids, drain
     # The fully-settled merged task neither blocks nor parks.
     assert str(t_ok) not in blocking_ids, drain
+
+
+@integration
+@pytest.mark.asyncio
+async def test_last_activity_at_is_max_event_time(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """last_activity_at is the greatest event created_at across the team's tasks —
+    the real activity signal the idle-sweep ages against. The sweep writes no
+    events, so it cannot spoof this by probing."""
+    coord = f"coordinator-act-{uuid.uuid4().hex[:8]}"
+    repo = f"o/act-{uuid.uuid4().hex[:6]}"
+    t_created = _BASE - timedelta(hours=1)
+    t_early = _BASE
+    t_late = _BASE + timedelta(hours=3)
+
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+        # Explicit task created_at BEFORE the events (production order), so the max
+        # event time is the true latest activity, not the task's creation.
+        task = (
+            await session.execute(
+                sa.text(
+                    "INSERT INTO tasks (plan_id, repo, title, created_by, created_at) "
+                    "VALUES (:p, :r, 'act', :c, :ts) RETURNING id"
+                ),
+                {"p": plan_id, "r": repo, "c": coord, "ts": t_created},
+            )
+        ).scalar_one()
+        await _emit(session, "task", "assigned", task_id=task, at=t_early)
+        await _emit(session, "task", "pr_merged", task_id=task, at=t_late)
+        await session.commit()
+        last = await _last_activity_at(session, coord)
+
+    assert last is not None
+    assert last.replace(tzinfo=None) == t_late.replace(tzinfo=None), last
+
+
+@integration
+@pytest.mark.asyncio
+async def test_last_activity_at_falls_back_to_task_created(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A team with tasks but no events ages against the newest task's creation,
+    not NULL — so a team that registered tasks but never emitted an event is still
+    aged (and swept once genuinely idle), not left standing forever."""
+    coord = f"coordinator-fb-{uuid.uuid4().hex[:8]}"
+    repo = f"o/fb-{uuid.uuid4().hex[:6]}"
+    created = _BASE - timedelta(hours=10)
+
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+        # Seed a task with an explicit created_at (no events for it).
+        await session.execute(
+            sa.text(
+                "INSERT INTO tasks (plan_id, repo, title, created_by, created_at) "
+                "VALUES (:p, :r, 'fb', :c, :ts)"
+            ),
+            {"p": plan_id, "r": repo, "c": coord, "ts": created},
+        )
+        await session.commit()
+        last = await _last_activity_at(session, coord)
+
+    assert last is not None
+    assert last.replace(tzinfo=None) == created.replace(tzinfo=None), last
+
+
+@integration
+@pytest.mark.asyncio
+async def test_last_activity_at_none_when_no_tasks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A team with no tasks has no age → NULL. The sweep leaves such a team alone
+    (it may be freshly stood up awaiting its first plan)."""
+    coord = f"coordinator-empty-{uuid.uuid4().hex[:8]}"
+    async with session_factory() as session:
+        last = await _last_activity_at(session, coord)
+    assert last is None
