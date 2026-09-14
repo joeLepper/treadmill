@@ -85,3 +85,12 @@ no-verdict / all-degraded). The live legs are exercised by running the tool.
 5. Truncation is caught only on the gateway leg (`finish_reason=length`). The codex
    and claude legs have no truncation check — safe today only because the rubric puts
    the VERDICT line first (truncation cuts findings, not the verdict), not parity.
+
+## As a skill (agents)
+
+`review-panel` is the shared skill wrapping this CLI so any harness (Claude Code and
+Codex) invokes it identically (ADR-0103). It adds a one-call helper,
+`.claude/skills/review-panel/scripts/review-pr.sh <PR|branch|file>`, that builds the diff
+artifact (excluding generated/vendored files) and runs the panel, exiting with the panel's
+own fail-closed code — so it drops straight into a plan `validation` gate. See
+`.claude/skills/review-panel/SKILL.md`.

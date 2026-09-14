@@ -177,11 +177,11 @@ def call_codex(prompt, timeout, model=None):
                "-s", "read-only", "-c", "approval_policy=never", "-o", out]
         if model:
             cmd += ["-m", model]
-        cmd += [prompt]
+        cmd += ["-"]  # read the prompt from stdin: a large artifact inlined in argv blows ARG_MAX
         # cwd=work (empty, does not contain CODEX_HOME) so a crafted artifact cannot
         # surface the OAuth token from the working directory.
         proc = subprocess.run(cmd, cwd=work, timeout=timeout, capture_output=True, text=True,
-                              env=env, stdin=subprocess.DEVNULL)
+                              env=env, input=prompt)
         if proc.returncode != 0:
             # A failed run's output is untrustworthy; degrade rather than risk
             # counting a partial "VERDICT: approve" as a real verdict.
@@ -209,9 +209,11 @@ def call_claude(prompt, timeout, model="sonnet"):
     # (verified: Bash refused, Read denied). The review needs no tools — the artifact
     # is already in the prompt. (`--allowedTools ""` is IGNORED, so Bash still ran;
     # the sentinel name is required.)
+    # The prompt (with the large artifact) goes on stdin, not argv: `claude -p` with no positional
+    # prompt reads it from stdin, and argv has a length cap a big diff exceeds (ARG_MAX).
     proc = subprocess.run(
-        ["claude", "-p", prompt, "--model", model, "--allowedTools", "__panel_no_tools__"],
-        env=env, timeout=timeout, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        ["claude", "-p", "--model", model, "--allowedTools", "__panel_no_tools__"],
+        env=env, timeout=timeout, capture_output=True, text=True, input=prompt,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"claude -p exited {proc.returncode}: "
