@@ -268,10 +268,27 @@ async def _merge_shas_for_tasks(
 async def _unsettled_deploy_shas(
     session: AsyncSession, shas: list[str]
 ) -> set[str]:
-    """Of ``shas``, those with a deploy STARTED but no terminal deploy/staging_smoke
-    outcome yet — the coordinator must stay to OBSERVE + escalate on failure
-    (ADR-0087 §3.7). A sha that never triggered a deploy (e.g. a feature-branch merge
-    that never reached main) has no deploy events → settled → not returned."""
+    """Of ``shas``, those whose post-merge observation is NOT settled — the coordinator
+    must stay to OBSERVE + escalate on failure (ADR-0087 §3.7).
+
+    The two streams are DISTINCT and must be settled PER stream (Ernie): ``deploy`` emits
+    started/succeeded/failed; ``staging_smoke`` emits passed/failed and has NO 'started'
+    marker. A sha is UNSETTLED when EITHER:
+      - a deploy STARTED but reached no deploy terminal (succeeded/failed), OR
+      - a deploy SUCCEEDED but its staging_smoke has not reached a terminal (passed/failed).
+    The second clause is the smoke-pending rule: because staging_smoke has no 'started'
+    signal, a successful deploy is treated as implying a pending smoke until the smoke
+    terminal arrives — otherwise "deploy succeeded, smoke coming" would read as settled
+    and a later staging_smoke.failed would have no coordinator to escalate it.
+    ``deploy.failed`` is settled (the failure IS the terminal; it surfaces as an
+    escalation, handled by the parked-on-human path). A sha with no deploy events (a
+    feature-branch merge that never reached main) is settled.
+
+    ASSUMPTION (main-mode only; --force escapes): a successful staging deploy is followed
+    by a staging smoke. A main-mode repo that never smokes would over-block here; that is
+    fail-closed and rare (feature-branch is the default and never deploys). A
+    ``staging_smoke.started`` event, if added later, would let us drop the implication.
+    """
     if not shas or await _relation_missing(session, "events"):
         return set()
     result = await session.execute(
@@ -282,8 +299,14 @@ async def _unsettled_deploy_shas(
             WHERE commit_sha = ANY(:shas)
               AND entity_type IN ('deploy', 'staging_smoke')
             GROUP BY commit_sha
-            HAVING bool_or(action = 'started')
-               AND NOT bool_or(action IN ('succeeded', 'failed', 'passed'))
+            HAVING
+                (bool_or(entity_type = 'deploy' AND action = 'started')
+                 AND NOT bool_or(entity_type = 'deploy'
+                                 AND action IN ('succeeded', 'failed')))
+                OR
+                (bool_or(entity_type = 'deploy' AND action = 'succeeded')
+                 AND NOT bool_or(entity_type = 'staging_smoke'
+                                 AND action IN ('passed', 'failed')))
             """
         ),
         {"shas": shas},
