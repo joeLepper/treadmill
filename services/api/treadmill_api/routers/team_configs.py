@@ -146,6 +146,248 @@ async def _in_flight_task_executions_for_labels(
     return [row[0] for row in result.fetchall()]
 
 
+class DrainItem(BaseModel):
+    task_id: str
+    derived_status: str | None
+    reason: str  # "team_active" | "post_merge_unsettled"
+
+
+class DrainStatus(BaseModel):
+    """Whether a team is safe to tear down (ADR-0109 drain-guard).
+
+    ``clean`` is True only when NO task is team-active and no merged task has an
+    unsettled deploy. ``parked`` (escalated tasks) does NOT block teardown — it is
+    parked-on-human and re-stands-up on the operator's response (ADR-0109 amendment).
+    """
+
+    repo: str
+    clean: bool
+    blocking: list[DrainItem]  # team-active OR merged-but-deploy-unsettled → BLOCK
+    parked: list[str]          # escalated task ids → allow-with-tracking (do NOT block)
+
+
+# Terminal-good derived_status set — the exact predicate the dashboard uses
+# (routers/dashboard/overview.py): a task is terminal iff derived_status is one of
+# these or begins with "pr_merged " (per-worker prefixed).
+_TERMINAL_STATUSES = ("done", "pr_merged", "validated", "cancelled")
+
+# One row per task of the team (tasks.created_by = coordinator_label), carrying its
+# derived_status and whether it currently has an OPEN operator escalation (the exact
+# open-escalation logic from overview.py: latest escalated_to_operator not yet followed
+# by an ack or a close).
+_TEAM_DRAIN_SQL = text(
+    """
+    WITH team_tasks AS (
+        SELECT id FROM tasks WHERE created_by = :coordinator_label
+    ),
+    last_escalation AS (
+        SELECT DISTINCT ON (task_id) task_id, created_at AS escalated_at
+        FROM events
+        WHERE entity_type = 'task' AND action = 'escalated_to_operator'
+          AND task_id IS NOT NULL
+        ORDER BY task_id, created_at DESC
+    ),
+    last_ack AS (
+        SELECT DISTINCT ON (task_id) task_id, created_at AS acked_at
+        FROM events
+        WHERE entity_type = 'task' AND action = 'escalation_acknowledged'
+          AND task_id IS NOT NULL
+        ORDER BY task_id, created_at DESC
+    ),
+    last_close AS (
+        SELECT DISTINCT ON (task_id) task_id, created_at AS closed_at
+        FROM events
+        WHERE entity_type = 'task' AND action = 'escalation_closed'
+          AND task_id IS NOT NULL
+        ORDER BY task_id, created_at DESC
+    )
+    SELECT
+        tt.id::text AS task_id,
+        ts.derived_status AS derived_status,
+        (le.task_id IS NOT NULL
+         AND (la.acked_at IS NULL OR la.acked_at < le.escalated_at)
+         AND (lc.closed_at IS NULL OR lc.closed_at < le.escalated_at)) AS escalated
+    FROM team_tasks tt
+    LEFT JOIN task_status  ts ON ts.id = tt.id
+    LEFT JOIN last_escalation le ON le.task_id = tt.id
+    LEFT JOIN last_ack     la ON la.task_id = tt.id
+    LEFT JOIN last_close   lc ON lc.task_id = tt.id
+    """
+)
+
+
+def _is_terminal(derived_status: str | None) -> bool:
+    s = derived_status or ""
+    return s in _TERMINAL_STATUSES or s.startswith("pr_merged ")
+
+
+def _is_merged(derived_status: str | None) -> bool:
+    s = derived_status or ""
+    return s == "pr_merged" or s.startswith("pr_merged ")
+
+
+def _classify(derived_status: str | None, escalated: bool) -> str:
+    """Pure per-state drain classification (fail-closed). Returns:
+    - ``parked``  — escalated: parked-on-human, does NOT block teardown (tracked).
+    - ``merged``  — a terminal pr_merged task: allowed UNLESS its deploy is unsettled
+      (the caller applies the post-merge deploy check on top).
+    - ``clean``   — other terminal (done/validated/cancelled): allows teardown.
+    - ``block``   — anything else (non-terminal / unknown): TEAM-ACTIVE, blocks.
+    Fail-closed: an unrecognized derived_status is not terminal → ``block``.
+    """
+    if escalated:
+        return "parked"
+    if _is_merged(derived_status):
+        return "merged"
+    if _is_terminal(derived_status):
+        return "clean"
+    return "block"
+
+
+async def _merge_shas_for_tasks(
+    session: AsyncSession, task_ids: list[str]
+) -> dict[str, str]:
+    """Merge commit_sha per pr_merged task (from its ``github.pr_merged`` event).
+
+    The canonical merge signal is ``entity_type='github', action='pr_merged'`` —
+    the SAME event the task_status view, the escalation close-sweep, and
+    task_executions all key on. No ``task``-entity ``pr_merged`` event exists; a
+    filter on ``entity_type='task'`` would return zero rows and silently disable
+    the post-merge deploy check. ``events.commit_sha`` is populated for this event
+    with the merge commit sha (ADR-0014 commit-anchor extraction); ``task_id`` is
+    FK-resolved from ``task_prs`` on ingress.
+    """
+    if not task_ids or await _relation_missing(session, "events"):
+        return {}
+    result = await session.execute(
+        text(
+            """
+            SELECT DISTINCT ON (task_id) task_id::text, commit_sha
+            FROM events
+            WHERE entity_type = 'github' AND action = 'pr_merged'
+              AND task_id = ANY(:ids) AND commit_sha IS NOT NULL
+            ORDER BY task_id, created_at DESC
+            """
+        ),
+        {"ids": task_ids},
+    )
+    return {row[0]: row[1] for row in result.fetchall()}
+
+
+async def _unsettled_deploy_shas(
+    session: AsyncSession, shas: list[str]
+) -> set[str]:
+    """Of ``shas``, those whose post-merge observation is NOT settled — the coordinator
+    must stay to OBSERVE + escalate on failure (ADR-0087 §3.7).
+
+    The two streams are DISTINCT and must be settled PER stream (Ernie): ``deploy`` emits
+    started/succeeded/failed; ``staging_smoke`` emits passed/failed and has NO 'started'
+    marker. A sha is UNSETTLED when EITHER:
+      - a deploy STARTED but reached no deploy terminal (succeeded/failed), OR
+      - a deploy SUCCEEDED but its staging_smoke has not reached a terminal (passed/failed).
+    The second clause is the smoke-pending rule: because staging_smoke has no 'started'
+    signal, a successful deploy is treated as implying a pending smoke until the smoke
+    terminal arrives — otherwise "deploy succeeded, smoke coming" would read as settled
+    and a later staging_smoke.failed would have no coordinator to escalate it.
+    ``deploy.failed`` is settled (the failure IS the terminal; it surfaces as an
+    escalation, handled by the parked-on-human path). A sha with no deploy events (a
+    feature-branch merge that never reached main) is settled.
+
+    ASSUMPTION (main-mode only; --force escapes): a successful staging deploy is followed
+    by a staging smoke. A main-mode repo that never smokes would over-block here; that is
+    fail-closed and rare (feature-branch is the default and never deploys). A
+    ``staging_smoke.started`` event, if added later, would let us drop the implication.
+    """
+    if not shas or await _relation_missing(session, "events"):
+        return set()
+    result = await session.execute(
+        text(
+            """
+            SELECT commit_sha
+            FROM events
+            WHERE commit_sha = ANY(:shas)
+              AND entity_type IN ('deploy', 'staging_smoke')
+            GROUP BY commit_sha
+            HAVING
+                (bool_or(entity_type = 'deploy' AND action = 'started')
+                 AND NOT bool_or(entity_type = 'deploy'
+                                 AND action IN ('succeeded', 'failed')))
+                OR
+                (bool_or(entity_type = 'deploy' AND action = 'succeeded')
+                 AND NOT bool_or(entity_type = 'staging_smoke'
+                                 AND action IN ('passed', 'failed')))
+            """
+        ),
+        {"shas": shas},
+    )
+    return {row[0] for row in result.fetchall()}
+
+
+async def _relation_missing(session: AsyncSession, name: str) -> bool:
+    exists = await session.execute(text("SELECT to_regclass(:n)"), {"n": name})
+    return exists.scalar_one_or_none() is None
+
+
+@router.get("/team_configs/{repo:path}/drain", response_model=DrainStatus)
+async def get_team_drain(
+    repo: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> DrainStatus:
+    """ADR-0109 drain-guard: is this team safe to tear down?
+
+    Fail-closed. A task blocks teardown when it is TEAM-ACTIVE — non-terminal and NOT
+    escalated (an unknown/new derived_status defaults to blocking). `escalated` tasks
+    are PARKED-ON-HUMAN (do not block; tracked for re-standup). A `pr_merged` task is
+    terminal UNLESS its merge sha has an unsettled deploy (main-mode: the coordinator
+    must stay to observe/escalate; feature-branch merges never deploy → settled).
+    """
+    cfg = await _store.get_by_repo(session, repo)
+    if cfg is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"team_config for repo {repo!r} not found",
+        )
+    if await _relation_missing(session, "tasks") or await _relation_missing(
+        session, "task_status"
+    ):
+        return DrainStatus(repo=repo, clean=True, blocking=[], parked=[])
+
+    rows = (
+        await session.execute(
+            _TEAM_DRAIN_SQL, {"coordinator_label": cfg.coordinator_label}
+        )
+    ).fetchall()
+
+    blocking: list[DrainItem] = []
+    parked: list[str] = []
+    merged_task_ids: list[str] = []
+    for task_id, derived_status, escalated in rows:
+        cat = _classify(derived_status, escalated)
+        if cat == "parked":
+            parked.append(task_id)  # parked-on-human: does NOT block
+        elif cat == "block":
+            blocking.append(
+                DrainItem(task_id=task_id, derived_status=derived_status,
+                          reason="team_active")
+            )
+        elif cat == "merged":
+            merged_task_ids.append(task_id)  # terminal-merged: check post-merge deploy
+        # cat == "clean": terminal (done/validated/cancelled) → allows teardown
+
+    # Post-merge (mode-agnostic): a merged task whose deploy is unsettled still blocks.
+    if merged_task_ids:
+        shas = await _merge_shas_for_tasks(session, merged_task_ids)
+        unsettled = await _unsettled_deploy_shas(session, list(set(shas.values())))
+        for tid, sha in shas.items():
+            if sha in unsettled:
+                blocking.append(
+                    DrainItem(task_id=tid, derived_status="pr_merged",
+                              reason="post_merge_unsettled")
+                )
+
+    return DrainStatus(repo=repo, clean=not blocking, blocking=blocking, parked=parked)
+
+
 @router.get("/team_configs", response_model=list[TeamConfigRow])
 async def list_team_configs(
     session: Annotated[AsyncSession, Depends(get_session)],

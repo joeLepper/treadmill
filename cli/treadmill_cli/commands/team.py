@@ -473,3 +473,105 @@ def up(
         )
         for w in systemd_warnings:
             err_console.print(f"[yellow]  {w}[/yellow]")
+
+
+@team_app.command("down")
+def down(
+    repo: Annotated[
+        str,
+        typer.Argument(help="Repo in ``owner/name`` form (e.g. ``joeLepper/treadmill``)."),
+    ],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Tear down even if the drain-guard reports in-flight work "
+            "(explicitly abandons it).",
+        ),
+    ] = False,
+) -> None:
+    """Tear down a team (ADR-0109): drain-guarded stop + disable of every team unit.
+
+    Refuses (exit 2) when the ADR-0109 drain-guard reports TEAM-ACTIVE work (a
+    non-terminal, non-escalated task) or a merged task with an unsettled deploy.
+    `escalated` tasks are PARKED-ON-HUMAN and do NOT block (they are tracked for
+    re-standup). The rendered dir + team_config row are KEPT (revivable). `--force`
+    overrides the guard and abandons the in-flight work.
+    """
+    if "/" not in repo:
+        err_console.print("[red]repo must be in owner/name form[/red]")
+        raise typer.Exit(code=1)
+    slug = _slug_from_repo(repo)
+
+    with ApiClient(load_config()) as client:
+        # Authoritative labels from the team_config row.
+        try:
+            cfg = client._request("GET", f"/api/v1/team_configs/{repo}")
+        except ApiError as exc:
+            if exc.status_code == 404:
+                err_console.print(
+                    f"[yellow]no team_config for {repo}; nothing to tear down[/yellow]"
+                )
+                raise typer.Exit(code=0)
+            err_console.print(
+                f"[red]team_config fetch failed: {exc.status_code} {exc.detail}[/red]"
+            )
+            raise typer.Exit(code=2)
+        # Drain-guard (server-side, joins task state + escalations + post-merge deploy).
+        try:
+            drain = client._request("GET", f"/api/v1/team_configs/{repo}/drain")
+        except ApiError as exc:
+            err_console.print(
+                f"[red]drain-guard check failed: {exc.status_code} {exc.detail}[/red]"
+            )
+            raise typer.Exit(code=2)
+
+    if not drain.get("clean", False) and not force:
+        err_console.print(
+            f"[red]team down REFUSED: drain-guard reports in-flight work on {repo}.[/red]"
+        )
+        for item in drain.get("blocking", []):
+            err_console.print(
+                f"[yellow]  {item['task_id']} — {item.get('derived_status')} "
+                f"({item['reason']})[/yellow]"
+            )
+        if drain.get("parked"):
+            err_console.print(
+                f"[dim]  parked-on-human (not blocking): "
+                f"{len(drain['parked'])} escalated task(s)[/dim]"
+            )
+        err_console.print(
+            "[yellow]Wait for the work to reach a terminal state, or --force to "
+            "abandon it.[/yellow]"
+        )
+        raise typer.Exit(code=2)
+
+    # Stop + disable every team unit; keep the rendered dir + config (revivable).
+    all_labels = [cfg["coordinator_label"]]
+    if cfg.get("evaluator_label"):
+        all_labels.append(cfg["evaluator_label"])
+    all_labels.extend(cfg.get("worker_labels", []))
+    systemd_warnings: list[str] = []
+    for label in all_labels:
+        unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
+        rc, err = _run_systemctl(["disable", "--now", unit])
+        if rc != 0:
+            systemd_warnings.append(
+                f"systemctl --user disable --now {unit}: rc={rc} stderr={err!r}"
+            )
+
+    console.print(f"[green]team down[/green]         {repo}")
+    console.print(f"[green]stopped labels[/green]    {all_labels}")
+    console.print(f"[green]team dir kept[/green]     {_TEAMS_DIR / slug} (revivable)")
+    if force and not drain.get("clean", False):
+        err_console.print(
+            "[yellow]--force: tore down with in-flight work the drain-guard "
+            "reported abandoned.[/yellow]"
+        )
+    if systemd_warnings:
+        err_console.print(
+            "[yellow]WARNING: systemd not available or unit failed to "
+            "disable/stop; the units may still be running — retry by hand.[/yellow]"
+        )
+        for w in systemd_warnings:
+            err_console.print(f"[yellow]  {w}[/yellow]")
