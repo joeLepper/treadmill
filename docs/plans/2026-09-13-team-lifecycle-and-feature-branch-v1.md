@@ -124,6 +124,19 @@ git-push integration) can't be dogfooded until steps 3–4 build it; it is prove
   — recorded as an amendment note on ADR-0109. The blocking set is now team-active only:
   `registered|assigned|executing|pr_open|rework-pending` + post-merge-observation + open
   task PR.
+- **The drain-guard is a MULTI-SOURCE join** (Ernie pre-code flag, confirmed against the
+  schema). Post-merge observation is NOT in the task's `derived_status` (which tops out at
+  `pr_merged`) — it is a SEPARATE `deploy`/`staging_smoke` EVENT stream
+  (`services/api/treadmill_api/events/deploy.py`). So a task at `pr_merged` whose
+  deploy/smoke is unsettled is still in-flight (coordinator owns rollback), and keying on
+  `derived_status == pr_merged → allow` — or reusing the server's
+  `_in_flight_task_executions_for_labels` (`status='running'`, no post-merge notion) —
+  reopens the gap. The guard must join THREE sources: `task_status.derived_status`
+  (team-active states block), `deploy`/`staging_smoke` observation (merged-but-unsettled
+  BLOCKS), and `task_prs` (open team-authored task PRs block). The post-merge foil MUST
+  run against this real join, never a mock hard-coding `pr_merged → block`. Likely a small
+  server endpoint computes the join (extend the scale-down guard); the CLI `team down`
+  calls it.
 
 ## Post-mortem
 
