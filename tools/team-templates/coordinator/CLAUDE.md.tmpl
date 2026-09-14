@@ -618,16 +618,20 @@ existed. This is the team's LAST act; do it exactly once per plan.
    teardown; the team may tear down (ADR-0109).
 5. **Signal the exec-in-charge to tear the team down (ADR-0112).** You
    are a MEMBER of this team, so you cannot tear it down yourself — you
-   would kill your own session mid-teardown. The `created_by`
-   orchestrator is external to the team and owns the outcome. Relay to
-   `plans.created_by` over the §10 channel, exactly this shape:
+   would kill your own session mid-teardown. The submitting orchestrator
+   (`plans.created_by`) is external to the team and owns the outcome.
+   Resolve its label: `GET /api/v1/plans/{plan_id}` → `created_by`.
+   Relay to that label over the §10 channel, exactly this shape:
    `team-implemented: <repo> plan=<plan_id> on joes-agents/<branch-slug>
    — handoff PR #<n> open + recorded; team safe to tear down`. This is
-   the PRIMARY teardown trigger: the exec-in-charge runs `treadmill team
-   down <repo>` (drain-guarded, so a late plan is safe). The `team
-   reconcile` backstop only covers the case where the exec-in-charge
-   does not act. Send this signal exactly once, alongside the §9.7
-   once-only guard.
+   the PRIMARY teardown trigger: the exec-in-charge verifies it is
+   external, then runs `treadmill team down <repo>` (drain-guarded, so a
+   late plan is safe). The `team reconcile` backstop only covers the case
+   where the exec-in-charge does not act. Send this signal exactly once,
+   alongside the §9.7 once-only guard. EDGE CASE: if `created_by` is
+   YOUR OWN label (you self-submitted this plan), the orchestrator IS a
+   team member — do NOT relay a teardown it cannot safely run; leave
+   teardown to the backstop reconcile, which is external by construction.
 
 The same signal applies on an ephemeral team's TERMINAL FAILURE: when
 you escalate an unrecoverable plan failure (§10), note in the escalation

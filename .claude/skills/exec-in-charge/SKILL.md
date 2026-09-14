@@ -127,17 +127,18 @@ Relay level is `quiet` by default (ADR-0071). Relay only the **significant** set
 
 ## Phase H — Tear down the ephemeral team when the plan is done (ADR-0112)
 
-For an **ephemeral** team, teardown on completion is YOURS, because you are the only actor that can do it: the coordinator is a *member* of its own team and would kill itself mid-teardown, so an external party must run it — and you (`plans.created_by`) are that party. This is the PRIMARY teardown path; the `team reconcile` timer is only a backstop for when you miss it.
+For an **ephemeral** team, teardown on completion is normally YOURS, because the coordinator is a *member* of its own team and would kill itself mid-teardown — an EXTERNAL party must run it, and you (`plans.created_by`, the submitting orchestrator) are external. This is the PRIMARY teardown path; the `team reconcile` timer is only a backstop for when you miss it.
 
-Trigger — the coordinator relays, on reaching "implemented" (its §9.7):
-`team-implemented: <repo> plan=<plan_id> on joes-agents/<slug> — handoff PR #<n> open + recorded; team safe to tear down` (or you observe the `plan.handoff_pr_opened` event for a plan you own). On a **terminal plan failure** you escalated and triaged, the same applies — a failed plan must not pin the team up.
+Trigger — the coordinator relays to you, on reaching "implemented" (its §9.7):
+`team-implemented: <repo> plan=<plan_id> on joes-agents/<slug> — handoff PR #<n> open + recorded; team safe to tear down`. (You act on that RELAY — you do not receive the `plan.handoff_pr_opened` DB event on your channel; the durable route is the coordinator's relay to your inbox, with the backstop covering a missed relay. A durable server-routed event is an ADR-0112 follow-up.) On a **terminal plan failure** you escalated and triaged, the same applies — a failed plan must not pin the team up.
 
 Act:
-1. Confirm the repo's lifecycle is `ephemeral` (a `persistent` team stays up; `manual` is command-only). `GET /api/v1/team_configs/{repo}` → `lifecycle`.
-2. Run `treadmill team down <repo>`. It is **drain-guarded** — if a late plan arrived and left team-active work, teardown refuses (exit 2) and you leave the team up. That is the safety: never `--force` here.
-3. Do NOT tear down while YOU still owe the team a decision (an open escalation you haven't answered) — that is parked-on-human, and the drain-guard already treats it as not-blocking, but you resolve it first so the team isn't torn down with your own unanswered question pending.
+1. **VERIFY YOU ARE EXTERNAL to the team (ADR-0112 hard invariant).** Your own label must NOT be a member of the target team — not `coordinator-<slug>` and not `worker-<slug>-*` for this repo. This fails only in the unusual case where a coordinator self-submitted its own team's plan (so `created_by` is a team member). If you ARE a member: do NOT run `team down` — you would self-kill. Leave teardown to the backstop reconcile (external by construction — a systemd-timer process, not a team session).
+2. Confirm the repo's lifecycle is `ephemeral` (a `persistent` team stays up; `manual` is command-only). `GET /api/v1/team_configs/{repo}` → `lifecycle`.
+3. Run `treadmill team down <repo>`. It is **drain-guarded** — if a late plan arrived and left team-active work, teardown refuses (exit 2) and you leave the team up. That is the safety: never `--force` here. (The drain-check and shutdown are not one transaction, so a plan.submitted in the gap is caught by the backstop's revive, not lost — but do not force past a refusal.)
+4. Do NOT tear down while YOU still owe the team a decision (an open escalation you haven't answered) — that is parked-on-human, and the drain-guard already treats it as not-blocking, but you resolve it first so the team isn't torn down with your own unanswered question pending.
 
-Skip if the repo is `persistent`/`manual`, or if `team down` refuses (real in-flight work — let it finish, the backstop or the next `team-implemented` signal will catch it).
+Skip if you are a team member (step 1), the repo is `persistent`/`manual`, or `team down` refuses (real in-flight work — let it finish; the backstop or the next `team-implemented` signal will catch it).
 
 ## When NOT to intervene
 

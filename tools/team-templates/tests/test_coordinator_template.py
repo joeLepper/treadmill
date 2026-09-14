@@ -631,3 +631,10 @@ def test_handoff_signals_exec_in_charge_to_tear_down() -> None:
     assert "team safe to tear down" in body
     # Routed to created_by (the external actor) over the §10 channel.
     assert "plans.created_by" in body
+    # The coordinator knows plan_id, not created_by — it must resolve the address
+    # (Ernie Finding C), not infer it.
+    assert "GET /api/v1/plans/{plan_id}` → `created_by`" in body
+    # Externality edge (kimi BLOCKING): a self-submitted plan makes created_by a team
+    # member — do NOT relay a teardown it can't safely run; leave it to the backstop.
+    assert "self-submitted this plan" in body
+    assert "leave teardown to the backstop" in body
