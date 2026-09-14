@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Treadmill PR-state poll reconciler for %i every 2 minutes (ADR-0113)
+# Persistent=true: if the host was off when a window fired, run once on next
+# boot/login rather than skipping — a merge/CI transition that happened while the
+# host was down is then reconciled promptly after a reboot.
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Persistent=true
+Unit=treadmill-pr-poll@%i.service
+
+[Install]
+WantedBy=timers.target

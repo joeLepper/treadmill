@@ -86,6 +86,14 @@ surface's gaps would leak downstream).
    Donna's P0 plan 1-then-4 — one investigation task first to prove PR-open + CI +
    integration end to end through the poller (and to confirm whether the repo runs CI
    on these PRs at all), then release the other four.
+   - Timer units DONE: `tools/cc-channels/systemd/treadmill-pr-poll@.{service,timer}`
+     (per-repo instance = slug; REPO + ACCOUNT from an EnvironmentFile; NOT
+     auto-enabled — enabling begins synthesizing events, the operator's call).
+   - Dogfood BLOCKED: the treadmill API is down (the `treadmill-api` container exited
+     ~2 weeks ago; no `treadmill-local` host processes run). Bringing it up needs
+     `treadmill-local up` from MAIN (branch-sensitive; a cold full-stack bring-up on
+     the shared host) — an operator decision, surfaced to Joe. The dogfood also holds
+     for Ernie's slice-3 co-sign.
 
 ## Risks / unknowns
 
