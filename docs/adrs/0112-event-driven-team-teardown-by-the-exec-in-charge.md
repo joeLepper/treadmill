@@ -237,6 +237,10 @@ had missed: (1) partial-failure recovery holes (a failed coordinator stop and a 
 worker start both stranded work), and (2) `team sweep` bypassing the serialization lock.
 Both are folded (coordinator-first-gated teardown + all-units liveness + partial-teardown
 completion; sweep now takes the lock), plus Fran's non-blocking notes (re-read drain
-under the lock; the lock wait is not time-bounded). Fran's re-verify on the folded tip is
-the final gate before merge. The cross-model verifier requirement is met by Fran's live
-pass — not a fallback.
+under the lock; the lock wait is not time-bounded; `team up` standup lock as a Follow-up).
+Fran then RE-VERIFIED the folded tip with re-executed foils and returned approve-with-notes
+(notes folded); Ernie's depth re-check of the same tip returned approve, with non-vacuous
+red-then-green foils (neutralize the coordinator-abort gate → the abort foil reddens;
+coordinator-only liveness → the partial-revive foil reddens). The ADR-0111 cross-model
+verifier requirement is met by Fran's live executed-foil pass — NOT the same-family
+fallback. Merge cleared by both layers.
