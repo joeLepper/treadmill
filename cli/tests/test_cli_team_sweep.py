@@ -20,6 +20,14 @@ from typer.testing import CliRunner
 
 runner = CliRunner()
 
+
+@pytest.fixture(autouse=True)
+def _tmp_lock(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """sweep now takes the shared host lock (ADR-0112); redirect it to a tmp file so
+    the tests do not touch the real ~/.treadmill lock."""
+    monkeypatch.setattr(team_module, "_RECONCILE_LOCK", tmp_path / "team-reconcile.lock")
+
+
 _NOW = datetime.now(UTC)
 _OLD = (_NOW - timedelta(hours=48)).isoformat()  # well past any grace
 _RECENT = (_NOW - timedelta(minutes=5)).isoformat()  # within grace

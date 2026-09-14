@@ -562,9 +562,28 @@ def _all_team_labels(cfg: dict) -> list[str]:
 
 def _teardown_team_units(cfg: dict) -> list[str]:
     """Stop + disable every team unit. Returns systemd warnings (empty on success).
-    Shared by ``team down`` and ``team sweep`` so both tear down identically."""
+    Shared by ``team down``, ``team sweep`` and ``team reconcile`` so all tear down
+    identically.
+
+    The COORDINATOR is stopped FIRST and its stop is GATED (ADR-0112, Fran): if the
+    coordinator disable fails, we ABORT before touching the other units, so a failed
+    teardown can never leave the un-healable coordinator-UP/workers-DOWN state (a
+    coordinator-only liveness check would read that as live and never repair it).
+    Aborting leaves the team fully up, which the all-units liveness check then reads
+    correctly. A worker/evaluator stop that fails leaves coordinator-DOWN/some-up,
+    which all-units liveness reads as not-fully-live → the reconcile completes it."""
     warnings: list[str] = []
-    for label in _all_team_labels(cfg):
+    labels = _all_team_labels(cfg)  # coordinator is first
+    coordinator = labels[0]
+    coord_unit = _SYSTEMD_UNIT_TEMPLATE.format(label=coordinator)
+    rc, err = _run_systemctl(["disable", "--now", coord_unit])
+    if rc != 0:
+        # Abort: do not create a coordinator-up/workers-down remnant.
+        return [
+            f"systemctl --user disable --now {coord_unit}: rc={rc} stderr={err!r} "
+            "— ABORTED teardown (coordinator stop failed; team left fully up)"
+        ]
+    for label in labels[1:]:
         unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
         rc, err = _run_systemctl(["disable", "--now", unit])
         if rc != 0:
@@ -672,8 +691,30 @@ def down(
     # in-flight reconcile pass to finish, then tear down (never skip the teardown). The
     # wait is bounded by ONE full reconcile pass (team-count × drain-HTTP latency), not
     # literally instant — fine against a 2-min backstop cadence.
-    all_labels = _all_team_labels(cfg)
-    with _host_reconcile_lock(blocking=True):
+    # Acquire the host lock, then RE-VERIFY under it right before stopping (ADR-0112,
+    # Fran): a plan can land, or the config change, during the lock wait, so the
+    # pre-lock cfg/drain snapshot may be stale. Re-read both under the lock and re-run
+    # the self-kill + drain guards on the fresh state. (This still cannot ATOMICALLY
+    # exclude a plan.submitted racing the stop — the backstop revive covers that — but
+    # it removes avoidable lock-wait staleness. The lock wait is NOT bounded by a fixed
+    # time: `systemctl` has no timeout, so a stuck unit can hold it indefinitely.)
+    with _host_reconcile_lock(blocking=True), ApiClient(load_config()) as client:
+        cfg = client._request("GET", f"/api/v1/team_configs/{repo}")
+        invoker = os.environ.get("TREADMILL_LABEL")
+        if invoker and invoker in _all_team_labels(cfg):
+            err_console.print(
+                f"[red]REFUSED: {invoker} is a MEMBER of team {repo} (self-kill)."
+                "[/red]"
+            )
+            raise typer.Exit(code=2)
+        drain = client._request("GET", f"/api/v1/team_configs/{repo}/drain")
+        if not drain.get("clean", False) and not force:
+            err_console.print(
+                f"[red]team down REFUSED: a plan landed during the lock wait — "
+                f"drain-guard now reports in-flight work on {repo}.[/red]"
+            )
+            raise typer.Exit(code=2)
+        all_labels = _all_team_labels(cfg)
         systemd_warnings = _teardown_team_units(cfg)
 
     console.print(f"[green]team down[/green]         {repo}")
@@ -733,16 +774,38 @@ def _sweep_decision(
     return "sweep"
 
 
-def _coordinator_unit_active(cfg: dict) -> bool:
-    """True iff the coordinator's systemd --user unit is actually running. Team
+def _team_fully_live(cfg: dict) -> bool:
+    """True iff EVERY team unit (coordinator, evaluator, all workers) is active. Team
     LIVENESS is the unit state, NOT the lease/config row (Ernie 4b #2): a team whose
     config row exists but whose unit is down (a crash, or a `team down`) is NOT live
-    and must be revived if it still has work."""
-    unit = _SYSTEMD_UNIT_TEMPLATE.format(label=cfg["coordinator_label"])
-    # `systemctl is-active` exits 0 iff the unit is active (3 = inactive/failed).
-    # _run_systemctl captures stderr, not stdout, so the exit code is the signal.
-    rc, _ = _run_systemctl(["is-active", unit])
-    return rc == 0
+    and must be revived if it still has work.
+
+    Keys on ALL units, not just the coordinator (ADR-0112, gpt): a partial teardown
+    (coordinator down, a worker up) OR a partial revive (coordinator up, a worker
+    failed to start) both read as NOT fully live, so the backstop revives them
+    (re-enable+start is idempotent) — an incomplete team self-heals instead of getting
+    stuck coordinator-up/workers-down, which a coordinator-only check would misread as
+    live and never repair. Cost is one `is-active` per unit per tick — cheap, local."""
+    for label in _all_team_labels(cfg):
+        unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
+        # `systemctl is-active` exits 0 iff the unit is active (3 = inactive/failed).
+        # _run_systemctl captures stderr, not stdout, so the exit code is the signal.
+        rc, _ = _run_systemctl(["is-active", unit])
+        if rc != 0:
+            return False
+    return True
+
+
+def _team_any_live(cfg: dict) -> bool:
+    """True iff ANY team unit is active. Used to COMPLETE a partial teardown (ADR-0112,
+    Fran): a done, sweepable team with any unit still up is torn down again (idempotent)
+    so a coordinator-down/workers-up remnant is finished, not leaked."""
+    for label in _all_team_labels(cfg):
+        unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
+        rc, _ = _run_systemctl(["is-active", unit])
+        if rc == 0:
+            return True
+    return False
 
 
 def _revive_team_units(cfg: dict) -> list[str]:
@@ -801,7 +864,10 @@ def sweep(
     skipped_new: list[str] = []
     errors: list[str] = []
 
-    with ApiClient(load_config()) as client:
+    # sweep is a teardown entry point too, so it takes the SAME host lifecycle lock as
+    # `team down` and `team reconcile` (ADR-0112, Fran BLOCKING 2) — otherwise a sweep
+    # teardown could interleave a concurrent reconcile revive. Blocking, like down.
+    with _host_reconcile_lock(blocking=True), ApiClient(load_config()) as client:
         try:
             configs = client._request("GET", "/api/v1/team_configs")
         except ApiError as exc:
@@ -934,7 +1000,7 @@ def reconcile(
                     errors.append(f"{repo}: drain {exc.status_code} {exc.detail}")
                     continue
 
-                live = _coordinator_unit_active(cfg)
+                live = _team_fully_live(cfg)
                 has_work = not drain.get("clean", False)
 
                 if has_work:
@@ -953,9 +1019,13 @@ def reconcile(
                         err_console.print(f"[yellow]  {repo}: {w}[/yellow]")
                     continue
 
-                # Drain clean → maybe TEAR DOWN (only ephemeral + idle + live).
+                # Drain clean → maybe TEAR DOWN. Use ANY-live (not fully-live) so a
+                # PARTIAL teardown (a coordinator-down/workers-up remnant) is COMPLETED
+                # on a later tick, not leaked (ADR-0112, Fran). _teardown_team_units is
+                # idempotent, so re-running it on a partly-torn team just finishes it.
+                any_live = _team_any_live(cfg)
                 decision = _sweep_decision(cfg, drain, now, idle_hours)
-                if decision == "sweep" and live:
+                if decision == "sweep" and any_live:
                     if dry_run:
                         torn_down.append(repo)
                         continue
@@ -963,7 +1033,7 @@ def reconcile(
                     torn_down.append(repo)
                     for w in warnings:
                         err_console.print(f"[yellow]  {repo}: {w}[/yellow]")
-                elif live:
+                elif any_live:
                     # Clean + up but not swept (persistent, within grace, or no
                     # activity yet) — the team is RUNNING, not "left down".
                     left_running.append(repo)

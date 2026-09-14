@@ -71,24 +71,30 @@ reconcile demoted to a backstop (operator-directed, 2026-09-14):
   done is refused. This is the PRIMARY teardown path: external actor, deterministic,
   prompt. The drain-check and unit shutdown inside `team down` are NOT one atomic
   transaction, so a plan.submitted that lands in the gap can leave a just-registered
-  task on a team whose units are stopping. This is NOT a permanent strand: `team down`
-  disables the COORDINATOR unit FIRST, and the reconcile keys team liveness on the
-  coordinator unit — so ANY teardown that has begun (even a partial one that failed
-  after stopping the coordinator but before a worker) reads as not-live, and the
-  backstop revives a not-live team that has work (re-enabling every unit). The residual
-  exposure is a worker's UNCOMMITTED work during the ~seconds shutdown, bounded by the
-  same commit/push-before-terminal durability the ADR-0109 parked-on-human path already
-  requires. `team down` re-evaluates the drain as late as possible before the stop, to
-  keep the window minimal.
-- **Teardown and the reconcile pass are SERIALIZED on a host lock** so a revive can
-  never INTERLEAVE a teardown. Without it, a reconcile tick that revives (re-enables
-  every unit) partway through a `team down` — after the coordinator is stopped but
-  before a worker — could resume the teardown and stop workers under a now-live
-  coordinator, a broken coordinator-up/workers-down state that coordinator-liveness
-  reads as live and never repairs. Both `team down` and `team reconcile` take the same
-  host `flock`: `team down` blocks (waits for the in-flight reconcile pass, then tears
-  down — never skipping), the reconcile skips a tick it cannot acquire. So teardown and
-  revive run to completion one at a time, never overlapped. This is a HOST-LOCAL guard,
+  task on a team whose units are stopping. This is NOT a permanent strand, guarded on
+  three sides (Fran, cross-model verifier): (1) **teardown is coordinator-first and
+  GATED** — `team down`/`_teardown_team_units` stops the coordinator FIRST and ABORTS
+  if that stop fails, so a failed teardown can never leave the un-healable
+  coordinator-UP/workers-DOWN state (aborting leaves the team fully up); (2) **liveness
+  is ALL member units, not just the coordinator** — a partial teardown
+  (coordinator-down/some-workers-up) OR a partial revive (coordinator-up but a worker
+  failed to start) both read as NOT fully live, so a team with work is revived
+  (re-enable+start, idempotent) rather than misread as live and left stuck; (3) the
+  reconcile **COMPLETES a partial teardown** — a done, sweepable team with ANY unit
+  still up is torn down again (idempotent) rather than leaked. The residual exposure is
+  a worker's UNCOMMITTED work during the shutdown window, bounded by the same
+  commit/push-before-terminal durability the ADR-0109 parked-on-human path requires.
+  `team down` re-reads cfg + drain UNDER the lock right before the stop, so the
+  drain snapshot is not stale after the lock wait (it still cannot ATOMICALLY exclude a
+  racing plan.submitted — the backstop revive covers that).
+- **All teardown entry points are SERIALIZED on one host lock** so a revive can never
+  INTERLEAVE a teardown. `team down`, `team sweep`, AND `team reconcile` take the same
+  host `flock` (the mutating commands block; the reconcile skips a tick it cannot
+  acquire) — `sweep` was a second teardown path and MUST participate or it recreates
+  the race. So teardown and revive run to completion one at a time, never overlapped.
+  The lock wait is NOT time-bounded — `systemctl` has no timeout, so a stuck unit can
+  hold it indefinitely (acceptable for a host-local admin tool; noted, not hidden).
+  This is a HOST-LOCAL guard,
   which is sufficient because a team and its lifecycle actors run on ONE operator host
   (all `treadmill-channel@*` units and the reconcile timer are `systemctl --user` on
   that host); a future multi-host substrate would replace the flock with a per-repo DB
@@ -183,12 +189,6 @@ sequenceDiagram
 
 ## Follow-ups
 
-- **Cross-model verifier pass when the roster recovers (ADR-0111 debt).** This ADR
-  merged on the ADR-0111 same-family fallback (see Review provenance) because Fran (the
-  Codex sibling) was capacity-gated and the panel's open-weight legs were gateway-
-  degraded. When a cross-model sibling is free (Fran back, or the panel gateway
-  recovered past the OpenCode 5h cap), run ONE cross-model verifier pass on the merged
-  change to close the debt cleanly.
 - **Durable server-routed done-signal (robustness upgrade).** The primary trigger is
   today the coordinator's soft relay to `created_by` (agent-initiated; the backstop
   covers a missed relay). To make the fast path prompt-BY-CONSTRUCTION, a server-side
@@ -212,15 +212,20 @@ sequenceDiagram
   the worker team by construction; the self-kill guards are defense-in-depth for a
   violation of it.
 
-## Review provenance (ADR-0111 fallback, recorded)
+## Review provenance (ADR-0111)
 
-This high-stakes Claude-authored change used a SAME-FAMILY depth verifier (Ernie, a
-Claude sibling), because the cross-model verifier ADR-0111 prefers (Fran, the Codex
-sibling) was unavailable (capacity-gated). Per ADR-0111 this fallback is recorded, not
-silent. Cross-model coverage still happened: the review PANEL's healthy GPT leg (a
-non-Claude family) reviewed every one of four rounds and caught real findings each time
-(externality self-kill, the TOCTOU race, the teardown/reconcile interleave, and the
-forged-label scope) — all folded. The panel could not reach its two-cross-family quorum
-because the open-weight gateway degraded (truncation/timeout) across all four runs — an
-INFRA condition (the OpenCode 5-hour cap), not an ADR defect. A clean cross-model
-verifier pass (Fran, or a recovered panel) remains a cheap follow-up if desired.
+This high-stakes Claude-authored change had BOTH review layers ADR-0111 asks for. Depth
+(same-family): Ernie (Claude sibling) ran foil-driven verifications across the whole arc
+(mutual-exclusion, no-deadlock, wiring). Breadth + cross-model VERIFIER: the review
+panel's GPT leg reviewed every round (the other cross-family legs degraded on the
+open-weight gateway — the OpenCode 5-hour cap, an infra condition, not an ADR defect,
+so the panel never reached its two-family quorum); AND Fran (the Codex sibling — the
+ADR-0111-preferred cross-model verifier) ran an independent verifier pass with EXECUTED
+foils and returned BLOCK with two real findings the same-family + degraded-panel passes
+had missed: (1) partial-failure recovery holes (a failed coordinator stop and a failed
+worker start both stranded work), and (2) `team sweep` bypassing the serialization lock.
+Both are folded (coordinator-first-gated teardown + all-units liveness + partial-teardown
+completion; sweep now takes the lock), plus Fran's non-blocking notes (re-read drain
+under the lock; the lock wait is not time-bounded). Fran's re-verify on the folded tip is
+the final gate before merge. The cross-model verifier requirement is met by Fran's live
+pass — not a fallback.
