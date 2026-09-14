@@ -1,6 +1,6 @@
 # ADR-0109: Ephemeral, repo-mode-driven team lifecycle
 
-- **Status:** accepted (2026-09-13; cross-model panel review — findings folded — + sibling co-sign by Ernie across two rounds, verified in-text)
+- **Status:** accepted (2026-09-13; cross-model panel review — findings folded — + sibling co-sign by Ernie across two rounds, verified in-text). DRAIN-GUARD AMENDMENT (2026-09-13, panel review of the v1 plan docs/plans/2026-09-13-team-lifecycle-and-feature-branch-v1.md): the drain-guard blocks on TEAM-ACTIVE work only. `escalated` tasks and the `branch → main` handoff PR are PARKED-ON-HUMAN — they do NOT block teardown (blocking on a stuck escalation forever would pin the team and defeat the resource goal), and are tracked so the team re-stands-up on the human's action. The blocking set below thus excludes `escalated`.
 - **Date:** 2026-09-13
 - **Related:** ADR-0087 (team execution model), ADR-0108 (panel-backed evaluator), ADR-0110 (feature-branch integration — the merge-target mode + the "implemented" trigger), ADR-0018 (retired container autoscaler)
 
