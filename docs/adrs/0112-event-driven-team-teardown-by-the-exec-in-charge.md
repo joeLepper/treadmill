@@ -183,6 +183,12 @@ sequenceDiagram
 
 ## Follow-ups
 
+- **Cross-model verifier pass when the roster recovers (ADR-0111 debt).** This ADR
+  merged on the ADR-0111 same-family fallback (see Review provenance) because Fran (the
+  Codex sibling) was capacity-gated and the panel's open-weight legs were gateway-
+  degraded. When a cross-model sibling is free (Fran back, or the panel gateway
+  recovered past the OpenCode 5h cap), run ONE cross-model verifier pass on the merged
+  change to close the debt cleanly.
 - **Durable server-routed done-signal (robustness upgrade).** The primary trigger is
   today the coordinator's soft relay to `created_by` (agent-initiated; the backstop
   covers a missed relay). To make the fast path prompt-BY-CONSTRUCTION, a server-side
