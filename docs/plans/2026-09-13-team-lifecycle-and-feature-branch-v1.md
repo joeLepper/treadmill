@@ -152,6 +152,22 @@ git-push integration) can't be dogfooded until steps 3–4 build it; it is prove
   run against this real join, never a mock hard-coding `pr_merged → block`. Likely a small
   server endpoint computes the join (extend the scale-down guard); the CLI `team down`
   calls it.
+- **The watcher (step 4b) is a host-side periodic reconcile that COMPOSES the
+  drain-guard, not a new server endpoint** (step-4b execution). `treadmill team
+  reconcile` (a systemd `--user` timer, single-flighted by a host `flock`) reads
+  `GET /team_configs` + `GET /drain` per team: a non-manual team with work (drain NOT
+  clean) whose UNIT is down is revived; an ephemeral team that is drain-clean and idle
+  is torn down via the SAME `_sweep_decision` `team sweep` uses. Two non-obvious calls,
+  both from Ernie's pre-flags: (a) team LIVENESS is the systemd unit (`is-active`), NOT
+  the lease/config row — a claimed-but-not-running team (a crash between the claim and
+  the side-effects, or a `team down`) is not live and self-heals on the next tick; (b)
+  re-standup keys on drain-activeness, so a still-parked escalation reads drain-clean
+  (not revived — waits for the human) and a RESOLVED escalation flips drain to not-clean
+  (revived) — re-standup fires on the human's response, not on `plan.submitted`. The
+  atomic lease (step 4a `claim` + the claim endpoint) protects concurrent standup; the
+  reconcile relies on the host `flock` for single-flight (single-host v1). The timer is
+  shipped but NOT auto-enabled — enabling begins autonomous team management and is the
+  operator's act.
 - **The canonical merge event is `github.pr_merged`, not `task.pr_merged`** (step-1
   execution — caught by the end-to-end drain foil Ernie required). The drain-guard's
   post-merge sha lookup first filtered `entity_type='task' AND action='pr_merged'`, which
