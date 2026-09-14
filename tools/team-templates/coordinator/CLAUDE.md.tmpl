@@ -144,6 +144,15 @@ plan, idempotently.
    `git push origin origin/<base>:refs/heads/joes-agents/<branch-slug>`
    (creating the ref IS a write; a read-only identity fails here). A `<base>` that does
    not resolve after fetch is a standup failure — escalate `standup_preflight_failed`.
+   **If the branch ALREADY exists** (a restart, or the plan's `integration_base` changed
+   after a prior standup cut it): VERIFY it was cut from THIS `<base>` —
+   `git merge-base --is-ancestor origin/<base> joes-agents/<branch-slug>` must succeed.
+   If it FAILS, the branch carries a different base's history (e.g. an earlier `main`
+   cut, then `integration_base` was changed to a non-`main` ref — ADR-0114 panel finding):
+   do NOT drift or dispatch onto it (that would bake the wrong base's history, and for a
+   client repo could leak `main` content). Escalate `standup_preflight_failed:
+   integration_base changed after the branch was cut` to `created_by`; a human re-cuts or
+   renames. NEVER silently reuse a mis-based branch.
 2. **PREFLIGHT — verify WRITE access, not read.** A branch-exists or
    read check passes while push is blocked. Prove the agent can update
    the ref: push an empty commit to the branch and then reset it back

@@ -74,17 +74,33 @@ sets only the BASE, not the name.
 ### Bad / trade-offs
 - One more per-plan knob. Mitigated: it defaults to the current behavior and follows the
   established `auto_merge` frontmatter → column → PlanResponse path exactly.
-- `PlanHandoffPrOpened.pr_number` becomes optional. Verified safe: only the scheduler's
-  drain SQL reads it (`(payload->>'pr_number')::int`), which yields no match on NULL —
-  correct for a handoff with no PR.
+- `PlanHandoffPrOpened.pr_number` becomes optional. Verified safe by tracing every
+  consumer (Ernie): the drain handoff-gate (`team_configs._plans_with_handoff`) keys
+  teardown on the event's EXISTENCE (`WHERE action='handoff_pr_opened'`) and reads no
+  `pr_number`; the only `(payload->>'pr_number')::int` casts live in the
+  `task_mergeability` VIEW and are NULL-safe (`NULL::int` never matches a `pr_number`,
+  no error); the fabric surface routes by `plan_id`. `pr_url` stays required (the
+  non-main case supplies the branch tree URL), so the event always emits validly.
 
 ### Risks
 - A `integration_base` naming a ref that does not resolve at standup would strand the
   plan. Mitigated: §3.1a step 1 fails the write-preflight loudly (`standup_preflight_failed`)
   when `origin/<base>` does not resolve after fetch.
+- **A base that ALIASES `main`** (panel gpt): `integration_base: HEAD` resolves to `main`
+  in most clones, silently cutting a "non-main" plan from `main`. Mitigated: the parser
+  rejects `HEAD`/symbolic refs, whitespace, and an `origin/` prefix — a base must be an
+  explicit bare branch name.
+- **Mid-flight base mutation** (panel claude): a plan first standing up with the default
+  base cuts `joes-agents/<slug>` off `main`; a later resubmit changing `integration_base`
+  to a non-`main` ref would leave step 1's "create if not exists" reusing the `main`-cut
+  branch while drifting from the new base — baking `main` history in. Mitigated: §3.1a
+  step 1 verifies an EXISTING branch descends from the current `<base>`
+  (`git merge-base --is-ancestor origin/<base> joes-agents/<slug>`) and fails
+  `standup_preflight_failed` on a mismatch, never silently reusing a mis-based branch.
 - **Falsifier:** a plan with `integration_base: <non-main>` whose coordinator still cuts
-  the branch off `origin/main`, drifts from `main`, or opens a `branch → main` handoff PR
-  — any of the three means the base is not honored.
+  the branch off `origin/main`, drifts from `main`, opens a `branch → main` handoff PR,
+  or reuses a `main`-based branch after the base changed — any of these means the base is
+  not honored.
 
 ## References
 

@@ -592,6 +592,29 @@ def test_standup_preflight_tests_write_access_and_fails_loud() -> None:
     assert "do NOT dispatch" in body.lower() or "do NOT dispatch tasks" in body
 
 
+def test_standup_reads_integration_base_and_cuts_off_it() -> None:
+    """ADR-0114 falsifier #1 (base-CUT): §3.1a must READ the plan's integration_base
+    and cut the branch off `origin/<base>`, NOT a hardcoded `origin/main`. Without this
+    guard a future edit could silently revert step 1 to `origin/main` and strand a
+    non-main-based plan's tasks (they'd never see the design-branch docs) with the
+    other two falsifier guards (drift, handoff) still green (Ernie, ADR-0114 review)."""
+    body = _coordinator_plain()
+    # step 0: read the base off the plan.
+    assert "integration_base" in body
+    assert "GET /api/v1/plans/{plan_id}" in body
+    # step 1: cut off origin/<base>, not a hardcoded origin/main.
+    assert "git fetch origin <base>" in body
+    assert (
+        "git push origin origin/<base>:refs/heads/joes-agents/<branch-slug>" in body
+    )
+    # the hardcoded-main create must be GONE (its presence is the reverted-guard smell).
+    assert "origin/main:refs/heads/joes-agents/<branch-slug>" not in body
+    # mid-flight base-mutation guard (ADR-0114 panel finding): an existing branch must
+    # be verified to descend from THIS base, else it carries a wrong base's history.
+    assert "git merge-base --is-ancestor origin/<base> joes-agents/<branch-slug>" in body
+    assert "integration_base changed after the branch was cut" in body
+
+
 def test_drift_merge_policy_is_defined() -> None:
     """ADR-0110/0114 drift: merge origin/<base> → branch on cadence (the SAME ref the
     branch was cut from — `main` by default, never `main` for a non-main base);
