@@ -99,6 +99,10 @@ _DEFAULT_WORKER_COUNT = 3
 _DEFAULT_API_URL = "http://localhost:8000"
 _TEAMS_DIR = Path.home() / ".treadmill" / "teams"
 _SYSTEMD_UNIT_TEMPLATE = "treadmill-channel@{label}.service"
+# Per-repo mode choices (ADR-0109 / ADR-0110). Mirror the API's Literal enums;
+# the CLI validates client-side for a clean error before the round-trip.
+_LIFECYCLE_CHOICES = frozenset({"ephemeral", "persistent", "manual"})
+_MERGE_TARGET_CHOICES = frozenset({"feature-branch", "main"})
 
 
 def _slug_from_repo(repo: str) -> str:
@@ -361,6 +365,31 @@ def up(
             ),
         ),
     ] = None,
+    lifecycle: Annotated[
+        str | None,
+        typer.Option(
+            "--lifecycle",
+            help=(
+                "Team lifecycle mode (ADR-0109): ``ephemeral`` (stand up per "
+                "plan, tear down when done), ``persistent`` (never auto-down), "
+                "or ``manual`` (up/down by command only). Omit to keep the "
+                "repo's current mode (new repos default ``ephemeral``)."
+            ),
+        ),
+    ] = None,
+    merge_target: Annotated[
+        str | None,
+        typer.Option(
+            "--merge-target",
+            help=(
+                "Where the team integrates (ADR-0110): ``feature-branch`` (the "
+                "team merges into a per-plan ``joes-agents/<slug>`` branch and "
+                "the human owns the branch->main PR) or ``main`` (agent-merge "
+                "to main; rare). Omit to keep the repo's current target (new "
+                "repos default ``feature-branch``)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Provision (or update) a per-repo Treadmill team.
 
@@ -369,6 +398,19 @@ def up(
     if "/" not in repo:
         err_console.print(
             f"[red]repo must be ``owner/name`` form; got {repo!r}[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    if lifecycle is not None and lifecycle not in _LIFECYCLE_CHOICES:
+        err_console.print(
+            f"[red]--lifecycle must be one of "
+            f"{sorted(_LIFECYCLE_CHOICES)}; got {lifecycle!r}[/red]"
+        )
+        raise typer.Exit(code=1)
+    if merge_target is not None and merge_target not in _MERGE_TARGET_CHOICES:
+        err_console.print(
+            f"[red]--merge-target must be one of "
+            f"{sorted(_MERGE_TARGET_CHOICES)}; got {merge_target!r}[/red]"
         )
         raise typer.Exit(code=1)
 
@@ -390,18 +432,21 @@ def up(
     upsert_path = "/api/v1/team_configs"
     if force:
         upsert_path = f"{upsert_path}?force=true"
+    upsert_body: dict[str, object] = {
+        "repo": repo,
+        "coordinator_label": coordinator_label,
+        "evaluator_label": evaluator_label,
+        "worker_labels": worker_labels,
+    }
+    # Send a mode only when the operator set it; omitting lets the API keep the
+    # repo's current value (or apply the server-default on first insert).
+    if lifecycle is not None:
+        upsert_body["lifecycle"] = lifecycle
+    if merge_target is not None:
+        upsert_body["merge_target"] = merge_target
     with ApiClient(load_config()) as client:
         try:
-            client._request(
-                "POST",
-                upsert_path,
-                json={
-                    "repo": repo,
-                    "coordinator_label": coordinator_label,
-                    "evaluator_label": evaluator_label,
-                    "worker_labels": worker_labels,
-                },
-            )
+            client._request("POST", upsert_path, json=upsert_body)
         except ApiError as exc:
             if exc.status_code == 409:
                 err_console.print(

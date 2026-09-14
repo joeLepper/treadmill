@@ -566,3 +566,60 @@ class TestModelPin:
         assert "claude-sonnet-4-6" in worker_model
         assert "claude-opus-4-8" not in worker_model
         assert "claude-sonnet-4-6" not in coord_model
+
+
+# ── ADR-0109 / ADR-0110: --lifecycle + --merge-target flags ─────────────
+
+
+class TestModeFlags:
+    def _body(self, fake_api_client: MagicMock) -> dict:
+        return fake_api_client._request.call_args.kwargs["json"]
+
+    def test_modes_forwarded_to_upsert_body(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        result = runner.invoke(
+            team_app,
+            ["up", "x/y", "--lifecycle", "persistent", "--merge-target", "main"],
+        )
+        assert result.exit_code == 0, result.stdout
+        body = self._body(fake_api_client)
+        assert body["lifecycle"] == "persistent"
+        assert body["merge_target"] == "main"
+
+    def test_modes_omitted_are_absent_from_body(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        """When the operator omits the modes, the CLI sends NO key — so the API
+        preserves the repo's current mode (or applies the server-default)."""
+        result = runner.invoke(team_app, ["up", "x/y"])
+        assert result.exit_code == 0, result.stdout
+        body = self._body(fake_api_client)
+        assert "lifecycle" not in body
+        assert "merge_target" not in body
+
+    def test_invalid_lifecycle_rejected_before_request(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        result = runner.invoke(team_app, ["up", "x/y", "--lifecycle", "immortal"])
+        assert result.exit_code == 1
+        fake_api_client._request.assert_not_called()
+
+    def test_invalid_merge_target_rejected_before_request(
+        self,
+        teams_dir: Path,
+        fake_api_client: MagicMock,
+        systemctl_success: list[list[str]],
+    ) -> None:
+        result = runner.invoke(team_app, ["up", "x/y", "--merge-target", "trunk"])
+        assert result.exit_code == 1
+        fake_api_client._request.assert_not_called()

@@ -45,6 +45,25 @@ class TeamConfig(Base):
         nullable=False,
         server_default=text("'{}'::text[]"),
     )
+    lifecycle: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'ephemeral'"),
+    )
+    """Team lifecycle mode (ADR-0109): ``ephemeral`` (default — stand up on the first
+    plan, tear down when the plan is done), ``persistent`` (never auto-down, hot
+    repos), or ``manual`` (up/down only by explicit command). Server-default
+    ``ephemeral`` so pre-ADR-0109 rows adopt the resource-conserving default."""
+    merge_target: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'feature-branch'"),
+    )
+    """Where the team integrates (ADR-0110): ``feature-branch`` (default — the team
+    merges task PRs into a per-plan ``joes-agents/<slug>`` branch and the human owns
+    the branch->main PR) or ``main`` (only the rare repo that permits agent-merge to
+    main). Server-default ``feature-branch`` — the safe default for the common case
+    where agent-merge-to-main is blocked."""
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

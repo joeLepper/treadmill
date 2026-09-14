@@ -52,6 +52,8 @@ class _StubTeamConfig:
         coordinator_label: str,
         worker_labels: list[str],
         evaluator_label: str | None = None,
+        lifecycle: str = "ephemeral",
+        merge_target: str = "feature-branch",
         config_id: uuid.UUID | None = None,
         created_at: datetime | None = None,
         updated_at: datetime | None = None,
@@ -62,6 +64,8 @@ class _StubTeamConfig:
         self.coordinator_label = coordinator_label
         self.evaluator_label = evaluator_label
         self.worker_labels = list(worker_labels)
+        self.lifecycle = lifecycle
+        self.merge_target = merge_target
         self.created_at = created_at or now
         self.updated_at = updated_at or now
 
@@ -71,12 +75,16 @@ def _make_team_config(
     coordinator_label: str,
     worker_labels: list[str],
     evaluator_label: str | None = None,
+    lifecycle: str = "ephemeral",
+    merge_target: str = "feature-branch",
 ) -> _StubTeamConfig:
     return _StubTeamConfig(
         repo=repo,
         coordinator_label=coordinator_label,
         worker_labels=worker_labels,
         evaluator_label=evaluator_label,
+        lifecycle=lifecycle,
+        merge_target=merge_target,
     )
 
 
@@ -156,11 +164,26 @@ class _StubSession:
         # pg_insert(TeamConfig).on_conflict_do_update — upsert path.
         if "INSERT INTO team_configs" in compiled_sql:
             params = self._params_dict(stmt)
-            self._team_configs[params["repo"]] = _make_team_config(
-                params["repo"],
+            repo = params["repo"]
+            existing = self._team_configs.get(repo)
+            # Faithful to the store: lifecycle/merge_target are in `params` only
+            # when the caller set them. On INSERT (no existing row) omit → the
+            # server-default; on UPDATE omit → preserve the existing value.
+            if "lifecycle" in params:
+                lifecycle = params["lifecycle"]
+            else:
+                lifecycle = existing.lifecycle if existing else "ephemeral"
+            if "merge_target" in params:
+                merge_target = params["merge_target"]
+            else:
+                merge_target = existing.merge_target if existing else "feature-branch"
+            self._team_configs[repo] = _make_team_config(
+                repo,
                 params["coordinator_label"],
                 list(params["worker_labels"]),
                 evaluator_label=params.get("evaluator_label"),
+                lifecycle=lifecycle,
+                merge_target=merge_target,
             )
             return _ExecResult(rowcount=1)
 
@@ -450,6 +473,104 @@ def test_upsert_evaluator_label_optional(app_and_session) -> None:
     )
     assert resp.status_code == 200
     assert resp.json()["evaluator_label"] is None
+
+
+# ── ADR-0109 / ADR-0110: lifecycle + merge_target mode round-trip ───────
+
+
+def test_upsert_round_trips_lifecycle_and_merge_target(app_and_session) -> None:
+    """The two mode fields land on the wire and survive round-trip via GET."""
+    app, _ = app_and_session
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": [],
+            "lifecycle": "persistent",
+            "merge_target": "main",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["lifecycle"] == "persistent"
+    assert resp.json()["merge_target"] == "main"
+
+    get = client.get("/api/v1/team_configs/x/y").json()
+    assert get["lifecycle"] == "persistent"
+    assert get["merge_target"] == "main"
+
+
+def test_upsert_applies_defaults_when_mode_omitted(app_and_session) -> None:
+    """A first insert that omits the modes gets the resource-conserving
+    defaults: ``ephemeral`` lifecycle and ``feature-branch`` merge target."""
+    app, _ = app_and_session
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={"repo": "x/y", "coordinator_label": "c-xy", "worker_labels": []},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["lifecycle"] == "ephemeral"
+    assert resp.json()["merge_target"] == "feature-branch"
+
+
+def test_upsert_preserves_mode_on_update_when_omitted(app_and_session) -> None:
+    """A re-upsert that omits the modes must NOT reset them — a plain
+    ``team up`` on an existing team keeps its chosen mode."""
+    app, _ = app_and_session
+    client = TestClient(app)
+    client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": [],
+            "lifecycle": "persistent",
+            "merge_target": "main",
+        },
+    )
+    # Re-upsert with the modes omitted (a plain re-`team up`).
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={"repo": "x/y", "coordinator_label": "c-xy", "worker_labels": ["w-1"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["lifecycle"] == "persistent"
+    assert resp.json()["merge_target"] == "main"
+
+
+def test_upsert_rejects_invalid_lifecycle(app_and_session) -> None:
+    """An unknown lifecycle is refused at the schema (422), never silently
+    coerced — fail-closed on the mode enum."""
+    app, _ = app_and_session
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": [],
+            "lifecycle": "immortal",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_upsert_rejects_invalid_merge_target(app_and_session) -> None:
+    """An unknown merge target is refused at the schema (422)."""
+    app, _ = app_and_session
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/team_configs",
+        json={
+            "repo": "x/y",
+            "coordinator_label": "c-xy",
+            "worker_labels": [],
+            "merge_target": "trunk",
+        },
+    )
+    assert resp.status_code == 422, resp.text
 
 
 # Scale-down guard tests — patch _in_flight_task_executions_for_labels

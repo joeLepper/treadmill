@@ -33,30 +33,39 @@ class TeamConfigStore:
         coordinator_label: str,
         worker_labels: list[str],
         evaluator_label: str | None = None,
+        lifecycle: str | None = None,
+        merge_target: str | None = None,
     ) -> TeamConfig:
         """Insert or update by ``repo``. Returns the persisted row.
 
         ``evaluator_label`` is the ADR-0087 per-repo evaluator session
-        label. Optional for back-compat with pre-ADR-0087 callers; new
-        ``treadmill team up`` flows populate it.
+        label. ``lifecycle`` (ADR-0109) and ``merge_target`` (ADR-0110) are
+        optional: when omitted, INSERT uses the column server-defaults
+        (``ephemeral`` / ``feature-branch``) and UPDATE PRESERVES the existing
+        value — so a plain re-``team up`` never silently resets a repo's mode.
         """
+        values: dict[str, object] = {
+            "repo": repo,
+            "coordinator_label": coordinator_label,
+            "evaluator_label": evaluator_label,
+            "worker_labels": list(worker_labels),
+        }
+        set_: dict[str, object] = {
+            "coordinator_label": coordinator_label,
+            "evaluator_label": evaluator_label,
+            "worker_labels": list(worker_labels),
+            "updated_at": sa.text("now()"),
+        }
+        if lifecycle is not None:
+            values["lifecycle"] = lifecycle
+            set_["lifecycle"] = lifecycle
+        if merge_target is not None:
+            values["merge_target"] = merge_target
+            set_["merge_target"] = merge_target
         stmt = (
             pg_insert(TeamConfig)
-            .values(
-                repo=repo,
-                coordinator_label=coordinator_label,
-                evaluator_label=evaluator_label,
-                worker_labels=list(worker_labels),
-            )
-            .on_conflict_do_update(
-                index_elements=["repo"],
-                set_={
-                    "coordinator_label": coordinator_label,
-                    "evaluator_label": evaluator_label,
-                    "worker_labels": list(worker_labels),
-                    "updated_at": sa.text("now()"),
-                },
-            )
+            .values(**values)
+            .on_conflict_do_update(index_elements=["repo"], set_=set_)
         )
         await session.execute(stmt)
         row = await self.get_by_repo(session, repo)
