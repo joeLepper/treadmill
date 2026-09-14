@@ -840,6 +840,7 @@ def reconcile(
     revived: list[str] = []
     torn_down: list[str] = []
     left_working: list[str] = []
+    left_running: list[str] = []
     left_down: list[str] = []
     skipped_manual: list[str] = []
     errors: list[str] = []
@@ -898,6 +899,10 @@ def reconcile(
                     torn_down.append(repo)
                     for w in warnings:
                         err_console.print(f"[yellow]  {repo}: {w}[/yellow]")
+                elif live:
+                    # Clean + up but not swept (persistent, within grace, or no
+                    # activity yet) — the team is RUNNING, not "left down".
+                    left_running.append(repo)
                 else:
                     left_down.append(repo)
     finally:
@@ -909,6 +914,7 @@ def reconcile(
     console.print(f"[green]{verb_up}[/green]        {revived}")
     console.print(f"[green]{verb_down}[/green]     {torn_down}")
     console.print(f"[dim]left working          {left_working}[/dim]")
+    console.print(f"[dim]left running (clean)  {left_running}[/dim]")
     console.print(f"[dim]left down (no work)   {left_down}[/dim]")
     console.print(f"[dim]skipped manual        {skipped_manual}[/dim]")
     if errors:

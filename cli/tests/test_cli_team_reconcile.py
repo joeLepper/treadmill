@@ -217,3 +217,24 @@ def test_single_flight_skips_when_lock_held(fake_api, systemctl, tmp_lock) -> No
     finally:
         fcntl.flock(holder, fcntl.LOCK_UN)
         holder.close()
+
+
+def test_live_persistent_clean_team_reads_as_running_not_down(
+    fake_api, systemctl
+) -> None:
+    """Cosmetic-correctness (Ernie 4b-2): a LIVE persistent+clean team is not swept
+    (persistent) and must report as running, not 'left down' — and nothing touches
+    systemd."""
+    systemctl.live.add("coordinator-o-persist")
+    result = _run(
+        fake_api,
+        [_cfg("o/persist", lifecycle="persistent")],
+        {"o/persist": _drain(clean=True, last_activity_at=_OLD)},
+    )
+    assert systemctl.calls == []
+    out = result.output
+    # The repo appears under "left running", not under "left down".
+    running_line = next(ln for ln in out.splitlines() if "left running" in ln)
+    down_line = next(ln for ln in out.splitlines() if "left down" in ln)
+    assert "o/persist" in running_line
+    assert "o/persist" not in down_line
