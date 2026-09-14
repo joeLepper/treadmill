@@ -208,25 +208,29 @@ class ApiClient:
         self,
         *,
         repo: str,
+        pr_number: int,
         head_sha: str,
         check_suite_id: int,
         conclusion: str,
         app_slug: str,
-        pr_number: int | None = None,
     ) -> dict[str, Any]:
         """Ingest an observed completed check SUITE (ADR-0113 CI leg). Idempotent;
-        a changed conclusion re-emits, a same-conclusion re-poll is a no-op."""
-        body: dict[str, Any] = {
-            "repo": repo,
-            "head_sha": head_sha,
-            "check_suite_id": check_suite_id,
-            "conclusion": conclusion,
-            "app_slug": app_slug,
-        }
-        if pr_number is not None:
-            body["pr_number"] = pr_number
+        a changed conclusion re-emits, a same-conclusion re-poll is a no-op.
+
+        ``pr_number`` is REQUIRED: the endpoint writes task_prs.head_sha keyed on
+        (repo, pr_number) so the observer attributes the ci_result on a webhookless
+        repo. The poller always polls a specific task_pr, so it always has it."""
         return self._request(
-            "POST", "/api/v1/github/poll-ingest/check-run", json=body,
+            "POST",
+            "/api/v1/github/poll-ingest/check-run",
+            json={
+                "repo": repo,
+                "pr_number": pr_number,
+                "head_sha": head_sha,
+                "check_suite_id": check_suite_id,
+                "conclusion": conclusion,
+                "app_slug": app_slug,
+            },
         )
 
     # ── Onboarding ───────────────────────────────────────────────────────────

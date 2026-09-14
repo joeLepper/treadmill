@@ -206,6 +206,23 @@ async def test_poll_ingest_is_idempotent_on_re_poll(
 # --- CI leg (ADR-0113 slice 2) -------------------------------------------------
 
 
+def test_ci_leg_requires_pr_number() -> None:
+    """pr_number is REQUIRED on the CI-leg request (Ernie, slice-3 hardening): the
+    endpoint's head_sha writer keys on it, so an omitted number would silently no-op
+    the attribution fix. Requiring it makes the fix non-bypassable. No DB needed."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError):
+        PollCheckRunIngestRequest(  # type: ignore[call-arg]
+            repo="o/r",
+            head_sha="abc",
+            check_suite_id=1,
+            conclusion="success",
+            app_slug="ga",
+        )
+
+
 async def _seed_task_with_pr(
     session: AsyncSession, repo: str, pr_number: int
 ) -> uuid.UUID:

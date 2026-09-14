@@ -53,7 +53,13 @@ class PollCheckRunIngestRequest(BaseModel):
     field the `ci_observer` rolls up and keys `task.ci_result` on."""
 
     repo: str = Field(min_length=1, max_length=255)
-    pr_number: int | None = Field(default=None, ge=1)
+    pr_number: int = Field(ge=1)
+    """REQUIRED (Ernie, slice-3 review): the CI-leg endpoint writes task_prs.head_sha
+    keyed on (repo, pr_number) so the observer can attribute the ci_result on a
+    webhookless repo. If pr_number were optional and omitted, that writer would no-op
+    and attribution would silently fail again (the masked gap). Requiring it makes the
+    attribution fix non-bypassable — the poller always polls a specific task_pr, so it
+    always has the number."""
     head_sha: str = Field(min_length=1, max_length=64)
     check_suite_id: int = Field(ge=1)
     conclusion: str = Field(min_length=1, max_length=32)
@@ -224,9 +230,7 @@ async def poll_ingest_check_run(
                 "conclusion": body.conclusion,
             },
             "app": {"slug": body.app_slug},
-            "pull_requests": (
-                [{"number": body.pr_number}] if body.pr_number is not None else []
-            ),
+            "pull_requests": [{"number": body.pr_number}],
         },
     }
     # ATTRIBUTION on a webhookless repo: the ci_observer resolves the task via
@@ -238,15 +242,16 @@ async def poll_ingest_check_run(
     # so we write task_prs.head_sha here — the poll-repo equivalent of the seam's writer,
     # keyed on the (repo, pr_number) bridge the coordinator already registered. This runs
     # BEFORE the seam so the observer (invoked inside it) resolves the task by head_sha.
-    if body.pr_number is not None:
-        await session.execute(
-            text(
-                "UPDATE task_prs SET head_sha = :h "
-                "WHERE lower(repo) = lower(:r) AND pr_number = :n"
-            ),
-            {"h": body.head_sha, "r": body.repo, "n": body.pr_number},
-        )
-        await session.commit()
+    # pr_number is REQUIRED on this request, so this writer always runs — the
+    # attribution fix cannot be silently bypassed by an omitted number (Ernie).
+    await session.execute(
+        text(
+            "UPDATE task_prs SET head_sha = :h "
+            "WHERE lower(repo) = lower(:r) AND pr_number = :n"
+        ),
+        {"h": body.head_sha, "r": body.repo, "n": body.pr_number},
+    )
+    await session.commit()
     event_id = _poll_check_run_event_id(
         body.repo, body.check_suite_id, body.head_sha, body.conclusion
     )
