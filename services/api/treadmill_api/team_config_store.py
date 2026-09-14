@@ -72,6 +72,63 @@ class TeamConfigStore:
         assert row is not None, "upsert must yield a row"
         return row
 
+    async def claim(
+        self,
+        session: AsyncSession,
+        repo: str,
+        coordinator_label: str,
+        worker_labels: list[str],
+        evaluator_label: str | None = None,
+        lifecycle: str | None = None,
+        merge_target: str | None = None,
+    ) -> tuple[TeamConfig, bool]:
+        """Atomically claim the per-repo STANDUP LEASE (ADR-0109/0110 step 4).
+
+        ``INSERT ... ON CONFLICT (repo) DO NOTHING RETURNING`` — the
+        ``team_configs.repo`` UNIQUE constraint is the lock. Under two concurrent
+        ``plan.submitted`` for one repo, EXACTLY ONE caller inserts the row and gets
+        ``claimed=True`` (it must perform the standup side-effects — render
+        templates, start systemd); every other caller gets ``claimed=False`` and the
+        already-standing row (it ATTACHES its plan to that team — never a second
+        team, never a dropped plan). The losing INSERT blocks on the row lock until
+        the winner's transaction commits, then sees the conflict, so the returned
+        row is always the winner's committed row.
+
+        Unlike :meth:`upsert`, a conflict does NOT mutate the existing row — an
+        attach must never disturb the standing team's labels or mode. The caller
+        owns the surrounding transaction; commit to release the lease.
+
+        REQUIRES READ COMMITTED isolation (Postgres + SQLAlchemy default). The
+        loser's INSERT unblocks only after the winner commits; the SEPARATE
+        ``get_by_repo`` SELECT then takes a fresh snapshot and sees the winner's
+        row. Under REPEATABLE READ / SERIALIZABLE the loser's snapshot predates the
+        winner's commit, ``get_by_repo`` returns ``None``, and the assertion below
+        fires — which in the watcher's plan.submitted handler would DROP the losing
+        plan, the exact loss the lease prevents. Keep 4b's claim in a READ COMMITTED
+        transaction; do NOT raise the isolation level around this call.
+        """
+        values: dict[str, object] = {
+            "repo": repo,
+            "coordinator_label": coordinator_label,
+            "evaluator_label": evaluator_label,
+            "worker_labels": list(worker_labels),
+        }
+        if lifecycle is not None:
+            values["lifecycle"] = lifecycle
+        if merge_target is not None:
+            values["merge_target"] = merge_target
+        stmt = (
+            pg_insert(TeamConfig)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["repo"])
+            .returning(TeamConfig.id)
+        )
+        result = await session.execute(stmt)
+        claimed = result.scalar_one_or_none() is not None
+        row = await self.get_by_repo(session, repo)
+        assert row is not None, "claim must yield a row (inserted or pre-existing)"
+        return row, claimed
+
     async def list_all(self, session: AsyncSession) -> list[TeamConfig]:
         result = await session.scalars(
             sa.select(TeamConfig).order_by(TeamConfig.repo)
