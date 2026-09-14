@@ -49,9 +49,16 @@ run unfettered on repos that forbid agent-merge-to-main. Cross-model workers are
      `registered` / `assigned` / `executing` / `pr_open` / `rework-pending` /
      post-merge-observation, and with any open TASK PR; SUCCEEDS (green) when all are
      terminal. **Parked-on-human is green-WITH-tracking:** an `escalated` task or an open
-     `branch → main` handoff PR lets teardown proceed AND the test asserts the item is
-     preserved and a re-standup is registered (so a stuck escalation never pins the team,
-     yet is never lost).
+     `branch → main` handoff PR lets teardown proceed, and TWO safety foils make parking
+     not-lose-work and not-strand (Ernie): (a) **work durability** — escalate a task whose
+     worker had in-progress UNCOMMITTED work → teardown → re-standup → assert the WORK
+     (branch content, not just the task row) survives; the state machine must commit/push
+     on-escalate so `escalated` never coexists with uncommitted worker state; (b)
+     **re-standup FIRES on the human's response** — park an escalation → simulate the
+     operator's escalation-RESPONSE → assert the team actually re-stands-up (reconcile
+     acts on the response, not only on `plan.submitted`, else a resolved escalation
+     strands). So a stuck escalation never pins the team, yet its work is never lost and
+     its resolution always resumes.
    - **Handoff-before-teardown NEGATIVE:** reach "all tasks integrated" WITHOUT an
      opened+recorded+surfaced handoff → teardown MUST NOT fire (red); with it → fires (green).
    - **Mode red halves:** `persistent` → NOT auto-torn-down / NOT swept; idle-but-in-flight
