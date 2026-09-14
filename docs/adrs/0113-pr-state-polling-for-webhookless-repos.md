@@ -36,11 +36,23 @@ event only on an observed state transition and re-emits nothing already recorded
 coordinator pipeline downstream is UNCHANGED; it cannot tell a polled event from a
 webhook one.
 
-Concretely: for each open `task_prs` row on a `poll` repo, poll the PR's `merged`
-state and its check-suite conclusion; on merge → synthesize `github.pr_merged` (with
-the merge sha); on a completed suite → synthesize the `task.ci_result` the
-`ci_observer` would have emitted. PR-OPEN is already relay-driven (the worker reports
-the PR to the coordinator, which registers `task_prs`), so it needs no polling.
+Concretely, two legs, each synthesizing the SAME event the webhook would (PR-OPEN is
+already relay-driven — the worker reports the PR, the coordinator registers `task_prs`
+— so it needs no polling):
+- **Merge leg:** `gh pr view <n> --json mergeCommitOid,headRefOid,merged,state`; on a
+  merge → synthesize `github.pr_merged` (merge sha). Dedup key = the merge sha
+  (terminal — a PR merges once).
+- **CI leg:** the seam does NOT take a `task.ci_result` directly — it emits
+  `github.check_run_completed` and DERIVES `task.ci_result` via `maybe_emit_ci_result`
+  (Ernie). So the poller synthesizes `github.check_run_completed`, one per check-run,
+  and downstream (the `ci_observer` per-suite rollup) is identical. Its required fields
+  — `check_suite.id` (int), `app.slug`, `conclusion`, `head_sha` — are NOT in
+  `statusCheckRollup`; they come from a DIFFERENT read: `gh api
+  /repos/{owner}/{repo}/commits/<head_sha>/check-runs`. Dedup key = `(check_suite_id,
+  head_sha, conclusion)` — NOT "any prior event for the PR" — so a CI RE-RUN whose
+  conclusion changes (success→failure) is a NEW transition and DOES emit (panel). And
+  CI is polled while a suite is UNSETTLED, decoupled from the PR's open/merged state,
+  so a suite that completes right after merge is not missed (panel).
 
 ## Alternatives considered
 
@@ -98,8 +110,13 @@ sequenceDiagram
 
 ## Follow-ups
 
-- Auto-detect `event_source`: default `poll` when the App is not installed on the
-  repo (probe the installation), instead of a manual per-repo flag.
+- Auto-detect `event_source` (raise priority — panel footgun): a manual per-repo
+  `poll` flag means an operator who FORGETS it on a collaborator-only repo realizes the
+  falsifier verbatim (no events ever, dependents never unblock, silent stall). v1
+  sidesteps this by taking repo+account as explicit CLI args (you cannot "forget" a
+  repo you deliberately run the poller against), but the durable fix is to default
+  `poll` by PROBING the App installation at `team up` (App not installed on the repo →
+  `event_source=poll` automatically) rather than a flag a human must remember.
 - Back-fill: on first poll of a repo, reconcile PRs closed while polling was off.
 
 ## References

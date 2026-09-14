@@ -55,20 +55,28 @@ surface's gaps would leak downstream).
 
 ## Sequence of work
 
-1. **Ingest endpoint** (server): `POST /api/v1/github/poll-ingest` — takes the observed
-   state, builds the normalized body the webhook would carry, runs the shared
-   `persist_and_resolve_webhook_event` seam. Covers `pr_merged` + `check_run`/ci. DB
-   foil: synthesized `github.pr_merged` resolves `task_id` and sets `events.commit_sha`;
-   a second identical ingest is a no-op (the seam's github dedup).
-2. **Poller CLI** `treadmill pr poll <repo> --account <acct>`: GET open `task_prs` for
-   the repo; for each, `gh pr view <n> --repo <repo> --json state,mergeCommit,merged,
-   statusCheckRollup` under `GH_TOKEN=$(gh auth token --user <acct>)`; on a NEW
-   transition (merged, or a completed suite) call the ingest endpoint; skip on no
-   change or a gh error (fail-closed); flock single-flight. CLI foils (mocked gh + API).
-3. **Timer + dogfood**: a `--user` timer for the poll repo; then onboard
+1. **Ingest endpoint — MERGE leg** (server): `POST /api/v1/github/poll-ingest` for
+   `pr_merged` — builds the `pull_request` closed+merged body, runs the shared
+   `persist_and_resolve_webhook_event` seam, gates on the deterministic event_id's
+   prior existence to avoid the seam's unconditional re-publish. DONE (dd40888) — DB
+   foils prove byte-identity (task_id + commit_sha) and no re-publish on re-poll.
+2. **Ingest endpoint — CI leg**: `github.check_run_completed` (NOT `task.ci_result` —
+   the seam derives that). Its fields come from `gh api
+   /repos/{owner}/{repo}/commits/<head_sha>/check-runs`, one synthesized event per
+   run. Idempotency gate keyed on `(check_suite_id, head_sha, conclusion)` so a CI
+   re-run with a changed conclusion re-emits. DB foil: `check_suite_id` reconstruction
+   + the observer rollup + the conclusion-aware re-emit. (Ernie CI-leg co-sign.)
+3. **Poller CLI** `treadmill pr poll <repo> --account <acct>`: GET open `task_prs` (+
+   PRs with unsettled CI) for the repo; per PR, `gh pr view <n> --json
+   mergeCommitOid,headRefOid,merged,state` and `gh api .../commits/<sha>/check-runs`
+   under `GH_TOKEN=$(gh auth token --user <acct>)` — NEVER `gh auth switch`; call the
+   ingest endpoint on a new transition; skip on no change or ANY gh non-zero
+   (fail-closed); flock single-flight. CLI foils (mocked gh + API).
+4. **Timer + dogfood**: a `--user` timer for the poll repo; then onboard
    `netlify/agent-runner-orchestrator` (`team up`, feature-branch mode), and run
-   Donna's P0 plan 1-then-4 (one investigation task first to prove PR-open + CI +
-   integration end to end through the poller, then release the other four).
+   Donna's P0 plan 1-then-4 — one investigation task first to prove PR-open + CI +
+   integration end to end through the poller (and to confirm whether the repo runs CI
+   on these PRs at all), then release the other four.
 
 ## Risks / unknowns
 
