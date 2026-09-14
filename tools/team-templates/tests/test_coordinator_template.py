@@ -453,6 +453,54 @@ def test_merge_step_reads_auto_merge_and_holds_when_false() -> None:
     assert "when the `github.pr_merged` webhook arrives from THEIR merge" in body
 
 
+# ── §8 peer-review FLOW preservation (ADR-0110 step 3 guard) ─────────
+#
+# The step-3 feature-branch rewrite edits the coordinator's integration path
+# (§9.3). ADR-0087 §8 sibling peer review — the inner buy-in loop that runs
+# BEFORE the evaluator — must survive that edit intact. These guards anchor on
+# the FLOW and its ordering, not just header strings, so a rewrite that keeps a
+# `## 8.` header while gutting the loop still fails (Ernie's semantic-anchor
+# requirement).
+
+
+def test_peer_review_runs_before_evaluator() -> None:
+    """Order is PR → §8 sibling buy-in → §9 evaluator. §8 must instruct opening
+    peer review BEFORE briefing the evaluator; a rewrite that jumps CI straight
+    to the evaluator drops the inner loop."""
+    body = _coordinator_plain()
+    assert "open peer review BEFORE briefing the evaluator" in body
+    # §8 is the inner loop; §9 is the outer evaluator pass — both named in order.
+    assert "## 8. Peer review" in body
+    assert "## 9. Evaluator handoff" in body
+
+
+def test_peer_review_reviewer_is_not_the_author() -> None:
+    """The buy-in must come from a SIBLING, not the author reviewing themselves."""
+    body = _coordinator_plain()
+    assert "NOT the PR author" in body
+
+
+def test_peer_review_dispatch_is_via_intra_team_relay_with_fixed_verdict() -> None:
+    """The intra-team messaging + fixed verdict tokens IN CONTEXT — the substance
+    of the loop, not just its heading. A reviewer is briefed via cc-relay and
+    relays a `lgtm` / `needs-changes:` verdict back."""
+    body = _coordinator_plain()
+    assert "Brief the reviewer via cc-relay" in body
+    assert "`lgtm` OR `needs-changes: <one-sentence summary>`" in body
+    # The peer-review trigger keeps reviewer rows out of the author's rework metric.
+    assert "trigger='peer-review'" in body
+
+
+def test_peer_review_collation_gates_the_evaluator() -> None:
+    """The buy-in gate: all-lgtm → brief the evaluator; any needs-changes →
+    coordinator-rework (back to CI), NOT forward to the evaluator."""
+    body = _coordinator_plain()
+    assert "All `lgtm`" in body
+    assert "brief evaluator per §9" in body
+    assert "Any `needs-changes`" in body
+    assert "Open coordinator-rework" in body
+
+
 def test_pr_synchronize_handler_is_marked_filtered_by_default() -> None:
     """§3.6 became a DEAD HANDLER when the ADR-0090 wake filter (#340)
     dropped `github.pr_synchronize` from the coordinator default set —

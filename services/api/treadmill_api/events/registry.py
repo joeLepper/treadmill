@@ -27,6 +27,7 @@ from treadmill_api.events.plan import (
     PlanAbandoned,
     PlanActivated,
     PlanCompleted,
+    PlanHandoffPrOpened,
     PlanPlanningStarted,
     PlanRegistered,
 )
@@ -97,6 +98,7 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     PlanActivated,
     PlanCompleted,
     PlanAbandoned,
+    PlanHandoffPrOpened,
     # Plan-doc events (ADR-0021)
     PlanDocObservedInactive,
     PlanDocParseFailed,

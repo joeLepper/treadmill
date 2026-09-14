@@ -18,6 +18,7 @@ All gated on the integration DB.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import uuid
@@ -380,3 +381,130 @@ async def test_last_activity_at_none_when_no_tasks(
     async with session_factory() as session:
         last = await _last_activity_at(session, coord)
     assert last is None
+
+
+# ---------------------------------------------------------------------------
+# ADR-0110 feature-branch handoff gate (step 3). A feature-branch plan is
+# "implemented" only when its tasks are all terminal AND the handoff PR is
+# recorded; the drain-guard must BLOCK an all-terminal plan that has no handoff
+# yet (else the sweep orphans the branch), and NOT block once the handoff event
+# exists. Keyed on the RECORDED handoff event, never a heuristic PR scan.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_team_config(
+    session: AsyncSession, repo: str, coord: str, merge_target: str
+) -> None:
+    await session.execute(
+        sa.text(
+            "INSERT INTO team_configs (repo, coordinator_label, merge_target) "
+            "VALUES (:r, :c, :mt)"
+        ),
+        {"r": repo, "c": coord, "mt": merge_target},
+    )
+
+
+async def _seed_handoff(
+    session: AsyncSession, plan_id: uuid.UUID, repo: str
+) -> None:
+    payload = json.dumps(
+        {"repo": repo, "branch": "joes-agents/x", "pr_url": "u", "pr_number": 9}
+    )
+    await session.execute(
+        sa.text(
+            "INSERT INTO events (entity_type, action, plan_id, payload) "
+            "VALUES ('plan', 'handoff_pr_opened', :pid, CAST(:pl AS jsonb))"
+        ),
+        {"pid": plan_id, "pl": payload},
+    )
+
+
+@integration
+@pytest.mark.asyncio
+async def test_feature_branch_all_terminal_no_handoff_blocks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Ernie #4: all tasks integrated (pr_merged into the branch) but NO handoff
+    recorded → the plan is implemented-but-not-handed-off → BLOCKS teardown, so the
+    sweep cannot orphan the branch."""
+    coord = f"coordinator-fbh-{uuid.uuid4().hex[:8]}"
+    repo = f"o/fbh-{uuid.uuid4().hex[:6]}"
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+        await _seed_team_config(session, repo, coord, "feature-branch")
+        t1 = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "github", "pr_merged", sha="fbh1", task_id=t1)
+        await session.commit()
+        drain = await get_team_drain(repo=repo, session=session)
+
+    assert drain.clean is False, drain
+    reasons = {i.task_id: i.reason for i in drain.blocking}
+    assert reasons.get(str(plan_id)) == "awaiting_handoff", drain
+
+
+@integration
+@pytest.mark.asyncio
+async def test_feature_branch_handoff_recorded_does_not_block(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With the handoff event recorded, the plan is implemented (the handoff PR is
+    parked-on-human) → teardown proceeds."""
+    coord = f"coordinator-fbok-{uuid.uuid4().hex[:8]}"
+    repo = f"o/fbok-{uuid.uuid4().hex[:6]}"
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+        await _seed_team_config(session, repo, coord, "feature-branch")
+        t1 = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "github", "pr_merged", sha="fbok1", task_id=t1)
+        await _seed_handoff(session, plan_id, repo)
+        await session.commit()
+        drain = await get_team_drain(repo=repo, session=session)
+
+    assert drain.clean is True, drain
+
+
+@integration
+@pytest.mark.asyncio
+async def test_feature_branch_active_task_blocks_not_handoff_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Ernie #3: an open task PR (team-active) BLOCKS via the normal path — and the
+    plan is NOT all-terminal, so the handoff gate does not also fire. The two are
+    distinct: the handoff is keyed on its recorded event, not on any open PR."""
+    coord = f"coordinator-fbact-{uuid.uuid4().hex[:8]}"
+    repo = f"o/fbact-{uuid.uuid4().hex[:6]}"
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+        await _seed_team_config(session, repo, coord, "feature-branch")
+        t_active = await _seed_task(session, plan_id, coord, repo)  # registered
+        await session.commit()
+        drain = await get_team_drain(repo=repo, session=session)
+
+    assert drain.clean is False, drain
+    reasons = {i.task_id: i.reason for i in drain.blocking}
+    assert reasons.get(str(t_active)) == "team_active", drain
+    assert "awaiting_handoff" not in reasons.values(), drain
+
+
+@integration
+@pytest.mark.asyncio
+async def test_main_mode_all_terminal_does_not_await_handoff(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The handoff gate is feature-branch ONLY. A main-mode plan whose tasks are all
+    terminal (and deploy settled) is clean — no handoff concept applies."""
+    coord = f"coordinator-mm-{uuid.uuid4().hex[:8]}"
+    repo = f"o/mm-{uuid.uuid4().hex[:6]}"
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+        await _seed_team_config(session, repo, coord, "main")
+        t1 = await _seed_task(session, plan_id, coord, repo)
+        # pr_merged + deploy fully settled → terminal, main-mode.
+        await _emit(session, "github", "pr_merged", sha="mm1", task_id=t1)
+        await _emit(session, "deploy", "started", sha="mm1")
+        await _emit(session, "deploy", "succeeded", sha="mm1")
+        await _emit(session, "staging_smoke", "passed", sha="mm1")
+        await session.commit()
+        drain = await get_team_drain(repo=repo, session=session)
+
+    assert drain.clean is True, drain

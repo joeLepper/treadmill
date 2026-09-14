@@ -84,3 +84,27 @@ class PlanSubmitted(EventPayload):
     repo: str
     coordinator_label: str
     task_count: int
+
+
+class PlanHandoffPrOpened(EventPayload):
+    """The team's last act on a feature-branch plan (ADR-0110): the
+    ``joes-agents/<branch-slug>`` → ``main`` handoff PR is OPEN, and this event
+    RECORDS it and SURFACES it to the operator. It is the "implemented" terminal
+    signal the drain-guard/sweep (ADR-0109) read — teardown is gated on THIS
+    event, never on "last task merged" alone, so implemented work is never
+    orphaned by a team that dissolved before the handoff existed.
+
+    Plan-scoped (not task-scoped): a handoff PR has no single owning task, so it
+    is recorded as a ``plan`` event, not a ``task_prs`` row. ``pr_url``/``pr_number``
+    identify the SPECIFIC recorded handoff PR — the drain-guard parks THIS PR
+    (parked-on-human), never a heuristic "any open PR into main". The fabric sink
+    routes the surface notification via ``plan_id``.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "plan"
+    ACTION: ClassVar[str] = "handoff_pr_opened"
+
+    repo: str
+    branch: str
+    pr_url: str
+    pr_number: int

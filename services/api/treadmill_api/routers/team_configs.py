@@ -195,7 +195,7 @@ _TERMINAL_STATUSES = ("done", "pr_merged", "validated", "cancelled")
 _TEAM_DRAIN_SQL = text(
     """
     WITH team_tasks AS (
-        SELECT id FROM tasks WHERE created_by = :coordinator_label
+        SELECT id, plan_id FROM tasks WHERE created_by = :coordinator_label
     ),
     last_escalation AS (
         SELECT DISTINCT ON (task_id) task_id, created_at AS escalated_at
@@ -220,6 +220,7 @@ _TEAM_DRAIN_SQL = text(
     )
     SELECT
         tt.id::text AS task_id,
+        tt.plan_id::text AS plan_id,
         ts.derived_status AS derived_status,
         (le.task_id IS NOT NULL
          AND (la.acked_at IS NULL OR la.acked_at < le.escalated_at)
@@ -371,6 +372,30 @@ async def _last_activity_at(
     return row.scalar_one_or_none()
 
 
+async def _plans_with_handoff(
+    session: AsyncSession, plan_ids: list[str]
+) -> set[str]:
+    """Of ``plan_ids``, those with a recorded ``plan.handoff_pr_opened`` event
+    (ADR-0110). Keyed on the RECORDED handoff event, never a heuristic scan of open
+    PRs — so an unrelated PR into main is never mistaken for the handoff. A plan
+    with a handoff event is IMPLEMENTED (the team's last act is done); one without,
+    whose tasks are all terminal, still OWES the handoff and blocks teardown."""
+    if not plan_ids or await _relation_missing(session, "events"):
+        return set()
+    result = await session.execute(
+        text(
+            """
+            SELECT DISTINCT plan_id::text
+            FROM events
+            WHERE entity_type = 'plan' AND action = 'handoff_pr_opened'
+              AND plan_id = ANY(:ids)
+            """
+        ),
+        {"ids": plan_ids},
+    )
+    return {row[0] for row in result.fetchall()}
+
+
 @router.get("/team_configs/{repo:path}/drain", response_model=DrainStatus)
 async def get_team_drain(
     repo: str,
@@ -404,8 +429,17 @@ async def get_team_drain(
     blocking: list[DrainItem] = []
     parked: list[str] = []
     merged_task_ids: list[str] = []
-    for task_id, derived_status, escalated in rows:
+    # Per-plan bookkeeping for the feature-branch handoff gate (ADR-0110): a plan is
+    # "implemented" only when its tasks are all terminal AND the handoff PR is
+    # recorded. `all_terminal` stays True only if every task is clean/merged (no
+    # active or parked task); `plan_ids` collects the team's plans.
+    plan_all_terminal: dict[str, bool] = {}
+    for task_id, plan_id, derived_status, escalated in rows:
         cat = _classify(derived_status, escalated)
+        terminal = cat in ("clean", "merged")
+        if plan_id is not None:
+            prev = plan_all_terminal.get(plan_id, True)
+            plan_all_terminal[plan_id] = prev and terminal
         if cat == "parked":
             parked.append(task_id)  # parked-on-human: does NOT block
         elif cat == "block":
@@ -427,6 +461,23 @@ async def get_team_drain(
                     DrainItem(task_id=tid, derived_status="pr_merged",
                               reason="post_merge_unsettled")
                 )
+
+    # Feature-branch handoff gate (ADR-0110): a plan whose tasks are ALL terminal but
+    # has NO recorded handoff PR is implemented-but-not-handed-off — the team still
+    # owes the `branch → main` handoff, so it BLOCKS teardown. This is the gate that
+    # stops the sweep (ADR-0109) from tearing a team down after its last task merges
+    # but before the handoff exists, which would orphan the branch. A plan WITH a
+    # handoff event is done (the handoff PR is parked-on-human) and does not block.
+    if cfg.merge_target == "feature-branch" and plan_all_terminal:
+        terminal_plans = [p for p, done in plan_all_terminal.items() if done]
+        if terminal_plans:
+            handed_off = await _plans_with_handoff(session, terminal_plans)
+            for plan_id in terminal_plans:
+                if plan_id not in handed_off:
+                    blocking.append(
+                        DrainItem(task_id=plan_id, derived_status="implemented",
+                                  reason="awaiting_handoff")
+                    )
 
     last_activity = await _last_activity_at(session, cfg.coordinator_label)
     return DrainStatus(
