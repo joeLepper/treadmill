@@ -547,11 +547,34 @@ def test_9_3_integration_branches_on_merge_target() -> None:
 def test_feature_branch_task_pr_conflict_policy_is_defined() -> None:
     """A task PR that conflicts merging into the branch must have a defined path —
     trivial-resolve else a reviewed conflict task / escalate — never force, never
-    wedge (Ernie: the task→branch analog of the drift-conflict path)."""
+    wedge (Ernie: the task→branch analog of the drift-conflict path). Anchor on the
+    SEMANTICS, not just the header, so a gutted instruction still reddens."""
     body = _coordinator_plain()
     assert "Conflict handling" in body
+    # trivial-resolve … else a reviewed conflict TASK … or escalate.
+    assert "resolve it trivially" in body
     assert "conflict-resolution TASK" in body
-    assert "never wedge" in body.lower() or "never wedge" in body
+    assert "escalate" in body
+    # never force / never wedge — the safety rails.
+    assert "NEVER force" in body or "never force" in body
+    assert "never wedge" in body
+
+
+def test_feature_branch_slug_keeps_date_for_uniqueness() -> None:
+    """ADR-0110 falsifier guard: the integration branch-slug must be UNIQUE per
+    plan. Stripping the date collides two same-short-name plans onto one branch, so
+    the template must KEEP the date prefix (and offer a plan-id-short fallback)
+    (Ernie 3b BLOCKING)."""
+    body = _coordinator_plain()
+    # The date is kept, illustrated by the worked example.
+    assert "2026-09-13-fix-auth" in body
+    assert "KEEP the date" in body
+    # The falsifier is named so the rule's purpose can't be edited away.
+    assert "two plans sharing an integration branch" in body
+    # The uniqueness fallback exists.
+    assert "plan_id[:8]" in body
+    # The old date-stripping derivation must NOT survive.
+    assert "without the date" not in body
 
 
 def test_standup_preflight_tests_write_access_and_fails_loud() -> None:

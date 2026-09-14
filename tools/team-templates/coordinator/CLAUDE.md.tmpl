@@ -122,9 +122,15 @@ Payload: `{plan_id, repo, coordinator_label, task_count}`.
 ### 3.1a Feature-branch standup + PREFLIGHT (ADR-0110)
 
 Only in `feature-branch` mode. The integration branch is per-plan:
-`joes-agents/<branch-slug>`, `<branch-slug>` derived from the plan
-(the plan doc slug — the basename of `doc_path` without the date
-prefix + `.md`; unique per plan). Do this ONCE per plan, idempotently.
+`joes-agents/<branch-slug>`, where `<branch-slug>` is the plan doc's
+basename WITH its date prefix and WITHOUT the `.md` extension — e.g.
+`docs/plans/2026-09-13-fix-auth.md` → `2026-09-13-fix-auth`. KEEP the
+date: it is the per-plan disambiguator. Two plans with the same short
+name (`fix-auth`) on one repo MUST NOT collide onto one branch — that
+is the ADR-0110 falsifier (two plans sharing an integration branch).
+If two plan docs ever share a full basename, append the plan id short
+(`<basename>-<plan_id[:8]>`) to guarantee uniqueness. Do this ONCE per
+plan, idempotently.
 
 1. Create the branch off the latest `main` if it does not exist:
    `git fetch origin main` then push a new ref —
