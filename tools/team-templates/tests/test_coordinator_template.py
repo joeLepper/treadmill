@@ -525,3 +525,74 @@ def test_pr_synchronize_handler_is_marked_filtered_by_default() -> None:
     assert "Re-poll `task_mergeability` for that PR" not in body
     # Widened-allowlist sessions get the noise-tolerance rule.
     assert "harmless but redundant" in body
+
+
+# ── ADR-0110 feature-branch integration (step 3b) ────────────────────
+
+
+def test_9_3_integration_branches_on_merge_target() -> None:
+    """§9.3 must fork on merge_target: feature-branch integrates by git merge+push
+    (NOT gh pr merge), main-mode keeps the existing gh-pr-merge + auto_merge hold."""
+    body = _coordinator_plain()
+    # The fork is explicit and reads merge_target (set in §3.1).
+    assert "merge_target" in body
+    # Feature-branch path: git merge + push, explicitly NOT gh pr merge.
+    assert "git merge + push — NOT `gh pr merge`" in body
+    assert "joes-agents/<branch-slug>" in body
+    # Main-mode path preserved verbatim (the #335 auto_merge hold + gh pr merge).
+    assert "gh pr merge <n> --squash --delete-branch" in body
+    assert "do NOT merge. HOLD for the operator" in body
+
+
+def test_feature_branch_task_pr_conflict_policy_is_defined() -> None:
+    """A task PR that conflicts merging into the branch must have a defined path —
+    trivial-resolve else a reviewed conflict task / escalate — never force, never
+    wedge (Ernie: the task→branch analog of the drift-conflict path)."""
+    body = _coordinator_plain()
+    assert "Conflict handling" in body
+    assert "conflict-resolution TASK" in body
+    assert "never wedge" in body.lower() or "never wedge" in body
+
+
+def test_standup_preflight_tests_write_access_and_fails_loud() -> None:
+    """§3.1a preflight must verify WRITE access (a real push), not a read/exists
+    check, and FAIL LOUD + escalate on denial — never silently stall (Ernie #2,
+    ADR-0110)."""
+    body = _coordinator_plain()
+    assert "### 3.1a" in body
+    assert "verify WRITE access, not read" in body
+    # It creates the branch off main and proves the ref-update permission.
+    assert "refs/heads/joes-agents/<branch-slug>" in body
+    # Fail-loud + the named escalation reason; no junk left behind.
+    assert "standup_preflight_failed" in body
+    assert "Leave NO junk" in body
+    assert "do NOT dispatch" in body.lower() or "do NOT dispatch tasks" in body
+
+
+def test_drift_merge_policy_is_defined() -> None:
+    """ADR-0110 drift: merge main→branch on cadence; trivial-resolve else conflict
+    task/escalate; never force-push."""
+    body = _coordinator_plain()
+    assert "Drift" in body
+    assert "merge `main` into the integration branch" in body
+    assert "never force-push" in body
+
+
+def test_handoff_section_opens_records_and_surfaces_once() -> None:
+    """§9.7: the team's last act — open branch→main PR, record via the
+    plan.handoff_pr_opened event (the drain-guard's implemented signal), surface,
+    once-only, and DO NOT merge to main (human gate)."""
+    body = _coordinator_plain()
+    assert "### 9.7" in body
+    assert "gh pr create --base main --head" in body
+    # The recorded event is the terminal/implemented signal for the drain-guard.
+    assert "handoff_pr_opened" in body
+    assert '"entity_type": "plan"' in body or "entity_type: \"plan\"" in body \
+        or 'action: "handoff_pr_opened"' in body
+    # Once-only guard against a restart re-surfacing.
+    assert "once" in body.lower()
+    assert "do not re-surface" in body.lower() or "do not open a second" in body.lower()
+    # The human owns the main gate — the coordinator does NOT merge the handoff.
+    assert "Do NOT merge the handoff PR" in body
+    # Parked-on-human: the open handoff does not block teardown.
+    assert "PARKED-ON-HUMAN" in body or "parked-on-human" in body.lower()

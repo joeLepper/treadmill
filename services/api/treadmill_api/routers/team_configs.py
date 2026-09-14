@@ -474,9 +474,15 @@ async def get_team_drain(
             handed_off = await _plans_with_handoff(session, terminal_plans)
             for plan_id in terminal_plans:
                 if plan_id not in handed_off:
+                    # Plan-scoped block: task_id carries the plan id and the status
+                    # says so, so the operator's blocking list reads "plan …
+                    # awaiting handoff", not a phantom task (Ernie cosmetic note).
                     blocking.append(
-                        DrainItem(task_id=plan_id, derived_status="implemented",
-                                  reason="awaiting_handoff")
+                        DrainItem(
+                            task_id=plan_id,
+                            derived_status="plan implemented; awaiting branch→main handoff",
+                            reason="awaiting_handoff",
+                        )
                     )
 
     last_activity = await _last_activity_at(session, cfg.coordinator_label)
