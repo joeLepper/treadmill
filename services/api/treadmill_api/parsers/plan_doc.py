@@ -110,10 +110,19 @@ class PlanFrontmatter(BaseModel):
                 "integration_base must be a non-empty branch name with no surrounding "
                 "whitespace"
             )
-        if stripped in {"HEAD", "@"} or stripped.startswith("HEAD"):
+        # Reject git pseudo-refs / symbolic refs (Ernie, airtight reject-set): HEAD and
+        # HEAD~1/HEAD^ (startswith), and *_HEAD — FETCH_HEAD/ORIG_HEAD/MERGE_HEAD/
+        # CHERRY_PICK_HEAD (endswith). Any of these resolves to something other than the
+        # named branch (often main) and defeats a non-main base.
+        if (
+            stripped == "@"
+            or stripped.startswith("HEAD")
+            or stripped.endswith("_HEAD")
+            or stripped == "HEAD"
+        ):
             raise ValueError(
                 "integration_base must be an explicit branch name, not the symbolic "
-                f"ref {stripped!r} (it resolves to main and defeats the non-main base)"
+                f"ref {stripped!r} (it resolves elsewhere and defeats the non-main base)"
             )
         if stripped.startswith("origin/"):
             raise ValueError(
