@@ -68,11 +68,13 @@ down (N smaller) is gated by the server-side guard described above.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import importlib.util
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -105,6 +107,33 @@ _SYSTEMD_UNIT_TEMPLATE = "treadmill-channel@{label}.service"
 # the CLI validates client-side for a clean error before the round-trip.
 _LIFECYCLE_CHOICES = frozenset({"ephemeral", "persistent", "manual"})
 _MERGE_TARGET_CHOICES = frozenset({"feature-branch", "main"})
+# Host-wide serialization for team lifecycle SIDE-EFFECTS (ADR-0112). `team down`
+# teardown and the `team reconcile` pass share this lock so a revive can never
+# INTERLEAVE a teardown into a broken coordinator-up / workers-down state (which
+# coordinator-liveness would then read as live and never repair).
+_RECONCILE_LOCK = _TEAMS_DIR.parent / "team-reconcile.lock"
+
+
+@contextlib.contextmanager
+def _host_reconcile_lock(*, blocking: bool) -> Iterator[bool]:
+    """Acquire the host lifecycle lock. ``team down`` uses ``blocking=True`` (it WAITS
+    for a brief reconcile pass, then tears down — never skipping teardown); the
+    reconcile pass uses ``blocking=False`` (a concurrent tick skips rather than
+    racing). Yields True if acquired, False only in the non-blocking held case."""
+    _RECONCILE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(_RECONCILE_LOCK, "w")
+    flags = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        try:
+            fcntl.flock(fh, flags)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
 
 
 def _slug_from_repo(repo: str) -> str:
@@ -636,8 +665,14 @@ def down(
         raise typer.Exit(code=2)
 
     # Stop + disable every team unit; keep the rendered dir + config (revivable).
+    # Hold the host lifecycle lock across the teardown so a concurrent `team
+    # reconcile` tick cannot INTERLEAVE a revive into the middle of it (ADR-0112,
+    # gpt panel finding) — otherwise a revive between disabling the coordinator and a
+    # worker leaves a broken coordinator-up/workers-down team. Blocking: we WAIT for a
+    # brief reconcile pass to finish, then tear down (never skip the teardown).
     all_labels = _all_team_labels(cfg)
-    systemd_warnings = _teardown_team_units(cfg)
+    with _host_reconcile_lock(blocking=True):
+        systemd_warnings = _teardown_team_units(cfg)
 
     console.print(f"[green]team down[/green]         {repo}")
     console.print(f"[green]stopped labels[/green]    {all_labels}")
@@ -815,9 +850,6 @@ def sweep(
         err_console.print("[yellow]drain errors (left standing):[/yellow]")
         for e in errors:
             err_console.print(f"[yellow]  {e}[/yellow]")
-
-
-_RECONCILE_LOCK = _TEAMS_DIR.parent / "team-reconcile.lock"
 
 
 @team_app.command("reconcile")

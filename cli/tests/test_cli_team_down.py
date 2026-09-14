@@ -6,6 +6,7 @@ disable every unit) when clean or forced; parked-on-human work does NOT block.
 """
 from __future__ import annotations
 
+import fcntl
 from unittest.mock import MagicMock
 
 import pytest
@@ -123,6 +124,41 @@ def _clear_invoker_label(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the invoking session to EXTERNAL (no member label) so the self-kill
     guard is deterministic; the guard tests set TREADMILL_LABEL explicitly."""
     monkeypatch.delenv("TREADMILL_LABEL", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _tmp_lock(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Redirect the host lifecycle lock into a per-test tmp file so teardown does not
+    touch the real ~/.treadmill lock."""
+    monkeypatch.setattr(team_module, "_RECONCILE_LOCK", tmp_path / "team-reconcile.lock")
+
+
+def test_teardown_holds_the_host_lock_against_reconcile(
+    fake_api, systemctl_calls, monkeypatch
+) -> None:
+    """ADR-0112 (gpt panel finding): team down holds the host lifecycle lock ACROSS
+    the teardown, so a concurrent reconcile revive cannot interleave. Proven by
+    checking the lock is un-acquirable from a second fd while _teardown_team_units
+    runs."""
+    fake_api._request.side_effect = [_CONFIG, _drain(clean=True)]
+    observed = {}
+
+    def _spy(cfg):
+        fh = open(team_module._RECONCILE_LOCK, "w")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed["held"] = False  # acquired → team down did NOT hold it (bug)
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        except BlockingIOError:
+            observed["held"] = True  # blocked → team down holds it (correct)
+        finally:
+            fh.close()
+        return []
+
+    monkeypatch.setattr(team_module, "_teardown_team_units", _spy)
+    result = runner.invoke(team_app, ["down", "o/r"])
+    assert result.exit_code == 0, result.output
+    assert observed.get("held") is True
 
 
 @pytest.mark.parametrize(

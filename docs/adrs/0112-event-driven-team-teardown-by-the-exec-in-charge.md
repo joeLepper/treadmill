@@ -48,11 +48,18 @@ reconcile demoted to a backstop (operator-directed, 2026-09-14):
   self-checks — its own `TREADMILL_LABEL` must not be in the team's full label set
   (coordinator, evaluator, AND all workers, read from `team_configs` — not a
   hand-enumerated role prefix, which drops the evaluator); and (b) `team down` ITSELF
-  refuses when its invoking `TREADMILL_LABEL` is a team member — the guard is in the
-  tool, not only the caller's discipline, so a buggy or omitted self-check cannot
-  cause a self-kill. `--force` overrides the drain-guard, never this self-kill guard.
-  A member routes teardown to the backstop, which is external by construction (a
-  systemd-timer process, not a team session).
+  refuses when its invoking `TREADMILL_LABEL` is a team member — testing against the
+  SAME full `team_configs` label set as layer (a) (coordinator + evaluator + all
+  workers, `_all_team_labels`), NOT a hand-enumerated role prefix, so the evaluator
+  cannot be dropped at either layer. The guard is in the tool, not only the caller's
+  discipline, so a buggy or omitted self-check cannot cause a self-kill. `--force`
+  overrides the drain-guard, never this self-kill guard.
+  A member simply does NOT run `team down`; it takes no other action, and the backstop
+  reconcile (external by construction — a systemd-timer process, not a team session)
+  reaps the team on its next tick. This is a PASSIVE fallback (tick-bounded), not an
+  active handoff — consistent with the diagram's else-branch; there is no immediate
+  nudge, and none is needed because a genuinely-external `created_by` (the invariant)
+  makes this branch a rare defense-in-depth path, not the normal one.
 - The **external exec-in-charge tears the team down** in response — running
   `treadmill team down <repo>`, which is drain-guarded, so a team that is not actually
   done is refused. This is the PRIMARY teardown path: external actor, deterministic,
@@ -67,6 +74,15 @@ reconcile demoted to a backstop (operator-directed, 2026-09-14):
   same commit/push-before-terminal durability the ADR-0109 parked-on-human path already
   requires. `team down` re-evaluates the drain as late as possible before the stop, to
   keep the window minimal.
+- **Teardown and the reconcile pass are SERIALIZED on a host lock** so a revive can
+  never INTERLEAVE a teardown. Without it, a reconcile tick that revives (re-enables
+  every unit) partway through a `team down` — after the coordinator is stopped but
+  before a worker — could resume the teardown and stop workers under a now-live
+  coordinator, a broken coordinator-up/workers-down state that coordinator-liveness
+  reads as live and never repairs. Both `team down` and `team reconcile` take the same
+  host `flock`: `team down` blocks (waits for the brief reconcile pass, then tears down
+  — never skipping), the reconcile skips a tick it cannot acquire. So teardown and
+  revive run to completion one at a time, never overlapped, on any one host.
 - The **`team reconcile` timer is the BACKSTOP only** — a low-frequency safety net
   (not a 2-minute primary loop) that tears down a team the responsible agent did not
   (the exec-in-charge was down, busy, or the coordinator crashed before signaling),
