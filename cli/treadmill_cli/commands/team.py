@@ -68,6 +68,7 @@ down (N smaller) is gated by the server-side guard described above.
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import os
 import subprocess
@@ -651,6 +652,54 @@ def _parse_ts(value: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _sweep_decision(
+    cfg: dict, drain: dict, now: datetime, idle_hours: float
+) -> str:
+    """Pure teardown decision shared by `team sweep` and `team reconcile` so both
+    honor the SAME drain-guard (Ernie 4b #4 — no shortcut that bypasses the handoff
+    gate). Returns one of: sweep | skip-mode | skip-active | skip-grace | skip-new.
+    A team is swept only when ephemeral AND drain-clean (the drain-guard's verdict,
+    which keeps parked-on-human green-with-tracking) AND idle beyond the grace."""
+    if cfg.get("lifecycle") != "ephemeral":
+        return "skip-mode"
+    if not drain.get("clean", False):
+        return "skip-active"
+    last = _parse_ts(drain.get("last_activity_at"))
+    if last is None:
+        return "skip-new"
+    if (now - last).total_seconds() / 3600.0 < idle_hours:
+        return "skip-grace"
+    return "sweep"
+
+
+def _coordinator_unit_active(cfg: dict) -> bool:
+    """True iff the coordinator's systemd --user unit is actually running. Team
+    LIVENESS is the unit state, NOT the lease/config row (Ernie 4b #2): a team whose
+    config row exists but whose unit is down (a crash, or a `team down`) is NOT live
+    and must be revived if it still has work."""
+    unit = _SYSTEMD_UNIT_TEMPLATE.format(label=cfg["coordinator_label"])
+    # `systemctl is-active` exits 0 iff the unit is active (3 = inactive/failed).
+    # _run_systemctl captures stderr, not stdout, so the exit code is the signal.
+    rc, _ = _run_systemctl(["is-active", unit])
+    return rc == 0
+
+
+def _revive_team_units(cfg: dict) -> list[str]:
+    """Enable + start every team unit (the standup side-effect for a REVIVE). The
+    rendered team dir + templates persist across `team down` (kept, revivable), so a
+    revive is a unit restart, not a re-render. Returns systemd warnings."""
+    warnings: list[str] = []
+    for label in _all_team_labels(cfg):
+        unit = _SYSTEMD_UNIT_TEMPLATE.format(label=label)
+        for verb in ("enable", "start"):
+            rc, err = _run_systemctl([verb, unit])
+            if rc != 0:
+                warnings.append(
+                    f"systemctl --user {verb} {unit}: rc={rc} stderr={err!r}"
+                )
+    return warnings
+
+
 @team_app.command("sweep")
 def sweep(
     idle_hours: Annotated[
@@ -700,6 +749,12 @@ def sweep(
             )
             raise typer.Exit(code=2)
 
+        _bucket = {
+            "skip-mode": skipped_mode,
+            "skip-active": skipped_active,
+            "skip-grace": skipped_grace,
+            "skip-new": skipped_new,
+        }
         for cfg in configs:
             repo = cfg["repo"]
             if cfg.get("lifecycle") != "ephemeral":
@@ -712,16 +767,9 @@ def sweep(
             except ApiError as exc:
                 errors.append(f"{repo}: drain {exc.status_code} {exc.detail}")
                 continue
-            if not drain.get("clean", False):
-                skipped_active.append(repo)
-                continue
-            last = _parse_ts(drain.get("last_activity_at"))
-            if last is None:
-                skipped_new.append(repo)  # no tasks yet → no age to measure
-                continue
-            idle_h = (now - last).total_seconds() / 3600.0
-            if idle_h < idle_hours:
-                skipped_grace.append(repo)
+            decision = _sweep_decision(cfg, drain, now, idle_hours)
+            if decision != "sweep":
+                _bucket[decision].append(repo)
                 continue
             # Qualifies: ephemeral + clean + idle beyond grace.
             if dry_run:
@@ -741,5 +789,129 @@ def sweep(
     console.print(f"[dim]skipped no-activity   {skipped_new}[/dim]")
     if errors:
         err_console.print("[yellow]drain errors (left standing):[/yellow]")
+        for e in errors:
+            err_console.print(f"[yellow]  {e}[/yellow]")
+
+
+_RECONCILE_LOCK = _TEAMS_DIR.parent / "team-reconcile.lock"
+
+
+@team_app.command("reconcile")
+def reconcile(
+    idle_hours: Annotated[
+        float,
+        typer.Option(
+            "--idle-hours",
+            min=0.0,
+            help=(
+                "Idle-grace before an ephemeral team is torn down (shared with "
+                f"`team sweep`). Default: {_DEFAULT_IDLE_HOURS}."
+            ),
+        ),
+    ] = _DEFAULT_IDLE_HOURS,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report actions without touching systemd."),
+    ] = False,
+) -> None:
+    """Reconcile team liveness against work (ADR-0109 watcher, step 4b).
+
+    One periodic pass, single-flighted by a host lock. For every non-`manual` team:
+    STAND UP a team that has work (drain NOT clean) but whose unit is not live —
+    covering both a resolved escalation (drain becomes not-clean again) and a
+    crashed/half-done standup (liveness is the UNIT, not the lease row); and TEAR
+    DOWN an ephemeral team that is drain-clean and idle beyond the grace (the same
+    drain-guard `team sweep` uses, so parked-on-human stays green-with-tracking).
+    A `manual` team is never auto-managed. Safe to run on a systemd timer.
+    """
+    # Host single-flight: two overlapping passes would double systemctl work and
+    # interleave teardown/standup. A non-blocking flock makes a concurrent tick a
+    # no-op rather than a race.
+    _RECONCILE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    lock_fh = open(_RECONCILE_LOCK, "w")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        console.print("[dim]reconcile already running on this host; skipping[/dim]")
+        lock_fh.close()
+        raise typer.Exit(code=0)
+
+    now = datetime.now(timezone.utc)
+    revived: list[str] = []
+    torn_down: list[str] = []
+    left_working: list[str] = []
+    left_down: list[str] = []
+    skipped_manual: list[str] = []
+    errors: list[str] = []
+    try:
+        with ApiClient(load_config()) as client:
+            try:
+                configs = client._request("GET", "/api/v1/team_configs")
+            except ApiError as exc:
+                err_console.print(
+                    f"[red]team_configs list failed: {exc.status_code} "
+                    f"{exc.detail}[/red]"
+                )
+                raise typer.Exit(code=2)
+
+            for cfg in configs:
+                repo = cfg["repo"]
+                if cfg.get("lifecycle") == "manual":
+                    skipped_manual.append(repo)
+                    continue
+                try:
+                    drain = client._request(
+                        "GET", f"/api/v1/team_configs/{repo}/drain"
+                    )
+                except ApiError as exc:
+                    # Fail-closed: an unconfirmable drain neither revives nor tears
+                    # down — leave the team exactly as it is.
+                    errors.append(f"{repo}: drain {exc.status_code} {exc.detail}")
+                    continue
+
+                live = _coordinator_unit_active(cfg)
+                has_work = not drain.get("clean", False)
+
+                if has_work:
+                    if live:
+                        left_working.append(repo)
+                        continue
+                    # Not live but has work → STAND UP (revive). Covers a resolved
+                    # escalation (drain not-clean again) and a crashed standup
+                    # (row exists, unit down).
+                    if dry_run:
+                        revived.append(repo)
+                        continue
+                    warnings = _revive_team_units(cfg)
+                    revived.append(repo)
+                    for w in warnings:
+                        err_console.print(f"[yellow]  {repo}: {w}[/yellow]")
+                    continue
+
+                # Drain clean → maybe TEAR DOWN (only ephemeral + idle + live).
+                decision = _sweep_decision(cfg, drain, now, idle_hours)
+                if decision == "sweep" and live:
+                    if dry_run:
+                        torn_down.append(repo)
+                        continue
+                    warnings = _teardown_team_units(cfg)
+                    torn_down.append(repo)
+                    for w in warnings:
+                        err_console.print(f"[yellow]  {repo}: {w}[/yellow]")
+                else:
+                    left_down.append(repo)
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
+
+    verb_up = "would revive" if dry_run else "revived"
+    verb_down = "would tear down" if dry_run else "tore down"
+    console.print(f"[green]{verb_up}[/green]        {revived}")
+    console.print(f"[green]{verb_down}[/green]     {torn_down}")
+    console.print(f"[dim]left working          {left_working}[/dim]")
+    console.print(f"[dim]left down (no work)   {left_down}[/dim]")
+    console.print(f"[dim]skipped manual        {skipped_manual}[/dim]")
+    if errors:
+        err_console.print("[yellow]drain errors (left as-is):[/yellow]")
         for e in errors:
             err_console.print(f"[yellow]  {e}[/yellow]")
