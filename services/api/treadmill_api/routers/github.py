@@ -37,12 +37,31 @@ _POLL_NS = uuid.UUID("6f0b4a2e-0113-4c0d-9c11-7013ea5e0113")
 
 
 class PollIngestRequest(BaseModel):
-    """A PR-state poller's OBSERVED state for a webhookless repo (ADR-0113)."""
+    """A PR-state poller's OBSERVED MERGE state for a webhookless repo (ADR-0113)."""
 
     repo: str = Field(min_length=1, max_length=255)
     pr_number: int = Field(ge=1)
-    action: Literal["pr_merged"]  # v1 merge leg; the CI leg is a follow-on
+    action: Literal["pr_merged"]  # the CI leg has its own endpoint + request model
     merge_sha: str = Field(min_length=1, max_length=64)
+
+
+class PollCheckRunIngestRequest(BaseModel):
+    """A PR-state poller's OBSERVED COMPLETED CHECK SUITE for a webhookless repo
+    (ADR-0113 CI leg). The poller observes a suite that reached `completed` (via `gh
+    api .../check-suites` or the per-run `check_suite` snapshot) and reports its
+    aggregate state. `conclusion` is the SUITE conclusion (success/failure/…) — the
+    field the `ci_observer` rolls up and keys `task.ci_result` on."""
+
+    repo: str = Field(min_length=1, max_length=255)
+    pr_number: int | None = Field(default=None, ge=1)
+    head_sha: str = Field(min_length=1, max_length=64)
+    check_suite_id: int = Field(ge=1)
+    conclusion: str = Field(min_length=1, max_length=32)
+    app_slug: str = Field(min_length=1, max_length=64)
+    check_name: str = Field(default="ci", min_length=1, max_length=255)
+    """Informational only — the run name carried in the `check_run_completed`
+    payload. The observer rolls up per SUITE, not per run, so it is not load-bearing;
+    it defaults so a suite-level synthesis needs no per-run name."""
 
 
 class PollIngestResponse(BaseModel):
@@ -64,75 +83,162 @@ def _poll_event_id(repo: str, pr_number: int, action: str, anchor: str) -> uuid.
     return uuid.uuid5(_POLL_NS, f"pr-poll:{repo}:{pr_number}:{action}:{anchor}")
 
 
+def _poll_check_run_event_id(
+    repo: str, check_suite_id: int, head_sha: str, conclusion: str
+) -> uuid.UUID:
+    """Deterministic event id for a synthesized `check_run_completed`, keyed on
+    `(check_suite_id, head_sha, conclusion)` — NOT "any prior event for the PR". A CI
+    RE-RUN whose conclusion CHANGES (success→failure) is a NEW key → a new event → the
+    `ci_observer` re-emits `task.ci_result` (the coordinator needs the changed verdict).
+    A re-run reproducing the SAME conclusion collapses onto the same row (no re-publish).
+    """
+    return uuid.uuid5(
+        _POLL_NS, f"pr-poll-ci:{repo}:{check_suite_id}:{head_sha}:{conclusion}"
+    )
+
+
+async def _ingest_synthetic_event(
+    session: AsyncSession,
+    request: Request,
+    *,
+    github_event: str,
+    synthetic: dict,
+    event_id: uuid.UUID,
+    action_label: str,
+) -> PollIngestResponse:
+    """Shared synthesize→gate→seam flow for both poll legs (ADR-0113).
+
+    Normalizes the synthetic body, gates on the deterministic `event_id`'s prior
+    existence (the shared seam publishes UNCONDITIONALLY even on an ON-CONFLICT
+    no-op, so a re-poll would RE-PUBLISH and the coordinator would re-process — the
+    gate skips the seam entirely when already recorded), then routes a first-seen
+    event through the SAME `persist_and_resolve_webhook_event` a real delivery uses."""
+    normalized = normalize_github_event(github_event, synthetic)
+    if normalized is None:  # defensive; a well-formed synthetic body always normalizes
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"poll-ingest: synthetic body did not normalize to {action_label}",
+        )
+    already = (
+        await session.execute(
+            text("SELECT 1 FROM events WHERE id = :eid"), {"eid": str(event_id)}
+        )
+    ).first() is not None
+    if already:
+        return PollIngestResponse(
+            event_id=str(event_id),
+            entity_type=normalized.entity_type,
+            action=normalized.action,
+            already_ingested=True,
+        )
+    event = await persist_and_resolve_webhook_event(
+        session,
+        normalized,
+        synthetic,
+        getattr(request.app.state, "redis", None),
+        get_publisher(),
+        event_id=event_id,
+    )
+    return PollIngestResponse(
+        event_id=str(event.id),
+        entity_type=normalized.entity_type,
+        action=normalized.action,
+    )
+
+
 @router.post("/poll-ingest", response_model=PollIngestResponse)
 async def poll_ingest(
     body: PollIngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     request: Request,
 ) -> PollIngestResponse:
-    """Ingest a poller's observed PR state as a SYNTHESIZED github event (ADR-0113).
+    """Ingest a poller's observed PR MERGE as a SYNTHESIZED github event (ADR-0113).
 
     Routed through the SAME shared webhook seam (`persist_and_resolve_webhook_event`)
     a real delivery uses, so the result is byte-identical: task_id resolved from
     `(repo, pr_number)` via `task_prs`, `events.commit_sha` set by the ADR-0014
     commit-anchor extraction, persisted, and published to the coordinator. A
     deterministic event_id makes a re-poll a no-op. For repos with no App/webhook."""
-    if body.action == "pr_merged":
-        # Reconstruct the exact `pull_request` closed+merged body the webhook carries,
-        # so `normalize_github_event` + the commit-anchor extraction produce identical
-        # output. Only the fields the normalizer + `_extract_commit_sha` read matter.
-        synthetic = {
-            "action": "closed",
-            "repository": {"full_name": body.repo},
-            "sender": {"login": "pr-poll"},
-            "pull_request": {
-                "number": body.pr_number,
-                "merged": True,
-                "merge_commit_sha": body.merge_sha,
-                "head": {"sha": body.merge_sha, "ref": ""},
+    if body.action != "pr_merged":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"poll-ingest: unsupported action {body.action!r}",
+        )
+    # Reconstruct the exact `pull_request` closed+merged body the webhook carries, so
+    # `normalize_github_event` + the commit-anchor extraction produce identical output.
+    # Only the fields the normalizer + `_extract_commit_sha` read matter.
+    synthetic = {
+        "action": "closed",
+        "repository": {"full_name": body.repo},
+        "sender": {"login": "pr-poll"},
+        "pull_request": {
+            "number": body.pr_number,
+            "merged": True,
+            "merge_commit_sha": body.merge_sha,
+            "head": {"sha": body.merge_sha, "ref": ""},
+        },
+    }
+    event_id = _poll_event_id(body.repo, body.pr_number, "pr_merged", body.merge_sha)
+    return await _ingest_synthetic_event(
+        session,
+        request,
+        github_event="pull_request",
+        synthetic=synthetic,
+        event_id=event_id,
+        action_label="pr_merged",
+    )
+
+
+@router.post("/poll-ingest/check-run", response_model=PollIngestResponse)
+async def poll_ingest_check_run(
+    body: PollCheckRunIngestRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    request: Request,
+) -> PollIngestResponse:
+    """Ingest a poller's observed COMPLETED CHECK SUITE as a SYNTHESIZED
+    `github.check_run_completed` (ADR-0113 CI leg).
+
+    The seam does NOT take a `task.ci_result` directly — it DERIVES it via the
+    `ci_observer`, which fires only when a check_run delivery's embedded suite
+    snapshot reads `completed` with a conclusion. So we synthesize the completed-suite
+    snapshot the webhook would carry (`check_suite.status=completed`,
+    `check_suite.conclusion=<observed>`), route it through the SAME seam, and the
+    observer rolls up ONE `task.ci_result` — identical to a webhook. The event_id is
+    keyed on `(check_suite_id, head_sha, conclusion)` so a conclusion CHANGE re-emits
+    while a same-conclusion re-poll is a no-op. For repos with no App/webhook."""
+    # Reconstruct the `check_run` completed body the webhook carries. The normalizer
+    # reads check_run.{name,conclusion,head_sha}, check_run.check_suite.{id,status,
+    # conclusion}, check_run.app.slug, and check_run.pull_requests[0].number. The
+    # observer keys the rollup on the embedded SUITE snapshot reading `completed`.
+    synthetic = {
+        "action": "completed",
+        "repository": {"full_name": body.repo},
+        "sender": {"login": "pr-poll"},
+        "check_run": {
+            "name": body.check_name,
+            "conclusion": body.conclusion,
+            "head_sha": body.head_sha,
+            "check_suite": {
+                "id": body.check_suite_id,
+                "status": "completed",
+                "conclusion": body.conclusion,
             },
-        }
-        normalized = normalize_github_event("pull_request", synthetic)
-        if normalized is None:  # defensive; a merged-closed PR always normalizes
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="poll-ingest: synthetic body did not normalize to pr_merged",
-            )
-        event_id = _poll_event_id(
-            body.repo, body.pr_number, "pr_merged", body.merge_sha
-        )
-        # IDEMPOTENCY (Ernie): the shared seam publishes UNCONDITIONALLY, even when its
-        # ON-CONFLICT insert is a no-op — so a re-poll would RE-PUBLISH pr_merged and the
-        # coordinator would re-process it. Gate on the deterministic event_id's prior
-        # existence and skip the seam entirely (no re-publish) when already recorded.
-        already = (
-            await session.execute(
-                text("SELECT 1 FROM events WHERE id = :eid"), {"eid": str(event_id)}
-            )
-        ).first() is not None
-        if already:
-            return PollIngestResponse(
-                event_id=str(event_id),
-                entity_type="github",
-                action="pr_merged",
-                already_ingested=True,
-            )
-        event = await persist_and_resolve_webhook_event(
-            session,
-            normalized,
-            synthetic,
-            getattr(request.app.state, "redis", None),
-            get_publisher(),
-            event_id=event_id,
-        )
-        return PollIngestResponse(
-            event_id=str(event.id),
-            entity_type=normalized.entity_type,
-            action=normalized.action,
-        )
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"poll-ingest: unsupported action {body.action!r}",
+            "app": {"slug": body.app_slug},
+            "pull_requests": (
+                [{"number": body.pr_number}] if body.pr_number is not None else []
+            ),
+        },
+    }
+    event_id = _poll_check_run_event_id(
+        body.repo, body.check_suite_id, body.head_sha, body.conclusion
+    )
+    return await _ingest_synthetic_event(
+        session,
+        request,
+        github_event="check_run",
+        synthetic=synthetic,
+        event_id=event_id,
+        action_label="check_run_completed",
     )
 
 

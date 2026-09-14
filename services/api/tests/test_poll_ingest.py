@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from treadmill_api.routers.github import PollIngestRequest, poll_ingest
+from treadmill_api.routers.github import (
+    PollCheckRunIngestRequest,
+    PollIngestRequest,
+    poll_ingest,
+    poll_ingest_check_run,
+)
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
 TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
@@ -196,3 +201,175 @@ async def test_poll_ingest_is_idempotent_on_re_poll(
             )
         ).scalar_one()
     assert count == 1  # exactly one row despite two ingests
+
+
+# --- CI leg (ADR-0113 slice 2) -------------------------------------------------
+
+
+async def _seed_task_with_pr(
+    session: AsyncSession, repo: str, pr_number: int, head_sha: str
+) -> uuid.UUID:
+    """Register a task + its task_prs row with head_sha set, so the ci_observer's
+    resolve_task_by_head_sha attributes the derived ci_result (webhook-free path)."""
+    plan_id = (
+        await session.execute(
+            sa.text("INSERT INTO plans (repo) VALUES (:r) RETURNING id"), {"r": repo}
+        )
+    ).scalar_one()
+    task_id = (
+        await session.execute(
+            sa.text(
+                "INSERT INTO tasks (plan_id, repo, title) "
+                "VALUES (:p, :r, 'ci foil') RETURNING id"
+            ),
+            {"p": plan_id, "r": repo},
+        )
+    ).scalar_one()
+    await session.execute(
+        sa.text(
+            "INSERT INTO task_prs (repo, pr_number, task_id, head_sha) "
+            "VALUES (:r, :n, :t, :h)"
+        ),
+        {"r": repo, "n": pr_number, "t": task_id, "h": head_sha},
+    )
+    await session.commit()
+    return task_id
+
+
+@integration
+@pytest.mark.asyncio
+async def test_poll_ingest_check_run_derives_ci_result_like_a_webhook(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A poller's observed COMPLETED SUITE, routed through the shared seam, must
+    reconstruct the check_run_completed body faithfully (integer check_suite.id +
+    app.slug in the embedded snapshot) AND make the ci_observer derive the SAME
+    task.ci_result a real webhook would — task_id resolved by head_sha, commit_sha =
+    head_sha, suite id + conclusion + app_slug carried."""
+    repo = f"o/ci-{uuid.uuid4().hex[:6]}"
+    pr_number = 51
+    head_sha = uuid.uuid4().hex
+    suite_id = 918273645
+    app_slug = "github-actions"
+
+    async with session_factory() as session:
+        task_id = await _seed_task_with_pr(session, repo, pr_number, head_sha)
+
+        resp = await poll_ingest_check_run(
+            PollCheckRunIngestRequest(
+                repo=repo,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                check_suite_id=suite_id,
+                conclusion="success",
+                app_slug=app_slug,
+            ),
+            session=session,
+            request=_fake_request(),
+        )
+        assert resp.entity_type == "github"
+        assert resp.action == "check_run_completed"
+        assert resp.already_ingested is False
+
+        # The synthesized github.check_run_completed carries the integer suite id +
+        # app slug the observer needs — the reconstruction faithfulness Ernie foils.
+        cr = (
+            await session.execute(
+                sa.text(
+                    "SELECT commit_sha, payload->>'check_suite_id', "
+                    "payload->>'app_slug', payload->>'suite_status' FROM events "
+                    "WHERE entity_type='github' AND action='check_run_completed' "
+                    "AND commit_sha = :h"
+                ),
+                {"h": head_sha},
+            )
+        ).one()
+        assert cr[0] == head_sha
+        assert cr[1] == str(suite_id)  # integer suite id survived the round-trip
+        assert cr[2] == app_slug
+        assert cr[3] == "completed"  # the snapshot the observer keys on
+
+        # The observer derived ONE task.ci_result — identical to the webhook path:
+        # attributed to the task by head_sha, suite id + conclusion + app_slug carried.
+        ci = (
+            await session.execute(
+                sa.text(
+                    "SELECT task_id::text, commit_sha, payload->>'conclusion', "
+                    "payload->>'check_suite_id', payload->>'app_slug' FROM events "
+                    "WHERE entity_type='task' AND action='ci_result' AND task_id = :t"
+                ),
+                {"t": task_id},
+            )
+        ).one()
+    assert ci[0] == str(task_id)
+    assert ci[1] == head_sha
+    assert ci[2] == "success"
+    assert ci[3] == str(suite_id)
+    assert ci[4] == app_slug
+
+
+@integration
+@pytest.mark.asyncio
+async def test_poll_ingest_check_run_re_emits_on_conclusion_change(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A CI RE-RUN whose conclusion CHANGES must re-emit; a re-poll of the SAME
+    conclusion must not. Dedup is keyed on (check_suite_id, head_sha, conclusion), so:
+    success → one ci_result; re-poll success → no-op (already_ingested); the suite
+    re-runs to failure → a NEW ci_result the coordinator needs. Two ci_result rows."""
+    repo = f"o/cirerun-{uuid.uuid4().hex[:6]}"
+    pr_number = 9
+    head_sha = uuid.uuid4().hex
+    suite_id = 555000111
+
+    def _body(conclusion: str) -> PollCheckRunIngestRequest:
+        return PollCheckRunIngestRequest(
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            check_suite_id=suite_id,
+            conclusion=conclusion,
+            app_slug="github-actions",
+        )
+
+    async with session_factory() as session:
+        task_id = await _seed_task_with_pr(session, repo, pr_number, head_sha)
+
+        r_ok1 = await poll_ingest_check_run(
+            _body("success"), session=session, request=_fake_request()
+        )
+        # Same suite+sha+conclusion re-poll: a true no-op (existence gate short-circuits
+        # BEFORE the seam, so the observer is not re-run and nothing re-publishes).
+        r_ok2 = await poll_ingest_check_run(
+            _body("success"), session=session, request=_fake_request()
+        )
+        # The suite re-runs and now FAILS: a new (suite,sha,conclusion) key → re-emit.
+        r_fail = await poll_ingest_check_run(
+            _body("failure"), session=session, request=_fake_request()
+        )
+        assert r_ok1.already_ingested is False
+        assert r_ok2.already_ingested is True
+        assert r_ok1.event_id == r_ok2.event_id  # same deterministic id
+        assert r_fail.already_ingested is False
+        assert r_fail.event_id != r_ok1.event_id  # conclusion change → distinct id
+
+        cr_count = (
+            await session.execute(
+                sa.text(
+                    "SELECT count(*) FROM events WHERE entity_type='github' "
+                    "AND action='check_run_completed' AND commit_sha = :h"
+                ),
+                {"h": head_sha},
+            )
+        ).scalar_one()
+        ci_rows = (
+            await session.execute(
+                sa.text(
+                    "SELECT payload->>'conclusion' FROM events WHERE entity_type='task' "
+                    "AND action='ci_result' AND task_id = :t ORDER BY created_at"
+                ),
+                {"t": task_id},
+            )
+        ).scalars().all()
+    assert cr_count == 2  # success + failure, NOT the redundant success re-poll
+    assert list(ci_rows) == ["success", "failure"]  # conclusion-change re-emit

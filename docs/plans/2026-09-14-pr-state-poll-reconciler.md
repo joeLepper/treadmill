@@ -61,11 +61,16 @@ surface's gaps would leak downstream).
    prior existence to avoid the seam's unconditional re-publish. DONE (dd40888) — DB
    foils prove byte-identity (task_id + commit_sha) and no re-publish on re-poll.
 2. **Ingest endpoint — CI leg**: `github.check_run_completed` (NOT `task.ci_result` —
-   the seam derives that). Its fields come from `gh api
-   /repos/{owner}/{repo}/commits/<head_sha>/check-runs`, one synthesized event per
-   run. Idempotency gate keyed on `(check_suite_id, head_sha, conclusion)` so a CI
-   re-run with a changed conclusion re-emits. DB foil: `check_suite_id` reconstruction
-   + the observer rollup + the conclusion-aware re-emit. (Ernie CI-leg co-sign.)
+   the seam derives that via `ci_observer`). `POST /api/v1/github/poll-ingest/check-run`
+   takes an observed completed suite `{repo, pr_number?, head_sha, check_suite_id,
+   conclusion, app_slug}`, synthesizes the completed-suite snapshot
+   (`check_suite.status=completed`), and routes it through the shared seam. Idempotency
+   gate keyed on `(check_suite_id, head_sha, conclusion)` so a CI re-run with a changed
+   conclusion re-emits. DONE — DB foils prove the observer derives the same
+   `task.ci_result` a webhook would (suite-id + app_slug reconstruction) AND the
+   conclusion-change re-emit vs same-conclusion no-op. Both foils red-then-green
+   verified by mutation (suite-not-completed, conclusion-dropped-from-key). (Ernie
+   CI-leg co-sign pending.)
 3. **Poller CLI** `treadmill pr poll <repo> --account <acct>`: GET open `task_prs` (+
    PRs with unsettled CI) for the repo; per PR, `gh pr view <n> --json
    mergeCommitOid,headRefOid,merged,state` and `gh api .../commits/<sha>/check-runs`
