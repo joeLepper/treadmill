@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
@@ -36,6 +36,10 @@ router = APIRouter(prefix="/api/v1", tags=["team_configs"])
 _store = TeamConfigStore()
 
 
+Lifecycle = Literal["ephemeral", "persistent", "manual"]
+MergeTarget = Literal["feature-branch", "main"]
+
+
 class TeamConfigRow(BaseModel):
     """Wire representation of one ``team_configs`` row."""
 
@@ -44,6 +48,8 @@ class TeamConfigRow(BaseModel):
     coordinator_label: str
     evaluator_label: str | None
     worker_labels: list[str]
+    lifecycle: Lifecycle
+    merge_target: MergeTarget
     created_at: datetime
     updated_at: datetime
 
@@ -53,6 +59,10 @@ class TeamConfigUpsert(BaseModel):
     coordinator_label: str = Field(min_length=1, max_length=64)
     evaluator_label: str | None = Field(default=None, max_length=64)
     worker_labels: list[str] = Field(default_factory=list)
+    # None → INSERT uses the column server-default; UPDATE preserves the existing
+    # value (a plain re-`team up` never silently resets a repo's mode).
+    lifecycle: Lifecycle | None = Field(default=None)
+    merge_target: MergeTarget | None = Field(default=None)
 
 
 class QueueDepth(BaseModel):
@@ -108,6 +118,8 @@ async def upsert_team_config(
         coordinator_label=body.coordinator_label,
         worker_labels=body.worker_labels,
         evaluator_label=body.evaluator_label,
+        lifecycle=body.lifecycle,
+        merge_target=body.merge_target,
     )
     await session.commit()
     return TeamConfigRow.model_validate(row, from_attributes=True)
