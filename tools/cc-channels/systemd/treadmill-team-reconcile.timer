@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Treadmill team reconcile every 2 minutes (ADR-0109 watcher)
+# Persistent=true: if the host was off when a window fired, run once on next
+# boot/login rather than skipping — a torn-down team with pending work is then
+# revived promptly after a reboot.
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Persistent=true
+Unit=treadmill-team-reconcile.service
+
+[Install]
+WantedBy=timers.target

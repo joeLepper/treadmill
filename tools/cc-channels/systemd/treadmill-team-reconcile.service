@@ -1,0 +1,19 @@
+[Unit]
+Description=Treadmill team reconcile — match team liveness to work (ADR-0109 watcher)
+# Triggered by treadmill-team-reconcile.timer every 2 min. One single-flighted
+# pass (host flock): revive a non-manual team that has work (drain not clean) but
+# whose unit is down; tear down an ephemeral team that is drain-clean and idle
+# beyond the grace (the same drain-guard `team sweep` uses). manual teams are
+# never auto-managed; an unconfirmable drain leaves a team as-is.
+#
+# NOT auto-enabled: shipping this unit does not start it. Enabling begins
+# AUTONOMOUS teardown/revive of real teams on this host — the operator's call:
+#   systemctl --user enable --now treadmill-team-reconcile.timer
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/treadmill team reconcile
+StandardOutput=journal
+StandardError=journal
+# oneshot never restarts; the journal captures the reconcile summary line.
