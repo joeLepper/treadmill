@@ -161,7 +161,7 @@ class TestTeamUpHappyPath:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        result = runner.invoke(team_app, ["joeLepper/treadmill"])
+        result = runner.invoke(team_app, ["up", "joeLepper/treadmill"])
         assert result.exit_code == 0, result.stdout
 
         fake_api_client._request.assert_called_once()
@@ -184,7 +184,7 @@ class TestTeamUpHappyPath:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        result = runner.invoke(team_app, ["x/y"])
+        result = runner.invoke(team_app, ["up", "x/y"])
         assert result.exit_code == 0, result.stdout
 
         team_root = teams_dir / "x-y"
@@ -211,7 +211,7 @@ class TestTeamUpHappyPath:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        runner.invoke(team_app, ["x/y"])
+        runner.invoke(team_app, ["up", "x/y"])
         coord_env = (teams_dir / "x-y" / "coordinator-x-y" / "coordinator-x-y.env").read_text()
         eval_env = (teams_dir / "x-y" / "evaluator-x-y" / "evaluator-x-y.env").read_text()
         worker_env = (teams_dir / "x-y" / "worker-x-y-1" / "worker-x-y-1.env").read_text()
@@ -225,7 +225,7 @@ class TestTeamUpHappyPath:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        runner.invoke(team_app, ["x/y", "--workers", "2"])
+        runner.invoke(team_app, ["up", "x/y", "--workers", "2"])
         # Each of 4 sessions (1 coord + 1 eval + 2 workers) gets enable + start.
         verbs_per_unit = [a[2] for a in systemctl_success]
         # 4 sessions × 2 verbs = 8 invocations
@@ -242,7 +242,7 @@ class TestTeamUpHappyPath:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        runner.invoke(team_app, ["x/y", "--workers", "5"])
+        runner.invoke(team_app, ["up", "x/y", "--workers", "5"])
         body = fake_api_client._request.call_args.kwargs["json"]
         assert len(body["worker_labels"]) == 5
         assert body["worker_labels"][-1] == "worker-x-y-5"
@@ -263,7 +263,7 @@ class TestIdempotency:
         the stub would lose the worker's accumulated memory.
         """
         # First run creates the stub.
-        runner.invoke(team_app, ["x/y", "--workers", "1"])
+        runner.invoke(team_app, ["up", "x/y", "--workers", "1"])
         worker_session_id = (
             teams_dir / "x-y" / "worker-x-y-1" / ".session-id"
         )
@@ -271,7 +271,7 @@ class TestIdempotency:
         worker_session_id.write_text("captured-session-uuid")
 
         # Re-run team up. Session ID file MUST survive.
-        runner.invoke(team_app, ["x/y", "--workers", "1"])
+        runner.invoke(team_app, ["up", "x/y", "--workers", "1"])
         assert worker_session_id.read_text() == "captured-session-uuid"
 
 
@@ -292,7 +292,7 @@ class TestScaleDown:
             status_code=409,
             detail="scale-down would orphan in-flight task_executions on worker labels ['w-3']: ['uuid-1']",
         )
-        result = runner.invoke(team_app, ["x/y", "--workers", "2"])
+        result = runner.invoke(team_app, ["up", "x/y", "--workers", "2"])
         assert result.exit_code == 2  # CLI's typer.Exit(code=2) on API error
 
     def test_force_flag_forwards_query_param(
@@ -303,7 +303,7 @@ class TestScaleDown:
     ) -> None:
         """``--force`` appends ``?force=true`` to the upsert URL so the
         server-side guard short-circuits."""
-        result = runner.invoke(team_app, ["x/y", "--workers", "2", "--force"])
+        result = runner.invoke(team_app, ["up", "x/y", "--workers", "2", "--force"])
         assert result.exit_code == 0, result.stdout
         _method, path = fake_api_client._request.call_args.args
         assert path == "/api/v1/team_configs?force=true"
@@ -319,7 +319,7 @@ class TestInputValidation:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        result = runner.invoke(team_app, ["joelepper"])
+        result = runner.invoke(team_app, ["up", "joelepper"])
         assert result.exit_code == 1
         # API client was never called.
         fake_api_client._request.assert_not_called()
@@ -332,7 +332,7 @@ class TestInputValidation:
     ) -> None:
         """Typer's ``min=1`` constraint catches zero-worker invocations
         before any work fires."""
-        result = runner.invoke(team_app, ["x/y", "--workers", "0"])
+        result = runner.invoke(team_app, ["up", "x/y", "--workers", "0"])
         assert result.exit_code != 0
         fake_api_client._request.assert_not_called()
 
@@ -350,7 +350,7 @@ class TestSystemdUnavailable:
         """No systemd (CI / container / macOS) is not fatal — the
         team_configs row + directory tree are the load-bearing
         artifacts."""
-        result = runner.invoke(team_app, ["x/y", "--workers", "1"])
+        result = runner.invoke(team_app, ["up", "x/y", "--workers", "1"])
         assert result.exit_code == 0, result.stdout
         # Directory tree is still populated.
         assert (teams_dir / "x-y" / "coordinator-x-y" / ".session-id").exists()
@@ -374,7 +374,7 @@ class TestTemplateInstallWiring:
         ``.claude/settings.json`` (so the PostToolUse relay-inject hook
         never registered). See docs/learnings/
         2026-06-10-template-install-layout-vs-launcher-cwd-mismatch.md."""
-        result = runner.invoke(team_app, ["Acme/Widget", "--workers", "2"])
+        result = runner.invoke(team_app, ["up", "Acme/Widget", "--workers", "2"])
         assert result.exit_code == 0, result.stdout
         assert stub_template_install == [("acme-widget", 2, "main")]
 
@@ -392,7 +392,7 @@ class TestOsmoFlags:
         stub_template_install: list[tuple[str, int, str]],
     ) -> None:
         result = runner.invoke(
-            team_app, ["ZEPHYR/zephyr", "--pr-base", "forecast/stage-a"]
+            team_app, ["up", "ZEPHYR/zephyr", "--pr-base", "forecast/stage-a"]
         )
         assert result.exit_code == 0, result.stdout
         assert stub_template_install[0][2] == "forecast/stage-a"
@@ -405,7 +405,7 @@ class TestOsmoFlags:
         stub_template_install: list[tuple[str, int, str]],
     ) -> None:
         result = runner.invoke(
-            team_app, ["ZEPHYR/zephyr", "--slug", "joelepper-zephyr"]
+            team_app, ["up", "ZEPHYR/zephyr", "--slug", "joelepper-zephyr"]
         )
         assert result.exit_code == 0, result.stdout
         # labels use the override slug; team_configs.repo stays the real repo
@@ -426,7 +426,7 @@ class TestOsmoFlags:
         extra.write_text("source /home/joe/zephyr/.env\nZEPHYR_PYTHON=/home/joe/zephyr/tools/zephyr-python\n")
         result = runner.invoke(
             team_app,
-            ["ZEPHYR/zephyr", "--slug", "joelepper-zephyr", "--env-extra", str(extra)],
+            ["up", "ZEPHYR/zephyr", "--slug", "joelepper-zephyr", "--env-extra", str(extra)],
         )
         assert result.exit_code == 0, result.stdout
         env_body = (
@@ -442,7 +442,7 @@ class TestOsmoFlags:
         fake_api_client: MagicMock,
     ) -> None:
         result = runner.invoke(
-            team_app, ["ZEPHYR/zephyr", "--env-extra", "/nonexistent/zephyr.env"]
+            team_app, ["up", "ZEPHYR/zephyr", "--env-extra", "/nonexistent/zephyr.env"]
         )
         assert result.exit_code == 1
 
@@ -461,7 +461,7 @@ class TestOsmoFlags:
             raise FileNotFoundError("install.py not found")
 
         monkeypatch.setattr(team_module, "_install_templates", _boom)
-        result = runner.invoke(team_app, ["x/y", "--workers", "1"])
+        result = runner.invoke(team_app, ["up", "x/y", "--workers", "1"])
         assert result.exit_code == 2
         assert systemctl_success == []  # no enable/start attempted
 
@@ -517,7 +517,7 @@ class TestModelPin:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        runner.invoke(team_app, ["x/y"])
+        runner.invoke(team_app, ["up", "x/y"])
         env_body = (
             teams_dir / "x-y" / "coordinator-x-y" / "coordinator-x-y.env"
         ).read_text()
@@ -529,7 +529,7 @@ class TestModelPin:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        runner.invoke(team_app, ["x/y"])
+        runner.invoke(team_app, ["up", "x/y"])
         env_body = (
             teams_dir / "x-y" / "evaluator-x-y" / "evaluator-x-y.env"
         ).read_text()
@@ -541,7 +541,7 @@ class TestModelPin:
         fake_api_client: MagicMock,
         systemctl_success: list[list[str]],
     ) -> None:
-        runner.invoke(team_app, ["x/y"])
+        runner.invoke(team_app, ["up", "x/y"])
         env_body = (
             teams_dir / "x-y" / "worker-x-y-1" / "worker-x-y-1.env"
         ).read_text()
@@ -555,7 +555,7 @@ class TestModelPin:
     ) -> None:
         """Coordinator + evaluator get opus; workers get sonnet — not
         the same value, so a single-value regression can't pass silently."""
-        runner.invoke(team_app, ["x/y"])
+        runner.invoke(team_app, ["up", "x/y"])
         coord_model = (
             teams_dir / "x-y" / "coordinator-x-y" / "coordinator-x-y.env"
         ).read_text()
