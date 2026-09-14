@@ -179,6 +179,60 @@ class ApiClient:
             "GET", "/api/v1/llm_calls/report", params={"since": since},
         )
 
+    # ── PR-state poller (ADR-0113) ────────────────────────────────────────────
+
+    def list_open_task_prs(self, repo: str) -> list[dict[str, Any]]:
+        """The repo's OPEN task_prs — the poll set. Each row carries pr_number +
+        head_sha the poller needs to check merge + CI on GitHub."""
+        data = self._request(
+            "GET", "/api/v1/task_prs", params={"repo": repo, "open": "true"},
+        )
+        return data.get("task_prs", [])
+
+    def poll_ingest_merge(
+        self, *, repo: str, pr_number: int, merge_sha: str,
+    ) -> dict[str, Any]:
+        """Ingest an observed PR merge (ADR-0113 merge leg). Idempotent server-side."""
+        return self._request(
+            "POST",
+            "/api/v1/github/poll-ingest",
+            json={
+                "repo": repo,
+                "pr_number": pr_number,
+                "action": "pr_merged",
+                "merge_sha": merge_sha,
+            },
+        )
+
+    def poll_ingest_check_run(
+        self,
+        *,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        check_suite_id: int,
+        conclusion: str,
+        app_slug: str,
+    ) -> dict[str, Any]:
+        """Ingest an observed completed check SUITE (ADR-0113 CI leg). Idempotent;
+        a changed conclusion re-emits, a same-conclusion re-poll is a no-op.
+
+        ``pr_number`` is REQUIRED: the endpoint writes task_prs.head_sha keyed on
+        (repo, pr_number) so the observer attributes the ci_result on a webhookless
+        repo. The poller always polls a specific task_pr, so it always has it."""
+        return self._request(
+            "POST",
+            "/api/v1/github/poll-ingest/check-run",
+            json={
+                "repo": repo,
+                "pr_number": pr_number,
+                "head_sha": head_sha,
+                "check_suite_id": check_suite_id,
+                "conclusion": conclusion,
+                "app_slug": app_slug,
+            },
+        )
+
     # ── Onboarding ───────────────────────────────────────────────────────────
 
     def get_repo_config(self, repo: str) -> dict[str, Any]:

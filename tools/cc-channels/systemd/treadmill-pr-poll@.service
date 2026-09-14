@@ -1,0 +1,27 @@
+[Unit]
+Description=Treadmill PR-state poll reconciler for %i (ADR-0113)
+# Templated per poll-repo: the instance name %i is the repo SLUG (owner-name), and
+# the repo + collaborator account are read from an EnvironmentFile so the slug stays
+# a clean systemd instance token. For a WEBHOOKLESS repo (no App / no webhook): one
+# single-flighted pass reads the repo's open task_prs, checks each PR's merge + CI on
+# GitHub with the account's collaborator token, and synthesizes the same events a
+# webhook would through the poll-ingest endpoints. Idempotent + fail-closed.
+#
+# The EnvironmentFile (create before enabling) sets:
+#   REPO=owner/name
+#   ACCOUNT=<gh account whose collaborator credential reads REPO>
+# e.g. %h/.treadmill/pr-poll/netlify-agent-runner-orchestrator.env
+#
+# NOT auto-enabled: shipping this unit does not start polling. Enabling begins
+# synthesizing merge/CI events for REPO — the operator's call:
+#   systemctl --user enable --now treadmill-pr-poll@<slug>.timer
+After=default.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.treadmill/pr-poll/%i.env
+# The poller reads GH_TOKEN=$(gh auth token --user $ACCOUNT) itself, per call; it
+# NEVER runs `gh auth switch`. The token is never written to the journal.
+ExecStart=%h/.local/bin/treadmill pr poll ${REPO} --account ${ACCOUNT}
+StandardOutput=journal
+StandardError=journal

@@ -29,9 +29,9 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from treadmill_api.dependencies_db import get_session
@@ -59,8 +59,16 @@ class TaskPRResponse(BaseModel):
     pr_number: int
     task_id: uuid.UUID
     branch: str | None
+    head_sha: str | None = None
     created_at: datetime
     closed_at: datetime | None
+
+
+class TaskPRListResponse(BaseModel):
+    """The open (or all) task_prs rows for a repo — the PR-state poller's poll set
+    (ADR-0113): the poller reads this, then checks each PR's merge + CI on GitHub."""
+
+    task_prs: list[TaskPRResponse]
 
 
 @router.post(
@@ -117,6 +125,39 @@ async def create_task_pr(
         pr_number=pr_row.pr_number,
         task_id=pr_row.task_id,
         branch=pr_row.branch,
+        head_sha=pr_row.head_sha,
         created_at=pr_row.created_at,
         closed_at=pr_row.closed_at,
+    )
+
+
+@router.get("/task_prs", response_model=TaskPRListResponse)
+async def list_task_prs(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    repo: Annotated[str, Query(min_length=1)],
+    open_only: Annotated[bool, Query(alias="open")] = True,
+) -> TaskPRListResponse:
+    """List a repo's task_prs — the PR-state poller's poll set (ADR-0113).
+
+    Defaults to OPEN rows (``closed_at IS NULL``) to bound the poll set; pass
+    ``open=false`` to include closed rows. Repo match is case-insensitive to mirror
+    the webhook seam's ``(repo, pr_number)`` resolution. Ordered by pr_number desc."""
+    stmt = select(TaskPR).where(func.lower(TaskPR.repo) == repo.lower())
+    if open_only:
+        stmt = stmt.where(TaskPR.closed_at.is_(None))
+    stmt = stmt.order_by(TaskPR.pr_number.desc())
+    rows = (await session.execute(stmt)).scalars().all()
+    return TaskPRListResponse(
+        task_prs=[
+            TaskPRResponse(
+                repo=r.repo,
+                pr_number=r.pr_number,
+                task_id=r.task_id,
+                branch=r.branch,
+                head_sha=r.head_sha,
+                created_at=r.created_at,
+                closed_at=r.closed_at,
+            )
+            for r in rows
+        ]
     )

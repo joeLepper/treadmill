@@ -32,6 +32,7 @@ from treadmill_cli.api_client import ApiClient, ApiError
 from treadmill_cli.commands.escalations import escalations_app
 from treadmill_cli.commands.learnings import learnings_app
 from treadmill_cli.commands.onboarding import onboarding_app
+from treadmill_cli.commands.pr import pr_app
 from treadmill_cli.commands.repo import repo_app
 from treadmill_cli.commands.team import team_app
 from treadmill_cli.commands.tokens import tokens_app
@@ -57,6 +58,7 @@ app.add_typer(schedules_app)
 app.add_typer(onboarding_app)
 app.add_typer(team_app)
 app.add_typer(repo_app)
+app.add_typer(pr_app)
 app.add_typer(escalations_app)
 app.add_typer(tokens_app)
 
