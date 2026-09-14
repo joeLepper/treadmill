@@ -14,7 +14,8 @@ for database access.
 - `hosts.py` — `/api/v1/hosts` + `/api/v1/hosts/bindings`. Host registry and per-label host binding (ADR-0095). See below.
 - `tasks.py` — `/api/v1/tasks`. Task CRUD and status.
 - `task_executions.py` — `/api/v1/task_executions`. Execution lifecycle (coordinator writes only).
-- `task_prs.py` — `/api/v1/task_prs`. PR tracking per task.
+- `task_prs.py` — `/api/v1/task_prs`. PR tracking per task. `GET` (with `?repo=&open=`) is the PR-state poller's poll set (ADR-0113).
+- `github.py` — `/api/v1/github`. App installation-token mint (ADR-0049) + the PR-state poll-ingest endpoints (ADR-0113): `POST /poll-ingest` (merge leg) and `POST /poll-ingest/check-run` (CI leg) synthesize webhook-identical events for webhookless repos through the shared `persist_and_resolve_webhook_event` seam.
 - `plans.py` — `/api/v1/plans`. Plan CRUD.
 - `onboarding.py` — `/api/v1/onboarding`. Repo config and profile upserts.
 - `schedules.py` — `/api/v1/schedules`. Scheduled agent routines.
