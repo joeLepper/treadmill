@@ -4,7 +4,7 @@ auto_merge: false
 
 # Plan: Team lifecycle + feature-branch integration (v1)
 
-- **Status:** drafting
+- **Status:** active
 - **Date:** 2026-09-13
 - **Related ADRs:** ADR-0109 (ephemeral team lifecycle), ADR-0110 (feature-branch integration), ADR-0087 (team execution), ADR-0108 (panel-backed evaluator)
 
@@ -145,6 +145,25 @@ git-push integration) can't be dogfooded until steps 3–4 build it; it is prove
   run against this real join, never a mock hard-coding `pr_merged → block`. Likely a small
   server endpoint computes the join (extend the scale-down guard); the CLI `team down`
   calls it.
+- **The canonical merge event is `github.pr_merged`, not `task.pr_merged`** (step-1
+  execution — caught by the end-to-end drain foil Ernie required). The drain-guard's
+  post-merge sha lookup first filtered `entity_type='task' AND action='pr_merged'`, which
+  matches ZERO rows — no such event is emitted anywhere; the task_status view, the
+  escalation close-sweep, and task_executions all key on `entity_type='github'`. The wrong
+  filter silently DISABLED the post-merge deploy check (returned no sha), so a
+  merged-but-unsettled deploy would have let teardown proceed — the exact work-loss the
+  guard exists to prevent. Fixed to `github.pr_merged` (`events.commit_sha` carries the
+  merge sha per ADR-0014). Lesson: the WIRED end-to-end foil, not the piece-tests, is what
+  caught the wrong task→sha link — a piece-test of `_unsettled_deploy_shas` alone passes
+  while the endpoint that feeds it the sha is broken.
+- **Adding a CLI subcommand changes a Typer app's arity** (step-1 execution — main went
+  red on the `cli` check post-merge). Typer auto-invokes the sole command when an app has
+  exactly one; adding `team down` made the subcommand name required, so the pre-existing
+  `team up` tests (which called `team_app` with the repo as the first arg) began exiting 2.
+  The regression lived in a file the diff never touched. Fix was test-only (prefix `up`;
+  real usage is already `team up <repo>`). Lesson (docs/learnings/2026-09-13-new-
+  subcommand-changes-typer-app-arity.md): when a change alters a CLI app's command arity,
+  run the WHOLE package suite before merge — the break is in the untouched siblings.
 
 ## Post-mortem
 
