@@ -213,7 +213,7 @@ def test_single_flight_skips_when_lock_held(fake_api, systemctl, tmp_lock) -> No
         result = runner.invoke(team_app, ["reconcile"])
         assert result.exit_code == 0, result.output
         assert systemctl.calls == []  # never acted — lock was held
-        assert "already running" in result.output
+        assert "skipping this tick" in result.output
     finally:
         fcntl.flock(holder, fcntl.LOCK_UN)
         holder.close()

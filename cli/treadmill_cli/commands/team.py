@@ -668,8 +668,10 @@ def down(
     # Hold the host lifecycle lock across the teardown so a concurrent `team
     # reconcile` tick cannot INTERLEAVE a revive into the middle of it (ADR-0112,
     # gpt panel finding) — otherwise a revive between disabling the coordinator and a
-    # worker leaves a broken coordinator-up/workers-down team. Blocking: we WAIT for a
-    # brief reconcile pass to finish, then tear down (never skip the teardown).
+    # worker leaves a broken coordinator-up/workers-down team. Blocking: we WAIT for an
+    # in-flight reconcile pass to finish, then tear down (never skip the teardown). The
+    # wait is bounded by ONE full reconcile pass (team-count × drain-HTTP latency), not
+    # literally instant — fine against a 2-min backstop cadence.
     all_labels = _all_team_labels(cfg)
     with _host_reconcile_lock(blocking=True):
         systemd_warnings = _teardown_team_units(cfg)
@@ -888,18 +890,6 @@ def reconcile(
       already reap.
     A `manual` team is never auto-managed. Safe to run on a systemd timer.
     """
-    # Host single-flight: two overlapping passes would double systemctl work and
-    # interleave teardown/standup. A non-blocking flock makes a concurrent tick a
-    # no-op rather than a race.
-    _RECONCILE_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    lock_fh = open(_RECONCILE_LOCK, "w")
-    try:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        console.print("[dim]reconcile already running on this host; skipping[/dim]")
-        lock_fh.close()
-        raise typer.Exit(code=0)
-
     now = datetime.now(timezone.utc)
     revived: list[str] = []
     torn_down: list[str] = []
@@ -908,7 +898,17 @@ def reconcile(
     left_down: list[str] = []
     skipped_manual: list[str] = []
     errors: list[str] = []
-    try:
+    # Host single-flight, SHARED with `team down` (ADR-0112): the same lock serializes
+    # a reconcile pass against a teardown so a revive cannot interleave one. Non-
+    # blocking here — a concurrent tick (or a running `team down`) skips rather than
+    # races.
+    with _host_reconcile_lock(blocking=False) as acquired:
+        if not acquired:
+            console.print(
+                "[dim]reconcile: host busy (another pass or a team down); "
+                "skipping this tick[/dim]"
+            )
+            raise typer.Exit(code=0)
         with ApiClient(load_config()) as client:
             try:
                 configs = client._request("GET", "/api/v1/team_configs")
@@ -969,9 +969,6 @@ def reconcile(
                     left_running.append(repo)
                 else:
                     left_down.append(repo)
-    finally:
-        fcntl.flock(lock_fh, fcntl.LOCK_UN)
-        lock_fh.close()
 
     verb_up = "would revive" if dry_run else "revived"
     verb_down = "would tear down" if dry_run else "tore down"

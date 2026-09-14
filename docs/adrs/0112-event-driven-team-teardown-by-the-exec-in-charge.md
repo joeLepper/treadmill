@@ -43,16 +43,22 @@ reconcile demoted to a backstop (operator-directed, 2026-09-14):
   (`treadmill-alan`, `-bert`, …); per the project's CLAUDE.md it "is NOT set to the
   coordinator label" — only orchestrators submit plans, and orchestrators are never
   team members. So the exec-in-charge is external BY CONSTRUCTION; this is not luck.
-  We still enforce externality in DEPTH against a mislabeled or misconfigured session
-  (or a future change that weakens the invariant), at TWO layers: (a) the actor
-  self-checks — its own `TREADMILL_LABEL` must not be in the team's full label set
-  (coordinator, evaluator, AND all workers, read from `team_configs` — not a
-  hand-enumerated role prefix, which drops the evaluator); and (b) `team down` ITSELF
-  refuses when its invoking `TREADMILL_LABEL` is a team member — testing against the
-  SAME full `team_configs` label set as layer (a) (coordinator + evaluator + all
-  workers, `_all_team_labels`), NOT a hand-enumerated role prefix, so the evaluator
-  cannot be dropped at either layer. The guard is in the tool, not only the caller's
-  discipline, so a buggy or omitted self-check cannot cause a self-kill. `--force`
+  We still enforce externality in DEPTH — against the realistic misconfiguration where
+  `created_by` resolves to a session whose real label IS a team member, or a future
+  change that weakens the invariant — at TWO layers: (a) the actor self-checks — its
+  own `TREADMILL_LABEL` must not be in the team's full label set (coordinator,
+  evaluator, AND all workers, read from `team_configs` — not a hand-enumerated role
+  prefix, which drops the evaluator); and (b) `team down` ITSELF refuses when its
+  invoking `TREADMILL_LABEL` is a team member — testing against the SAME full
+  `team_configs` label set as layer (a) (coordinator + evaluator + all workers,
+  `_all_team_labels`), NOT a hand-enumerated role prefix, so the evaluator cannot be
+  dropped at either layer. SCOPE: both layers trust the launcher-set `TREADMILL_LABEL`
+  as the actor's identity. A session that FORGES its own label (claims an orchestrator
+  label while actually being a team member) defeats any label-based guard — that is a
+  substrate trust-boundary concern (the launcher owns the label; a process that
+  overrides it can bypass far more than this), not something a teardown guard can
+  catch. GIVEN A CORRECT LABEL, the tool-side guard (b) means a buggy or omitted agent
+  self-check (a) cannot cause a self-kill. `--force`
   overrides the drain-guard, never this self-kill guard.
   A member simply does NOT run `team down`; it takes no other action, and the backstop
   reconcile (external by construction — a systemd-timer process, not a team session)
@@ -80,9 +86,16 @@ reconcile demoted to a backstop (operator-directed, 2026-09-14):
   before a worker — could resume the teardown and stop workers under a now-live
   coordinator, a broken coordinator-up/workers-down state that coordinator-liveness
   reads as live and never repairs. Both `team down` and `team reconcile` take the same
-  host `flock`: `team down` blocks (waits for the brief reconcile pass, then tears down
-  — never skipping), the reconcile skips a tick it cannot acquire. So teardown and
-  revive run to completion one at a time, never overlapped, on any one host.
+  host `flock`: `team down` blocks (waits for the in-flight reconcile pass, then tears
+  down — never skipping), the reconcile skips a tick it cannot acquire. So teardown and
+  revive run to completion one at a time, never overlapped. This is a HOST-LOCAL guard,
+  which is sufficient because a team and its lifecycle actors run on ONE operator host
+  (all `treadmill-channel@*` units and the reconcile timer are `systemctl --user` on
+  that host); a future multi-host substrate would replace the flock with a per-repo DB
+  lock (the atomic lease of ADR-0109 step 4a is the natural anchor). The reconcile
+  BACKSTOP still ticks on its 2-minute timer (ADR-0109 unchanged) — only its teardown
+  GRACE was shortened (to 0.5h); so an orphaned task from the TOCTOU window is revived
+  within one tick (~2 min), the "~seconds" being the shutdown window itself.
 - The **`team reconcile` timer is the BACKSTOP only** — a low-frequency safety net
   (not a 2-minute primary loop) that tears down a team the responsible agent did not
   (the exec-in-charge was down, busy, or the coordinator crashed before signaling),
