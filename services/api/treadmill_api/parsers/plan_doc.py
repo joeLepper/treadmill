@@ -83,6 +83,54 @@ class PlanFrontmatter(BaseModel):
 
     auto_merge: StrictBool | None = None
 
+    integration_base: str | None = None
+    """The git BRANCH NAME the coordinator cuts the per-plan integration branch FROM and
+    drifts it AGAINST (ADR-0114, amends ADR-0110). ``None`` (omitted) means ``main`` —
+    the default, unchanged behavior. Set it to a non-main branch (e.g.
+    ``joes-agents/run-shape-telemetry-design``) when a plan's tasks must READ docs/code
+    that live only on that branch, or when the deliverable layers on a base we do not
+    own the ``main`` of. When it is non-default, the integration branch ITSELF is the
+    deliverable — the coordinator opens NO branch→main handoff PR (§9.7). A bare branch
+    name (the coordinator prefixes ``origin/``); the coordinator also validates it
+    resolves at standup (a bad ref fails the preflight)."""
+
+    @field_validator("integration_base")
+    @classmethod
+    def _validate_integration_base(cls, v: str | None) -> str | None:
+        """Reject values that would silently defeat the base's purpose (ADR-0114, panel
+        gpt): a symbolic ref like ``HEAD`` resolves to ``main`` in most clones — a base
+        that aliases ``main`` is never what a non-main plan means, so fail loud instead.
+        Also reject empties and an ``origin/``-prefix (the coordinator adds ``origin/``;
+        a prefixed value would double it to ``origin/origin/…``)."""
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped or stripped != v:
+            raise ValueError(
+                "integration_base must be a non-empty branch name with no surrounding "
+                "whitespace"
+            )
+        # Reject git pseudo-refs / symbolic refs (Ernie, airtight reject-set): HEAD and
+        # HEAD~1/HEAD^ (startswith), and *_HEAD — FETCH_HEAD/ORIG_HEAD/MERGE_HEAD/
+        # CHERRY_PICK_HEAD (endswith). Any of these resolves to something other than the
+        # named branch (often main) and defeats a non-main base.
+        if (
+            stripped == "@"
+            or stripped.startswith("HEAD")
+            or stripped.endswith("_HEAD")
+            or stripped == "HEAD"
+        ):
+            raise ValueError(
+                "integration_base must be an explicit branch name, not the symbolic "
+                f"ref {stripped!r} (it resolves elsewhere and defeats the non-main base)"
+            )
+        if stripped.startswith("origin/"):
+            raise ValueError(
+                "integration_base is a bare branch name; drop the 'origin/' prefix "
+                "(the coordinator adds it)"
+            )
+        return stripped
+
 
 # ── Pydantic schemas (strict) ─────────────────────────────────────────────────
 

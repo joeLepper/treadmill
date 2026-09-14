@@ -592,12 +592,38 @@ def test_standup_preflight_tests_write_access_and_fails_loud() -> None:
     assert "do NOT dispatch" in body.lower() or "do NOT dispatch tasks" in body
 
 
+def test_standup_reads_integration_base_and_cuts_off_it() -> None:
+    """ADR-0114 falsifier #1 (base-CUT): §3.1a must READ the plan's integration_base
+    and cut the branch off `origin/<base>`, NOT a hardcoded `origin/main`. Without this
+    guard a future edit could silently revert step 1 to `origin/main` and strand a
+    non-main-based plan's tasks (they'd never see the design-branch docs) with the
+    other two falsifier guards (drift, handoff) still green (Ernie, ADR-0114 review)."""
+    body = _coordinator_plain()
+    # step 0: read the base off the plan.
+    assert "integration_base" in body
+    assert "GET /api/v1/plans/{plan_id}" in body
+    # step 1: cut off origin/<base>, not a hardcoded origin/main.
+    assert "git fetch origin <base>" in body
+    assert (
+        "git push origin origin/<base>:refs/heads/joes-agents/<branch-slug>" in body
+    )
+    # the hardcoded-main create must be GONE (its presence is the reverted-guard smell).
+    assert "origin/main:refs/heads/joes-agents/<branch-slug>" not in body
+    # mid-flight base-mutation guard (ADR-0114 panel finding): an existing branch must
+    # be verified to descend from THIS base, else it carries a wrong base's history.
+    assert "git merge-base --is-ancestor origin/<base> joes-agents/<branch-slug>" in body
+    assert "integration_base changed after the branch was cut" in body
+
+
 def test_drift_merge_policy_is_defined() -> None:
-    """ADR-0110 drift: merge main→branch on cadence; trivial-resolve else conflict
-    task/escalate; never force-push."""
+    """ADR-0110/0114 drift: merge origin/<base> → branch on cadence (the SAME ref the
+    branch was cut from — `main` by default, never `main` for a non-main base);
+    trivial-resolve else conflict task/escalate; never force-push."""
     body = _coordinator_plain()
     assert "Drift" in body
-    assert "merge `main` into the integration branch" in body
+    # ADR-0114: drift against the plan's integration base, not a hardcoded main.
+    assert "merge `origin/<base>`" in body
+    assert "you must NOT merge `main` in" in body  # the non-main-base boundary
     assert "never force-push" in body
 
 
@@ -607,16 +633,24 @@ def test_handoff_section_opens_records_and_surfaces_once() -> None:
     once-only, and DO NOT merge to main (human gate)."""
     body = _coordinator_plain()
     assert "### 9.7" in body
+    # main-base handoff: open the branch→main PR (default, unchanged).
     assert "gh pr create --base main --head" in body
+    # ADR-0114: a non-main integration_base opens NO PR — the integration branch IS
+    # the deliverable and that repo's main must not be touched.
+    assert "open NO PR" in body
+    assert "integration branch IS the deliverable" in body
+    assert "do NOT touch `main` at all" in body
     # The recorded event is the terminal/implemented signal for the drain-guard.
     assert "handoff_pr_opened" in body
     assert '"entity_type": "plan"' in body or "entity_type: \"plan\"" in body \
         or 'action: "handoff_pr_opened"' in body
+    # The event is keyed on existence, not pr_number — omit pr_number for the no-PR case.
+    assert "OMIT `pr_number`" in body
     # Once-only guard against a restart re-surfacing.
     assert "once" in body.lower()
     assert "do not re-surface" in body.lower() or "do not open a second" in body.lower()
-    # The human owns the main gate — the coordinator does NOT merge the handoff.
-    assert "Do NOT merge the handoff PR" in body
+    # The coordinator does NOT merge the handoff (human owns the main gate).
+    assert "Do NOT merge" in body
     # Parked-on-human: the open handoff does not block teardown.
     assert "PARKED-ON-HUMAN" in body or "parked-on-human" in body.lower()
 

@@ -306,6 +306,66 @@ def test_create_plan_with_doc_no_frontmatter_leaves_auto_merge_null(
     assert row is None
 
 
+def test_create_plan_with_doc_reads_integration_base_frontmatter(
+    client: httpx.Client,
+    truncate: None,
+    seed_wf_author: None,
+    seed_team_config: None,
+    engine: Engine,
+) -> None:
+    """ADR-0114: a non-main integration_base wires frontmatter → Plan row AND is
+    echoed on the create response, so the coordinator's §3.1a can read it."""
+    base = "joes-agents/run-shape-telemetry-design"
+    doc = f"---\nintegration_base: {base}\n---\n\n" + _PLAN_DOC_TEMPLATE
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "test/repo",
+            "doc_path": "docs/plans/run-shape-investigation.md",
+            "doc_content": doc,
+        },
+    )
+    assert response.status_code == 201, response.text
+    plan_id = response.json()["id"]
+    assert response.json()["integration_base"] == base  # exposed on PlanResponse
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT integration_base FROM plans WHERE id = :id"),
+            {"id": plan_id},
+        ).scalar_one()
+    assert row == base
+
+
+def test_create_plan_with_doc_no_frontmatter_leaves_integration_base_null(
+    client: httpx.Client,
+    truncate: None,
+    seed_wf_author: None,
+    seed_team_config: None,
+    engine: Engine,
+) -> None:
+    """No integration_base → NULL → the coordinator defaults to origin/main (ADR-0114
+    default; unchanged behavior)."""
+    response = client.post(
+        "/api/v1/plans",
+        json={
+            "repo": "test/repo",
+            "doc_path": "docs/plans/default-base.md",
+            "doc_content": _PLAN_DOC_TEMPLATE,
+        },
+    )
+    assert response.status_code == 201, response.text
+    plan_id = response.json()["id"]
+    assert response.json()["integration_base"] is None
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT integration_base FROM plans WHERE id = :id"),
+            {"id": plan_id},
+        ).scalar_one()
+    assert row is None
+
+
 def test_create_plan_with_unknown_workflow_returns_400(
     client: httpx.Client,
     truncate: None,
