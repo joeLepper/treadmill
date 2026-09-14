@@ -116,3 +116,51 @@ def test_non_slash_repo_rejected(fake_api, systemctl_calls) -> None:
     result = runner.invoke(team_app, ["down", "justname"])
     assert result.exit_code == 1
     assert systemctl_calls == []
+
+
+@pytest.fixture(autouse=True)
+def _clear_invoker_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the invoking session to EXTERNAL (no member label) so the self-kill
+    guard is deterministic; the guard tests set TREADMILL_LABEL explicitly."""
+    monkeypatch.delenv("TREADMILL_LABEL", raising=False)
+
+
+@pytest.mark.parametrize(
+    "member_label",
+    ["coordinator-o-r", "evaluator-o-r", "worker-o-r-2"],
+)
+def test_self_kill_guard_refuses_a_team_member(
+    fake_api, systemctl_calls, monkeypatch, member_label
+) -> None:
+    """ADR-0112 self-kill guard (defense-in-depth): a session whose TREADMILL_LABEL is
+    ANY of the team's labels — coordinator, EVALUATOR, or a worker — cannot run
+    `team down` on its own team; refuse (exit 2) and touch no systemd. Enforced by the
+    tool, not just the caller's self-check. Includes the evaluator (Ernie: the role a
+    hand-enumerated check drops)."""
+    fake_api._request.side_effect = [_CONFIG]  # never reaches the drain call
+    monkeypatch.setenv("TREADMILL_LABEL", member_label)
+    result = runner.invoke(team_app, ["down", "o/r"])
+    assert result.exit_code == 2, result.output
+    assert systemctl_calls == []
+    assert "self-kill" in result.output
+
+
+def test_self_kill_guard_not_overridden_by_force(
+    fake_api, systemctl_calls, monkeypatch
+) -> None:
+    """--force overrides the DRAIN-guard, never the self-kill guard."""
+    fake_api._request.side_effect = [_CONFIG]
+    monkeypatch.setenv("TREADMILL_LABEL", "worker-o-r-1")
+    result = runner.invoke(team_app, ["down", "o/r", "--force"])
+    assert result.exit_code == 2, result.output
+    assert systemctl_calls == []
+
+
+def test_external_actor_passes_self_kill_guard(fake_api, systemctl_calls, monkeypatch) -> None:
+    """An external actor (an orchestrator label) is not a member → guard passes,
+    teardown proceeds on a clean drain."""
+    fake_api._request.side_effect = [_CONFIG, _drain(clean=True)]
+    monkeypatch.setenv("TREADMILL_LABEL", "treadmill-alan")
+    result = runner.invoke(team_app, ["down", "o/r"])
+    assert result.exit_code == 0, result.output
+    assert len(systemctl_calls) == 5

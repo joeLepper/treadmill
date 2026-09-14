@@ -587,6 +587,25 @@ def down(
                 f"[red]team_config fetch failed: {exc.status_code} {exc.detail}[/red]"
             )
             raise typer.Exit(code=2)
+
+        # SELF-KILL GUARD (ADR-0112, defense-in-depth): teardown must be run by an
+        # actor EXTERNAL to the team — `team down` disables every member unit, so a
+        # member (coordinator / evaluator / any worker) that runs it would kill its
+        # own session mid-teardown. Enforce it in the TOOL, not only the caller's
+        # self-check: if the invoking session's TREADMILL_LABEL is in this team's
+        # label set, refuse. An external actor (an orchestrator, the operator, or the
+        # reconcile backstop process) has no member label and passes. --force does
+        # NOT override this — it overrides the drain-guard, never the self-kill.
+        invoker = os.environ.get("TREADMILL_LABEL")
+        if invoker and invoker in _all_team_labels(cfg):
+            err_console.print(
+                f"[red]REFUSED: {invoker} is a MEMBER of team {repo} — a member "
+                "cannot tear down its own team (self-kill). Route teardown to an "
+                "external actor (the plan's orchestrator) or the reconcile backstop."
+                "[/red]"
+            )
+            raise typer.Exit(code=2)
+
         # Drain-guard (server-side, joins task state + escalations + post-merge deploy).
         try:
             drain = client._request("GET", f"/api/v1/team_configs/{repo}/drain")

@@ -38,28 +38,35 @@ reconcile demoted to a backstop (operator-directed, 2026-09-14):
 - The coordinator, on reaching "implemented" (§9.7: handoff opened + recorded +
   surfaced) or on a terminal-failure escalation, **relays a "team safe to tear
   down" signal to `plans.created_by`** over the same channel §10 escalations use.
-- **The teardown actor MUST be external to the team it tears down** (the load-bearing
-  invariant — this is teardown, not detection). `plans.created_by` is normally the
-  submitting orchestrator (`treadmill-alan`, `-bert`, …), which is never a team
-  member, so it is the external actor. But `created_by` is NOT guaranteed external: a
-  coordinator that self-submits follow-up work is `created_by` of its own team's plan.
-  So the actor VERIFIES externality before acting: if its own label is a member of
-  the target team (`coordinator-<slug>` or `worker-<slug>-*`), it must NOT run `team
-  down` (that is the self-kill the incumbent alternative was rejected for) — it leaves
-  teardown to the backstop, which is external by construction (a systemd-timer
-  process, not a team session).
+- **The teardown actor is external to the team it tears down — by invariant, and
+  enforced in depth.** `plans.created_by` is ALWAYS the submitting orchestrator
+  (`treadmill-alan`, `-bert`, …); per the project's CLAUDE.md it "is NOT set to the
+  coordinator label" — only orchestrators submit plans, and orchestrators are never
+  team members. So the exec-in-charge is external BY CONSTRUCTION; this is not luck.
+  We still enforce externality in DEPTH against a mislabeled or misconfigured session
+  (or a future change that weakens the invariant), at TWO layers: (a) the actor
+  self-checks — its own `TREADMILL_LABEL` must not be in the team's full label set
+  (coordinator, evaluator, AND all workers, read from `team_configs` — not a
+  hand-enumerated role prefix, which drops the evaluator); and (b) `team down` ITSELF
+  refuses when its invoking `TREADMILL_LABEL` is a team member — the guard is in the
+  tool, not only the caller's discipline, so a buggy or omitted self-check cannot
+  cause a self-kill. `--force` overrides the drain-guard, never this self-kill guard.
+  A member routes teardown to the backstop, which is external by construction (a
+  systemd-timer process, not a team session).
 - The **external exec-in-charge tears the team down** in response — running
   `treadmill team down <repo>`, which is drain-guarded, so a team that is not actually
   done is refused. This is the PRIMARY teardown path: external actor, deterministic,
   prompt. The drain-check and unit shutdown inside `team down` are NOT one atomic
   transaction, so a plan.submitted that lands in the gap can leave a just-registered
-  task on a team whose units are stopping. This window is narrow (the coordinator is
-  itself being stopped, so it dispatches at most the one racing task) and, critically,
-  it is NOT a permanent strand: the backstop revives any team that has work but no
-  live unit (below). The residual exposure is a worker's UNCOMMITTED work during the
-  ~seconds shutdown, bounded by the same commit/push-before-terminal durability the
-  ADR-0109 parked-on-human path already requires. `team down` re-evaluates the drain
-  as late as possible before issuing the stop, to keep the window minimal.
+  task on a team whose units are stopping. This is NOT a permanent strand: `team down`
+  disables the COORDINATOR unit FIRST, and the reconcile keys team liveness on the
+  coordinator unit — so ANY teardown that has begun (even a partial one that failed
+  after stopping the coordinator but before a worker) reads as not-live, and the
+  backstop revives a not-live team that has work (re-enabling every unit). The residual
+  exposure is a worker's UNCOMMITTED work during the ~seconds shutdown, bounded by the
+  same commit/push-before-terminal durability the ADR-0109 parked-on-human path already
+  requires. `team down` re-evaluates the drain as late as possible before the stop, to
+  keep the window minimal.
 - The **`team reconcile` timer is the BACKSTOP only** — a low-frequency safety net
   (not a 2-minute primary loop) that tears down a team the responsible agent did not
   (the exec-in-charge was down, busy, or the coordinator crashed before signaling),
@@ -93,9 +100,9 @@ own behalf); this ADR changes only the PRIMARY teardown path.
   outcome end to end, consistent with the exec-in-charge skill.
 
 ### Bad / trade-offs
-- Teardown now depends on a live, EXTERNAL, correctly-behaving exec-in-charge for the
-  fast path; the backstop covers its absence (down, busy, or non-external
-  `created_by`) but at the backstop's slower cadence.
+- Teardown now depends on a live, correctly-behaving exec-in-charge for the fast path
+  (externality is guaranteed by the created_by invariant, not a runtime dependency);
+  the backstop covers its absence (down or busy) at the backstop's slower cadence.
 - Two actors can now initiate teardown (exec-in-charge + backstop reconcile). A
   double-fire is safe because `team down` is drain-guarded AND a no-op on an
   already-down team (`systemctl disable --now` on an inactive unit is a no-op; the
@@ -149,14 +156,23 @@ sequenceDiagram
 
 - **Durable server-routed done-signal (robustness upgrade).** The primary trigger is
   today the coordinator's soft relay to `created_by` (agent-initiated; the backstop
-  covers a missed relay). To make the fast path prompt-BY-CONSTRUCTION rather than
-  best-effort, add `created_by` to the `plan.handoff_pr_opened` payload and a
-  server-side relay-drop to `~/.cc-channels/<created_by>/relay/` on that event
-  (mirroring the task-relay pattern, e.g. `ArchitectEmitFailure`). Then teardown does
-  not depend on the coordinator remembering to also send a separate relay. Deferred
-  because the soft relay + backstop already deliver safely.
+  covers a missed relay). To make the fast path prompt-BY-CONSTRUCTION, a server-side
+  relay-drop to `~/.cc-channels/<created_by>/relay/` on `plan.handoff_pr_opened` would
+  remove the dependence on the coordinator also sending a separate relay. Deferred —
+  and it is NOT the ~20-line mirror of the task-relay pattern it first appears: the
+  `ArchitectEmitFailure` relay trigger the docstrings name
+  (`maybe_drop_relay_on_architect_emit_failure`) has no implementation in the tree,
+  and broadcast fan-out addresses channel SUBSCRIBERS, not an arbitrary `created_by`
+  label. So a durable per-event relay-drop keyed on a payload label needs its
+  delivery plumbing ESTABLISHED and verified first, not merely a new field. The soft
+  relay + backstop deliver safely in the meantime.
 
 ## References
 
 - ADR-0109 (the lifecycle this amends), ADR-0110 (the `plan.handoff_pr_opened`
   done-signal), the exec-in-charge skill, coordinator template §9.7 + §10.
+- Treadmill CLAUDE.md §`created_by` field — "The `created_by` field on a plan is the
+  orchestrator session label that submitted the plan … It is NOT set to the
+  coordinator label." This is the invariant that makes `plans.created_by` external to
+  the worker team by construction; the self-kill guards are defense-in-depth for a
+  violation of it.
