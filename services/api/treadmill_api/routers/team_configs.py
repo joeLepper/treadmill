@@ -247,7 +247,16 @@ def _classify(derived_status: str | None, escalated: bool) -> str:
 async def _merge_shas_for_tasks(
     session: AsyncSession, task_ids: list[str]
 ) -> dict[str, str]:
-    """Merge commit_sha per pr_merged task (from its task.pr_merged event)."""
+    """Merge commit_sha per pr_merged task (from its ``github.pr_merged`` event).
+
+    The canonical merge signal is ``entity_type='github', action='pr_merged'`` —
+    the SAME event the task_status view, the escalation close-sweep, and
+    task_executions all key on. No ``task``-entity ``pr_merged`` event exists; a
+    filter on ``entity_type='task'`` would return zero rows and silently disable
+    the post-merge deploy check. ``events.commit_sha`` is populated for this event
+    with the merge commit sha (ADR-0014 commit-anchor extraction); ``task_id`` is
+    FK-resolved from ``task_prs`` on ingress.
+    """
     if not task_ids or await _relation_missing(session, "events"):
         return {}
     result = await session.execute(
@@ -255,7 +264,7 @@ async def _merge_shas_for_tasks(
             """
             SELECT DISTINCT ON (task_id) task_id::text, commit_sha
             FROM events
-            WHERE entity_type = 'task' AND action = 'pr_merged'
+            WHERE entity_type = 'github' AND action = 'pr_merged'
               AND task_id = ANY(:ids) AND commit_sha IS NOT NULL
             ORDER BY task_id, created_at DESC
             """

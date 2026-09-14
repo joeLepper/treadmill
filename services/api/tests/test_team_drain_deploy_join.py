@@ -1,26 +1,41 @@
-"""DB-backed foil for the drain-guard's post-merge deploy/staging_smoke join
-(ADR-0109 / Ernie BLOCKING 2). A pure test cannot cover this — it runs the real SQL
-against real `events` rows across the two DISTINCT streams (deploy: started/succeeded/
-failed; staging_smoke: passed/failed, NO 'started'). Gated on the integration DB.
+"""DB-backed foils for the drain-guard (ADR-0109). A pure test cannot cover these —
+they run the real SQL against real rows.
+
+Three foils, one per untested link in the drain-guard's single safety chain:
+  1. ``_unsettled_deploy_shas`` — the two DISTINCT event streams (deploy:
+     started/succeeded/failed; staging_smoke: passed/failed, NO 'started'), settled
+     PER stream (Ernie BLOCKING 2).
+  2. the escalation open-vs-closed CTE in ``_TEAM_DRAIN_SQL`` — the drain-SPECIFIC
+     combining boolean (open iff latest escalation is followed by no later ack/close),
+     which overview.py's aggregate test does NOT exercise (Ernie BLOCKING 1a).
+  3. the WIRED endpoint ``GET /drain`` end-to-end — proves ``_merge_shas_for_tasks``
+     hands the deploy check the RIGHT sha and the parts compose (Ernie BLOCKING 1b).
+
+All gated on the integration DB.
 """
+
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Iterator
-from pathlib import Path
 import subprocess
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-
-from treadmill_api.routers.team_configs import _unsettled_deploy_shas
+from treadmill_api.routers.team_configs import (
+    _TEAM_DRAIN_SQL,
+    _unsettled_deploy_shas,
+    get_team_drain,
+)
 
 INTEGRATION = os.environ.get("TREADMILL_INTEGRATION") == "1"
 TEST_DB_URL = os.environ.get("TREADMILL_TEST_DATABASE_URL")
@@ -58,14 +73,49 @@ async def session_factory(
     await async_engine.dispose()
 
 
-async def _emit(session: AsyncSession, entity_type: str, action: str, sha: str) -> None:
+# ---------------------------------------------------------------------------
+# Seed helpers (async, minimal — only the columns the drain path reads).
+# ---------------------------------------------------------------------------
+
+_BASE = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
+
+
+async def _emit(
+    session: AsyncSession,
+    entity_type: str,
+    action: str,
+    *,
+    sha: str | None = None,
+    task_id: uuid.UUID | None = None,
+    at: datetime | None = None,
+) -> None:
     await session.execute(
         sa.text(
-            "INSERT INTO events (entity_type, action, commit_sha) "
-            "VALUES (:et, :ac, :sha)"
+            "INSERT INTO events (entity_type, action, commit_sha, task_id, created_at) "
+            "VALUES (:et, :ac, :sha, :tid, COALESCE(:at, now()))"
         ),
-        {"et": entity_type, "ac": action, "sha": sha},
+        {"et": entity_type, "ac": action, "sha": sha, "tid": task_id, "at": at},
     )
+
+
+async def _seed_plan(session: AsyncSession, repo: str) -> uuid.UUID:
+    row = await session.execute(
+        sa.text("INSERT INTO plans (repo) VALUES (:r) RETURNING id"), {"r": repo}
+    )
+    return row.scalar_one()
+
+
+async def _seed_task(
+    session: AsyncSession, plan_id: uuid.UUID, created_by: str, repo: str
+) -> uuid.UUID:
+    row = await session.execute(
+        sa.text(
+            "INSERT INTO tasks (plan_id, repo, title, created_by) "
+            "VALUES (:p, :r, 'drain foil', :c) RETURNING id"
+        ),
+        {"p": plan_id, "r": repo, "c": created_by},
+    )
+    return row.scalar_one()
 
 
 @integration
@@ -74,39 +124,178 @@ async def test_post_merge_deploy_settling_per_stream(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The exact cases from the BLOCKING-2 review — per stream, against real events."""
-    import uuid
-
     p = uuid.uuid4().hex[:8]
-    sha_started = f"{p}-started"           # deploy started, no terminal → UNSETTLED
-    sha_ok_no_smoke = f"{p}-ok-no-smoke"   # deploy succeeded, no smoke → UNSETTLED (pending)
-    sha_full = f"{p}-full"                 # deploy succeeded + smoke passed → settled
-    sha_deploy_failed = f"{p}-dfail"       # deploy failed → settled (failure is terminal)
-    sha_smoke_failed = f"{p}-sfail"        # deploy succeeded + smoke failed → settled
-    sha_none = f"{p}-none"                 # no deploy events (feature-branch) → settled
+    sha_started = f"{p}-started"  # deploy started, no terminal → UNSETTLED
+    sha_ok_no_smoke = f"{p}-ok-no-smoke"  # deploy succeeded, no smoke → UNSETTLED (pending)
+    sha_full = f"{p}-full"  # deploy succeeded + smoke passed → settled
+    sha_deploy_failed = f"{p}-dfail"  # deploy failed → settled (failure is terminal)
+    sha_smoke_failed = f"{p}-sfail"  # deploy succeeded + smoke failed → settled
+    sha_none = f"{p}-none"  # no deploy events (feature-branch) → settled
 
     async with session_factory() as session:
-        await _emit(session, "deploy", "started", sha_started)
+        await _emit(session, "deploy", "started", sha=sha_started)
 
-        await _emit(session, "deploy", "started", sha_ok_no_smoke)
-        await _emit(session, "deploy", "succeeded", sha_ok_no_smoke)
+        await _emit(session, "deploy", "started", sha=sha_ok_no_smoke)
+        await _emit(session, "deploy", "succeeded", sha=sha_ok_no_smoke)
 
-        await _emit(session, "deploy", "started", sha_full)
-        await _emit(session, "deploy", "succeeded", sha_full)
-        await _emit(session, "staging_smoke", "passed", sha_full)
+        await _emit(session, "deploy", "started", sha=sha_full)
+        await _emit(session, "deploy", "succeeded", sha=sha_full)
+        await _emit(session, "staging_smoke", "passed", sha=sha_full)
 
-        await _emit(session, "deploy", "started", sha_deploy_failed)
-        await _emit(session, "deploy", "failed", sha_deploy_failed)
+        await _emit(session, "deploy", "started", sha=sha_deploy_failed)
+        await _emit(session, "deploy", "failed", sha=sha_deploy_failed)
 
-        await _emit(session, "deploy", "succeeded", sha_smoke_failed)
-        await _emit(session, "staging_smoke", "failed", sha_smoke_failed)
+        await _emit(session, "deploy", "succeeded", sha=sha_smoke_failed)
+        await _emit(session, "staging_smoke", "failed", sha=sha_smoke_failed)
         await session.commit()
 
         all_shas = [
-            sha_started, sha_ok_no_smoke, sha_full, sha_deploy_failed,
-            sha_smoke_failed, sha_none,
+            sha_started,
+            sha_ok_no_smoke,
+            sha_full,
+            sha_deploy_failed,
+            sha_smoke_failed,
+            sha_none,
         ]
         unsettled = await _unsettled_deploy_shas(session, all_shas)
 
     # Only a deploy still running, or a successful deploy whose smoke has not landed,
     # keeps the coordinator on the hook — the smoke-leg gap the review caught.
     assert unsettled == {sha_started, sha_ok_no_smoke}, unsettled
+
+
+@integration
+@pytest.mark.asyncio
+async def test_escalation_open_vs_closed_cte(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The drain-SPECIFIC open-escalation boolean: escalated iff the LATEST
+    escalation is followed by NO later ack and NO later close. This is the
+    parked-vs-block safety boundary, and it hinges on timestamp comparisons the
+    dashboard's aggregate test never exercises (Ernie BLOCKING 1a)."""
+    coord = f"coordinator-esc-{uuid.uuid4().hex[:8]}"
+    repo = f"o/esc-{uuid.uuid4().hex[:6]}"
+
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+
+        # task_open: escalated, never acked/closed → escalated=True (parked).
+        t_open = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "task", "escalated_to_operator", task_id=t_open, at=_BASE)
+
+        # task_acked: escalated then a LATER ack → escalated=False.
+        t_acked = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "task", "escalated_to_operator", task_id=t_acked, at=_BASE)
+        await _emit(
+            session,
+            "task",
+            "escalation_acknowledged",
+            task_id=t_acked,
+            at=_BASE + timedelta(minutes=5),
+        )
+
+        # task_closed: escalated then a LATER close → escalated=False.
+        t_closed = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "task", "escalated_to_operator", task_id=t_closed, at=_BASE)
+        await _emit(
+            session,
+            "task",
+            "escalation_closed",
+            task_id=t_closed,
+            at=_BASE + timedelta(minutes=5),
+        )
+
+        # task_reescalated: escalated, closed, then escalated AGAIN (latest) → True.
+        t_re = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "task", "escalated_to_operator", task_id=t_re, at=_BASE)
+        await _emit(
+            session,
+            "task",
+            "escalation_closed",
+            task_id=t_re,
+            at=_BASE + timedelta(minutes=5),
+        )
+        await _emit(
+            session,
+            "task",
+            "escalated_to_operator",
+            task_id=t_re,
+            at=_BASE + timedelta(minutes=10),
+        )
+
+        # task_none: no escalation events at all → escalated=False.
+        t_none = await _seed_task(session, plan_id, coord, repo)
+        await session.commit()
+
+        rows = (await session.execute(_TEAM_DRAIN_SQL, {"coordinator_label": coord})).fetchall()
+
+    escalated_by_task = {r.task_id: r.escalated for r in rows}
+    assert escalated_by_task[str(t_open)] is True, escalated_by_task
+    assert escalated_by_task[str(t_acked)] is False, escalated_by_task
+    assert escalated_by_task[str(t_closed)] is False, escalated_by_task
+    assert escalated_by_task[str(t_re)] is True, escalated_by_task
+    assert escalated_by_task[str(t_none)] is False, escalated_by_task
+
+
+@integration
+@pytest.mark.asyncio
+async def test_get_team_drain_end_to_end(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The WIRED endpoint. Proves the parts COMPOSE — the piece-tests prove the
+    parts. Critically, this is the foil that catches a wrong task→sha link: if
+    ``_merge_shas_for_tasks`` reads the wrong event, the merged-but-unsettled task
+    silently drops out of ``blocking`` and the guard tears a team down with
+    unobserved deploy work (Ernie BLOCKING 1b)."""
+    coord = f"coordinator-e2e-{uuid.uuid4().hex[:8]}"
+    repo = f"o/e2e-{uuid.uuid4().hex[:6]}"
+    sha_settled = f"e2e-{uuid.uuid4().hex[:8]}-ok"
+    sha_unsettled = f"e2e-{uuid.uuid4().hex[:8]}-run"
+
+    async with session_factory() as session:
+        plan_id = await _seed_plan(session, repo)
+        await session.execute(
+            sa.text("INSERT INTO team_configs (repo, coordinator_label) VALUES (:r, :c)"),
+            {"r": repo, "c": coord},
+        )
+
+        # t_active: no task_execution, no events → derived_status 'registered' →
+        # team-active → BLOCK.
+        await _seed_task(session, plan_id, coord, repo)
+
+        # t_parked: escalated, open → parked (does NOT block).
+        t_parked = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "task", "escalated_to_operator", task_id=t_parked, at=_BASE)
+
+        # t_merged_settled: github.pr_merged → 'pr_merged'; deploy fully settled →
+        # NOT blocking.
+        t_ok = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "github", "pr_merged", sha=sha_settled, task_id=t_ok)
+        await _emit(session, "deploy", "started", sha=sha_settled)
+        await _emit(session, "deploy", "succeeded", sha=sha_settled)
+        await _emit(session, "staging_smoke", "passed", sha=sha_settled)
+
+        # t_merged_unsettled: github.pr_merged → 'pr_merged'; deploy started but not
+        # terminal → MUST block (post_merge_unsettled). This is the case a wrong
+        # task→sha link (the entity_type bug) would silently drop.
+        t_bad = await _seed_task(session, plan_id, coord, repo)
+        await _emit(session, "github", "pr_merged", sha=sha_unsettled, task_id=t_bad)
+        await _emit(session, "deploy", "started", sha=sha_unsettled)
+        await session.commit()
+
+        drain = await get_team_drain(repo=repo, session=session)
+
+    assert drain.clean is False, drain
+    blocking_ids = {item.task_id for item in drain.blocking}
+    reasons = {item.task_id: item.reason for item in drain.blocking}
+    # The registered task blocks as team-active.
+    assert any(r == "team_active" for r in reasons.values()), reasons
+    # The merged-but-unsettled task blocks as post_merge_unsettled — the sha was
+    # correctly resolved from its github.pr_merged event and found unsettled.
+    assert str(t_bad) in blocking_ids, drain
+    assert reasons[str(t_bad)] == "post_merge_unsettled", reasons
+    # The escalated task is parked, not blocking.
+    assert drain.parked == [str(t_parked)], drain
+    assert str(t_parked) not in blocking_ids, drain
+    # The fully-settled merged task neither blocks nor parks.
+    assert str(t_ok) not in blocking_ids, drain
