@@ -125,6 +125,20 @@ Treadmill has no cross-plan machine-edges, so **you enforce cross-plan dependenc
 
 Relay level is `quiet` by default (ADR-0071). Relay only the **significant** set to the operator (via Telegram if a chat is active): `pr_merged` (clean terminal success) and any unexpected terminal state (terminal_step_failure, cap_reached, gate_broken, architect amend-exhausted, unresolved conflict, cancelled). Relay structured facts (entity/action/ids), never raw event prose. Skip everything else — no firehose. Reports to Joe use ASD-STE100 Simplified Technical English.
 
+## Phase H — Tear down the ephemeral team when the plan is done (ADR-0112)
+
+For an **ephemeral** team, teardown on completion is YOURS, because you are the only actor that can do it: the coordinator is a *member* of its own team and would kill itself mid-teardown, so an external party must run it — and you (`plans.created_by`) are that party. This is the PRIMARY teardown path; the `team reconcile` timer is only a backstop for when you miss it.
+
+Trigger — the coordinator relays, on reaching "implemented" (its §9.7):
+`team-implemented: <repo> plan=<plan_id> on joes-agents/<slug> — handoff PR #<n> open + recorded; team safe to tear down` (or you observe the `plan.handoff_pr_opened` event for a plan you own). On a **terminal plan failure** you escalated and triaged, the same applies — a failed plan must not pin the team up.
+
+Act:
+1. Confirm the repo's lifecycle is `ephemeral` (a `persistent` team stays up; `manual` is command-only). `GET /api/v1/team_configs/{repo}` → `lifecycle`.
+2. Run `treadmill team down <repo>`. It is **drain-guarded** — if a late plan arrived and left team-active work, teardown refuses (exit 2) and you leave the team up. That is the safety: never `--force` here.
+3. Do NOT tear down while YOU still owe the team a decision (an open escalation you haven't answered) — that is parked-on-human, and the drain-guard already treats it as not-blocking, but you resolve it first so the team isn't torn down with your own unanswered question pending.
+
+Skip if the repo is `persistent`/`manual`, or if `team down` refuses (real in-flight work — let it finish, the backstop or the next `team-implemented` signal will catch it).
+
 ## When NOT to intervene
 
 If tasks are moving and the coordinator is dispatching, do not nudge for the sake of it — verify and let it run. Intervene when work stalls (Phase A), when an escalation needs a decision (Phase C), or at a merge/gate you own (Phases D–E). Over-nudging a working team wastes cycles and muddies the coordinator's queue.

@@ -638,6 +638,11 @@ def down(
 
 
 _DEFAULT_IDLE_HOURS = 6.0
+# The reconcile is a BACKSTOP for teardown (ADR-0112): the exec-in-charge tears a
+# done ephemeral team down promptly on the handoff signal, so the reconcile only
+# needs to catch the ones it missed — a short grace (30 min), not the manual
+# `team sweep`'s conservative 6h.
+_DEFAULT_RECONCILE_IDLE_HOURS = 0.5
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -804,24 +809,32 @@ def reconcile(
             "--idle-hours",
             min=0.0,
             help=(
-                "Idle-grace before an ephemeral team is torn down (shared with "
-                f"`team sweep`). Default: {_DEFAULT_IDLE_HOURS}."
+                "Backstop grace before a done ephemeral team is torn down. The "
+                "exec-in-charge tears down promptly on the handoff signal "
+                "(ADR-0112); this only catches the misses. Default: "
+                f"{_DEFAULT_RECONCILE_IDLE_HOURS}h."
             ),
         ),
-    ] = _DEFAULT_IDLE_HOURS,
+    ] = _DEFAULT_RECONCILE_IDLE_HOURS,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Report actions without touching systemd."),
     ] = False,
 ) -> None:
-    """Reconcile team liveness against work (ADR-0109 watcher, step 4b).
+    """Reconcile team liveness against work — the BACKSTOP watcher (ADR-0109/0112).
 
-    One periodic pass, single-flighted by a host lock. For every non-`manual` team:
-    STAND UP a team that has work (drain NOT clean) but whose unit is not live —
-    covering both a resolved escalation (drain becomes not-clean again) and a
-    crashed/half-done standup (liveness is the UNIT, not the lease row); and TEAR
-    DOWN an ephemeral team that is drain-clean and idle beyond the grace (the same
-    drain-guard `team sweep` uses, so parked-on-human stays green-with-tracking).
+    One periodic pass, single-flighted by a host lock. It is a safety net, not the
+    primary lifecycle driver: the exec-in-charge tears a done ephemeral team down
+    promptly on the coordinator's handoff signal (ADR-0112), and a plan is normally
+    stood up by whoever submits it. This pass catches what those miss. For every
+    non-`manual` team:
+    - STAND UP a team that has work (drain NOT clean) but whose unit is not live —
+      covering a resolved escalation (drain becomes not-clean again) and a
+      crashed/half-done standup (liveness is the UNIT, not the lease row);
+    - TEAR DOWN an ephemeral team that is drain-clean and idle beyond a SHORT
+      backstop grace (the same drain-guard `team sweep` uses, so parked-on-human
+      stays green-with-tracking) — only the done teams the exec-in-charge did not
+      already reap.
     A `manual` team is never auto-managed. Safe to run on a systemd timer.
     """
     # Host single-flight: two overlapping passes would double systemctl work and

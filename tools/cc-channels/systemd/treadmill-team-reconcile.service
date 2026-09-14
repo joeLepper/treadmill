@@ -1,10 +1,12 @@
 [Unit]
-Description=Treadmill team reconcile — match team liveness to work (ADR-0109 watcher)
-# Triggered by treadmill-team-reconcile.timer every 2 min. One single-flighted
-# pass (host flock): revive a non-manual team that has work (drain not clean) but
-# whose unit is down; tear down an ephemeral team that is drain-clean and idle
-# beyond the grace (the same drain-guard `team sweep` uses). manual teams are
-# never auto-managed; an unconfirmable drain leaves a team as-is.
+Description=Treadmill team reconcile — BACKSTOP watcher (ADR-0109/0112)
+# Triggered by treadmill-team-reconcile.timer every 2 min. A SAFETY NET, not the
+# primary lifecycle: the exec-in-charge tears a done ephemeral team down promptly on
+# the coordinator's handoff signal (ADR-0112); this pass catches the misses. One
+# single-flighted pass (host flock): revive a non-manual team that has work (drain
+# not clean) but whose unit is down; tear down an ephemeral team that is drain-clean
+# and idle beyond a short backstop grace (the same drain-guard `team sweep` uses).
+# manual teams are never auto-managed; an unconfirmable drain leaves a team as-is.
 #
 # NOT auto-enabled: shipping this unit does not start it. Enabling begins
 # AUTONOMOUS teardown/revive of real teams on this host — the operator's call:
