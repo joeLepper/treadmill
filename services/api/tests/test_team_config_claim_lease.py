@@ -148,3 +148,89 @@ async def test_claim_of_standing_team_attaches_not_mutates(
     # The standing team is untouched — the attach did not overwrite it.
     assert row.coordinator_label == "coordinator-first"
     assert row.worker_labels == ["w1", "w2"]
+
+
+@integration
+@pytest.mark.asyncio
+async def test_concurrent_claims_loser_blocks_until_winner_commits(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Deterministic barrier (Ernie 4a #2 — the non-vacuous race foil): the loser's
+    claim PROVABLY blocks on the winner's row lock until the winner commits, then
+    unblocks to claimed=False. This forces the lock-blocking path every run, unlike
+    asyncio.gather which may schedule the two claims sequentially."""
+    repo = f"o/barrier-{uuid.uuid4().hex[:8]}"
+    store = TeamConfigStore()
+    sess_a = session_factory()
+    sess_b = session_factory()
+    try:
+        # Winner: claim holds the row lock, NOT yet committed.
+        row_a, claimed_a = await store.claim(
+            sess_a, repo=repo, coordinator_label="A", worker_labels=["wa"]
+        )
+        assert claimed_a is True
+
+        # Loser: its claim's INSERT must block on the winner's lock.
+        task_b = asyncio.create_task(
+            store.claim(sess_b, repo=repo, coordinator_label="B", worker_labels=["wb"])
+        )
+        # Give B's task time to reach — and block at — the INSERT.
+        await asyncio.sleep(0.4)
+        assert not task_b.done(), (
+            "loser's claim must BLOCK on the winner's uncommitted row lock; "
+            "if it completed, the lock-blocking path was not exercised"
+        )
+
+        # Release: the winner commits → the loser unblocks and sees the conflict.
+        await sess_a.commit()
+        row_b, claimed_b = await task_b
+        await sess_b.commit()
+
+        assert claimed_b is False, "loser must lose"
+        assert row_b.coordinator_label == "A", "loser attaches to the winner's row"
+    finally:
+        await sess_a.close()
+        await sess_b.close()
+
+
+@integration
+@pytest.mark.asyncio
+async def test_claim_endpoint_wins_then_attaches(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The claim ENDPOINT the watcher calls: first claim → claimed=True + the
+    written config; a second claim → claimed=False + the standing config (attach),
+    untouched. Exercises the wired POST /team_configs/{repo}/claim path."""
+    from treadmill_api.routers.team_configs import (
+        TeamConfigClaim,
+        claim_team_config,
+    )
+
+    repo = f"o/ep-{uuid.uuid4().hex[:8]}"
+    async with session_factory() as session:
+        first = await claim_team_config(
+            repo=repo,
+            body=TeamConfigClaim(
+                coordinator_label="coordinator-ep",
+                worker_labels=["w1"],
+                lifecycle="ephemeral",
+                merge_target="feature-branch",
+            ),
+            session=session,
+        )
+    assert first.claimed is True
+    assert first.config.coordinator_label == "coordinator-ep"
+    assert first.config.lifecycle == "ephemeral"
+
+    async with session_factory() as session:
+        second = await claim_team_config(
+            repo=repo,
+            body=TeamConfigClaim(
+                coordinator_label="coordinator-OTHER", worker_labels=["w2"]
+            ),
+            session=session,
+        )
+    assert second.claimed is False
+    # Attach: the standing team is returned untouched.
+    assert second.config.coordinator_label == "coordinator-ep"
+    assert second.config.worker_labels == ["w1"]
