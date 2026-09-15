@@ -1,8 +1,8 @@
 ---
 date: 2026-09-14
 trigger: pattern
-status: captured
-related: ADR-0108, ADR-0115
+status: crystallized-into-ADR-0116
+related: ADR-0108, ADR-0115, ADR-0116
 ---
 
 # Learning: the panel-backed evaluator over-gates lightweight integration-branch findings — but catches real defects
@@ -29,16 +29,17 @@ produces genuine quality signal, so lightening it is a quality/speed TRADEOFF, n
 clear win — the decision is the operator's, not an obvious cut.
 
 ## Proposed rule
-none yet — this is a tradeoff surfaced for the operator, not a settled rule. Options if
-Joe chooses to lighten: a lighter evaluator pass for `feature-branch` mode (e.g.
-single-model or peer-review-only for docs-class tasks), OR keep the full evaluator (the
-defects it catches justify the cost). Do NOT implement until the operator decides.
+RESOLVED by ADR-0116 (2026-09-14): gate weight matches blast radius, and the expensive
+part is the PANEL BREADTH, not the evaluation. Integration-branch task PRs run a SINGLE
+cross-model pass (`panel.py --min-cross-model 1`) and KEEP the §9.4/§9.5 rework loop; the
+FULL panel (`--min-cross-model 2`) + full CI run once at the integration→`main` promotion.
+The tradeoff was decided by lightening the cost (panel fan-out), not the value (the
+unbiased cross-model catch + the loop) — which is exactly what this learning surfaced.
 
 ## Proposed remediation
-Deferred pending the operator's call (surfaced 2026-09-14). If lightening is chosen, it
-mirrors ADR-0115's `merge_target`-keyed split: full evaluator for `main`, a lighter pass
-for `feature-branch`. The ADR-0115 CI-gate removal + inline-depends_on stay as-is
-regardless.
+Landed in ADR-0116. Coordinator §9.1 sets `panel_breadth: single|full` by `merge_target`;
+the evaluator template reads it (`--min-cross-model 1` on the integration branch, `2` at
+promotion / main-merge). The ADR-0115 CI-gate removal + inline-depends_on stay as-is.
 
 ## Notes
 Distinct from the CI-gate finding (ADR-0115) precisely because the evaluator earns its
