@@ -524,7 +524,17 @@ Send via cc-relay to `evaluator-{{REPO_SLUG}}`:
 PR #<n> ready for evaluation.
 [task_id: <uuid>]
 [pr_number: <n>]
+[panel_breadth: single | full]
 ```
+
+**MODE (ADR-0116 — gate weight matches blast radius).** Set `panel_breadth` by
+`merge_target`: **feature-branch → `single`** (the evaluator runs ONE cross-family model,
+`panel.py --min-cross-model 1` — unbiased vs the same-family implementer, but not the full
+multi-model fan-out); **main → `full`** (the ADR-0108 full panel, `--min-cross-model 2`).
+The evaluator + the §9.4/§9.5 rework loop are KEPT either way — only the panel BREADTH is
+lightened for the integration branch. The FULL panel runs ONCE at the integration→`main`
+promotion (§9.8), where the change reaches `main`; per-finding full-panel on an
+integration branch is over-gating (slice-1: ~1hr/3 cycles on a docs note).
 
 The evaluator reads the PR, CI status, inline review thread, rules
 from `docs/knowledge-base/rules/`, repo memories. Full holistic
