@@ -1,7 +1,7 @@
 ---
 date: 2026-09-14
 trigger: pattern
-status: captured
+status: crystallized-into-ADR-0117
 related: ADR-0087, ADR-0110, ADR-0115, ADR-0116
 ---
 

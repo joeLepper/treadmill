@@ -1,6 +1,6 @@
 # ADR-0087 — Long-lived team execution model
 
-- **Status:** proposed
+- **Status:** proposed; amended by ADR-0117 (coordinator yields between PRs at N-parallel — per-turn work cap)
 - **Date:** 2026-06-10
 - **Supersedes:** ADR-0018, ADR-0022, ADR-0029, ADR-0032, ADR-0084, ADR-0086 (substantially)
 - **Authors:** treadmill-alan, treadmill-bert
