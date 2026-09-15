@@ -18,14 +18,29 @@ Design (ADR-0118):
 * Per-plan substrate (SC6): acts ONLY on plans whose ``substrate == 'router'``; the legacy
   agent-coordinator owns the rest. The binding is read per event but is immutable once set at
   standup, so there is no cross-substrate double-dispatch.
+* DURABLE by RECONCILIATION, not by the queue. ``subscribe_local`` is an in-process asyncio
+  queue — a fast path, not a durable one: a wake published while this consumer is down, or
+  lost when a crash lands between the per-dependent commits, is gone from that queue with no
+  redelivery, which would REINTRODUCE the wake-gap (Bert's review, 2026-09-15). So the live
+  event path is backed by a periodic RECONCILE SWEEP (``reconcile``) over the DURABLE facts:
+  it dispatches any router-substrate task whose ``depends_on`` is satisfied but which has NO
+  author ``task_executions`` row at its current generation. That closes the down-consumer and
+  crash-mid-loop holes — and, because it reads the DB rather than one process's queue, the
+  cross-process/multi-replica miss too (a webhook persisted on another replica). The sweep is
+  idempotent with the live path via the same ``(task_id, generation)`` unique index, so the
+  two never double-dispatch. SC2 ("wake-gap cannot recur") holds on the sweep, not on the
+  consumer being perfectly live.
+
+DEPLOYMENT: the live event path assumes ONE designated consumer process (in-process bus);
+the reconcile sweep is what makes correctness independent of that assumption.
 
 Lifecycle mirrors ``FabricEventSink``/``NotificationFanout``: ``start()`` is a no-op on a dark
 build (router dispatch disabled), ``stop()`` is safe on a never-started instance.
 
-INCREMENT 1 (this file): the ``github.pr_merged`` → dependent-dispatch path — the clearest
-``depends_on`` edge. Follow-on increments (flagged inline): ``task.ci_result`` → re-eval
-dispatch (via ``is_ci_ready``), and the evaluator ``rework`` verdict → generation-bump +
-author re-dispatch.
+INCREMENT 1 (this file): the ``github.pr_merged`` → dependent-dispatch path + the reconcile
+sweep. Follow-on increments (flagged inline): ``task.ci_result`` → re-eval dispatch (via
+``is_ci_ready``, Bert), and the evaluator ``rework`` verdict → generation-bump + author
+re-dispatch.
 """
 
 from __future__ import annotations
@@ -61,13 +76,21 @@ class DispatchConsumer:
     """Background eventbus subscriber that turns a delivered completion event into the next
     deterministic dispatch. See the module docstring for the ADR-0118 design."""
 
-    def __init__(self, *, session_factory: Any = None, enabled: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        session_factory: Any = None,
+        enabled: bool = False,
+        reconcile_interval_seconds: float = 30.0,
+    ) -> None:
         # Dark by default: an unset router-dispatch flag means no subscription and no task,
         # exactly like FabricEventSink's no-URL build.
         self._session_factory = session_factory
         self._enabled = enabled and session_factory is not None
+        self._reconcile_interval = reconcile_interval_seconds
         self._queue: asyncio.Queue[dict[str, Any]] | None = None
         self._task: asyncio.Task[None] | None = None
+        self._reconcile_task: asyncio.Task[None] | None = None
         self._stopped = False
 
     @property
@@ -84,23 +107,48 @@ class DispatchConsumer:
         # Subscribe BEFORE spawning the task so the queue exists when the task awaits get().
         self._queue = subscribe_local()
         self._task = asyncio.create_task(self._run(), name="dispatch-consumer")
+        # The reconcile sweep is the durable backstop for the in-process queue (see the
+        # module docstring): it makes SC2 hold even across a down consumer or a crash mid-loop.
+        self._reconcile_task = asyncio.create_task(
+            self._reconcile_loop(), name="dispatch-reconcile"
+        )
         logger.info("dispatch consumer started: router owns dispatch for router-substrate plans")
 
     async def stop(self) -> None:
         self._stopped = True
         if self._queue is not None:
             unsubscribe_local(self._queue)
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("dispatch consumer raised on shutdown")
-            self._task = None
+        for attr in ("_task", "_reconcile_task"):
+            t: asyncio.Task[None] | None = getattr(self, attr)
+            if t is not None:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("dispatch consumer raised on shutdown")
+                setattr(self, attr, None)
         self._queue = None
         logger.info("dispatch consumer stopped")
+
+    async def _reconcile_loop(self) -> None:
+        """Periodically run the reconcile sweep — the durable backstop for the in-process
+        queue. Any failure is contained; the loop must outlive a transient DB hiccup."""
+        while not self._stopped:
+            try:
+                await asyncio.sleep(self._reconcile_interval)
+            except asyncio.CancelledError:
+                raise
+            if self._stopped or self._session_factory is None:
+                continue
+            try:
+                async with self._session_factory() as session:
+                    await self.reconcile(session)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("dispatch consumer: reconcile sweep raised; continuing")
 
     async def _run(self) -> None:
         assert self._queue is not None
@@ -138,6 +186,37 @@ class DispatchConsumer:
             elif key in {("run", "completed"), ("task", "completed")}:
                 await self._on_upstream_terminal(session, record)
 
+    async def reconcile(self, session: Any) -> int:
+        """The durable backstop: dispatch every router-substrate task whose deps are satisfied
+        but which has NO author ``task_executions`` row at its current generation. Idempotent
+        with the live path via the ``(task_id, generation)`` unique index. Returns the count
+        dispatched (0 in steady state). This — not the in-process queue — is why SC2 holds
+        across a down consumer, a crash mid-loop, or a cross-replica publish.
+
+        Exposed (like ``handle``) so tests can drive one sweep without the timer loop.
+        """
+        candidates = (
+            await session.execute(
+                text(
+                    "SELECT t.id FROM tasks t "
+                    "JOIN plans p ON p.id = t.plan_id "
+                    "WHERE p.substrate = 'router' "
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM task_executions te "
+                    "    WHERE te.task_id = t.id AND te.generation = t.generation "
+                    "      AND te.trigger IN ('initial','coordinator-rework','evaluator-rework')"
+                    "  )"
+                )
+            )
+        ).all()
+        dispatched = 0
+        for (task_id,) in candidates:
+            if await self._maybe_dispatch(session, str(task_id)):
+                dispatched += 1
+        if dispatched:
+            logger.info("dispatch consumer: reconcile sweep dispatched %d task(s)", dispatched)
+        return dispatched
+
     async def _on_upstream_terminal(self, session: Any, record: dict[str, Any]) -> None:
         """An upstream task reached a terminal fact (pr_merged / run.completed / completed):
         dispatch every dependent whose ``depends_on`` is now fully satisfied."""
@@ -160,20 +239,20 @@ class DispatchConsumer:
         for (dep_task_id,) in rows:
             await self._maybe_dispatch(session, str(dep_task_id))
 
-    async def _maybe_dispatch(self, session: Any, task_id: str) -> None:
+    async def _maybe_dispatch(self, session: Any, task_id: str) -> bool:
         """Dispatch ``task_id`` iff it is on the router substrate and every dependency is
         satisfied. Idempotent: a second delivery for the same (task, generation) no-ops on the
-        unique index."""
+        unique index. Returns True iff a new dispatch row was created."""
         task = (
             await session.execute(select(Task).where(Task.id == task_id))
         ).scalar_one_or_none()
         if task is None:
-            return
+            return False
         if not await self._is_router_plan(session, task.plan_id):
-            return  # SC6 — the legacy coordinator owns non-router plans.
+            return False  # SC6 — the legacy coordinator owns non-router plans.
         if not await is_depends_on_satisfied(session, task_id):
-            return
-        await self._dispatch(session, task, trigger="initial")
+            return False
+        return await self._dispatch(session, task, trigger="initial")
 
     async def _is_router_plan(self, session: Any, plan_id: Any) -> bool:
         substrate = (
