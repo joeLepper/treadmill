@@ -172,6 +172,11 @@ def call_codex(prompt, timeout, model=None):
         shutil.copy(src_auth, os.path.join(home, "auth.json"))  # fresh token, no MCP
         out = os.path.join(work, "last.txt")
         env = dict(os.environ)
+        # The ChatGPT OAuth session is the free budget; a stray OPENAI_API_KEY in the
+        # env OVERRIDES it and falls back to the (no-credit) API key — the same override
+        # that forces Fran to run with `env -u OPENAI_API_KEY`. Unset it so this leg uses
+        # the Codex OAuth token, mirroring the claude leg's ANTHROPIC_API_KEY pop.
+        env.pop("OPENAI_API_KEY", None)
         env["CODEX_HOME"] = home
         cmd = ["codex", "exec", "--skip-git-repo-check",
                "-s", "read-only", "-c", "approval_policy=never", "-o", out]
