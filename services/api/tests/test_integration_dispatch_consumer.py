@@ -287,3 +287,43 @@ async def test_ci_result_fires_evaluator_once_then_dedups_new_head_reevaluates(e
     await consumer.handle(_ci_result_record(task, plan, "H2"))
     with engine.begin() as conn:
         assert _eval_dispatches(conn, task) == 2  # H1 and H2 — distinct evaluations
+
+
+# ── launch signal: task.ready is emitted on dispatch (alan) ───────────────────
+
+
+class _StubDispatcher:
+    """Records persist_and_publish calls in place of the real Dispatcher (no Event row)."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str, str]] = []
+
+    async def persist_and_publish(
+        self, session, *, entity_type, action, payload, task_id=None, **kw
+    ):
+        self.published.append((entity_type, action, str(task_id)))
+        return None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_emits_task_ready_launch_once(engine: Engine):
+    from treadmill_api.coordination.dispatch_consumer import DispatchConsumer
+
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="router")
+        upstream = _seed_task(conn, plan)
+        dependent = _seed_task(conn, plan)
+        _add_dep(conn, dependent, upstream)
+        _mark_pr_merged(conn, upstream)
+
+    stub = _StubDispatcher()
+    consumer = DispatchConsumer(
+        session_factory=_async_maker(), dispatcher=stub, enabled=True
+    )
+    await consumer.handle(_pr_merged_record(upstream, plan))
+    # the dependent was dispatched -> a task.ready LAUNCH was emitted for it.
+    assert ("task", "ready", str(dependent)) in stub.published
+    # re-delivery: idempotent dispatch no-ops BEFORE the publish -> no second launch.
+    await consumer.handle(_pr_merged_record(upstream, plan))
+    assert stub.published.count(("task", "ready", str(dependent))) == 1

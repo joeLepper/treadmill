@@ -56,7 +56,9 @@ from treadmill_api.coordination.dispatch_predicates import (
     is_depends_on_satisfied,
     on_ci_result,
 )
+from treadmill_api.dispatch import Dispatcher
 from treadmill_api.eventbus import subscribe_local, unsubscribe_local
+from treadmill_api.events.task import TaskReady
 from treadmill_api.models.evaluator_dispatch import EvaluatorDispatch
 from treadmill_api.models.plan import Plan
 from treadmill_api.models.task import Task
@@ -84,12 +86,18 @@ class DispatchConsumer:
         self,
         *,
         session_factory: Any = None,
+        dispatcher: Dispatcher | None = None,
         enabled: bool = False,
         reconcile_interval_seconds: float = 30.0,
     ) -> None:
         # Dark by default: an unset router-dispatch flag means no subscription and no task,
         # exactly like FabricEventSink's no-URL build.
         self._session_factory = session_factory
+        # The durable launch path: persist_and_publish a task.ready event (source-of-truth
+        # Event row + bus publish, replay-resilient) so the assigned worker session — which
+        # subscribes by its label — picks the task up. Without a dispatcher the consumer still
+        # records the dispatch row (SC2/SC3) but does not emit the launch signal.
+        self._dispatcher = dispatcher
         self._enabled = enabled and session_factory is not None
         self._reconcile_interval = reconcile_interval_seconds
         self._queue: asyncio.Queue[dict[str, Any]] | None = None
@@ -348,6 +356,17 @@ class DispatchConsumer:
                 task.generation,
             )
             return False
+        # LAUNCH: the dispatch row landed — emit task.ready in the SAME transaction so the row
+        # and the durable Event commit atomically. The assigned worker (subscribed by label)
+        # consumes it and fetches its brief. No dispatcher (dark/test) -> record only, no launch.
+        if self._dispatcher is not None:
+            await self._dispatcher.persist_and_publish(
+                session,
+                entity_type="task",
+                action="ready",
+                payload=TaskReady(),
+                task_id=task.id,
+            )
         await session.commit()
         logger.info(
             "dispatch consumer: dispatched task=%s generation=%s trigger=%s worker=%s",
@@ -366,9 +385,15 @@ class DispatchConsumer:
         return f"router-worker-{task.repo}"
 
 
-def make_dispatch_consumer(settings: Any, session_factory: Any = None) -> DispatchConsumer:
-    """Build a DispatchConsumer from Settings. Dark unless ``ROUTER_DISPATCH_ENABLED`` is set,
-    mirroring ``make_fabric_event_sink`` — the router ships behind a flag so a repo runs the
-    router or the legacy coordinator during cutover (ADR-0118 rollout)."""
+def make_dispatch_consumer(
+    settings: Any, session_factory: Any = None, publisher: Any = None
+) -> DispatchConsumer:
+    """Build a DispatchConsumer from Settings + the app's EventPublisher. Dark unless
+    ``ROUTER_DISPATCH_ENABLED`` is set, mirroring ``make_fabric_event_sink`` — the router ships
+    behind a flag so a repo runs the router or the legacy coordinator during cutover (ADR-0118
+    rollout). The publisher (``app.state.publisher``) drives the durable task.ready launch."""
     enabled = bool(getattr(settings, "router_dispatch_enabled", False))
-    return DispatchConsumer(session_factory=session_factory, enabled=enabled)
+    dispatcher = Dispatcher(publisher) if publisher is not None else None
+    return DispatchConsumer(
+        session_factory=session_factory, dispatcher=dispatcher, enabled=enabled
+    )
