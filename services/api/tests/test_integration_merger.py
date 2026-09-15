@@ -18,22 +18,32 @@ from treadmill_api.coordination.integration_merger import (
 
 
 class ScriptedRunner:
-    """Records git invocations; returns (rc, out) scripted by a matching substring."""
+    """Records git invocations; returns (rc, out) scripted by a matching substring. A LIST
+    value is a sequence consumed one per matching call (the last entry repeats) — for the
+    push-rejected-then-succeeds retry case."""
 
-    def __init__(self, rc_by_substring: dict[str, tuple[int, str]] | None = None) -> None:
+    def __init__(self, rc_by_substring: dict[str, object] | None = None) -> None:
         self.calls: list[tuple[str, ...]] = []
-        self._script = rc_by_substring or {}
+        self._script = {
+            k: (list(v) if isinstance(v, list) else v)
+            for k, v in (rc_by_substring or {}).items()
+        }
 
     async def run(self, *args: str) -> tuple[int, str]:
         self.calls.append(args)
         joined = " ".join(args)
         for sub, result in self._script.items():
             if sub in joined:
-                return result
+                if isinstance(result, list):
+                    return result.pop(0) if len(result) > 1 else result[0]
+                return result  # type: ignore[return-value]
         return (0, "")
 
     def ran(self, substring: str) -> bool:
         return any(substring in " ".join(c) for c in self.calls)
+
+    def count(self, substring: str) -> int:
+        return sum(1 for c in self.calls if substring in " ".join(c))
 
 
 OP = MergeOp(
@@ -69,14 +79,63 @@ async def test_already_integrated_is_a_noop_no_push():
 
 @pytest.mark.asyncio
 async def test_conflict_aborts_and_never_pushes():
-    # not yet integrated, but the merge conflicts -> abort, signal, NEVER push/force.
+    # not yet integrated; merge fails with UNMERGED files -> real conflict -> abort, NEVER push.
     r = ScriptedRunner(
-        {"merge-base --is-ancestor": (1, ""), "merge --no-ff --no-edit": (1, "CONFLICT")}
+        {
+            "merge-base --is-ancestor": (1, ""),
+            "merge --no-ff --no-edit": (1, "CONFLICT"),
+            "ls-files -u": (0, "100644 abc 1\tsrc/x.py"),  # unmerged files present
+        }
     )
     assert await integrate_task(r, OP) == "conflict"
     assert r.ran("git merge --abort")
     assert not r.ran("git push")
     assert not r.ran("--force")
+
+
+@pytest.mark.asyncio
+async def test_infra_merge_failure_is_not_a_conflict():
+    # merge fails but NO unmerged files (missing object / dirty tree) -> infra error, not a
+    # conflict worker (Bert non-blocking #1).
+    r = ScriptedRunner(
+        {
+            "merge-base --is-ancestor": (1, ""),
+            "merge --no-ff --no-edit": (128, "fatal: not something we can merge"),
+            "ls-files -u": (0, ""),  # nothing unmerged -> not a conflict
+        }
+    )
+    assert await integrate_task(r, OP) == "merge-failed"
+    assert r.ran("git merge --abort")
+    assert not r.ran("git push")
+
+
+@pytest.mark.asyncio
+async def test_fetch_failure_never_reasons_on_stale_refs():
+    r = ScriptedRunner({"git fetch": (1, "network down")})
+    assert await integrate_task(r, OP) == "fetch-failed"
+    assert not r.ran("merge-base")  # never reasons after a failed fetch
+    assert not r.ran("git push")
+
+
+@pytest.mark.asyncio
+async def test_push_rejected_retries_then_succeeds():
+    # THE BLOCKING CASE (Bert): origin advances between fetch and push -> non-fast-forward
+    # rejection. The push rc must be checked and the cycle re-driven; the ancestry check keeps
+    # the retry safe. Push fails once, then lands.
+    r = ScriptedRunner(
+        {"merge-base --is-ancestor": (1, ""), "git push": [(1, "rejected: non-fast-forward"), (0, "")]}
+    )
+    assert await integrate_task(r, OP) == "merged"
+    assert r.count("git push") == 2  # re-driven, not silently reported merged
+    assert not r.ran("--force")
+
+
+@pytest.mark.asyncio
+async def test_push_rejected_exhausts_returns_push_rejected_not_merged():
+    # origin keeps advancing past max_retries -> NEVER return "merged"; caller re-drives.
+    r = ScriptedRunner({"merge-base --is-ancestor": (1, ""), "git push": (1, "rejected")})
+    assert await integrate_task(r, OP, max_retries=2) == "push-rejected"
+    assert r.count("git push") == 3  # max_retries + 1 attempts
 
 
 @pytest.mark.asyncio
