@@ -1,6 +1,6 @@
 # ADR-0117: Keep each coordinator turn bounded — an interim N-parallel wedge mitigation
 
-- **Status:** proposed — **INTERIM** operational mitigation; to be superseded by the coordinator-router ADR (move mechanical coordination into server code)
+- **Status:** accepted — **INTERIM** operational mitigation; superseded by ADR-0118 (coordinator-router), retired when its phase 1 lands (accepted 2026-09-15)
 - **Date:** 2026-09-14
 - **Amends (interim):** ADR-0087 (long-lived team execution model)
 - **Related:** ADR-0115 (feature-branch self-drive), ADR-0116 (gate weight by blast radius), ADR-0108 (panel-backed evaluator)
