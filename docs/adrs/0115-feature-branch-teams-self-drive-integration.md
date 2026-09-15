@@ -47,7 +47,14 @@ observer→coordinator event push:
    integration itself (§9.3 `git merge + push`), it KNOWS the moment a task integrated —
    so it re-evaluates dependents INLINE right there (dispatch each now-unblocked task),
    rather than waiting for the `github.pr_merged` event/§3.3. Feature-branch mode
-   therefore never depends on the (fragile) event-push wake.
+   therefore never depends on the (fragile) event-push wake. **Idempotency (Ernie):** the
+   poller still synthesizes `github.pr_merged` for that task later, so §3.3 must not
+   re-dispatch the dependents already dispatched inline. The inline path completes the
+   task's execution (§9.3 step 4), so §3.3's step-1 guard — STOP when there is no running
+   execution for the task — deterministically fires and §3.3 does nothing. (§5's spawn
+   409 does NOT cover this: its key includes `started_at`, so a genuinely-later
+   re-dispatch would not trip it.) §3.3 step 3 also skips a dependent that already has a
+   running/registered/assigned execution.
 
 Main-merge mode (`merge_target = main`, the rare permissive repo) is UNCHANGED: it keeps
 the §3.5 CI gate and the §3.3 event-driven resolver.

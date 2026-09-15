@@ -632,6 +632,13 @@ def test_feature_branch_self_drives_no_ci_gate_inline_depends_on() -> None:
     # (3) §9.3-feature-branch: inline depends_on resolution, not the pr_merged event.
     assert "Resolve `depends_on` INLINE (ADR-0115)" in flat
     assert "do NOT wait for the `github.pr_merged`" in flat
+    # (3-safety) the inline dispatch's idempotency guard MUST exist (Ernie, ADR-0115):
+    # §3.3 STOPS when there's no running execution (already integrated inline), else the
+    # later synthesized pr_merged double-dispatches the dependents.
+    assert "If there is NONE, STOP" in flat
+    assert "DOUBLE-DISPATCH the dependents" in flat
+    # and §3.3 step-3 dispatch is gated on the dependent not already being in flight.
+    assert "never\ndouble-dispatch a dependent already in flight".replace("\n", " ") in flat
 
 
 def test_drift_merge_policy_is_defined() -> None:
