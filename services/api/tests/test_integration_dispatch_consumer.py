@@ -38,7 +38,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 REPO = "joeLepper/treadmill"
-_TABLES = "plans, tasks, task_prs, task_dependencies, task_executions, events"
+_TABLES = "plans, tasks, task_prs, task_dependencies, task_executions, evaluator_dispatches, events"
 
 
 @pytest.fixture(scope="module")
@@ -215,3 +215,75 @@ async def test_reconcile_backfills_a_crashed_dispatch(engine: Engine):
         assert _author_execs(conn, b) == 1  # backfilled
         assert _author_execs(conn, c) == 1  # backfilled
     assert dispatched == 2  # B and C, not A
+
+
+# ── ci_result -> evaluator dedup (trailing-suite foil, per alan) ───────────────
+
+
+def _seed_ci_result(conn, task_id, head, *, app_slug, conclusion):
+    """A task.ci_result event is_ci_ready reads (by commit_sha == head)."""
+    conn.execute(
+        sa.text(
+            "INSERT INTO events (entity_type, action, task_id, commit_sha, payload) "
+            "VALUES ('task','ci_result',:t,:h,:p::jsonb)"
+        ),
+        {
+            "t": task_id,
+            "h": head,
+            "p": f'{{"app_slug":"{app_slug}","conclusion":"{conclusion}"}}',
+        },
+    )
+
+
+def _eval_dispatches(conn, task_id) -> int:
+    return conn.execute(
+        sa.text("SELECT count(*) FROM evaluator_dispatches WHERE task_id=:t"),
+        {"t": task_id},
+    ).scalar_one()
+
+
+def _ci_result_record(task_id, plan_id, head) -> dict:
+    return {
+        "entity_type": "task",
+        "action": "ci_result",
+        "task_id": str(task_id),
+        "plan_id": str(plan_id),
+        "payload": {"head_sha": head},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ci_result_fires_evaluator_once_then_dedups_new_head_reevaluates(engine: Engine):
+    """Alan's trailing-suite foil against evaluator_dispatches UNIQUE(task_id, head_sha):
+    (1) the first ci_result whose required suite is terminal+passing → ONE evaluator dispatch;
+    (2) a LATER (trailing non-required) ci_result for the SAME head → is_ci_ready still True,
+        but the unique guard no-ops the second → still ONE row;
+    (3) a rework push (new head) → a NEW evaluator dispatch.
+    """
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)
+        # Required suite green at head H1 -> is_ci_ready(H1) is True.
+        _seed_ci_result(conn, task, "H1", app_slug="github-actions", conclusion="success")
+
+    consumer = _consumer()
+    # (1) first ready ci_result fires the evaluator once.
+    await consumer.handle(_ci_result_record(task, plan, "H1"))
+    with engine.begin() as conn:
+        assert _eval_dispatches(conn, task) == 1
+
+    # (2) a trailing NON-required suite completes for the SAME head; is_ci_ready still True
+    #     (it keys on the required github-actions success), but the unique guard no-ops.
+    with engine.begin() as conn:
+        _seed_ci_result(conn, task, "H1", app_slug="kodiak", conclusion="neutral")
+    await consumer.handle(_ci_result_record(task, plan, "H1"))
+    with engine.begin() as conn:
+        assert _eval_dispatches(conn, task) == 1  # still one — dedup on (task, head)
+
+    # (3) rework push: a new head H2 goes green -> a NEW evaluation.
+    with engine.begin() as conn:
+        _seed_ci_result(conn, task, "H2", app_slug="github-actions", conclusion="success")
+    await consumer.handle(_ci_result_record(task, plan, "H2"))
+    with engine.begin() as conn:
+        assert _eval_dispatches(conn, task) == 2  # H1 and H2 — distinct evaluations
