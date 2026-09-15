@@ -212,6 +212,15 @@ dependents the same way.
 
 ### 3.5 `task.ci_result`
 
+**MODE GATE (ADR-0115): this section GATES only in `merge_target = main` mode.** In
+`feature-branch` mode, `task.ci_result` is INFORMATIONAL — LOG it and IGNORE it; peer
+review is triggered at §6.1 (PR open) and integration gates on peer review + evaluator,
+NOT on CI (CI runs on the human branch→main PR). Do NOT open coordinator-rework off a
+ci_result in feature-branch mode. (This also sidesteps two ADR-0090 rollup hazards on
+integration-branch PRs: a `skipped` github-actions suite is not a failure, and a repo
+with MULTIPLE github-actions suites gives no single rollup — neither matters when you
+don't gate on ci_result.) The rest of this section applies to main-merge mode.
+
 ONE event per completed check SUITE at a task's PR head, emitted by
 the API-side CI-observer (ADR-0090). You do NOT write this event —
 the observer owns it. (Mechanism, precisely: the manual events
@@ -367,8 +376,13 @@ On receipt:
 1. Verify the `task_execution_id` matches the one you POSTed.
 2. `POST /api/v1/task_prs` with
    `{task_id, repo, pr_number}`.
-3. Trigger §3.5 monitoring: subscribe to CI events for this PR.
-4. Log: `pr_opened: task_id=<task_id> pr=#<n>`.
+3. Proceed by `merge_target` (read in §3.1):
+   - **feature-branch (ADR-0115):** go DIRECTLY to §8 peer review. Do NOT wait on
+     `task.ci_result` — CI is the human's concern on the branch→main PR, not a per-finding
+     gate on the integration branch. (`task.ci_result` still arrives; §3.5 logs + ignores
+     it in this mode.)
+   - **main:** trigger §3.5 CI monitoring: gate peer review on the CI-green rollup.
+4. Log: `pr_opened: task_id=<task_id> pr=#<n> mode=<merge_target>`.
 
 ### 6.2 Subprocess exit (no PR yet)
 
@@ -549,7 +563,17 @@ sidesteps both.
    as merged when its head lands on the base).
 4. `PATCH /api/v1/task_executions/{id}` with
    `{status: "completed", completed_at: <now>}`.
-5. Do NOT merge anything to `main` — the human owns the `main` gate.
+5. **Resolve `depends_on` INLINE (ADR-0115) — do NOT wait for the `github.pr_merged`
+   event.** You just integrated this task, so you know its integration happened; dispatch
+   its now-unblocked dependents yourself. Query
+   `GET /api/v1/task_dependencies?expression=task.<task_id>.pr_merged` (and any
+   `.step.*.completed` edges this integration satisfied); for each dependent, dispatch
+   (§5) if all its other dependencies are also satisfied. This is the SAME resolution §3.3
+   does — but self-driven, so feature-branch mode never depends on the observer→coordinator
+   event push (which the 2026-09-14 dogfood showed can fail to wake you). The synthesized
+   `github.pr_merged` still lands in the events table (idempotent); §3.3 acting on it too
+   is harmless (re-dispatch is guarded — a dependent already dispatched is not re-run).
+6. Do NOT merge anything to `main` — the human owns the `main` gate.
    When ALL the plan's tasks are integrated, open the handoff (§9.7).
 
 #### 9.3-main (`merge_target == main`; the rare permissive repo)

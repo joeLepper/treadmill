@@ -615,6 +615,25 @@ def test_standup_reads_integration_base_and_cuts_off_it() -> None:
     assert "integration_base changed after the branch was cut" in body
 
 
+def test_feature_branch_self_drives_no_ci_gate_inline_depends_on() -> None:
+    """ADR-0115: in feature-branch mode the coordinator gates integration on PEER
+    REVIEW (not task.ci_result) and resolves depends_on INLINE at §9.3 (not via the
+    github.pr_merged event). Guards the three falsifier legs: (1) §6.1 routes
+    feature-branch PR-open straight to peer review, (2) §3.5 is informational-only /
+    does-not-gate in feature-branch mode, (3) §9.3 dispatches dependents inline."""
+    import re
+    flat = re.sub(r"\s+", " ", _coordinator_plain())  # collapse line-wraps
+    # (1) §6.1: feature-branch PR-open → peer review directly, no CI wait.
+    assert "go DIRECTLY to §8 peer review" in flat
+    assert "Do NOT wait on `task.ci_result`" in flat
+    # (2) §3.5: mode gate — informational in feature-branch, gates only in main.
+    assert "this section GATES only in `merge_target = main` mode" in flat
+    assert "Do NOT open coordinator-rework off a ci_result in feature-branch mode" in flat
+    # (3) §9.3-feature-branch: inline depends_on resolution, not the pr_merged event.
+    assert "Resolve `depends_on` INLINE (ADR-0115)" in flat
+    assert "do NOT wait for the `github.pr_merged`" in flat
+
+
 def test_drift_merge_policy_is_defined() -> None:
     """ADR-0110/0114 drift: merge origin/<base> → branch on cadence (the SAME ref the
     branch was cut from — `main` by default, never `main` for a non-main base);

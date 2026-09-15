@@ -1,6 +1,6 @@
 # ADR-0110: Agent teams integrate on a feature branch, not main
 
-- **Status:** accepted (2026-09-13; cross-model panel review — 5/6 blocking, folded — + sibling co-sign by Ernie, verified in-text); amended by ADR-0114 (per-plan `integration_base`)
+- **Status:** accepted (2026-09-13; cross-model panel review — 5/6 blocking, folded — + sibling co-sign by Ernie, verified in-text); amended by ADR-0114 (per-plan `integration_base`) + ADR-0115 (feature-branch self-drives: no CI gate, inline depends_on)
 - **Date:** 2026-09-13
 - **Related:** ADR-0087 (team execution / coordinator merges), ADR-0109 (team lifecycle), ADR-0108 (panel-backed evaluator)
 
