@@ -225,7 +225,7 @@ def _seed_ci_result(conn, task_id, head, *, app_slug, conclusion):
     conn.execute(
         sa.text(
             "INSERT INTO events (entity_type, action, task_id, commit_sha, payload) "
-            "VALUES ('task','ci_result',:t,:h,:p::jsonb)"
+            "VALUES ('task','ci_result',:t,:h,CAST(:p AS jsonb))"
         ),
         {
             "t": task_id,
