@@ -283,6 +283,10 @@ def test_adr0116_panel_breadth_matches_blast_radius() -> None:
     assert "--min-cross-model 1" in evalu
     assert "--min-cross-model 2" in evalu
     assert "panel_breadth" in evalu
+    # FAIL-HEAVY DEFAULT (Ernie): an OMITTED panel_breadth must default to `full`, not
+    # `single` — an omission stays HEAVY (safe), never silently under-gates. Guard the
+    # default's direction so a regression can't flip it to `single`.
+    assert "Default to `full`" in evalu
 
 
 def test_evaluator_template_pins_batch_per_wake() -> None:
