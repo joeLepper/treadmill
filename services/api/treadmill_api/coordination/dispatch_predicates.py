@@ -192,3 +192,63 @@ async def is_ci_ready(session: AsyncSession, head_sha: str, required: Iterable[s
         for (p,) in rows.all()
     ]
     return ci_ready(results, required)
+
+
+# ── ci_result -> re-eval handler (TRACE 2 wake) ───────────────────────────────
+
+# The suites that gate readiness. GitHub's own suite rollup (per-suite ci_result); the
+# coordinator's existing convention keys on the github-actions suite (non-required apps —
+# kodiak, netlify — are separate suites simply excluded). Injected, so the source can change.
+DEFAULT_REQUIRED_SUITES: frozenset[str] = frozenset({"github-actions"})
+
+
+def _head_sha_of(record: dict) -> str | None:
+    """Pull the head SHA out of a ``task.ci_result`` delivery record. The local bus record
+    carries no top-level ``commit_sha`` — the head is in the ci_result payload (``head_sha``).
+    Tolerates a payload delivered as a dict or a JSON string, and a top-level fallback.
+    """
+    payload = record.get("payload")
+    if isinstance(payload, str):
+        import json
+
+        try:
+            payload = json.loads(payload)
+        except (ValueError, TypeError):
+            payload = None
+    if isinstance(payload, dict):
+        head = payload.get("head_sha") or payload.get("commit_sha")
+        if head:
+            return str(head)
+    head = record.get("commit_sha") or record.get("head_sha")
+    return str(head) if head else None
+
+
+async def on_ci_result(
+    session: AsyncSession,
+    record: dict,
+    dispatch_evaluator,
+    *,
+    required: Iterable[str] = DEFAULT_REQUIRED_SUITES,
+) -> bool:
+    """DECISION for a ``task.ci_result`` event: if the head's REQUIRED checks are ready,
+    invoke the evaluator for that head. Returns True iff the evaluator was dispatched.
+
+    Split of concerns (ADR-0118): the CONSUMER gates substrate (router-only, SC6) BEFORE
+    calling this — as it does for the pr_merged path — so this handler assumes a router plan.
+    ``dispatch_evaluator(task_id, head_sha)`` is the WRITE half, injected and owned by the
+    consumer. This function only decides "is this head ready for re-eval".
+
+    IDEMPOTENCY (the write's responsibility, flagged): ``is_ci_ready`` stays True once the
+    required suites are terminal, so a LATER ci_result for the same head (a trailing
+    non-required suite completing) re-enters here and would re-invoke the evaluator. The
+    "at most one re-eval per head" invariant therefore lives in ``dispatch_evaluator`` — a
+    per-(task, head) unique guard, the eval-path analog of the ``(task_id, generation)`` index.
+    """
+    task_id = record.get("task_id")
+    head_sha = _head_sha_of(record)
+    if not task_id or not head_sha:
+        return False
+    if not await is_ci_ready(session, head_sha, required):
+        return False
+    await dispatch_evaluator(task_id=str(task_id), head_sha=head_sha)
+    return True
