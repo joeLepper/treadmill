@@ -148,6 +148,32 @@ def call_gateway(model, prompt, timeout, master_key):
     return (ch.get("message", {}) or {}).get("content") or ""
 
 
+def _codex_fatal_line(stderr):
+    """Pick the line that names WHY codex exec failed, skipping noise that hides it.
+
+    codex prints, in order: a non-fatal 'Refusing to create helper binaries under
+    temporary dir' WARNING (it proceeds), repeated 'Reconnecting... N/5' retries,
+    and only THEN the real cause ('401 Unauthorized', 'no credits remaining',
+    'stream disconnected before completion'). Returning the first 200 chars shows
+    only the warning and masks the cause. We prefer a line naming a known fatal
+    signal; else the last non-noise line; else a trimmed head as a last resort."""
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    if not lines:
+        return ""
+    signals = ("no credits remaining", "401 unauthorized", "unauthorized",
+               "stream disconnected", "insufficient", "quota", "invalid api key",
+               "incorrect api key", "forbidden", "rate limit")
+    noise = ("refusing to create helper binaries", "reconnecting...",
+             "falling back from websockets")
+    for l in reversed(lines):  # the fatal cause is emitted last
+        if any(s in l.lower() for s in signals):
+            return l[:200]
+    for l in reversed(lines):
+        if not any(n in l.lower() for n in noise):
+            return l[:200]
+    return lines[-1][:200]
+
+
 def call_codex(prompt, timeout, model=None):
     """GPT leg: `codex exec` on the Codex CLI OAuth session. Runs in an ISOLATED
     minimal CODEX_HOME holding only a fresh copy of the OAuth token — the default
@@ -178,6 +204,25 @@ def call_codex(prompt, timeout, model=None):
         # the Codex OAuth token, mirroring the claude leg's ANTHROPIC_API_KEY pop.
         env.pop("OPENAI_API_KEY", None)
         env["CODEX_HOME"] = home
+        # PREFLIGHT: fail with an ACTIONABLE message if the copied auth is not a
+        # ChatGPT OAuth session. A `codex login --with-api-key` anywhere on the box
+        # flips the SHARED ~/.codex to api-key mode (auth.json = a bare
+        # OPENAI_API_KEY, config forced_login_method="api"); the API key has no
+        # credits, so `codex exec` fails deep in a 401/"no credits" retry loop that
+        # reads as an infra bug. Detecting it here (mirrors ADR-0102's auth-guard for
+        # Fran) turns a fleet-credential incident into one clear line. (2026-09-15.)
+        st = subprocess.run(["codex", "login", "status"], env=env,
+                            capture_output=True, text=True, timeout=30)
+        if "chatgpt" not in (st.stdout + st.stderr).lower():
+            # Report the actual status line ("Logged in using an API key"), not the
+            # helper-binary warning codex also prints to stderr.
+            status = next((l.strip() for l in (st.stdout + "\n" + st.stderr).splitlines()
+                          if "logged in" in l.lower() or "not signed" in l.lower()),
+                         "unknown")
+            raise RuntimeError(
+                "codex leg not on ChatGPT OAuth — the free-budget session is gone "
+                "(got: " + status[:80] + "). A `codex login --with-api-key` clobbered "
+                "the shared ~/.codex. Fix: `codex login` (browser) to restore ChatGPT auth.")
         cmd = ["codex", "exec", "--skip-git-repo-check",
                "-s", "read-only", "-c", "approval_policy=never", "-o", out]
         if model:
@@ -190,8 +235,14 @@ def call_codex(prompt, timeout, model=None):
         if proc.returncode != 0:
             # A failed run's output is untrustworthy; degrade rather than risk
             # counting a partial "VERDICT: approve" as a real verdict.
+            # Surface the MEANINGFUL error, not the leading line. codex prints a
+            # non-fatal "Refusing to create helper binaries under temporary dir"
+            # WARNING (it proceeds past it) BEFORE the real fatal cause (401, "no
+            # credits remaining", "stream disconnected"). Naive stderr[:200] shows
+            # only that warning and masks the true failure (this misled a whole
+            # gate diagnosis, 2026-09-15). Prefer lines that name the fatal cause.
             raise RuntimeError(f"codex exec exited {proc.returncode}: "
-                               f"{(proc.stderr or '').strip()[:200] or 'no stderr'}")
+                               f"{_codex_fatal_line(proc.stderr) or 'no stderr'}")
         try:
             with open(out) as fh:
                 return fh.read()
