@@ -52,8 +52,12 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
-from treadmill_api.coordination.dispatch_predicates import is_depends_on_satisfied
+from treadmill_api.coordination.dispatch_predicates import (
+    is_depends_on_satisfied,
+    on_ci_result,
+)
 from treadmill_api.eventbus import subscribe_local, unsubscribe_local
+from treadmill_api.models.evaluator_dispatch import EvaluatorDispatch
 from treadmill_api.models.plan import Plan
 from treadmill_api.models.task import Task
 from treadmill_api.models.task_execution import TaskExecution
@@ -179,10 +183,15 @@ class DispatchConsumer:
         async with self._session_factory() as session:
             if key == ("github", "pr_merged"):
                 await self._on_upstream_terminal(session, record)
-            # Follow-on increments (recognized, not yet acting):
-            #   ("task", "ci_result")        -> is_ci_ready → dispatch the evaluator
+            elif key == ("task", "ci_result"):
+                # TRACE 2 — the ci_result wake. Gate substrate here (Bert's split: the consumer
+                # gates, on_ci_result decides), then let the handler fire the evaluator when the
+                # required checks are ready. The per-(task, head) dedup lives in the write.
+                task_id = record.get("task_id")
+                if task_id and await self._is_router_task(session, str(task_id)):
+                    await on_ci_result(session, record, self._dispatch_evaluator)
+            # Follow-on increment (recognized, not yet acting):
             #   ("task", "evaluator_verdict")-> rework → bump generation + re-dispatch author
-            #   ("run", "completed") / ("task","completed") -> same terminal-edge path below
             elif key in {("run", "completed"), ("task", "completed")}:
                 await self._on_upstream_terminal(session, record)
 
@@ -267,6 +276,45 @@ class DispatchConsumer:
             await session.execute(select(Plan.substrate).where(Plan.id == plan_id))
         ).scalar_one_or_none()
         return substrate == "router"
+
+    async def _is_router_task(self, session: Any, task_id: str) -> bool:
+        """SC6 gate for a task-scoped event that carries only ``task_id`` (e.g. ci_result):
+        the task's plan must be on the router substrate."""
+        substrate = (
+            await session.execute(
+                select(Plan.substrate).join(Task, Task.plan_id == Plan.id).where(
+                    Task.id == task_id
+                )
+            )
+        ).scalar_one_or_none()
+        return substrate == "router"
+
+    async def _dispatch_evaluator(self, *, task_id: str, head_sha: str) -> bool:
+        """The WRITE half of the ci_result→re-eval path (injected into ``on_ci_result``).
+
+        Records ONE evaluator dispatch per (task, head): the UNIQUE(task_id, head_sha) makes a
+        trailing non-required suite's re-entry a no-op, so the evaluator fires exactly once per
+        head. A rework push is a new head_sha → a new evaluation. Runs in its own session (the
+        handler passes no session). Returns True iff a new dispatch was recorded.
+        """
+        if self._session_factory is None:
+            return False
+        async with self._session_factory() as session:
+            session.add(EvaluatorDispatch(task_id=task_id, head_sha=head_sha))
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                logger.debug(
+                    "dispatch consumer: evaluator already dispatched task=%s head=%s (no-op)",
+                    task_id,
+                    head_sha,
+                )
+                return False
+            logger.info(
+                "dispatch consumer: evaluator dispatched task=%s head=%s", task_id, head_sha
+            )
+            return True
 
     async def _dispatch(self, session: Any, task: Task, *, trigger: str) -> bool:
         """Record ONE author dispatch for ``task`` at its current generation. Returns True if
