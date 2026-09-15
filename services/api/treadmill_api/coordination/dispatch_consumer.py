@@ -206,6 +206,14 @@ class DispatchConsumer:
                     "    WHERE te.task_id = t.id AND te.generation = t.generation "
                     "      AND te.trigger IN ('initial','coordinator-rework','evaluator-rework')"
                     "  )"
+                    # A task whose PR has merged is DONE — never re-dispatch it, even if it
+                    # somehow lacks a current-generation execution row (e.g. an upstream that
+                    # completed). The live path dispatches dependents, not the merged task; the
+                    # sweep scans all tasks, so it needs this terminal guard.
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM events e "
+                    "    WHERE e.task_id = t.id AND e.action = 'pr_merged'"
+                    "  )"
                 )
             )
         ).all()
@@ -269,19 +277,23 @@ class DispatchConsumer:
         label is deterministic here so the record + its idempotency are exercisable now.
         """
         worker_label = self._resolve_worker(task)
-        execution = TaskExecution(
-            task_id=task.id,
-            worker_label=worker_label,
-            trigger=trigger,
-            generation=task.generation,
-        )
-        session.add(execution)
         try:
-            await session.flush()
+            # SAVEPOINT: the partial UNIQUE (task_id, generation) violation surfaces at flush
+            # OR at commit; a nested transaction contains it so a re-delivery rolls back to the
+            # savepoint WITHOUT poisoning the outer transaction or the loop's other dependents.
+            async with session.begin_nested():
+                session.add(
+                    TaskExecution(
+                        task_id=task.id,
+                        worker_label=worker_label,
+                        trigger=trigger,
+                        generation=task.generation,
+                    )
+                )
+                await session.flush()
         except IntegrityError:
-            # The partial UNIQUE (task_id, generation) already holds an author dispatch for
-            # this cycle — a re-delivered event. Idempotent no-op by construction.
-            await session.rollback()
+            # Already an author dispatch for this cycle — a re-delivered event. Idempotent
+            # no-op by construction; the savepoint rolled back, the outer txn is intact.
             logger.debug(
                 "dispatch consumer: %s already dispatched at generation %s (re-delivery no-op)",
                 task.id,
