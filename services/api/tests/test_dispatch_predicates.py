@@ -14,10 +14,12 @@ import pytest
 from treadmill_api.coordination.dispatch_predicates import (
     CheckResult,
     TerminalFact,
+    _head_sha_of,
     ci_ready,
     depends_on_satisfied,
     is_ci_ready,
     is_depends_on_satisfied,
+    on_ci_result,
 )
 
 X = str(uuid.uuid4())
@@ -212,3 +214,76 @@ async def test_wrapper_ci_not_ready_when_required_failed():
 # is_ci_ready's query; a real-DB integration test (alan's consumer suite) covers that a
 # ci_result for a superseded head is not fetched. The unit tests above cover the payload
 # mapping + the required-set decision.
+
+
+# ── on_ci_result handler (decision; write injected) ───────────────────────────
+
+
+class _EvalSpy:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, *, task_id, head_sha):
+        self.calls.append((task_id, head_sha))
+
+
+def _ci_record(task_id="dep-task", head="abc123", *, payload=None):
+    return {
+        "task_id": task_id,
+        "action": "ci_result",
+        "entity_type": "task",
+        "payload": payload if payload is not None else {"head_sha": head},
+    }
+
+
+def test_head_sha_of_dict_json_and_missing():
+    assert _head_sha_of(_ci_record(head="H1")) == "H1"
+    assert _head_sha_of(_ci_record(payload='{"head_sha": "H2"}')) == "H2"
+    assert _head_sha_of({"payload": {}}) is None
+    assert _head_sha_of({"payload": "not json"}) is None
+
+
+@pytest.mark.asyncio
+async def test_on_ci_result_dispatches_evaluator_when_ready():
+    # is_ci_ready query returns a required suite success -> ready.
+    session = _StubSession([({"app_slug": "github-actions", "conclusion": "success"},)])
+    spy = _EvalSpy()
+    dispatched = await on_ci_result(
+        session, _ci_record("t1", "HEAD"), spy, required={"github-actions"}
+    )
+    assert dispatched is True
+    assert spy.calls == [("t1", "HEAD")]
+
+
+@pytest.mark.asyncio
+async def test_on_ci_result_no_dispatch_when_required_failed():
+    session = _StubSession([({"app_slug": "github-actions", "conclusion": "failure"},)])
+    spy = _EvalSpy()
+    dispatched = await on_ci_result(
+        session, _ci_record("t1", "HEAD"), spy, required={"github-actions"}
+    )
+    assert dispatched is False
+    assert spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_on_ci_result_no_dispatch_when_head_or_task_missing():
+    spy = _EvalSpy()
+    # missing head_sha: no session query needed, must not dispatch
+    assert await on_ci_result(_StubSession(), {"task_id": "t", "payload": {}}, spy) is False
+    # missing task_id
+    assert await on_ci_result(_StubSession(), {"payload": {"head_sha": "H"}}, spy) is False
+    assert spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_on_ci_result_does_not_dedup_writes_must():
+    """on_ci_result is a DECISION: a later ci_result for the same head (a trailing suite) is
+    still 'ready', so it dispatches AGAIN. The at-most-once-per-head guard is the WRITE's
+    job (dispatch_evaluator), documented so the consumer owns it — this pins that split.
+    """
+    spy = _EvalSpy()
+    for _ in range(2):
+        session = _StubSession([({"app_slug": "github-actions", "conclusion": "success"},)])
+        await on_ci_result(session, _ci_record("t1", "HEAD"), spy, required={"github-actions"})
+    assert spy.calls == [("t1", "HEAD"), ("t1", "HEAD")]  # decision fires each time; write dedups
