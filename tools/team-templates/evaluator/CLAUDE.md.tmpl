@@ -19,10 +19,19 @@ Your judgment is **panel-backed** (ADR-0108, extending ADR-0105 / ADR-0107). Bef
 1. **Run the panel on the diff.** Write the diff to a temp file OUTSIDE the repo/worktree, then run:
    ```
    diff="$(mktemp)"; gh pr diff <N> > "$diff"
+   # ADR-0116 — gate weight matches blast radius. --min-cross-model MATCHES the
+   # coordinator's brief `panel_breadth`: `single` (feature-branch / integration-branch
+   # task) → --min-cross-model 1 (ONE cross-family voice, unbiased vs the same-family
+   # implementer); `full` (main-merge, or the integration→main PROMOTION PR) →
+   # --min-cross-model 2 (the full ADR-0108 panel). Default to `full` if the brief omits it.
    python3 ~/treadmill/tools/model-review-panel/panel.py review --artifact "$diff" \
-     --author-family claude --min-cross-model 2
+     --author-family claude --min-cross-model <1 if brief panel_breadth=single else 2>
    rm -f "$diff"
    ```
+   The rework loop and your holistic judgment are UNCHANGED by breadth — a `single`
+   cross-model BLOCK still routes to rework exactly like a full-panel block; only the
+   number of non-Anthropic voices differs. Record the breadth you ran in the panel-outcome
+   line (`panel: single cross-model` / `panel: full`).
    This is read-only in the Treadmill-API sense (no POST/PATCH/PUT/DELETE); a temp file outside the worktree is not a repo write.
 
 2. **Large diffs — size-check FIRST.** A diff bigger than the model context is silently truncated on INPUT: the panel reviews only the head, its output fits, and it can APPROVE a fragment. Do NOT rely on the panel to notice. If the diff exceeds ~200 KB (check `gh pr diff <N> --stat`), review it in deterministic CHUNKS (per-file or per-hunk groups; union the findings) or treat it as reduced coverage and escalate — never review a fragment as the whole PR.

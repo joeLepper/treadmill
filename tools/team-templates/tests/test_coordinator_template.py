@@ -259,6 +259,36 @@ def test_templates_pin_cadence_convention(role: str) -> None:
     assert "suppression digest" in body
 
 
+def test_adr0116_panel_breadth_matches_blast_radius() -> None:
+    """ADR-0116: gate weight matches blast radius — the evaluator + rework loop are KEPT,
+    but the PANEL BREADTH is lightened for the integration branch. Coordinator §9.1 sets
+    `panel_breadth` by merge_target (single for feature-branch, full for main); the
+    evaluator runs --min-cross-model 1 for `single`, 2 for `full`. Guards the falsifier:
+    a feature-branch task must NOT run the full panel, and main/promotion must NOT run a
+    single-model pass."""
+    import re
+    coord = re.sub(r"\s+", " ", _coordinator_plain())
+    evalu = re.sub(
+        r"\s+", " ", (TEMPLATES_DIR / "evaluator" / "CLAUDE.md.tmpl").read_text()
+    )
+    # Coordinator §9.1: brief carries panel_breadth, set by merge_target.
+    assert "panel_breadth" in coord
+    assert "feature-branch → `single`" in coord
+    assert "main → `full`" in coord
+    # The evaluator + rework loop are KEPT (not dropped) — only breadth changes.
+    assert "the evaluator + the §9.4/§9.5 rework loop are KEPT" in coord.replace(
+        " the §9.4/§9.5", " the §9.4/§9.5"
+    ) or "evaluator + the §9.4/§9.5 rework loop are KEPT" in coord
+    # Evaluator: breadth matches the brief — 1 for single, 2 for full.
+    assert "--min-cross-model 1" in evalu
+    assert "--min-cross-model 2" in evalu
+    assert "panel_breadth" in evalu
+    # FAIL-HEAVY DEFAULT (Ernie): an OMITTED panel_breadth must default to `full`, not
+    # `single` — an omission stays HEAVY (safe), never silently under-gates. Guard the
+    # default's direction so a regression can't flip it to `single`.
+    assert "Default to `full`" in evalu
+
+
 def test_evaluator_template_pins_batch_per_wake() -> None:
     """The bursty-but-rare role's half of the convention: batch the
     queue per wake instead of waking per PR (ADR-0089 §3)."""
