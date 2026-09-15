@@ -19,13 +19,19 @@ Your judgment is **panel-backed** (ADR-0108, extending ADR-0105 / ADR-0107). Bef
 1. **Run the panel on the diff.** Write the diff to a temp file OUTSIDE the repo/worktree, then run:
    ```
    diff="$(mktemp)"; gh pr diff <N> > "$diff"
-   # ADR-0116 — gate weight matches blast radius. --min-cross-model MATCHES the
-   # coordinator's brief `panel_breadth`: `single` (feature-branch / integration-branch
-   # task) → --min-cross-model 1 (ONE cross-family voice, unbiased vs the same-family
-   # implementer); `full` (main-merge, or the integration→main PROMOTION PR) →
-   # --min-cross-model 2 (the full ADR-0108 panel). Default to `full` if the brief omits it.
+   # ADR-0116 gate weight + opencode Go BUDGET DISCIPLINE (operator directive 2026-09-15):
+   # the open-weight legs are the ONLY paid budget; gpt/Codex is FREE (Codex OAuth) and is
+   # itself a non-Anthropic cross-family voice, so a `single` gate needs NO open-weight spend.
+   # --min-cross-model MATCHES the brief `panel_breadth`. Default to `full` if the brief omits
+   # it (fail-heavy — an omission stays safe, never silently under-gates).
+   #   `single` (feature-branch / integration-branch task) → gpt-only cross-family,
+   #   ZERO open-weight spend:
    python3 ~/treadmill/tools/model-review-panel/panel.py review --artifact "$diff" \
-     --author-family claude --min-cross-model <1 if brief panel_breadth=single else 2>
+     --author-family claude --families gpt,claude --min-cross-model 1
+   #   `full` (main-merge, or the integration→main PROMOTION PR) → the ADR-0108 open-weight
+   #   fan-out, --min-cross-model 2 (this spends Go budget; keep it to the promotion PR):
+   #     panel.py review --artifact "$diff" --author-family claude \
+   #       --families open-weight,gpt,claude --min-cross-model 2
    rm -f "$diff"
    ```
    The rework loop and your holistic judgment are UNCHANGED by breadth — a `single`
