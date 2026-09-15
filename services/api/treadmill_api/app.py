@@ -68,10 +68,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from treadmill_api.coordination import (
+        DispatchConsumer,
         FabricEventSink,
         NotificationFanout,
         ReplayLoop,
         WebhookInboxPoller,
+        make_dispatch_consumer,
         make_fabric_event_sink,
         make_notification_fanout,
     )
@@ -198,6 +200,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await fabric_event_sink.start()
 
+    # ADR-0118 coordinator-router. Dark unless ROUTER_DISPATCH_ENABLED — start() is a no-op
+    # otherwise, so wiring it here changes nothing until a repo is cut over. Its own session
+    # factory (not shared) so its transactions never contend with request handlers.
+    dispatch_consumer: DispatchConsumer = make_dispatch_consumer(
+        settings,
+        session_factory=(
+            async_sessionmaker(engine, expire_on_commit=False)
+            if engine is not None
+            else None
+        ),
+        publisher=publisher,
+    )
+    await dispatch_consumer.start()
+
     app.state.settings = settings
     app.state.engine = engine
     app.state.redis = redis
@@ -214,6 +230,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.webhook_inbox_poller = webhook_inbox_poller
     app.state.notification_fanout = notification_fanout
     app.state.fabric_event_sink = fabric_event_sink
+    app.state.dispatch_consumer = dispatch_consumer
     app.state.probes = _build_probes(
         engine, redis, webhook_inbox_poller=webhook_inbox_poller,
     )
@@ -239,6 +256,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if webhook_inbox_poller is not None:
                 await webhook_inbox_poller.stop()
             await notification_fanout.stop()
+            await dispatch_consumer.stop()
             await fabric_event_sink.stop()
             await github_clients.aclose()
             if engine is not None:
