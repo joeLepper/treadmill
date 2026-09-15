@@ -327,3 +327,77 @@ async def test_dispatch_emits_task_ready_launch_once(engine: Engine):
     # re-delivery: idempotent dispatch no-ops BEFORE the publish -> no second launch.
     await consumer.handle(_pr_merged_record(upstream, plan))
     assert stub.published.count(("task", "ready", str(dependent))) == 1
+
+
+# ── worker dispatch sink: deliver router task.ready to the assigned worker (alan) ──
+
+
+class _StubHttp:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url, json=None):
+        self.posts.append((url, json))
+        return None
+
+
+def _seed_execution(conn, task_id, worker_label, trigger="initial", generation=1):
+    conn.execute(
+        sa.text(
+            "INSERT INTO task_executions (task_id, worker_label, trigger, generation) "
+            "VALUES (:t,:w,:tr,:g)"
+        ),
+        {"t": task_id, "w": worker_label, "tr": trigger, "g": generation},
+    )
+
+
+def _task_ready_record(task_id):
+    return {"entity_type": "task", "action": "ready", "task_id": str(task_id), "payload": {}}
+
+
+def _sink(http):
+    from treadmill_api.coordination.worker_dispatch_sink import WorkerDispatchSink
+
+    return WorkerDispatchSink(
+        ingress_url="http://ingress.local", session_factory=_async_maker(), http_client=http
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_sink_delivers_task_ready_to_assigned_worker(engine: Engine):
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)
+        _seed_execution(conn, task, "router-worker-x")
+    http = _StubHttp()
+    await _sink(http).handle(_task_ready_record(task))
+    assert len(http.posts) == 1
+    _, body = http.posts[0]
+    assert body["worker_label"] == "router-worker-x"
+    assert body["event_type"] == "task.ready"
+    assert body["payload"]["task_id"] == str(task)
+
+
+@pytest.mark.asyncio
+async def test_worker_sink_skips_legacy_substrate(engine: Engine):
+    # SC6: a legacy plan is delivered by its agent coordinator (FabricEventSink), never the
+    # router's worker sink — else both would deliver.
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="legacy")
+        task = _seed_task(conn, plan)
+        _seed_execution(conn, task, "w-legacy")
+    http = _StubHttp()
+    await _sink(http).handle(_task_ready_record(task))
+    assert http.posts == []
+
+
+@pytest.mark.asyncio
+async def test_worker_sink_ignores_non_task_ready(engine: Engine):
+    http = _StubHttp()
+    await _sink(http).handle(
+        {"entity_type": "github", "action": "pr_merged",
+         "task_id": str(uuid.uuid4()), "payload": {}}
+    )
+    assert http.posts == []

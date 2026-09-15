@@ -73,9 +73,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         NotificationFanout,
         ReplayLoop,
         WebhookInboxPoller,
+        WorkerDispatchSink,
         make_dispatch_consumer,
         make_fabric_event_sink,
         make_notification_fanout,
+        make_worker_dispatch_sink,
     )
     from treadmill_api.eventbus import make_publisher, set_publisher
 
@@ -214,6 +216,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await dispatch_consumer.start()
 
+    # The worker half of the router: delivers task.ready to the assigned worker's session via
+    # the fabric ingress. Dark unless ROUTER_DISPATCH_ENABLED (its own session factory).
+    worker_dispatch_sink: WorkerDispatchSink = make_worker_dispatch_sink(
+        settings,
+        session_factory=(
+            async_sessionmaker(engine, expire_on_commit=False)
+            if engine is not None
+            else None
+        ),
+    )
+    await worker_dispatch_sink.start()
+
     app.state.settings = settings
     app.state.engine = engine
     app.state.redis = redis
@@ -231,6 +245,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.notification_fanout = notification_fanout
     app.state.fabric_event_sink = fabric_event_sink
     app.state.dispatch_consumer = dispatch_consumer
+    app.state.worker_dispatch_sink = worker_dispatch_sink
     app.state.probes = _build_probes(
         engine, redis, webhook_inbox_poller=webhook_inbox_poller,
     )
@@ -257,6 +272,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await webhook_inbox_poller.stop()
             await notification_fanout.stop()
             await dispatch_consumer.stop()
+            await worker_dispatch_sink.stop()
             await fabric_event_sink.stop()
             await github_clients.aclose()
             if engine is not None:
