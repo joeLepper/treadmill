@@ -41,9 +41,10 @@ INCREMENTS (this file): the ``github.pr_merged`` → dependent-dispatch path + t
 sweep; ``task.ci_result`` → re-eval dispatch (via ``is_ci_ready``, Bert); and the evaluator
 verdict loop — ``rework`` bumps ``tasks.generation`` + re-dispatches the author,
 ``approve`` records the approval (idempotent BY CONSTRUCTION via ``verdict_applications``
-UNIQUE(task_id, head_sha)). Follow-on:
-the approve → integration GIT MERGE of the approved head onto the plan's integration branch
-(the merge mechanism + the integration-branch name source are an open design decision).
+UNIQUE(task_id, head_sha)) and, for a ``feature-branch`` repo with a git ``runner_factory`` wired,
+INTEGRATES the approved head (``git merge --no-ff`` + push via ``integration_merger``) — DARK
+until the enable step wires the runner (creds/identity). Follow-on: ``main``-mode integration
+(``gh pr merge``) and the prod runner-factory wiring.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,6 +62,11 @@ from sqlalchemy.exc import IntegrityError
 from treadmill_api.coordination.dispatch_predicates import (
     is_depends_on_satisfied,
     on_ci_result,
+)
+from treadmill_api.coordination.integration_merger import (
+    GitRunner,
+    integrate_task,
+    merge_op_for_plan,
 )
 from treadmill_api.dispatch import Dispatcher
 from treadmill_api.eventbus import subscribe_local, unsubscribe_local
@@ -147,6 +154,27 @@ def select_worker(
         return None
     return min(roster, key=lambda w: (load_by_worker.get(w, 0), roster.index(w)))
 
+
+def integration_slug(doc_path: str | None) -> str | None:
+    """Derive the per-plan integration-branch slug from the plan's ``doc_path`` (pure core;
+    ADR-0118 approve→integration, a port of the coordinator template §3.1a).
+
+    §3.1a: the branch is ``joes-agents/<branch-slug>`` where ``<branch-slug>`` is the plan doc's
+    basename WITH its date prefix and WITHOUT the ``.md`` extension — e.g.
+    ``docs/plans/2026-09-13-fix-auth.md`` → ``2026-09-13-fix-auth``. Returns ``None`` when there
+    is no ``doc_path`` (a plan that never recorded one cannot have a derived branch — the caller
+    leaves the approval recorded for later rather than integrating to a guessed branch).
+
+    NOTE: §3.1a's collision rule (append ``-<plan_id[:8]>`` when two docs share a basename) is a
+    follow-on — it needs a cross-plan uniqueness check this pure core does not have.
+    """
+    if not doc_path:
+        return None
+    base = doc_path.rsplit("/", 1)[-1]
+    if base.endswith(".md"):
+        base = base[:-3]
+    return base or None
+
 # The task-scoped completion events that can unblock or re-trigger work. Increment 1 acts on
 # pr_merged; the others are recognized and routed to their (stubbed) handlers so the classify
 # path is complete and testable now.
@@ -170,6 +198,7 @@ class DispatchConsumer:
         dispatcher: Dispatcher | None = None,
         enabled: bool = False,
         reconcile_interval_seconds: float = 30.0,
+        runner_factory: Callable[[str], Awaitable[GitRunner]] | None = None,
     ) -> None:
         # Dark by default: an unset router-dispatch flag means no subscription and no task,
         # exactly like FabricEventSink's no-URL build.
@@ -179,6 +208,11 @@ class DispatchConsumer:
         # subscribes by its label — picks the task up. Without a dispatcher the consumer still
         # records the dispatch row (SC2/SC3) but does not emit the launch signal.
         self._dispatcher = dispatcher
+        # The git executor for approve→integration (feature-branch merge). A factory
+        # ``repo -> GitRunner`` so the working clone is built lazily per repo. None (prod today,
+        # and any test that doesn't exercise integration) => the approve path records the approval
+        # but does NOT merge — the same "wired but off" shape as the dispatcher launch signal.
+        self._runner_factory = runner_factory
         self._enabled = enabled and session_factory is not None
         self._reconcile_interval = reconcile_interval_seconds
         self._queue: asyncio.Queue[dict[str, Any]] | None = None
@@ -496,22 +530,83 @@ class DispatchConsumer:
         await self._dispatch(session, task, trigger="evaluator-rework")
 
     async def _record_approval(self, session: Any, task: Task, head_sha: str) -> None:
-        """approve verdict (already claimed): commit the claim. The integration GIT MERGE of the
-        approved head onto the plan's integration branch is a follow-on slice (the merge
-        mechanism — plain PR-merge vs feature-branch integrate — and the integration-branch name
-        source are an open design decision). The ``verdict_applications`` row is the durable
-        record the integrator consumes: the approved (task, head) pairs not yet integrated."""
-        await session.commit()
-        logger.info(
-            "dispatch consumer: recorded approval task=%s head=%s (integration is a follow-on)",
-            task.id, head_sha,
-        )
+        """approve verdict (already claimed): commit the claim, then attempt integration.
 
-    async def _escalate_undeliverable_verdict(self, session: Any, task: Task) -> None:
-        """Persist a durable operator escalation for a verdict we cannot apply (no head_sha, no
-        open PR). Written directly so it lands even in record-only mode; the dashboard escalation
-        bucket reads the ``task.escalated_to_operator`` row. Keeps the drop (we cannot apply)
-        but makes it LOUD so a stalled task is visible, not silent (Bert review)."""
+        The claim commits FIRST so an approval is durable even if integration fails or crashes —
+        the ``verdict_applications`` row is the work-list an integrator (this call, a retry, or a
+        future sweep) consumes. Integration itself (``_maybe_integrate``) is separate and
+        non-transactional (git is external): a feature-branch ``git merge --no-ff`` + push of the
+        approved head, which — being contained in the integration branch — closes the PR and
+        fires ``github.pr_merged``, unblocking dependents through the normal terminal path."""
+        await session.commit()
+        logger.info("dispatch consumer: recorded approval task=%s head=%s", task.id, head_sha)
+        await self._maybe_integrate(session, task, head_sha)
+
+    async def _maybe_integrate(self, session: Any, task: Task, head_sha: str) -> None:
+        """Feature-branch approve→integration (ADR-0118). DARK unless a git ``runner_factory`` is
+        wired: with none, the approval is recorded and integration is deferred (the work-list row
+        remains). Only ``merge_target == 'feature-branch'`` integrates here; ``main`` mode
+        (``gh pr merge``) is a follow-on. On a real conflict the router escalates (a worker must
+        resolve it); an infra failure is left for retry (the approval row persists)."""
+        if self._runner_factory is None:
+            logger.info(
+                "dispatch consumer: integration not wired (dark); approval recorded for task=%s",
+                task.id,
+            )
+            return
+        merge_target = await self._merge_target(session, task.repo)
+        if merge_target != "feature-branch":
+            logger.info(
+                "dispatch consumer: repo=%s merge_target=%s — main-mode integration is a "
+                "follow-on; approval recorded for task=%s", task.repo, merge_target, task.id,
+            )
+            return
+        slug = integration_slug(await self._plan_doc_path(session, task.plan_id))
+        if slug is None:
+            logger.warning(
+                "dispatch consumer: task=%s plan has no doc_path → no integration branch slug; "
+                "approval recorded, integration deferred", task.id,
+            )
+            return
+        merge_op = await merge_op_for_plan(session, task.plan_id, slug, head_sha)
+        runner = await self._runner_factory(task.repo)
+        result = await integrate_task(runner, merge_op)
+        if result in ("merged", "already-integrated"):
+            logger.info(
+                "dispatch consumer: integrated task=%s head=%s into %s (%s); pr_merged will "
+                "unblock dependents", task.id, head_sha, merge_op.integration_branch, result,
+            )
+        elif result == "conflict":
+            # A real textual conflict needs a worker's judgment — the router never resolves one.
+            await self._escalate(session, task, "integration_conflict")
+        else:
+            # fetch-failed / merge-failed / push-rejected: infra/transient. Leave the approval
+            # row as the work-list; a retry (or a future integration sweep) re-drives it.
+            logger.warning(
+                "dispatch consumer: integration of task=%s into %s returned %s (infra); "
+                "approval remains for retry", task.id, merge_op.integration_branch, result,
+            )
+
+    async def _merge_target(self, session: Any, repo: str) -> str:
+        """The repo's integration mode (``team_configs.merge_target``): ``feature-branch``
+        (default) or ``main``. Defaults to ``feature-branch`` when no team config (the safe
+        common case — the router only integrates feature-branch here)."""
+        row = (
+            await session.execute(
+                select(TeamConfig.merge_target).where(TeamConfig.repo == repo)
+            )
+        ).first()
+        return str(row[0]) if row and row[0] else "feature-branch"
+
+    async def _plan_doc_path(self, session: Any, plan_id: Any) -> str | None:
+        row = (
+            await session.execute(select(Plan.doc_path).where(Plan.id == plan_id))
+        ).first()
+        return str(row[0]) if row and row[0] else None
+
+    async def _escalate(self, session: Any, task: Task, reason: str) -> None:
+        """Persist a durable operator escalation (dashboard escalation bucket). Written directly
+        so it lands in record-only mode; shared by the headless-verdict and conflict paths."""
         session.add(
             Event(
                 entity_type="task",
@@ -519,9 +614,7 @@ class DispatchConsumer:
                 task_id=task.id,
                 payload=encode_payload(
                     TaskEscalatedToOperator(
-                        task_id=task.id,
-                        repo=task.repo,
-                        reason="verdict_undeliverable",
+                        task_id=task.id, repo=task.repo, reason=reason,  # type: ignore[arg-type]
                         created_by=task.created_by,
                     )
                 ),
@@ -529,10 +622,15 @@ class DispatchConsumer:
         )
         await session.commit()
         logger.warning(
-            "dispatch consumer: verdict for task=%s has no head_sha and no open PR; "
-            "cannot apply — escalated to operator (created_by=%s)",
-            task.id, task.created_by,
+            "dispatch consumer: escalated task=%s reason=%s (created_by=%s)",
+            task.id, reason, task.created_by,
         )
+
+    async def _escalate_undeliverable_verdict(self, session: Any, task: Task) -> None:
+        """A verdict we cannot apply (no head_sha, no open PR) is ESCALATED, not dropped to a
+        log line — a silent drop would stall the task (Bert review). Delegates to ``_escalate``,
+        which persists the durable ``task.escalated_to_operator`` row the dashboard bucket reads."""
+        await self._escalate(session, task, "verdict_undeliverable")
 
     async def _dispatch(self, session: Any, task: Task, *, trigger: str) -> bool:
         """Record ONE author dispatch for ``task`` at its current generation. Returns True if
@@ -673,7 +771,13 @@ def make_dispatch_consumer(
     """Build a DispatchConsumer from Settings + the app's EventPublisher. Dark unless
     ``ROUTER_DISPATCH_ENABLED`` is set, mirroring ``make_fabric_event_sink`` — the router ships
     behind a flag so a repo runs the router or the legacy coordinator during cutover (ADR-0118
-    rollout). The publisher (``app.state.publisher``) drives the durable task.ready launch."""
+    rollout). The publisher (``app.state.publisher``) drives the durable task.ready launch.
+
+    ``runner_factory`` is intentionally NOT wired here — approve→integration stays dark until the
+    enable step decides the git IDENTITY/creds the API pushes as and provides a working-clone
+    state dir + remote URL (then a factory ``repo -> SubprocessGitRunner(ensure_working_clone(...))``
+    is passed). Without it the approve path records the approval (the ``verdict_applications``
+    work-list) but performs no git operations — the same "wired but off" shape as the launch."""
     enabled = bool(getattr(settings, "router_dispatch_enabled", False))
     dispatcher = Dispatcher(publisher) if publisher is not None else None
     return DispatchConsumer(
