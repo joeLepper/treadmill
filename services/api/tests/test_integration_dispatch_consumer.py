@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(
 REPO = "joeLepper/treadmill"
 _TABLES = (
     "plans, tasks, task_prs, task_dependencies, task_executions, "
-    "evaluator_dispatches, verdict_applications, events"
+    "evaluator_dispatches, verdict_applications, team_configs, events"
 )
 
 
@@ -577,3 +577,85 @@ async def test_headless_verdict_escalates_instead_of_silently_stalling(engine: E
         assert _task_generation(conn, task) == 1  # not bumped — could not apply
         assert _verdict_markers(conn, task) == 0  # no claim
         assert _escalations(conn, task, "verdict_undeliverable") == 1  # LOUD, not silent
+
+
+# ── worker assignment: roster + continuity + load-balance (alan) ───────────────
+
+
+def _seed_team_config(conn, repo, worker_labels) -> None:
+    conn.execute(
+        sa.text(
+            "INSERT INTO team_configs (repo, coordinator_label, worker_labels) "
+            "VALUES (:r, :c, :w)"
+        ),
+        {"r": repo, "c": f"coordinator-{repo}", "w": worker_labels},
+    )
+
+
+def _newest_author_worker(conn, task_id) -> str:
+    return conn.execute(
+        sa.text(
+            "SELECT worker_label FROM task_executions WHERE task_id=:t "
+            "AND trigger IN ('initial','coordinator-rework','evaluator-rework') "
+            "ORDER BY started_at DESC LIMIT 1"
+        ),
+        {"t": task_id},
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_initial_dispatch_load_balances_over_the_roster(engine: Engine):
+    """A fresh dispatch goes to the LEAST-loaded roster worker. Roster [w1,w2]; w1 already has an
+    in-flight (non-merged) task → the new dependent is assigned to w2."""
+    W1, W2 = "worker-tm-1", "worker-tm-2"
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, [W1, W2])
+        plan = _seed_plan(conn, substrate="router")
+        # w1 is busy with an in-flight (no pr_merged) task → load(w1)=1, load(w2)=0.
+        busy = _seed_task(conn, plan)
+        _seed_execution(conn, busy, W1, trigger="initial", generation=1)
+        # the task we will dispatch: a dependent unblocked by a merged upstream.
+        upstream = _seed_task(conn, plan)
+        dependent = _seed_task(conn, plan)
+        _add_dep(conn, dependent, upstream)
+        _mark_pr_merged(conn, upstream)
+
+    await _consumer().handle(_pr_merged_record(upstream, plan))
+    with engine.begin() as conn:
+        assert _newest_author_worker(conn, dependent) == W2  # least-loaded
+
+
+@pytest.mark.asyncio
+async def test_rework_reuses_the_prior_worker(engine: Engine):
+    """Continuity: a rework re-dispatch returns to the worker that served the prior generation,
+    even though the other roster worker is less loaded."""
+    W1, W2 = "worker-tm-1", "worker-tm-2"
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, [W1, W2])  # W1 has 0 load, W2 served the task
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)
+        _seed_execution(conn, task, W2, trigger="initial", generation=1)
+
+    await _consumer().handle(_verdict_record(task, plan, verdict="rework", head="H1"))
+    with engine.begin() as conn:
+        assert _task_generation(conn, task) == 2
+        assert _newest_author_worker(conn, task) == W2  # continuity, not the emptier W1
+
+
+@pytest.mark.asyncio
+async def test_no_team_config_falls_back_to_synthetic_label(engine: Engine):
+    """With no team_config for the repo, the router uses a deterministic synthetic label so the
+    dispatch record + idempotency still work (the router is dark without a real team)."""
+    with engine.begin() as conn:
+        _truncate(conn)  # NO team_config seeded
+        plan = _seed_plan(conn, substrate="router")
+        upstream = _seed_task(conn, plan)
+        dependent = _seed_task(conn, plan)
+        _add_dep(conn, dependent, upstream)
+        _mark_pr_merged(conn, upstream)
+
+    await _consumer().handle(_pr_merged_record(upstream, plan))
+    with engine.begin() as conn:
+        assert _newest_author_worker(conn, dependent) == f"router-worker-{REPO}"
