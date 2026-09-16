@@ -905,3 +905,72 @@ async def test_approve_invalid_slug_escalates_not_loops(engine: Engine):
         assert _verdict_markers(conn, task) == 1  # approval recorded
         assert _escalations(conn, task, "integration_blocked") == 1  # escalated
     assert runner.calls == []  # never attempted the unpushable branch
+
+
+# ── sweep fixes: latest-head + stuck-exclusion (Bert #419) — alan ──────────────
+
+
+def _seed_approval_at(conn, task_id, head, created_at, gen=1) -> None:
+    conn.execute(
+        sa.text(
+            "INSERT INTO verdict_applications (task_id, head_sha, decision, applied_generation, "
+            "created_at) VALUES (:t, :h, 'approve', :g, :ts)"
+        ),
+        {"t": task_id, "h": head, "g": gen, "ts": created_at},
+    )
+
+
+def _seed_escalation(conn, task_id, reason) -> None:
+    conn.execute(
+        sa.text(
+            "INSERT INTO events (entity_type, action, task_id, payload) "
+            "VALUES ('task','escalated_to_operator',:t, CAST(:p AS jsonb))"
+        ),
+        {"t": task_id, "p": f'{{"reason":"{reason}"}}'},
+    )
+
+
+@pytest.mark.asyncio
+async def test_sweep_integrates_only_the_latest_approved_head(engine: Engine):
+    """A re-approval (stranded at H1, approved again at H2) must integrate ONLY H2 — never
+    re-merge the superseded head (Bert #419)."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval_at(conn, task, "H1-OLD", "2020-01-01 00:00:00+00", gen=1)
+        _seed_approval_at(conn, task, "H2-NEW", "2020-06-01 00:00:00+00", gen=2)
+
+    runner = _ScriptedRunner()
+    consumer = _consumer_with_runner(runner)
+    async with _async_maker()() as session:
+        await consumer.integration_sweep(session)
+
+    merges = [c for c in runner.calls if len(c) > 1 and c[1] == "merge" and "--no-ff" in c]
+    assert merges, "expected a merge"
+    assert all("H1-OLD" not in c for c in merges)  # never the superseded head
+    assert any("H2-NEW" in c for c in merges)  # only the latest
+
+
+@pytest.mark.asyncio
+async def test_sweep_excludes_a_stuck_escalated_approval(engine: Engine):
+    """An approval already escalated (conflict/blocked) is NOT re-driven — else the sweep would
+    re-escalate every tick forever (Bert #419). A human clears it via a fresh verdict."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval(conn, task, "HEADSHA")
+        _seed_escalation(conn, task, "integration_conflict")  # already stuck
+
+    runner = _ScriptedRunner()
+    consumer = _consumer_with_runner(runner)
+    async with _async_maker()() as session:
+        n = await consumer.integration_sweep(session)
+
+    assert n == 0  # excluded from the candidate set
+    assert runner.calls == []  # not re-driven, so not re-escalated

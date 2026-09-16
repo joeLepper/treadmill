@@ -79,9 +79,14 @@ coordinator-router; there is no `coordinator-{{REPO_SLUG}}`. Then:
    `description` are the spec the plan authored, `scope`/`operator_note` the rest. Here API
    reads ARE load-bearing (they replace the coordinator's brief); if the record is genuinely
    ambiguous, escalate to the OPERATOR, not a coordinator.
-2. **Your `--base`** is the plan's integration base: `GET /api/v1/plans/<plan_id>` →
-   `integration_base` (fall back to `main` when null). Branch + PR against that, per the
-   Workspace/Open-a-PR rules above.
+2. **Your `--base` is the plan's INTEGRATION BRANCH**, `joes-agents/<plan-slug>` — NOT
+   `integration_base`. `integration_base` (`GET /api/v1/plans/<plan_id>` → `integration_base`,
+   default `main`) is only the ref that branch was cut FROM; you PR INTO the integration branch
+   itself. The `<plan-slug>` is the plan doc's basename with its date, `.md` stripped (e.g.
+   `docs/plans/2026-09-13-fix-auth.md` → `joes-agents/2026-09-13-fix-auth`). Branch + PR against
+   that, per the Workspace/Open-a-PR rules above. This is load-bearing: the router integrates by
+   merging your PR into that branch, which fires `github.pr_merged` and unblocks dependents — a
+   PR based on `main` would never close and would strand everything downstream.
 3. **Implement and open the PR on your branch** exactly as in steps 2–3 above.
 4. **Do NOT relay a report to a coordinator** — there isn't one. The router observes
    `github.pr_opened` + CI and drives review/integration by itself; opening the PR IS your
