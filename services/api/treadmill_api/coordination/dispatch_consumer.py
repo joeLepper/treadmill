@@ -54,7 +54,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.exc import IntegrityError
 
 from treadmill_api.coordination.dispatch_predicates import (
@@ -70,6 +70,7 @@ from treadmill_api.models.event import Event
 from treadmill_api.models.plan import Plan
 from treadmill_api.models.task import Task, TaskPR
 from treadmill_api.models.task_execution import TaskExecution
+from treadmill_api.models.team_config import TeamConfig
 from treadmill_api.models.verdict_application import VerdictApplication
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,26 @@ def parse_verdict(record: dict[str, Any]) -> Verdict | None:
         head_sha=str(head) if head else None,
         remediation=payload.get("remediation"),
     )
+
+
+def select_worker(
+    roster: list[str], load_by_worker: dict[str, int], prior: str | None
+) -> str | None:
+    """Pick the worker to dispatch a task to (pure core; ADR-0118 worker-assignment, a port of
+    the legacy coordinator template §4 "Worker routing").
+
+    CONTINUITY first: if ``prior`` (the worker who served an earlier generation of THIS task) is
+    still in the roster, reuse it — a rework must return to the worker that has the context, and
+    reassigning it would throw that away. Otherwise LOAD-BALANCE: the roster worker with the
+    fewest in-flight tasks, tie-broken by roster order so the choice is deterministic (the
+    "round-robin among ties" rule). Returns ``None`` when the roster is empty (no team config) —
+    the caller then falls back to a synthetic label. Pure + DB-free so it is foil-tested directly.
+    """
+    if prior is not None and prior in roster:
+        return prior
+    if not roster:
+        return None
+    return min(roster, key=lambda w: (load_by_worker.get(w, 0), roster.index(w)))
 
 # The task-scoped completion events that can unblock or re-trigger work. Increment 1 acts on
 # pr_merged; the others are recognized and routed to their (stubbed) handlers so the classify
@@ -518,10 +539,10 @@ class DispatchConsumer:
         a new row was created, False if the unique index no-oped a re-delivery.
 
         The ``task_executions`` row IS the dispatch record SC2 asserts appears deterministically
-        on a delivered event. Worker assignment policy (which live worker) is a follow-on; the
-        label is deterministic here so the record + its idempotency are exercisable now.
+        on a delivered event. The worker label comes from the assignment policy
+        (``_resolve_worker``): continuity for a rework, else load-balance over the repo's roster.
         """
-        worker_label = self._resolve_worker(task)
+        worker_label = await self._resolve_worker(session, task)
         try:
             # SAVEPOINT: the partial UNIQUE (task_id, generation) violation surfaces at flush
             # OR at commit; a nested transaction contains it so a re-delivery rolls back to the
@@ -566,12 +587,84 @@ class DispatchConsumer:
         )
         return True
 
-    @staticmethod
-    def _resolve_worker(task: Task) -> str:
-        """Deterministic worker label for a dispatch. Phase-1 placeholder: a stable
-        per-task label so the dispatch record + idempotency are exercisable. The worker-pool
-        assignment policy (round-robin over a repo's live workers) is a follow-on slice."""
-        return f"router-worker-{task.repo}"
+    async def _resolve_worker(self, session: Any, task: Task) -> str:
+        """Assign the worker for a dispatch: continuity for a rework, else load-balance over the
+        repo's roster (``select_worker``). Roster = ``team_configs.worker_labels`` (the persisted
+        per-repo team shape, ``worker-<slug>-1..N``). Falls back to a synthetic label when a repo
+        has no team config / empty roster — the router is dark without a real team anyway, and
+        the label only needs to be deterministic for the dispatch record + idempotency.
+
+        The empty-roster fallback is defensive, not a normal path: plan-submit 412s without a
+        ``team_configs`` row and ``team up`` defaults to 3 workers, so a router plan always has a
+        roster (an empty ``worker_labels`` needs a deliberate ``team up --workers 0``). Bert #417
+        flagged that a synthetic label goes to no live worker → a silent stall on that
+        misconfiguration; the roster invariant is why we keep the record here rather than
+        escalate. If ``--workers 0`` is ever a real path, switch this to an operator escalation
+        (like the headless-verdict fix)."""
+        roster = await self._worker_roster(session, task.repo)
+        prior = await self._prior_worker(session, str(task.id))
+        if not roster:
+            logger.warning(
+                "dispatch consumer: no worker roster for repo=%s (no team_config); "
+                "using synthetic label", task.repo,
+            )
+            return prior or f"router-worker-{task.repo}"
+        load = await self._worker_load(session, task.repo, roster)
+        return select_worker(roster, load, prior) or f"router-worker-{task.repo}"
+
+    async def _worker_roster(self, session: Any, repo: str) -> list[str]:
+        """The repo's configured worker labels (``team_configs.worker_labels``), or [] if the
+        repo has no team config."""
+        row = (
+            await session.execute(
+                select(TeamConfig.worker_labels).where(TeamConfig.repo == repo)
+            )
+        ).first()
+        return list(row[0]) if row and row[0] else []
+
+    async def _prior_worker(self, session: Any, task_id: str) -> str | None:
+        """The worker that served the most recent author dispatch of THIS task (any generation),
+        for rework continuity. None on a first dispatch."""
+        row = (
+            await session.execute(
+                text(
+                    "SELECT worker_label FROM task_executions "
+                    "WHERE task_id = :t "
+                    "  AND trigger IN ('initial','coordinator-rework','evaluator-rework') "
+                    # generation DESC is the deterministic secondary sort: two executions with an
+                    # identical started_at (rare) would otherwise tie non-deterministically, so
+                    # break on the higher generation — the later rework cycle (Bert #417).
+                    "ORDER BY started_at DESC, generation DESC LIMIT 1"
+                ),
+                {"t": task_id},
+            )
+        ).first()
+        return str(row[0]) if row and row[0] else None
+
+    async def _worker_load(
+        self, session: Any, repo: str, roster: list[str]
+    ) -> dict[str, int]:
+        """In-flight load per roster worker: the count of DISTINCT non-terminal tasks in ``repo``
+        each worker is assigned (an author execution exists, and the task has no ``pr_merged``).
+        The load-balance input for ``select_worker``; a worker absent from the map has load 0."""
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT te.worker_label, count(DISTINCT te.task_id) "
+                    "FROM task_executions te JOIN tasks t ON t.id = te.task_id "
+                    "WHERE t.repo = :r "
+                    "  AND te.trigger IN ('initial','coordinator-rework','evaluator-rework') "
+                    "  AND te.worker_label IN :roster "
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM events e "
+                    "    WHERE e.task_id = t.id AND e.action = 'pr_merged'"
+                    "  ) "
+                    "GROUP BY te.worker_label"
+                ).bindparams(bindparam("roster", expanding=True)),
+                {"r": repo, "roster": roster},
+            )
+        ).all()
+        return {str(w): int(n) for w, n in rows}
 
 
 def make_dispatch_consumer(
