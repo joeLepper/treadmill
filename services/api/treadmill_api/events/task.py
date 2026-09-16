@@ -68,6 +68,10 @@ class TaskEscalatedToOperator(EventPayload):
         "terminal_step_failure",
         "terminal_gate_sweep",
         "step_starvation",
+        # ADR-0118 verdict loop: the router received an evaluator verdict it cannot apply —
+        # no head_sha in the payload and no open PR to borrow one from — so the task would
+        # stall silently. The router escalates instead of dropping the verdict to a log line.
+        "verdict_undeliverable",
     ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from
@@ -218,6 +222,34 @@ class TaskReady(EventPayload):
 
     ENTITY_TYPE: ClassVar[str] = "task"
     ACTION: ClassVar[str] = "ready"
+
+
+class TaskEvaluatorVerdict(EventPayload):
+    """The evaluator's verdict on a task's PR head, posted as an EVENT (ADR-0118 verdict loop).
+
+    In ROUTER mode there is no agent coordinator to cc-relay the verdict to, so the evaluator
+    POSTs this to ``POST /api/v1/events`` and the router's dispatch consumer acts on it:
+      * ``rework`` — the router bumps ``tasks.generation`` and re-dispatches the author (a fresh
+        ``task.ready``); ``remediation`` is the author's next brief.
+      * ``approve`` — the router records the approval (via the ``task.verdict_applied`` marker)
+        so the integration path can merge the head; the integration git merge is a follow-on.
+
+    Fields are optional-friendly so any stored shape validates on read (the POST surface stores
+    the caller dict verbatim; head-SHA absence is tolerated and back-filled from ``task_prs``).
+    Legacy-substrate plans keep the cc-relay-to-coordinator handoff; this is router-only.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "evaluator_verdict"
+
+    verdict: Literal["approve", "rework"]
+    head_sha: str | None = None
+    """The PR head the verdict is about. Used to key the idempotency marker and to isolate the
+    verdict to one head; back-filled from the task's newest open PR when the poster omits it."""
+    remediation: str | None = None
+    """For ``rework``: the concrete change list the author works next. Durable here so the
+    re-dispatched worker reads it on its rework wake (the router does not push a brief)."""
+    reasoning: str | None = None
 
 
 class TaskCancelled(EventPayload):

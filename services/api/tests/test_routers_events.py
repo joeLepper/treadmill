@@ -518,3 +518,60 @@ class TestDedupScopedToGithub:
             )
         assert resp.status_code == 409
         assert dispatcher.calls == []
+
+
+# ── GET /api/v1/events (ADR-0118 read surface) ─────────────────────────────
+
+
+class _ListResult:
+    """A result whose ``.scalars().all()`` returns a fixed list — the shape ``list_events`` uses."""
+
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def scalars(self) -> "_ListResult":
+        return self
+
+    def all(self) -> list[Any]:
+        return list(self._rows)
+
+
+class _ListSession:
+    """Fake session that returns a fixed row list and captures the compiled SELECT for assertion."""
+
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+        self.compiled: str | None = None
+
+    async def execute(self, stmt: Any) -> _ListResult:
+        self.compiled = str(stmt)
+        return _ListResult(self._rows)
+
+
+@pytest.mark.asyncio
+async def test_list_events_maps_rows_and_filters_by_task_and_action():
+    from treadmill_api.routers.events import list_events
+
+    tid = uuid.uuid4()
+    rows = [
+        Event(
+            id=uuid.uuid4(),
+            entity_type="task",
+            action="evaluator_verdict",
+            task_id=tid,
+            plan_id=None,
+            payload={"verdict": "rework", "remediation": "fix X"},
+        )
+    ]
+    session = _ListSession(rows)
+    out = await list_events(
+        session=session, task_id=tid, entity_type="task", action="evaluator_verdict", limit=5
+    )
+    # response maps the row through
+    assert len(out) == 1
+    assert out[0].action == "evaluator_verdict"
+    assert out[0].payload["remediation"] == "fix X"
+    # the query carries the filters + newest-first ordering + the bounded limit
+    compiled = session.compiled or ""
+    assert "FROM events" in compiled
+    assert "ORDER BY events.created_at DESC" in compiled

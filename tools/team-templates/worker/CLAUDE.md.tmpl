@@ -86,7 +86,10 @@ coordinator-router; there is no `coordinator-{{REPO_SLUG}}`. Then:
 4. **Do NOT relay a report to a coordinator** — there isn't one. The router observes
    `github.pr_opened` + CI and drives review/integration by itself; opening the PR IS your
    handoff. A rework arrives as a fresh `task.ready` (the router re-dispatched you at a new
-   generation) — re-read the task record + the PR's failing checks, fix, push.
+   generation) — re-read the task record, then GET the evaluator's remediation for your rework
+   brief: `GET /api/v1/events?task_id=<id>&entity_type=task&action=evaluator_verdict` and read
+   the NEWEST row's `payload.remediation` (that is what the router acted on to re-dispatch you).
+   Fix exactly those points, plus the PR's failing checks, and push.
 
 ### Peer review tasks
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +54,44 @@ class EventResponse(BaseModel):
     task_id: uuid.UUID | None
     plan_id: uuid.UUID | None
     payload: dict[str, Any]
+
+
+@router.get("/events", response_model=list[EventResponse])
+async def list_events(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    task_id: uuid.UUID | None = None,
+    entity_type: str | None = None,
+    action: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 20,
+) -> list[EventResponse]:
+    """Read persisted events, newest first, filtered by any of ``task_id`` / ``entity_type`` /
+    ``action``.
+
+    Read-only surface over the append-only events log. The ADR-0118 router publishes its
+    facts as events (e.g. ``task.evaluator_verdict``); a router-mode worker reads its rework
+    remediation from here on a ``task.ready`` wake — there is no coordinator to hand it a brief.
+    Newest-first + a bounded ``limit`` so a caller takes the latest without paging the whole log.
+    """
+    stmt = select(Event)
+    if task_id is not None:
+        stmt = stmt.where(Event.task_id == task_id)
+    if entity_type is not None:
+        stmt = stmt.where(Event.entity_type == entity_type)
+    if action is not None:
+        stmt = stmt.where(Event.action == action)
+    stmt = stmt.order_by(Event.created_at.desc()).limit(limit)
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        EventResponse(
+            id=e.id,
+            entity_type=e.entity_type,
+            action=e.action,
+            task_id=e.task_id,
+            plan_id=e.plan_id,
+            payload=e.payload or {},
+        )
+        for e in rows
+    ]
 
 
 @router.post(

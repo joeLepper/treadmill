@@ -37,16 +37,21 @@ the reconcile sweep is what makes correctness independent of that assumption.
 Lifecycle mirrors ``FabricEventSink``/``NotificationFanout``: ``start()`` is a no-op on a dark
 build (router dispatch disabled), ``stop()`` is safe on a never-started instance.
 
-INCREMENT 1 (this file): the ``github.pr_merged`` → dependent-dispatch path + the reconcile
-sweep. Follow-on increments (flagged inline): ``task.ci_result`` → re-eval dispatch (via
-``is_ci_ready``, Bert), and the evaluator ``rework`` verdict → generation-bump + author
-re-dispatch.
+INCREMENTS (this file): the ``github.pr_merged`` → dependent-dispatch path + the reconcile
+sweep; ``task.ci_result`` → re-eval dispatch (via ``is_ci_ready``, Bert); and the evaluator
+verdict loop — ``rework`` bumps ``tasks.generation`` + re-dispatches the author,
+``approve`` records the approval (idempotent BY CONSTRUCTION via ``verdict_applications``
+UNIQUE(task_id, head_sha)). Follow-on:
+the approve → integration GIT MERGE of the approved head onto the plan's integration branch
+(the merge mechanism + the integration-branch name source are an open design decision).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select, text
@@ -58,13 +63,68 @@ from treadmill_api.coordination.dispatch_predicates import (
 )
 from treadmill_api.dispatch import Dispatcher
 from treadmill_api.eventbus import subscribe_local, unsubscribe_local
-from treadmill_api.events.task import TaskReady
+from treadmill_api.events.registry import encode_payload
+from treadmill_api.events.task import TaskEscalatedToOperator, TaskReady
 from treadmill_api.models.evaluator_dispatch import EvaluatorDispatch
+from treadmill_api.models.event import Event
 from treadmill_api.models.plan import Plan
-from treadmill_api.models.task import Task
+from treadmill_api.models.task import Task, TaskPR
 from treadmill_api.models.task_execution import TaskExecution
+from treadmill_api.models.verdict_application import VerdictApplication
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """An evaluator verdict, normalized from a ``task.evaluator_verdict`` delivery record.
+
+    Pure value: parsed by ``parse_verdict`` (DB-free, foil-tested); the consumer's
+    ``_on_evaluator_verdict`` fetches the head-SHA fallback and applies the side effects.
+    ``head_sha`` may be ``None`` here when the poster omitted it — the consumer back-fills it
+    from the task's newest open PR before it keys the idempotency marker.
+    """
+
+    task_id: str
+    decision: str  # "approve" | "rework"
+    head_sha: str | None
+    remediation: str | None
+
+
+def _coerce_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the record's payload as a dict. The local bus may deliver it as a JSON string;
+    tolerate that (mirrors ``dispatch_predicates._head_sha_of``)."""
+    payload = record.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, TypeError):
+            payload = None
+    return payload if isinstance(payload, dict) else {}
+
+
+def parse_verdict(record: dict[str, Any]) -> Verdict | None:
+    """Parse a ``task.evaluator_verdict`` delivery into a ``Verdict``, or ``None`` if the record
+    is not a well-formed verdict (wrong type, missing task_id, or an unknown decision value).
+
+    Pure and total: never raises on a malformed record — a bad verdict is dropped, not fatal.
+    """
+    if record.get("entity_type") != "task" or record.get("action") != "evaluator_verdict":
+        return None
+    task_id = record.get("task_id")
+    if not task_id:
+        return None
+    payload = _coerce_payload(record)
+    decision = payload.get("verdict") or payload.get("decision")
+    if decision not in ("approve", "rework"):
+        return None
+    head = payload.get("head_sha") or payload.get("commit_sha") or record.get("commit_sha")
+    return Verdict(
+        task_id=str(task_id),
+        decision=str(decision),
+        head_sha=str(head) if head else None,
+        remediation=payload.get("remediation"),
+    )
 
 # The task-scoped completion events that can unblock or re-trigger work. Increment 1 acts on
 # pr_merged; the others are recognized and routed to their (stubbed) handlers so the classify
@@ -198,8 +258,10 @@ class DispatchConsumer:
                 task_id = record.get("task_id")
                 if task_id and await self._is_router_task(session, str(task_id)):
                     await on_ci_result(session, record, self._dispatch_evaluator)
-            # Follow-on increment (recognized, not yet acting):
-            #   ("task", "evaluator_verdict")-> rework → bump generation + re-dispatch author
+            elif key == ("task", "evaluator_verdict"):
+                # The verdict loop: rework → bump generation + re-dispatch the author; approve →
+                # record the approval for integration. Substrate is gated inside (SC6).
+                await self._on_evaluator_verdict(session, record)
             elif key in {("run", "completed"), ("task", "completed")}:
                 await self._on_upstream_terminal(session, record)
 
@@ -323,6 +385,133 @@ class DispatchConsumer:
                 "dispatch consumer: evaluator dispatched task=%s head=%s", task_id, head_sha
             )
             return True
+
+    async def _on_evaluator_verdict(self, session: Any, record: dict[str, Any]) -> None:
+        """Apply an evaluator verdict for a router task (the ADR-0118 verdict loop).
+
+        ``rework`` bumps ``tasks.generation`` and re-dispatches the author at the new
+        generation; ``approve`` records the approval. EXACTLY-ONCE BY CONSTRUCTION: the apply
+        INSERTs a ``verdict_applications`` row (UNIQUE(task_id, head_sha)) FIRST, so a
+        re-delivered, double-POSTed, OR concurrently-delivered (multi-replica) verdict fails at
+        the INSERT and no-ops — no SELECT-then-act race, matching the ``(task_id, generation)``
+        author index and ``evaluator_dispatches`` (Bert review, PR #416). The whole apply (claim
+        + bump + author dispatch + task.ready) commits in ONE transaction via ``_dispatch``, so
+        the bump and the new author row can never land apart. SC6: router-substrate only.
+        """
+        verdict = parse_verdict(record)
+        if verdict is None:
+            return
+        if not await self._is_router_task(session, verdict.task_id):
+            return  # SC6 — the legacy coordinator owns non-router plans.
+        task = (
+            await session.execute(select(Task).where(Task.id == verdict.task_id))
+        ).scalar_one_or_none()
+        if task is None:
+            return
+        head_sha = verdict.head_sha or await self._resolve_head_sha(session, verdict.task_id)
+        if head_sha is None:
+            # A verdict with no head — and no open PR to borrow one from — cannot be keyed or
+            # targeted, so we cannot apply it. Dropping it silently would STALL the task (a
+            # rework never re-dispatches, an approve never records) with no signal. Make it
+            # LOUD: a durable operator escalation, not just a log line (Bert review).
+            await self._escalate_undeliverable_verdict(session, task)
+            return
+        if not await self._claim_verdict(session, task, head_sha, verdict.decision):
+            return  # already applied (this or a concurrent delivery won) — idempotent no-op.
+        if verdict.decision == "rework":
+            await self._apply_rework(session, task)
+        else:
+            await self._record_approval(session, task, head_sha)
+
+    async def _resolve_head_sha(self, session: Any, task_id: str) -> str | None:
+        """Fall back to the task's newest open PR head when the verdict omitted ``head_sha``.
+        Newest by ``created_at`` and only OPEN PRs (``closed_at IS NULL``) so a stale merged PR
+        never supplies the head for a fresh verdict."""
+        row = (
+            await session.execute(
+                select(TaskPR.head_sha)
+                .where(TaskPR.task_id == task_id, TaskPR.closed_at.is_(None))
+                .order_by(TaskPR.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        return str(row[0]) if row and row[0] else None
+
+    async def _claim_verdict(
+        self, session: Any, task: Task, head_sha: str, decision: str
+    ) -> bool:
+        """Claim the (task, head) verdict by INSERTing the ``verdict_applications`` row. Returns
+        True iff THIS call created the row; False if it already existed (the unique constraint
+        no-ops a re-delivery or a concurrent apply). The INSERT runs in a SAVEPOINT so a
+        violation rolls back to it WITHOUT poisoning the outer transaction — the same pattern as
+        ``_dispatch``'s author insert. ``applied_generation`` is the CURRENT (pre-bump)
+        generation: on rework the caller bumps to +1 next, so this records the retired one."""
+        try:
+            async with session.begin_nested():
+                session.add(
+                    VerdictApplication(
+                        task_id=task.id,
+                        head_sha=head_sha,
+                        decision=decision,
+                        applied_generation=task.generation,
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            logger.debug(
+                "dispatch consumer: verdict already applied task=%s head=%s (no-op)",
+                task.id, head_sha,
+            )
+            return False
+        return True
+
+    async def _apply_rework(self, session: Any, task: Task) -> None:
+        """rework verdict (already claimed): bump the generation and re-dispatch the author at
+        the new generation with the ``evaluator-rework`` trigger. The re-dispatched worker reads
+        the verdict's remediation on its wake (the router does not push a brief). ``_dispatch``
+        commits the whole unit (claim + bump + new author row + task.ready) atomically."""
+        task.generation = task.generation + 1
+        await session.flush()
+        await self._dispatch(session, task, trigger="evaluator-rework")
+
+    async def _record_approval(self, session: Any, task: Task, head_sha: str) -> None:
+        """approve verdict (already claimed): commit the claim. The integration GIT MERGE of the
+        approved head onto the plan's integration branch is a follow-on slice (the merge
+        mechanism — plain PR-merge vs feature-branch integrate — and the integration-branch name
+        source are an open design decision). The ``verdict_applications`` row is the durable
+        record the integrator consumes: the approved (task, head) pairs not yet integrated."""
+        await session.commit()
+        logger.info(
+            "dispatch consumer: recorded approval task=%s head=%s (integration is a follow-on)",
+            task.id, head_sha,
+        )
+
+    async def _escalate_undeliverable_verdict(self, session: Any, task: Task) -> None:
+        """Persist a durable operator escalation for a verdict we cannot apply (no head_sha, no
+        open PR). Written directly so it lands even in record-only mode; the dashboard escalation
+        bucket reads the ``task.escalated_to_operator`` row. Keeps the drop (we cannot apply)
+        but makes it LOUD so a stalled task is visible, not silent (Bert review)."""
+        session.add(
+            Event(
+                entity_type="task",
+                action="escalated_to_operator",
+                task_id=task.id,
+                payload=encode_payload(
+                    TaskEscalatedToOperator(
+                        task_id=task.id,
+                        repo=task.repo,
+                        reason="verdict_undeliverable",
+                        created_by=task.created_by,
+                    )
+                ),
+            )
+        )
+        await session.commit()
+        logger.warning(
+            "dispatch consumer: verdict for task=%s has no head_sha and no open PR; "
+            "cannot apply — escalated to operator (created_by=%s)",
+            task.id, task.created_by,
+        )
 
     async def _dispatch(self, session: Any, task: Task, *, trigger: str) -> bool:
         """Record ONE author dispatch for ``task`` at its current generation. Returns True if
