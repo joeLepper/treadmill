@@ -659,3 +659,34 @@ async def test_no_team_config_falls_back_to_synthetic_label(engine: Engine):
     await _consumer().handle(_pr_merged_record(upstream, plan))
     with engine.begin() as conn:
         assert _newest_author_worker(conn, dependent) == f"router-worker-{REPO}"
+
+
+@pytest.mark.asyncio
+async def test_prior_worker_tiebreak_is_deterministic_on_equal_started_at(engine: Engine):
+    """Bert #417 nit: two author executions with an IDENTICAL started_at must not tie
+    non-deterministically. The generation-DESC secondary sort makes continuity pick the
+    higher-generation (later rework cycle) worker. Task at gen 2: gen1→wA, gen2→wB, same
+    started_at; a rework returns to wB, deterministically."""
+    WA, WB = "worker-tm-1", "worker-tm-2"
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, [WA, WB])
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)
+        conn.execute(sa.text("UPDATE tasks SET generation=2 WHERE id=:t"), {"t": task})
+        # A fixed PAST timestamp shared by both prior executions: it must be earlier than the
+        # rework's own now()-stamped execution, so `_newest_author_worker` reads the rework row.
+        ts = "2020-01-01 00:00:00+00"
+        for gen, w in ((1, WA), (2, WB)):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO task_executions (task_id, worker_label, trigger, generation, "
+                    "started_at) VALUES (:t,:w,'initial',:g,:ts)"
+                ),
+                {"t": task, "w": w, "g": gen, "ts": ts},
+            )
+
+    await _consumer().handle(_verdict_record(task, plan, verdict="rework", head="H1"))
+    with engine.begin() as conn:
+        assert _task_generation(conn, task) == 3
+        assert _newest_author_worker(conn, task) == WB  # higher-generation prior, deterministic

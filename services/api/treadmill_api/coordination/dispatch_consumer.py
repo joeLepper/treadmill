@@ -592,7 +592,15 @@ class DispatchConsumer:
         repo's roster (``select_worker``). Roster = ``team_configs.worker_labels`` (the persisted
         per-repo team shape, ``worker-<slug>-1..N``). Falls back to a synthetic label when a repo
         has no team config / empty roster — the router is dark without a real team anyway, and
-        the label only needs to be deterministic for the dispatch record + idempotency."""
+        the label only needs to be deterministic for the dispatch record + idempotency.
+
+        The empty-roster fallback is defensive, not a normal path: plan-submit 412s without a
+        ``team_configs`` row and ``team up`` defaults to 3 workers, so a router plan always has a
+        roster (an empty ``worker_labels`` needs a deliberate ``team up --workers 0``). Bert #417
+        flagged that a synthetic label goes to no live worker → a silent stall on that
+        misconfiguration; the roster invariant is why we keep the record here rather than
+        escalate. If ``--workers 0`` is ever a real path, switch this to an operator escalation
+        (like the headless-verdict fix)."""
         roster = await self._worker_roster(session, task.repo)
         prior = await self._prior_worker(session, str(task.id))
         if not roster:
@@ -623,7 +631,10 @@ class DispatchConsumer:
                     "SELECT worker_label FROM task_executions "
                     "WHERE task_id = :t "
                     "  AND trigger IN ('initial','coordinator-rework','evaluator-rework') "
-                    "ORDER BY started_at DESC LIMIT 1"
+                    # generation DESC is the deterministic secondary sort: two executions with an
+                    # identical started_at (rare) would otherwise tie non-deterministically, so
+                    # break on the higher generation — the later rework cycle (Bert #417).
+                    "ORDER BY started_at DESC, generation DESC LIMIT 1"
                 ),
                 {"t": task_id},
             )
