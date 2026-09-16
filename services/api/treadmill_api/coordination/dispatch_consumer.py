@@ -643,7 +643,10 @@ class DispatchConsumer:
         rows = (
             await session.execute(
                 text(
-                    "SELECT va.task_id, va.head_sha "
+                    # DISTINCT ON (task) + created_at DESC → the LATEST approved head per task
+                    # (Bert #419): a re-approval (stranded at H1, then approved again at H2) must
+                    # integrate ONLY H2 — never re-merge the superseded H1.
+                    "SELECT DISTINCT ON (va.task_id) va.task_id, va.head_sha "
                     "FROM verdict_applications va "
                     "JOIN tasks t ON t.id = va.task_id "
                     "JOIN plans p ON p.id = t.plan_id "
@@ -652,6 +655,17 @@ class DispatchConsumer:
                     "    SELECT 1 FROM events e "
                     "    WHERE e.task_id = t.id AND e.action = 'pr_merged'"
                     "  )"
+                    # Exclude a STUCK approval (Bert #419): once integration escalated a real
+                    # conflict or a blocked (unpushable) slug, re-driving it every tick would
+                    # re-escalate forever (dashboard spam) and never succeed — a human must clear
+                    # it (which re-dispatches via a fresh verdict). Stop re-driving, don't back off.
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM events e2 "
+                    "    WHERE e2.task_id = t.id AND e2.action = 'escalated_to_operator' "
+                    "      AND e2.payload->>'reason' IN "
+                    "          ('integration_conflict','integration_blocked')"
+                    "  ) "
+                    "ORDER BY va.task_id, va.created_at DESC"
                 )
             )
         ).all()
