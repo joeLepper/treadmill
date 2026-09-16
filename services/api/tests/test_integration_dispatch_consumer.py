@@ -826,3 +826,82 @@ async def test_approve_without_doc_path_defers_integration(engine: Engine):
     with engine.begin() as conn:
         assert _verdict_markers(conn, task) == 1
     assert runner.calls == []  # no slug → no integration
+
+
+# ── integration sweep + slug sanitization (Bert #418, enable-hardening) — alan ──
+
+
+def _seed_approval(conn, task_id, head, gen=1) -> None:
+    conn.execute(
+        sa.text(
+            "INSERT INTO verdict_applications (task_id, head_sha, decision, applied_generation) "
+            "VALUES (:t, :h, 'approve', :g)"
+        ),
+        {"t": task_id, "h": head, "g": gen},
+    )
+
+
+@pytest.mark.asyncio
+async def test_integration_sweep_redrives_a_stranded_approval(engine: Engine):
+    """The retry backstop: an approved-but-not-integrated task (a claim committed but integration
+    never landed — crash/infra-fail) is re-driven by the sweep and integrated. integrate_task is
+    idempotent, so this is safe."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval(conn, task, "HEADSHA")  # approval recorded, but no pr_merged yet
+
+    runner = _ScriptedRunner()
+    consumer = _consumer_with_runner(runner)
+    async with _async_maker()() as session:
+        n = await consumer.integration_sweep(session)
+
+    assert n == 1
+    pushes = [c for c in runner.calls if len(c) > 1 and c[1] == "push"]
+    assert pushes and pushes[-1][-1] == "joes-agents/2026-09-13-demo"
+
+
+@pytest.mark.asyncio
+async def test_integration_sweep_skips_already_merged(engine: Engine):
+    """A task whose PR already merged (github.pr_merged exists) is NOT a sweep candidate — the
+    integration landed; re-driving would be pointless."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval(conn, task, "HEADSHA")
+        _mark_pr_merged(conn, task)  # integration landed
+
+    runner = _ScriptedRunner()
+    consumer = _consumer_with_runner(runner)
+    async with _async_maker()() as session:
+        n = await consumer.integration_sweep(session)
+
+    assert n == 0
+    assert runner.calls == []  # not a candidate → no git ops
+
+
+@pytest.mark.asyncio
+async def test_approve_invalid_slug_escalates_not_loops(engine: Engine):
+    """A doc_path basename with a git-invalid char yields an unpushable branch → the router
+    escalates (integration_blocked) rather than looping on a perpetual infra-fail."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13 has space.md")  # space → invalid ref
+        task = _seed_task(conn, plan)
+
+    runner = _ScriptedRunner()
+    await _consumer_with_runner(runner).handle(
+        _verdict_record(task, plan, verdict="approve", head="HEADSHA")
+    )
+    with engine.begin() as conn:
+        assert _verdict_markers(conn, task) == 1  # approval recorded
+        assert _escalations(conn, task, "integration_blocked") == 1  # escalated
+    assert runner.calls == []  # never attempted the unpushable branch
