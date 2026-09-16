@@ -19,6 +19,16 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# The router creates integration MERGE commits (git merge --no-ff), which require a committer
+# identity. A server clone has none by default ("Committer identity unknown"), so the runner
+# supplies a bot identity via env on every call — no dependence on ambient git config.
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "treadmill-router",
+    "GIT_AUTHOR_EMAIL": "router@treadmill.local",
+    "GIT_COMMITTER_NAME": "treadmill-router",
+    "GIT_COMMITTER_EMAIL": "router@treadmill.local",
+}
+
 
 class SubprocessGitRunner:
     """Runs ``git`` in a fixed working directory. Implements the ``GitRunner`` protocol
@@ -36,6 +46,7 @@ class SubprocessGitRunner:
                 cwd=self._cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, **_GIT_IDENTITY},
             )
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
             rc = proc.returncode if proc.returncode is not None else 1

@@ -57,6 +57,10 @@ directory.
 
 ## Task lifecycle
 
+**Which mode am I in?** If a `task.ready` wake delivered this task (instruction surface 4, a
+`{task_id}` and no coordinator-composed brief), you are in **Router mode** — skip to *Router mode*
+below. Otherwise a coordinator briefed you: follow the numbered steps here.
+
 The coordinator dispatches you with a task brief. Your job per task:
 
 1. **Read the brief.** It names the task ID, the file scope, the success criteria, and any context. If the brief is ambiguous, relay back to the coordinator asking for clarification — do not guess.

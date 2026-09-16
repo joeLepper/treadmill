@@ -78,7 +78,12 @@ class WorkerDispatchSink:
         session_factory: Any = None,
         http_client: httpx.AsyncClient | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        enabled: bool = True,
     ) -> None:
+        # Class-level darkness (Bert review): the router flag gates start() here, not only in
+        # the factory, so a direct construction on a legacy fleet can't start either. handle()
+        # is still callable directly (tests), guarded by ingress_url/http_client.
+        self._enabled = enabled
         self.ingress_url = ingress_url or None
         self._session_factory = session_factory
         self._injected_client = http_client
@@ -90,11 +95,11 @@ class WorkerDispatchSink:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.ingress_url)
+        return self._enabled and bool(self.ingress_url)
 
     async def start(self) -> None:
         if not self.is_configured:
-            logger.info("worker dispatch sink: no ingress URL; dark, skipping start")
+            logger.info("worker dispatch sink: disabled or no ingress URL; dark, skipping start")
             return
         from treadmill_api.eventbus import subscribe_local
 
@@ -179,4 +184,6 @@ def make_worker_dispatch_sink(settings: Any, session_factory: Any = None) -> Wor
     emitted anyway, so gating start on the flag keeps an idle subscriber out of a legacy fleet."""
     enabled = bool(getattr(settings, "router_dispatch_enabled", False))
     ingress_url = getattr(settings, "fabric_ingress_url", None) if enabled else None
-    return WorkerDispatchSink(ingress_url=ingress_url, session_factory=session_factory)
+    return WorkerDispatchSink(
+        ingress_url=ingress_url, session_factory=session_factory, enabled=enabled
+    )
