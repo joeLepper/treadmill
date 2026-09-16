@@ -76,6 +76,10 @@ class TaskEscalatedToOperator(EventPayload):
         # feature branch hit a real textual conflict. The router never resolves a conflict
         # itself (a worker must), so it escalates for that judgment.
         "integration_conflict",
+        # ADR-0118 approve→integration: the plan's integration-branch slug (from doc_path) is
+        # not a legal git ref, so the branch is unpushable and integration would infra-fail
+        # forever. The router escalates instead of looping.
+        "integration_blocked",
     ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from

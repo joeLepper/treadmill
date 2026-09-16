@@ -23,3 +23,19 @@ def test_keeps_non_md_basename_verbatim():
 def test_none_and_empty_return_none():
     assert integration_slug(None) is None
     assert integration_slug("") is None
+
+
+from treadmill_api.coordination.dispatch_consumer import is_valid_ref_component
+
+
+def test_valid_ref_components():
+    assert is_valid_ref_component("2026-09-13-fix-auth")
+    assert is_valid_ref_component("2026-09-13-v1.2")  # an internal dot is legal
+
+
+def test_invalid_ref_components_rejected():
+    for bad in [
+        "", "has space", "bad~tilde", "caret^x", "colon:x", "q?x", "star*x",
+        "brack[x", "back\\x", "a..b", "x.lock", ".leading", "trailing.", "at@{brace",
+    ]:
+        assert not is_valid_ref_component(bad), bad

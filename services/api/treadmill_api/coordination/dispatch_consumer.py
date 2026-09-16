@@ -175,6 +175,24 @@ def integration_slug(doc_path: str | None) -> str | None:
         base = base[:-3]
     return base or None
 
+
+# git-check-ref-format forbids these in a ref component: space and the metacharacters
+# ~ ^ : ? * [ \, plus control chars; and the sequences .. and @{, a trailing .lock, a leading/
+# trailing dot, and empty. We reject rather than sanitize (a rewrite could collide two docs).
+_REF_FORBIDDEN = set(" ~^:?*[\\") | {chr(c) for c in range(0x20)} | {chr(0x7F)}
+
+
+def is_valid_ref_component(slug: str) -> bool:
+    """True iff ``slug`` is a legal single git ref component (so ``joes-agents/<slug>`` is a
+    pushable branch). A doc_path basename with an invalid char would make ``integrate_task``
+    infra-fail forever, so the caller escalates instead of looping on it (Bert #418, pure core).
+    """
+    if not slug or ".." in slug or "@{" in slug:
+        return False
+    if slug.startswith(".") or slug.endswith(".") or slug.endswith(".lock"):
+        return False
+    return not any(ch in _REF_FORBIDDEN for ch in slug)
+
 # The task-scoped completion events that can unblock or re-trigger work. Increment 1 acts on
 # pr_merged; the others are recognized and routed to their (stubbed) handlers so the classify
 # path is complete and testable now.
@@ -276,6 +294,21 @@ class DispatchConsumer:
                 raise
             except Exception:
                 logger.exception("dispatch consumer: reconcile sweep raised; continuing")
+            # The integration sweep is the retry backstop for approve→integration, the analog of
+            # reconcile for dispatch (Bert #418): after an approval claim commits, a crash or
+            # infra-fail during integration strands the task — a re-delivered verdict no-ops on
+            # the committed claim, so nothing else re-drives it. The sweep re-drives every
+            # approved-but-not-integrated task; integrate_task is idempotent (ancestry no-op), so
+            # re-driving an already-merged one is a safe "already-integrated". Skipped when dark.
+            if self._runner_factory is None:
+                continue
+            try:
+                async with self._session_factory() as session:
+                    await self.integration_sweep(session)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("dispatch consumer: integration sweep raised; continuing")
 
     async def _run(self) -> None:
         assert self._queue is not None
@@ -568,6 +601,15 @@ class DispatchConsumer:
                 "approval recorded, integration deferred", task.id,
             )
             return
+        if not is_valid_ref_component(slug):
+            # A doc_path basename with a git-invalid char yields an unpushable branch name, so
+            # integrate_task would infra-fail FOREVER (Bert #418). Escalate instead of looping.
+            logger.warning(
+                "dispatch consumer: task=%s slug %r is not a legal git ref component; escalating",
+                task.id, slug,
+            )
+            await self._escalate(session, task, "integration_blocked")
+            return
         merge_op = await merge_op_for_plan(session, task.plan_id, slug, head_sha)
         runner = await self._runner_factory(task.repo)
         result = await integrate_task(runner, merge_op)
@@ -586,6 +628,42 @@ class DispatchConsumer:
                 "dispatch consumer: integration of task=%s into %s returned %s (infra); "
                 "approval remains for retry", task.id, merge_op.integration_branch, result,
             )
+
+    async def integration_sweep(self, session: Any) -> int:
+        """Re-drive every approved-but-not-integrated task — the retry backstop for
+        approve→integration (Bert #418), the analog of ``reconcile`` for dispatch.
+
+        A ``verdict_applications`` row with ``decision='approve'`` on a router plan whose task has
+        NO ``github.pr_merged`` event is an approval whose integration has not (yet) landed —
+        either never attempted (a crash after the claim commit) or an infra-fail. The sweep
+        re-runs ``_maybe_integrate`` for each; ``integrate_task`` is idempotent (the ancestry
+        check no-ops an already-merged head), so re-driving is safe. Returns the candidate count.
+        Exposed (like ``reconcile``) so a test drives one pass without the timer.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT va.task_id, va.head_sha "
+                    "FROM verdict_applications va "
+                    "JOIN tasks t ON t.id = va.task_id "
+                    "JOIN plans p ON p.id = t.plan_id "
+                    "WHERE va.decision = 'approve' AND p.substrate = 'router' "
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM events e "
+                    "    WHERE e.task_id = t.id AND e.action = 'pr_merged'"
+                    "  )"
+                )
+            )
+        ).all()
+        for task_id, head_sha in rows:
+            task = (
+                await session.execute(select(Task).where(Task.id == task_id))
+            ).scalar_one_or_none()
+            if task is not None:
+                await self._maybe_integrate(session, task, str(head_sha))
+        if rows:
+            logger.info("dispatch consumer: integration sweep re-drove %d approval(s)", len(rows))
+        return len(rows)
 
     async def _merge_target(self, session: Any, repo: str) -> str:
         """The repo's integration mode (``team_configs.merge_target``): ``feature-branch``
