@@ -22,6 +22,7 @@ from sqlalchemy import (
     Integer,
     PrimaryKeyConstraint,
     String,
+    Integer,
     Text,
     text,
 )
@@ -45,6 +46,13 @@ class Task(Base):
         nullable=False,
     )
     repo: Mapped[str] = mapped_column(String(255), nullable=False)
+    # ADR-0118 SC3 — CURRENT rework cycle (source of truth). Starts at 1; the router
+    # bumps it on each rework verdict before re-dispatching the author. task_executions
+    # record the generation they served; UNIQUE(task_id, generation) on author rows makes
+    # a re-delivered dispatch event a no-op.
+    generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)

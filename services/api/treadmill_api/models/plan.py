@@ -67,6 +67,18 @@ class Plan(Base):
     ``integration_base:``."""
 
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    substrate: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'legacy'"),
+    )
+    """ADR-0118 SC6 — the coordination substrate that owns this plan, bound ONCE at standup
+    and immutable for the plan's life: ``legacy`` (the agent-coordinator) or ``router`` (the
+    coordinator-router in server code). The router acts only on ``router`` plans; the legacy
+    coordinator acts only on ``legacy`` plans. A repo's per-repo flag selects the substrate
+    for NEW standups; flipping it never moves a running plan (no cross-substrate split-brain)."""
+
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

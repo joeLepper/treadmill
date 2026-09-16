@@ -24,6 +24,10 @@ events and the table no longer exist — coordinators write
   §Health bots (follow-on track).
 """
 
+from treadmill_api.coordination.dispatch_consumer import (
+    DispatchConsumer,
+    make_dispatch_consumer,
+)
 from treadmill_api.coordination.fabric_event_sink import (
     FabricEventSink,
     make_fabric_event_sink,
@@ -34,8 +38,16 @@ from treadmill_api.coordination.notification_fanout import (
 )
 from treadmill_api.coordination.replay import ReplayLoop
 from treadmill_api.coordination.webhook_inbox import WebhookInboxPoller
+from treadmill_api.coordination.worker_dispatch_sink import (
+    WorkerDispatchSink,
+    make_worker_dispatch_sink,
+)
 
 __all__ = [
+    "DispatchConsumer",
+    "make_dispatch_consumer",
+    "WorkerDispatchSink",
+    "make_worker_dispatch_sink",
     "FabricEventSink",
     "NotificationFanout",
     "ReplayLoop",
