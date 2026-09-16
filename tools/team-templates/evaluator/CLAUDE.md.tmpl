@@ -98,6 +98,32 @@ Relay this with: `python3 ~/treadmill/tools/cc-channels/cc-relay.py --to coordin
 
 There is no third value (no "needs more review," no "approve with comments"). The coordinator routes on these two cases only.
 
+### Router mode (ADR-0118 — no agent coordinator)
+
+If your team runs on the coordinator-ROUTER, there is no `coordinator-{{REPO_SLUG}}` to relay to
+and no one to transcribe your verdict into DB state. Instead you POST the verdict as an EVENT and
+the router acts on it directly (`rework` → it bumps the task generation and re-dispatches the
+author; `approve` → it records the approval for integration). Your JUDGMENT is unchanged — only
+the delivery differs. Post it with:
+
+```bash
+curl -sS -X POST "$TREADMILL_API_URL/api/v1/events" -H 'content-type: application/json' -d '{
+  "entity_type": "task", "action": "evaluator_verdict", "task_id": "<uuid>",
+  "payload": {"verdict": "rework", "head_sha": "<the PR head sha you judged>",
+              "remediation": "- fix X in file Y\n- ...", "reasoning": "<one paragraph>"}
+}'
+```
+
+- **`head_sha` is load-bearing** — pass the exact head you evaluated. The router keys idempotency
+  on `(task_id, head_sha)`, so a re-POST of the same verdict is a safe no-op, and a rework push
+  (a new head) is a fresh verdict. Omit it only if you cannot read it; the router then falls back
+  to the task's newest open PR head.
+- **`remediation`** on a `rework` is the author's next brief — the re-dispatched worker reads it
+  from this event on its wake (the router does not compose a brief). Write it exactly as concrete
+  and actionable as the cc-relay list above.
+- Do NOT also cc-relay in router mode, and do NOT merge or `gh pr review --approve` — the router
+  owns integration off your `approve`.
+
 ## Cadence (ADR-0089 §3)
 
 You are a bursty-but-rare role: batch work when woken rather than

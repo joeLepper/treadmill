@@ -220,6 +220,54 @@ class TaskReady(EventPayload):
     ACTION: ClassVar[str] = "ready"
 
 
+class TaskEvaluatorVerdict(EventPayload):
+    """The evaluator's verdict on a task's PR head, posted as an EVENT (ADR-0118 verdict loop).
+
+    In ROUTER mode there is no agent coordinator to cc-relay the verdict to, so the evaluator
+    POSTs this to ``POST /api/v1/events`` and the router's dispatch consumer acts on it:
+      * ``rework`` — the router bumps ``tasks.generation`` and re-dispatches the author (a fresh
+        ``task.ready``); ``remediation`` is the author's next brief.
+      * ``approve`` — the router records the approval (via the ``task.verdict_applied`` marker)
+        so the integration path can merge the head; the integration git merge is a follow-on.
+
+    Fields are optional-friendly so any stored shape validates on read (the POST surface stores
+    the caller dict verbatim; head-SHA absence is tolerated and back-filled from ``task_prs``).
+    Legacy-substrate plans keep the cc-relay-to-coordinator handoff; this is router-only.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "evaluator_verdict"
+
+    verdict: Literal["approve", "rework"]
+    head_sha: str | None = None
+    """The PR head the verdict is about. Used to key the idempotency marker and to isolate the
+    verdict to one head; back-filled from the task's newest open PR when the poster omits it."""
+    remediation: str | None = None
+    """For ``rework``: the concrete change list the author works next. Durable here so the
+    re-dispatched worker reads it on its rework wake (the router does not push a brief)."""
+    reasoning: str | None = None
+
+
+class TaskVerdictApplied(EventPayload):
+    """Idempotency marker: the router applied an evaluator verdict for one (task, head).
+
+    Written once per ``(task_id, head_sha)`` when the router consumes a
+    ``task.evaluator_verdict`` and acts on it. The router checks for this marker BEFORE acting
+    (by ``task_id`` + the Event ``commit_sha`` column = head_sha), so a re-delivered or
+    double-POSTed verdict is a no-op — the verdict-path analog of the ``(task_id, generation)``
+    author-dispatch index and the ``evaluator_dispatches`` re-eval guard. ADR-0118 verdict loop.
+    """
+
+    ENTITY_TYPE: ClassVar[str] = "task"
+    ACTION: ClassVar[str] = "verdict_applied"
+
+    decision: Literal["approve", "rework"]
+    head_sha: str
+    generation: int
+    """The task generation the verdict was applied against. On ``rework`` this is the generation
+    the router RETIRED — it bumped to ``generation + 1`` and re-dispatched the author there."""
+
+
 class TaskCancelled(EventPayload):
     """Emitted when a task is cancelled. Cancellation is terminal — no
     workflow runs may be dispatched against the task afterward.

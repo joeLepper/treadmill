@@ -401,3 +401,158 @@ async def test_worker_sink_ignores_non_task_ready(engine: Engine):
          "task_id": str(uuid.uuid4()), "payload": {}}
     )
     assert http.posts == []
+
+
+# ── evaluator verdict loop: rework bumps generation, approve records (alan) ────
+
+
+def _seed_task_pr(conn, task_id, head) -> None:
+    """An OPEN task_prs row so the consumer can back-fill head_sha when a verdict omits it."""
+    conn.execute(
+        sa.text(
+            "INSERT INTO task_prs (repo, pr_number, task_id, head_sha) "
+            "VALUES (:r, :n, :t, :h)"
+        ),
+        {"r": REPO, "n": int(uuid.uuid4().int % 1_000_000), "t": task_id, "h": head},
+    )
+
+
+def _verdict_record(task_id, plan_id, *, verdict, head=None, remediation=None) -> dict:
+    payload: dict = {"verdict": verdict}
+    if head is not None:
+        payload["head_sha"] = head
+    if remediation is not None:
+        payload["remediation"] = remediation
+    return {
+        "entity_type": "task",
+        "action": "evaluator_verdict",
+        "task_id": str(task_id),
+        "plan_id": str(plan_id),
+        "payload": payload,
+    }
+
+
+def _task_generation(conn, task_id) -> int:
+    return conn.execute(
+        sa.text("SELECT generation FROM tasks WHERE id=:t"), {"t": task_id}
+    ).scalar_one()
+
+
+def _verdict_markers(conn, task_id) -> int:
+    return conn.execute(
+        sa.text(
+            "SELECT count(*) FROM events "
+            "WHERE entity_type='task' AND action='verdict_applied' AND task_id=:t"
+        ),
+        {"t": task_id},
+    ).scalar_one()
+
+
+def _execs_by_trigger(conn, task_id, trigger) -> int:
+    return conn.execute(
+        sa.text("SELECT count(*) FROM task_executions WHERE task_id=:t AND trigger=:tr"),
+        {"t": task_id, "tr": trigger},
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_rework_verdict_bumps_generation_and_redispatches_once(engine: Engine):
+    """A rework verdict bumps tasks.generation and re-dispatches the author at the new
+    generation with the evaluator-rework trigger — exactly once. A re-delivered verdict finds
+    the (task, head) marker and no-ops: no second bump, no second author row."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)
+        _seed_execution(conn, task, "router-worker-x", trigger="initial", generation=1)
+
+    consumer = _consumer()
+    rec = _verdict_record(task, plan, verdict="rework", head="H1", remediation="fix the guard")
+    await consumer.handle(rec)
+    await consumer.handle(rec)  # re-delivery
+
+    with engine.begin() as conn:
+        assert _task_generation(conn, task) == 2  # bumped once, not twice
+        assert _execs_by_trigger(conn, task, "evaluator-rework") == 1  # one re-dispatch
+        assert _execs_by_trigger(conn, task, "initial") == 1  # the original stays
+        assert _verdict_markers(conn, task) == 1  # idempotency marker written once
+        # the new author execution is at the bumped generation
+        assert conn.execute(
+            sa.text(
+                "SELECT generation FROM task_executions "
+                "WHERE task_id=:t AND trigger='evaluator-rework'"
+            ),
+            {"t": task},
+        ).scalar_one() == 2
+
+
+@pytest.mark.asyncio
+async def test_approve_verdict_records_marker_without_dispatch(engine: Engine):
+    """An approve verdict records the approval marker and does NOT bump the generation or
+    re-dispatch the author (integration is a follow-on). Idempotent on re-delivery."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)
+        _seed_execution(conn, task, "router-worker-x", trigger="initial", generation=1)
+
+    consumer = _consumer()
+    rec = _verdict_record(task, plan, verdict="approve", head="H1")
+    await consumer.handle(rec)
+    await consumer.handle(rec)  # re-delivery
+
+    with engine.begin() as conn:
+        assert _task_generation(conn, task) == 1  # NOT bumped
+        assert _execs_by_trigger(conn, task, "evaluator-rework") == 0  # no re-dispatch
+        assert _verdict_markers(conn, task) == 1  # one approval marker, despite two deliveries
+        assert conn.execute(
+            sa.text(
+                "SELECT payload->>'decision' FROM events "
+                "WHERE entity_type='task' AND action='verdict_applied' AND task_id=:t"
+            ),
+            {"t": task},
+        ).scalar_one() == "approve"
+
+
+@pytest.mark.asyncio
+async def test_verdict_head_sha_falls_back_to_open_pr(engine: Engine):
+    """When the verdict omits head_sha, the router back-fills from the task's newest OPEN PR —
+    so the idempotency marker still keys correctly and a re-delivery no-ops."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)
+        _seed_execution(conn, task, "router-worker-x", trigger="initial", generation=1)
+        _seed_task_pr(conn, task, "OPENHEAD")  # open PR carries the head
+
+    consumer = _consumer()
+    rec = _verdict_record(task, plan, verdict="rework", remediation="do X")  # no head_sha
+    await consumer.handle(rec)
+    await consumer.handle(rec)
+
+    with engine.begin() as conn:
+        assert _task_generation(conn, task) == 2  # applied once via the PR-head fallback
+        assert _verdict_markers(conn, task) == 1
+        assert conn.execute(
+            sa.text(
+                "SELECT commit_sha FROM events "
+                "WHERE entity_type='task' AND action='verdict_applied' AND task_id=:t"
+            ),
+            {"t": task},
+        ).scalar_one() == "OPENHEAD"
+
+
+@pytest.mark.asyncio
+async def test_verdict_legacy_substrate_ignored(engine: Engine):
+    """SC6: a verdict on a legacy-substrate plan is the agent coordinator's business — the
+    router does nothing (no bump, no marker)."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="legacy")
+        task = _seed_task(conn, plan)
+        _seed_execution(conn, task, "w-legacy", trigger="initial", generation=1)
+
+    await _consumer().handle(_verdict_record(task, plan, verdict="rework", head="H1"))
+    with engine.begin() as conn:
+        assert _task_generation(conn, task) == 1
+        assert _verdict_markers(conn, task) == 0
