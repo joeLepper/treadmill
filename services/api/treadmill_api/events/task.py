@@ -72,6 +72,10 @@ class TaskEscalatedToOperator(EventPayload):
         # no head_sha in the payload and no open PR to borrow one from — so the task would
         # stall silently. The router escalates instead of dropping the verdict to a log line.
         "verdict_undeliverable",
+        # ADR-0118 approve→integration: integrating the approved head into the plan's
+        # feature branch hit a real textual conflict. The router never resolves a conflict
+        # itself (a worker must), so it escalates for that judgment.
+        "integration_conflict",
     ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from

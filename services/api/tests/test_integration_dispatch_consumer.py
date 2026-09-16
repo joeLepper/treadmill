@@ -690,3 +690,139 @@ async def test_prior_worker_tiebreak_is_deterministic_on_equal_started_at(engine
     with engine.begin() as conn:
         assert _task_generation(conn, task) == 3
         assert _newest_author_worker(conn, task) == WB  # higher-generation prior, deterministic
+
+
+# ── approve → integration (feature-branch, scripted git runner) — alan ─────────
+
+
+class _ScriptedRunner:
+    """A GitRunner foil that drives integrate_task deterministically. Records every git call so
+    a foil can assert the integration branch + push. conflict=True makes the merge conflict."""
+
+    def __init__(self, *, conflict: bool = False) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._conflict = conflict
+
+    async def run(self, *args: str) -> tuple[int, str]:
+        self.calls.append(args)
+        sub = args[1] if len(args) > 1 else ""
+        if sub == "merge-base":
+            return (1, "")  # not an ancestor -> proceed to merge (not already integrated)
+        if sub == "merge":
+            if len(args) > 2 and args[2] == "--abort":
+                return (0, "")
+            return (1, "CONFLICT (content): file") if self._conflict else (0, "")
+        if sub == "ls-files":
+            return (0, "100644 abc123 1\tfile\n") if self._conflict else (0, "")
+        return (0, "")  # fetch / checkout / push / anything else
+
+
+def _runner_factory(runner):
+    async def factory(repo):  # noqa: ANN001, ARG001
+        return runner
+    return factory
+
+
+def _consumer_with_runner(runner):
+    from treadmill_api.coordination.dispatch_consumer import DispatchConsumer
+
+    return DispatchConsumer(
+        session_factory=_async_maker(), enabled=True, runner_factory=_runner_factory(runner)
+    )
+
+
+def _set_plan_doc(conn, plan_id, doc_path, integration_base=None) -> None:
+    conn.execute(
+        sa.text("UPDATE plans SET doc_path=:d, integration_base=:b WHERE id=:p"),
+        {"d": doc_path, "b": integration_base, "p": plan_id},
+    )
+
+
+@pytest.mark.asyncio
+async def test_approve_integrates_into_the_plan_feature_branch(engine: Engine):
+    """approve + feature-branch repo + a wired runner → the router merges the approved head into
+    joes-agents/<slug> (slug from the plan doc_path) and pushes. No conflict → no escalation."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])  # merge_target defaults to feature-branch
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+
+    runner = _ScriptedRunner()
+    await _consumer_with_runner(runner).handle(
+        _verdict_record(task, plan, verdict="approve", head="HEADSHA")
+    )
+    with engine.begin() as conn:
+        assert _verdict_markers(conn, task) == 1  # approval recorded
+        assert _escalations(conn, task, "integration_conflict") == 0
+    # the runner pushed the approved head's merge to the derived integration branch
+    pushes = [c for c in runner.calls if len(c) > 1 and c[1] == "push"]
+    assert pushes and pushes[-1][-1] == "joes-agents/2026-09-13-demo"
+    merges = [c for c in runner.calls if len(c) > 1 and c[1] == "merge" and "--no-ff" in c]
+    assert merges and "HEADSHA" in merges[0]
+
+
+@pytest.mark.asyncio
+async def test_approve_integration_conflict_escalates(engine: Engine):
+    """A real merge conflict on integration → the router escalates (a worker must resolve it),
+    and the approval is still recorded."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+
+    runner = _ScriptedRunner(conflict=True)
+    await _consumer_with_runner(runner).handle(
+        _verdict_record(task, plan, verdict="approve", head="HEADSHA")
+    )
+    with engine.begin() as conn:
+        assert _verdict_markers(conn, task) == 1
+        assert _escalations(conn, task, "integration_conflict") == 1  # escalated, not resolved
+
+
+@pytest.mark.asyncio
+async def test_approve_main_mode_defers_integration(engine: Engine):
+    """A repo whose merge_target is 'main' does NOT feature-branch integrate here (gh pr merge is
+    a follow-on): the approval is recorded and the runner is never touched."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        conn.execute(
+            sa.text(
+                "INSERT INTO team_configs (repo, coordinator_label, worker_labels, merge_target) "
+                "VALUES (:r,:c,:w,'main')"
+            ),
+            {"r": REPO, "c": "c", "w": ["worker-tm-1"]},
+        )
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+
+    runner = _ScriptedRunner()
+    await _consumer_with_runner(runner).handle(
+        _verdict_record(task, plan, verdict="approve", head="HEADSHA")
+    )
+    with engine.begin() as conn:
+        assert _verdict_markers(conn, task) == 1  # recorded
+    assert runner.calls == []  # main-mode: no feature-branch integration attempted
+
+
+@pytest.mark.asyncio
+async def test_approve_without_doc_path_defers_integration(engine: Engine):
+    """A feature-branch plan with no doc_path has no derivable branch slug → integration is
+    deferred (approval recorded, runner untouched), never merged to a guessed branch."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")  # doc_path left NULL
+        task = _seed_task(conn, plan)
+
+    runner = _ScriptedRunner()
+    await _consumer_with_runner(runner).handle(
+        _verdict_record(task, plan, verdict="approve", head="HEADSHA")
+    )
+    with engine.begin() as conn:
+        assert _verdict_markers(conn, task) == 1
+    assert runner.calls == []  # no slug → no integration
