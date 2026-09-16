@@ -38,7 +38,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 REPO = "joeLepper/treadmill"
-_TABLES = "plans, tasks, task_prs, task_dependencies, task_executions, evaluator_dispatches, events"
+_TABLES = (
+    "plans, tasks, task_prs, task_dependencies, task_executions, "
+    "evaluator_dispatches, verdict_applications, events"
+)
 
 
 @pytest.fixture(scope="module")
@@ -440,11 +443,18 @@ def _task_generation(conn, task_id) -> int:
 
 def _verdict_markers(conn, task_id) -> int:
     return conn.execute(
-        sa.text(
-            "SELECT count(*) FROM events "
-            "WHERE entity_type='task' AND action='verdict_applied' AND task_id=:t"
-        ),
+        sa.text("SELECT count(*) FROM verdict_applications WHERE task_id=:t"),
         {"t": task_id},
+    ).scalar_one()
+
+
+def _escalations(conn, task_id, reason) -> int:
+    return conn.execute(
+        sa.text(
+            "SELECT count(*) FROM events WHERE entity_type='task' "
+            "AND action='escalated_to_operator' AND task_id=:t AND payload->>'reason'=:r"
+        ),
+        {"t": task_id, "r": reason},
     ).scalar_one()
 
 
@@ -506,10 +516,7 @@ async def test_approve_verdict_records_marker_without_dispatch(engine: Engine):
         assert _execs_by_trigger(conn, task, "evaluator-rework") == 0  # no re-dispatch
         assert _verdict_markers(conn, task) == 1  # one approval marker, despite two deliveries
         assert conn.execute(
-            sa.text(
-                "SELECT payload->>'decision' FROM events "
-                "WHERE entity_type='task' AND action='verdict_applied' AND task_id=:t"
-            ),
+            sa.text("SELECT decision FROM verdict_applications WHERE task_id=:t"),
             {"t": task},
         ).scalar_one() == "approve"
 
@@ -534,10 +541,7 @@ async def test_verdict_head_sha_falls_back_to_open_pr(engine: Engine):
         assert _task_generation(conn, task) == 2  # applied once via the PR-head fallback
         assert _verdict_markers(conn, task) == 1
         assert conn.execute(
-            sa.text(
-                "SELECT commit_sha FROM events "
-                "WHERE entity_type='task' AND action='verdict_applied' AND task_id=:t"
-            ),
+            sa.text("SELECT head_sha FROM verdict_applications WHERE task_id=:t"),
             {"t": task},
         ).scalar_one() == "OPENHEAD"
 
@@ -556,3 +560,20 @@ async def test_verdict_legacy_substrate_ignored(engine: Engine):
     with engine.begin() as conn:
         assert _task_generation(conn, task) == 1
         assert _verdict_markers(conn, task) == 0
+
+
+@pytest.mark.asyncio
+async def test_headless_verdict_escalates_instead_of_silently_stalling(engine: Engine):
+    """A verdict with no head_sha AND no open PR cannot be keyed or targeted. The router must
+    NOT drop it silently (that stalls the task) — it escalates to the operator (Bert review)."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        plan = _seed_plan(conn, substrate="router")
+        task = _seed_task(conn, plan)  # NO task_pr → no head to borrow
+        _seed_execution(conn, task, "router-worker-x", trigger="initial", generation=1)
+
+    await _consumer().handle(_verdict_record(task, plan, verdict="rework"))  # no head_sha
+    with engine.begin() as conn:
+        assert _task_generation(conn, task) == 1  # not bumped — could not apply
+        assert _verdict_markers(conn, task) == 0  # no claim
+        assert _escalations(conn, task, "verdict_undeliverable") == 1  # LOUD, not silent

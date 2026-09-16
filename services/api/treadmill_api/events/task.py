@@ -68,6 +68,10 @@ class TaskEscalatedToOperator(EventPayload):
         "terminal_step_failure",
         "terminal_gate_sweep",
         "step_starvation",
+        # ADR-0118 verdict loop: the router received an evaluator verdict it cannot apply —
+        # no head_sha in the payload and no open PR to borrow one from — so the task would
+        # stall silently. The router escalates instead of dropping the verdict to a log line.
+        "verdict_undeliverable",
     ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from
@@ -246,26 +250,6 @@ class TaskEvaluatorVerdict(EventPayload):
     """For ``rework``: the concrete change list the author works next. Durable here so the
     re-dispatched worker reads it on its rework wake (the router does not push a brief)."""
     reasoning: str | None = None
-
-
-class TaskVerdictApplied(EventPayload):
-    """Idempotency marker: the router applied an evaluator verdict for one (task, head).
-
-    Written once per ``(task_id, head_sha)`` when the router consumes a
-    ``task.evaluator_verdict`` and acts on it. The router checks for this marker BEFORE acting
-    (by ``task_id`` + the Event ``commit_sha`` column = head_sha), so a re-delivered or
-    double-POSTed verdict is a no-op — the verdict-path analog of the ``(task_id, generation)``
-    author-dispatch index and the ``evaluator_dispatches`` re-eval guard. ADR-0118 verdict loop.
-    """
-
-    ENTITY_TYPE: ClassVar[str] = "task"
-    ACTION: ClassVar[str] = "verdict_applied"
-
-    decision: Literal["approve", "rework"]
-    head_sha: str
-    generation: int
-    """The task generation the verdict was applied against. On ``rework`` this is the generation
-    the router RETIRED — it bumped to ``generation + 1`` and re-dispatched the author there."""
 
 
 class TaskCancelled(EventPayload):

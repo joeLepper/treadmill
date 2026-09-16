@@ -40,7 +40,8 @@ build (router dispatch disabled), ``stop()`` is safe on a never-started instance
 INCREMENTS (this file): the ``github.pr_merged`` → dependent-dispatch path + the reconcile
 sweep; ``task.ci_result`` → re-eval dispatch (via ``is_ci_ready``, Bert); and the evaluator
 verdict loop — ``rework`` bumps ``tasks.generation`` + re-dispatches the author,
-``approve`` records the approval (idempotent via a ``task.verdict_applied`` marker). Follow-on:
+``approve`` records the approval (idempotent BY CONSTRUCTION via ``verdict_applications``
+UNIQUE(task_id, head_sha)). Follow-on:
 the approve → integration GIT MERGE of the approved head onto the plan's integration branch
 (the merge mechanism + the integration-branch name source are an open design decision).
 """
@@ -63,12 +64,13 @@ from treadmill_api.coordination.dispatch_predicates import (
 from treadmill_api.dispatch import Dispatcher
 from treadmill_api.eventbus import subscribe_local, unsubscribe_local
 from treadmill_api.events.registry import encode_payload
-from treadmill_api.events.task import TaskReady, TaskVerdictApplied
+from treadmill_api.events.task import TaskEscalatedToOperator, TaskReady
 from treadmill_api.models.evaluator_dispatch import EvaluatorDispatch
 from treadmill_api.models.event import Event
 from treadmill_api.models.plan import Plan
 from treadmill_api.models.task import Task, TaskPR
 from treadmill_api.models.task_execution import TaskExecution
+from treadmill_api.models.verdict_application import VerdictApplication
 
 logger = logging.getLogger(__name__)
 
@@ -388,39 +390,36 @@ class DispatchConsumer:
         """Apply an evaluator verdict for a router task (the ADR-0118 verdict loop).
 
         ``rework`` bumps ``tasks.generation`` and re-dispatches the author at the new
-        generation; ``approve`` records the approval. Both are made EXACTLY-ONCE by a
-        ``task.verdict_applied`` marker keyed on ``(task_id, head_sha)`` — a re-delivered or
-        double-POSTed verdict finds the marker and no-ops. The whole apply (marker + bump +
-        dispatch) commits in ONE transaction via ``_dispatch``, so the bump and the new author
-        row can never land apart (reconcile would otherwise see a bumped generation with no
-        current-generation execution). SC6: acts only on router-substrate tasks.
+        generation; ``approve`` records the approval. EXACTLY-ONCE BY CONSTRUCTION: the apply
+        INSERTs a ``verdict_applications`` row (UNIQUE(task_id, head_sha)) FIRST, so a
+        re-delivered, double-POSTed, OR concurrently-delivered (multi-replica) verdict fails at
+        the INSERT and no-ops — no SELECT-then-act race, matching the ``(task_id, generation)``
+        author index and ``evaluator_dispatches`` (Bert review, PR #416). The whole apply (claim
+        + bump + author dispatch + task.ready) commits in ONE transaction via ``_dispatch``, so
+        the bump and the new author row can never land apart. SC6: router-substrate only.
         """
         verdict = parse_verdict(record)
         if verdict is None:
             return
         if not await self._is_router_task(session, verdict.task_id):
             return  # SC6 — the legacy coordinator owns non-router plans.
-        head_sha = verdict.head_sha or await self._resolve_head_sha(session, verdict.task_id)
-        if head_sha is None:
-            logger.warning(
-                "dispatch consumer: verdict for task=%s has no head_sha (payload or task_prs); "
-                "cannot key the idempotency marker — dropping",
-                verdict.task_id,
-            )
-            return
-        if await self._verdict_already_applied(session, verdict.task_id, head_sha):
-            logger.debug(
-                "dispatch consumer: verdict already applied task=%s head=%s (no-op)",
-                verdict.task_id, head_sha,
-            )
-            return
         task = (
             await session.execute(select(Task).where(Task.id == verdict.task_id))
         ).scalar_one_or_none()
         if task is None:
             return
+        head_sha = verdict.head_sha or await self._resolve_head_sha(session, verdict.task_id)
+        if head_sha is None:
+            # A verdict with no head — and no open PR to borrow one from — cannot be keyed or
+            # targeted, so we cannot apply it. Dropping it silently would STALL the task (a
+            # rework never re-dispatches, an approve never records) with no signal. Make it
+            # LOUD: a durable operator escalation, not just a log line (Bert review).
+            await self._escalate_undeliverable_verdict(session, task)
+            return
+        if not await self._claim_verdict(session, task, head_sha, verdict.decision):
+            return  # already applied (this or a concurrent delivery won) — idempotent no-op.
         if verdict.decision == "rework":
-            await self._apply_rework(session, task, head_sha)
+            await self._apply_rework(session, task)
         else:
             await self._record_approval(session, task, head_sha)
 
@@ -438,66 +437,80 @@ class DispatchConsumer:
         ).first()
         return str(row[0]) if row and row[0] else None
 
-    async def _verdict_already_applied(
-        self, session: Any, task_id: str, head_sha: str
-    ) -> bool:
-        """True iff a ``task.verdict_applied`` marker already exists for this (task, head).
-        The marker stores the head in the Event ``commit_sha`` column, so the guard is a plain
-        indexed lookup — no JSON access (ADR-0011)."""
-        row = (
-            await session.execute(
-                select(Event.id).where(
-                    Event.entity_type == "task",
-                    Event.action == "verdict_applied",
-                    Event.task_id == task_id,
-                    Event.commit_sha == head_sha,
-                ).limit(1)
-            )
-        ).first()
-        return row is not None
-
-    def _add_verdict_marker(
+    async def _claim_verdict(
         self, session: Any, task: Task, head_sha: str, decision: str
-    ) -> None:
-        """Add the idempotency marker Event (not yet committed — it commits with the apply).
-        Written directly (not via the dispatcher) so the marker lands even in record-only mode
-        where no publisher is wired. The head lives in the ``commit_sha`` column the guard reads.
-        """
-        session.add(
-            Event(
-                entity_type="task",
-                action="verdict_applied",
-                task_id=task.id,
-                commit_sha=head_sha,
-                payload=encode_payload(
-                    TaskVerdictApplied(
-                        decision=decision, head_sha=head_sha, generation=task.generation
+    ) -> bool:
+        """Claim the (task, head) verdict by INSERTing the ``verdict_applications`` row. Returns
+        True iff THIS call created the row; False if it already existed (the unique constraint
+        no-ops a re-delivery or a concurrent apply). The INSERT runs in a SAVEPOINT so a
+        violation rolls back to it WITHOUT poisoning the outer transaction — the same pattern as
+        ``_dispatch``'s author insert. ``applied_generation`` is the CURRENT (pre-bump)
+        generation: on rework the caller bumps to +1 next, so this records the retired one."""
+        try:
+            async with session.begin_nested():
+                session.add(
+                    VerdictApplication(
+                        task_id=task.id,
+                        head_sha=head_sha,
+                        decision=decision,
+                        applied_generation=task.generation,
                     )
-                ),
+                )
+                await session.flush()
+        except IntegrityError:
+            logger.debug(
+                "dispatch consumer: verdict already applied task=%s head=%s (no-op)",
+                task.id, head_sha,
             )
-        )
+            return False
+        return True
 
-    async def _apply_rework(self, session: Any, task: Task, head_sha: str) -> None:
-        """rework verdict: mark it applied, bump the generation, and re-dispatch the author at
+    async def _apply_rework(self, session: Any, task: Task) -> None:
+        """rework verdict (already claimed): bump the generation and re-dispatch the author at
         the new generation with the ``evaluator-rework`` trigger. The re-dispatched worker reads
         the verdict's remediation on its wake (the router does not push a brief). ``_dispatch``
-        commits the whole unit (marker + bump + new author row + task.ready) atomically."""
-        self._add_verdict_marker(session, task, head_sha, "rework")
+        commits the whole unit (claim + bump + new author row + task.ready) atomically."""
         task.generation = task.generation + 1
         await session.flush()
         await self._dispatch(session, task, trigger="evaluator-rework")
 
     async def _record_approval(self, session: Any, task: Task, head_sha: str) -> None:
-        """approve verdict: record the approval marker and commit. The integration GIT MERGE of
-        the approved head onto the plan's integration branch is a follow-on slice (the merge
+        """approve verdict (already claimed): commit the claim. The integration GIT MERGE of the
+        approved head onto the plan's integration branch is a follow-on slice (the merge
         mechanism — plain PR-merge vs feature-branch integrate — and the integration-branch name
-        source are an open design decision). The marker is the durable record that the
-        integrator consumes: it lists the approved (task, head) pairs not yet integrated."""
-        self._add_verdict_marker(session, task, head_sha, "approve")
+        source are an open design decision). The ``verdict_applications`` row is the durable
+        record the integrator consumes: the approved (task, head) pairs not yet integrated."""
         await session.commit()
         logger.info(
             "dispatch consumer: recorded approval task=%s head=%s (integration is a follow-on)",
             task.id, head_sha,
+        )
+
+    async def _escalate_undeliverable_verdict(self, session: Any, task: Task) -> None:
+        """Persist a durable operator escalation for a verdict we cannot apply (no head_sha, no
+        open PR). Written directly so it lands even in record-only mode; the dashboard escalation
+        bucket reads the ``task.escalated_to_operator`` row. Keeps the drop (we cannot apply)
+        but makes it LOUD so a stalled task is visible, not silent (Bert review)."""
+        session.add(
+            Event(
+                entity_type="task",
+                action="escalated_to_operator",
+                task_id=task.id,
+                payload=encode_payload(
+                    TaskEscalatedToOperator(
+                        task_id=task.id,
+                        repo=task.repo,
+                        reason="verdict_undeliverable",
+                        created_by=task.created_by,
+                    )
+                ),
+            )
+        )
+        await session.commit()
+        logger.warning(
+            "dispatch consumer: verdict for task=%s has no head_sha and no open PR; "
+            "cannot apply — escalated to operator (created_by=%s)",
+            task.id, task.created_by,
         )
 
     async def _dispatch(self, session: Any, task: Task, *, trigger: str) -> bool:

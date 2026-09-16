@@ -65,7 +65,6 @@ from treadmill_api.events.task import (
     TaskRegistered,
     TaskRetry,
     TaskEvaluatorVerdict,
-    TaskVerdictApplied,
     TaskWorkerDepsFailed,
     TaskWorkerHintRequested,
 )
@@ -91,7 +90,6 @@ _REGISTRY_CLASSES: list[type[EventPayload]] = [
     TaskRegistered,
     TaskRetry,
     TaskEvaluatorVerdict,
-    TaskVerdictApplied,
     TaskWorkerDepsFailed,
     OperatorHintSet,
     TaskWorkerHintRequested,
