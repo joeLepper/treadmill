@@ -154,3 +154,42 @@ async def test_drift_against_a_non_main_base_never_merges_main():
     assert r.ran(f"git merge --no-ff --no-edit origin/{base}")
     # the only 'main' allowed is inside the plan slug, never a `origin/main` merge:
     assert not r.ran("merge --no-ff --no-edit origin/main")
+
+
+# ── PR-ref fetch + tip verification (ADR-0119 TOCTOU guard, Bert #421) ─────────
+
+OP_PR = MergeOp(
+    repo="joeLepper/treadmill",
+    task_head="deadbeef" * 5,
+    integration_branch="joes-agents/my-plan",
+    base="main",
+    pr_number=7,
+)
+
+
+@pytest.mark.asyncio
+async def test_pr_ref_verified_tip_matches_then_merges():
+    # fetch refs/pull/7/head; FETCH_HEAD tip == approved head -> proceed and merge.
+    r = ScriptedRunner(
+        {"merge-base --is-ancestor": (1, ""), "rev-parse FETCH_HEAD": (0, OP_PR.task_head)}
+    )
+    assert await integrate_task(r, OP_PR) == "merged"
+    assert r.ran("git fetch origin joes-agents/my-plan refs/pull/7/head")
+    assert r.ran("git rev-parse FETCH_HEAD")
+    assert r.ran("git merge --no-ff --no-edit " + OP_PR.task_head)
+
+
+@pytest.mark.asyncio
+async def test_pr_ref_tip_moved_refuses_to_merge():
+    # the PR head moved since approval -> FETCH_HEAD tip != approved head -> head-moved, NO merge.
+    r = ScriptedRunner({"rev-parse FETCH_HEAD": (0, "f00dbabe" * 5)})  # different sha
+    assert await integrate_task(r, OP_PR) == "head-moved"
+    assert not r.ran("git merge --no-ff")  # never merged unapproved content
+    assert not r.ran("git push")
+
+
+@pytest.mark.asyncio
+async def test_pr_ref_fetch_failure_is_infra():
+    r = ScriptedRunner({"refs/pull/7/head": (1, "network")})
+    assert await integrate_task(r, OP_PR) == "fetch-failed"
+    assert not r.ran("git merge --no-ff")

@@ -33,9 +33,14 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class MergeOp:
     repo: str
-    task_head: str  # the approved task PR's head sha to integrate
+    task_head: str  # the APPROVED task PR's head sha to integrate
     integration_branch: str  # joes-agents/<slug>
     base: str  # the plan's integration_base (resolved; 'main' by default)
+    pr_number: int | None = None
+    """The task's PR number. When set, ``integrate_task`` fetches ``refs/pull/<n>/head`` (a
+    server may not have the bare ``task_head`` reachable — ADR-0119 host integrator) AND verifies
+    the fetched tip still equals ``task_head``, refusing to integrate if the PR head moved since
+    approval (the TOCTOU guard — never merge unapproved content as the operator, Bert #421)."""
 
 
 def integration_branch_for(slug: str) -> str:
@@ -58,7 +63,10 @@ async def integrate_task(runner: GitRunner, op: MergeOp, *, max_retries: int = 3
     textual conflict, aborted; the caller opens a conflict task), ``merge-failed`` /
     ``fetch-failed`` (an INFRA error — missing object, dirty tree, network — the caller
     retries/escalates, NOT a conflict worker), ``push-rejected`` (origin kept advancing past
-    ``max_retries`` — the caller re-drives).
+    ``max_retries`` — the caller re-drives), ``head-moved`` (``pr_number`` set and the PR head no
+    longer equals the approved ``task_head`` — the head moved since approval; the caller escalates
+    for re-eval and NEVER integrates the new, unapproved content — the ADR-0119 identity split's
+    worst-case guard, Bert #421).
 
     ATOMICITY under concurrency (Bert's review): reconcile/retry + multi-replica mean another
     integrate/drift/human can advance ``origin/<branch>`` between our fetch and our push, making
@@ -70,9 +78,32 @@ async def integrate_task(runner: GitRunner, op: MergeOp, *, max_retries: int = 3
     never return ``merged`` on a failed push.
     """
     for _ in range(max_retries + 1):
-        frc, _ = await runner.run("git", "fetch", "origin", op.integration_branch, op.task_head)
-        if frc != 0:
-            return "fetch-failed"  # infra; stale/missing refs would poison the ancestry check.
+        if op.pr_number is not None:
+            # Fetch the PR ref (a server may not have the bare sha reachable) THEN verify its tip
+            # still equals the approved head. A worker force-push between the host's queue read
+            # and this fetch would move refs/pull/<n>/head; merging its current tip blind would
+            # integrate NEVER-APPROVED code as the operator — so we verify and refuse (Bert #421).
+            frc, _ = await runner.run(
+                "git", "fetch", "origin", op.integration_branch,
+                f"refs/pull/{op.pr_number}/head",
+            )
+            if frc != 0:
+                return "fetch-failed"
+            rrc, tip = await runner.run("git", "rev-parse", "FETCH_HEAD")
+            if rrc != 0:
+                return "fetch-failed"
+            if tip.strip() != op.task_head:
+                logger.warning(
+                    "integration: PR #%s head moved (%s != approved %s) — refusing to integrate",
+                    op.pr_number, tip.strip()[:12], op.task_head[:12],
+                )
+                return "head-moved"
+        else:
+            frc, _ = await runner.run(
+                "git", "fetch", "origin", op.integration_branch, op.task_head
+            )
+            if frc != 0:
+                return "fetch-failed"  # infra; stale/missing refs poison the ancestry check.
         rc, _ = await runner.run(
             "git", "merge-base", "--is-ancestor", op.task_head,
             f"origin/{op.integration_branch}",
