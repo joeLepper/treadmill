@@ -838,6 +838,12 @@ class LocalRuntime:
             # here.
             "DATABASE_URL": _API_INTERNAL_DB_URL,
             "REDIS_URL": _API_INTERNAL_REDIS_URL,
+            # ADR-0118/0119 coordinator-router cutover: the lifespan starts the router's dispatch
+            # consumer + reconcile/integration sweeps. SC6-scoped — it acts ONLY on plans whose
+            # ``substrate == 'router'``; legacy plans stay on the agent coordinator, untouched.
+            "TREADMILL_ROUTER_DISPATCH_ENABLED": str(
+                cfg.get("router_dispatch_enabled", True)
+            ).lower(),
         }
         # Inject the API's IAM-User keys last so the
         # env-var dict carries the credential keys the container's

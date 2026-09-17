@@ -276,6 +276,14 @@ class Settings(BaseSettings):
         default=None, alias="FABRIC_INGRESS_URL",
     )
 
+    # ADR-0118/0119 coordinator-router. When true, the API's lifespan starts the router's
+    # dispatch consumer + reconcile/integration sweeps + worker-dispatch sink, and the router
+    # owns dispatch/integration for plans whose ``substrate == 'router'`` (legacy plans stay on
+    # the agent coordinator). Ships DARK (default false) — the enable flag for the cutover.
+    router_dispatch_enabled: bool = Field(
+        default=False, alias="TREADMILL_ROUTER_DISPATCH_ENABLED",
+    )
+
     @property
     def notification_webhook_urls(self) -> list[str]:
         """Parsed list of generic-webhook URLs. Empty list = no fan-out."""
