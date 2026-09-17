@@ -142,17 +142,14 @@ class RouterIntegrator:
         # the operator's gh user, NOT the treadmill-router fallback. Resolved here so a merge is
         # authored by the operator. If unset, we WARN and fall back — commits would then NOT
         # attribute to the operator (the ADR-0119 falsifier), so operating requires setting it.
+        # None when unset/partial. __init__ stays PERMISSIVE (unit tests drive process_candidate
+        # with an injected runner and never need this); run() HARD-FAILS on None so a real poll
+        # loop can never silently merge as the treadmill-router bot (Bert #426, see run()).
         self._identity = (
             identity_env(operator_name, operator_email)
             if operator_name and operator_email
             else None
         )
-        if self._identity is None:
-            logger.warning(
-                "router integrator: no operator git identity (ROUTER_INTEGRATOR_GIT_NAME/EMAIL) — "
-                "integration commits will use the treadmill-router fallback and will NOT attribute "
-                "to the operator's gh user (ADR-0119). Set them before integrating real work."
-            )
         self._stopped = False
 
     async def _runner_factory(self, repo: str) -> GitRunner:
@@ -197,6 +194,18 @@ class RouterIntegrator:
         return len(candidates)
 
     async def run(self) -> None:
+        # HARD-FAIL rather than merge as the bot (Bert #426): without an operator identity the
+        # integrator would silently push operator PRs authored by treadmill-router — the ADR-0119
+        # falsifier, fired irreversibly in prod (the merge is pushed + the PR closed before anyone
+        # reads a journald warning). No legitimate host-integrator run wants bot attribution. So
+        # refuse to start; systemd surfaces the non-zero exit loudly and nothing merges.
+        if self._identity is None:
+            raise RuntimeError(
+                "router integrator: refusing to start without an operator git identity — set "
+                "ROUTER_INTEGRATOR_GIT_NAME + ROUTER_INTEGRATOR_GIT_EMAIL to the operator's gh "
+                "identity (a GitHub-verified email), else integration commits would mis-attribute "
+                "to the treadmill-router bot instead of the operator (ADR-0119)."
+            )
         logger.info("router integrator: polling %s every %ss", self._api_url, self._poll_interval)
         while not self._stopped:
             try:

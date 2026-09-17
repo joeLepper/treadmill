@@ -176,11 +176,19 @@ def test_operator_identity_resolved_from_name_and_email():
     assert ri._identity["GIT_COMMITTER_NAME"] == "Joe Lepper"
 
 
-def test_missing_operator_identity_is_none_so_runner_falls_back_with_a_warning():
-    # unset → None → SubprocessGitRunner uses its treadmill-router fallback; the integrator warns
-    # at construction (operating without it mis-attributes commits, ADR-0119).
+def test_missing_operator_identity_is_permissive_in_init_but_run_hard_fails():
+    # __init__ stays permissive (unit tests drive process_candidate with an injected runner):
     ri = RouterIntegrator(api_url="http://x", state_dir="/tmp/x")
     assert ri._identity is None
     # a name without an email (or vice versa) is treated as unset — both are required.
     ri2 = RouterIntegrator(api_url="http://x", state_dir="/tmp/x", operator_name="Joe Lepper")
     assert ri2._identity is None
+
+
+@pytest.mark.asyncio
+async def test_run_refuses_to_start_without_operator_identity():
+    # HARD-FAIL (Bert #426): a real poll loop must never silently merge as the treadmill-router
+    # bot. run() raises rather than warn-and-fallback, so systemd surfaces it and nothing merges.
+    ri = RouterIntegrator(api_url="http://x", state_dir="/tmp/x")  # no operator identity
+    with pytest.raises(RuntimeError, match="operator git identity"):
+        await ri.run()
