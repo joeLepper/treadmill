@@ -60,8 +60,10 @@ sequenceDiagram
     participant GitHub
     Evaluator->>Router: task.evaluator_verdict (approve)
     Router->>WorkList: record approval (task, head)
-    Integrator->>WorkList: poll approved-not-integrated
-    Integrator->>GitHub: git merge --no-ff + push (as operator)
+    Integrator->>Router: GET /integration_queue (poll)
+    Router->>WorkList: read approved-not-integrated
+    Router-->>Integrator: candidates (task, approved head, branch)
+    Integrator->>GitHub: git merge --no-ff + push approved head (as operator)
     GitHub-->>Router: github.pr_merged
     Router->>Router: dispatch dependents
 ```
