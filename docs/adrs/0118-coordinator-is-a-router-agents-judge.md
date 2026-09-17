@@ -1,6 +1,6 @@
 # ADR-0118: The coordinator is a router (code); the agents that judge are the workers and the validator
 
-- **Status:** accepted
+- **Status:** accepted (amended by ADR-0119 — integration executes host-side as the operator)
 - **Date:** 2026-09-14
 - **Amends:** ADR-0087 (long-lived team execution model) — supersedes its *coordinator-as-agent* core; the worker + validator + peer-review model it defines is kept.
 - **Supersedes:** ADR-0117 (coordinator yields between PRs) — that per-turn cap is an interim bridge, retired only at the end of the migration (below), not on proposal.
