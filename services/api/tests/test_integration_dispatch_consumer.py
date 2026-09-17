@@ -920,13 +920,18 @@ def _seed_approval_at(conn, task_id, head, created_at, gen=1) -> None:
     )
 
 
-def _seed_escalation(conn, task_id, reason) -> None:
+def _seed_escalation(conn, task_id, reason, head=None) -> None:
+    import json as _json
+
+    payload = {"reason": reason}
+    if head is not None:
+        payload["head_sha"] = head  # the queue's by-(task,head) exclusion matches on this
     conn.execute(
         sa.text(
             "INSERT INTO events (entity_type, action, task_id, payload) "
             "VALUES ('task','escalated_to_operator',:t, CAST(:p AS jsonb))"
         ),
-        {"t": task_id, "p": f'{{"reason":"{reason}"}}'},
+        {"t": task_id, "p": _json.dumps(payload)},
     )
 
 
@@ -1040,7 +1045,8 @@ async def test_integration_queue_excludes_merged_stuck_and_main_mode(engine: Eng
         merged = _seed_task(conn, plan)
         _seed_approval(conn, merged, "M"); _mark_pr_merged(conn, merged)  # already integrated
         stuck = _seed_task(conn, plan)
-        _seed_approval(conn, stuck, "S"); _seed_escalation(conn, stuck, "integration_conflict")
+        _seed_approval(conn, stuck, "S")
+        _seed_escalation(conn, stuck, "integration_conflict", head="S")  # escalated AT head S
 
     cands = await _queue()
     assert cands == []  # merged excluded, stuck excluded
@@ -1078,3 +1084,40 @@ async def test_integration_queue_invalid_slug_flagged_not_dropped(engine: Engine
     cands = await _queue()
     assert len(cands) == 1  # returned so the host can escalate, not silently dropped
     assert cands[0].slug_valid is False and cands[0].integration_branch is None
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_stuck_exclusion_is_by_task_and_head(engine: Engine):
+    """Bert #422: the stuck-exclusion is by (task, HEAD), not by task. An escalation AT head H1
+    excludes H1 (so a stale_head/conflict can't re-select+re-escalate every poll), but a FRESH
+    approval at a NEW head H2 still flows (the operator re-evaluated and re-approved)."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        # escalated at H1 (older); then re-approved at H2 (newer) after the operator re-evaluated.
+        _seed_approval_at(conn, task, "H1", "2020-01-01 00:00:00+00", gen=1)
+        _seed_escalation(conn, task, "integration_stale_head", head="H1")
+        _seed_approval_at(conn, task, "H2", "2020-06-01 00:00:00+00", gen=2)
+
+    cands = await _queue()
+    # latest head H2 is NOT excluded (no escalation at H2) → it flows; H1 would be excluded.
+    assert len(cands) == 1 and cands[0].head_sha == "H2"
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_excludes_a_head_still_escalated(engine: Engine):
+    """The complement: when the ONLY approved head is the one that escalated, it stays excluded
+    (no re-selection → no re-escalation-every-poll → the incident stays ackable)."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval(conn, task, "H1")
+        _seed_escalation(conn, task, "integration_stale_head", head="H1")
+
+    assert await _queue() == []  # H1 excluded; nothing else approved → empty, no re-drive

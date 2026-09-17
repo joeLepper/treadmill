@@ -9,8 +9,12 @@ re-implements the query and cannot silently drift from the ADR-0118/#420 rules:
 * LATEST approved head per task (``DISTINCT ON (task) ORDER BY created_at DESC``) — a re-approval
   integrates only the newest head, never a superseded one.
 * NOT already integrated — no ``github.pr_merged`` for the task.
-* NOT stuck — no unresolved ``integration_conflict`` / ``integration_blocked`` escalation (a
-  human clears those via a fresh verdict; the integrator must not re-drive them every poll).
+* NOT stuck AT THIS HEAD — no ``integration_conflict`` / ``integration_blocked`` /
+  ``integration_stale_head`` escalation whose ``payload.head_sha`` equals this candidate's head.
+  The exclusion is by ``(task, head)``, not by task (Bert #422): it stops re-selecting — and so
+  re-escalating — a head the integrator already escalated (a ``stale_head`` recurs every poll
+  otherwise, making the incident un-ackable), while still letting a FRESH approval at a NEW head
+  through. A human clears a stuck head by re-evaluating; the new head is a new row, not excluded.
 * feature-branch mode only (``team_configs.merge_target == 'feature-branch'``); ``main`` mode
   (``gh pr merge``) is a follow-on.
 
@@ -69,7 +73,9 @@ _CANDIDATES_SQL = text(
     "  AND NOT EXISTS ("
     "    SELECT 1 FROM events e2 WHERE e2.task_id = t.id "
     "      AND e2.action = 'escalated_to_operator' "
-    "      AND e2.payload->>'reason' IN ('integration_conflict','integration_blocked')"
+    "      AND e2.payload->>'reason' IN "
+    "          ('integration_conflict','integration_blocked','integration_stale_head') "
+    "      AND e2.payload->>'head_sha' = va.head_sha"
     "  ) "
     "ORDER BY va.task_id, va.created_at DESC"
 )

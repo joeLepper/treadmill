@@ -35,9 +35,11 @@ coordinator). See ADR-0119 for the full rationale, the trust flow, and the falsi
 The unit runs headless, so it **cannot** use an interactive `gh` keychain. Provide a
 non-interactive credential the unit's user can read, one of:
 
-- a git credential helper storing a PAT for `https://github.com` (`git config --global
-  credential.helper store` + a `~/.git-credentials` line with a `pull_requests:write`+
-  `contents:write` PAT for the operator), or
+- a git credential helper storing a **fine-grained PAT** for `https://github.com`, scoped to the
+  integrated repos with `Contents: Read and write` + `Pull requests: Read and write` (prefer this
+  over a classic `repo`-scope PAT — least privilege). `git config --global credential.helper
+  store` writes the token in **plaintext** to `~/.git-credentials`, so `chmod 600
+  ~/.git-credentials` and treat that file as a secret; or
 - an ssh deploy/user key and an `ssh` remote (set `remote_url_template` to
   `git@github.com:{repo}.git`).
 
@@ -49,8 +51,10 @@ the router integrates, and store it readable only by the unit's user.
 1. Confirm the api is up and reachable at `TREADMILL_API_URL` and at least one plan is
    `substrate=router` with `merge_target=feature-branch`.
 2. Provision the operator credential (above); verify `git push` works as the operator by hand.
-3. Install + start the unit (operator's call — begins autonomous merges):
-   `cp systemd/treadmill-router-integrator.service ~/.config/systemd/user/ && \
+3. Install + start the unit (operator's call — begins autonomous merges). A `--user` unit dies on
+   operator logout unless lingering is on, so enable linger first (headless host):
+   `loginctl enable-linger "$USER" && \
+    cp systemd/treadmill-router-integrator.service ~/.config/systemd/user/ && \
     systemctl --user enable --now treadmill-router-integrator`
 4. Verify: `GET /api/v1/integration_queue` drains as tasks are approved, the resulting
    `joes-agents/<slug>` merge commits are authored by the **operator** (not `treadmill[bot]` —

@@ -149,7 +149,11 @@ class RouterIntegrator:
                     "entity_type": "task",
                     "action": "escalated_to_operator",
                     "task_id": c.task_id,
-                    "payload": {"reason": reason, "repo": c.repo},
+                    # head_sha is load-bearing: the queue's stuck-exclusion is by (task, head), so
+                    # this escalation stops re-selection of THIS head while a fresh approval at a
+                    # new head still flows (Bert #422). Without it a stale_head re-escalates every
+                    # poll and the incident is un-ackable.
+                    "payload": {"reason": reason, "repo": c.repo, "head_sha": c.head_sha},
                 },
             )
             logger.warning("escalated task=%s reason=%s", c.task_id, reason)
