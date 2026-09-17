@@ -1,6 +1,6 @@
 # ADR-0119: Router integration executes on the rainbow host as the operator, not in the API container
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-09-16
 - **Amends:** ADR-0118 (the coordinator is a router) — it moved coordination into server code but left the integration EXECUTION locus and identity unspecified; this pins them.
 - **Related:** ADR-0110 (feature-branch integration), ADR-0049 (GitHub App identity `treadmill[bot]`), ADR-0016 (dev-local topology — the API runs as a container).
