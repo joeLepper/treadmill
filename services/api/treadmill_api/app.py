@@ -35,6 +35,7 @@ from treadmill_api.routers.context_docs import router as context_docs_router
 from treadmill_api.routers.dashboard import router as dashboard_router
 from treadmill_api.routers.escalations import router as escalations_router
 from treadmill_api.routers.events import router as events_router
+from treadmill_api.routers.integration_queue import router as integration_queue_router
 from treadmill_api.routers.github import router as github_router
 from treadmill_api.routers.onboarding import router as onboarding_router
 from treadmill_api.routers.plans import router as plans_router
@@ -329,6 +330,7 @@ def create_app() -> FastAPI:
     app.include_router(schedules_router)
     app.include_router(system_status_router)
     app.include_router(events_router)
+    app.include_router(integration_queue_router)
     app.include_router(github_router)
     app.include_router(webhooks_router)
     app.include_router(onboarding_router)

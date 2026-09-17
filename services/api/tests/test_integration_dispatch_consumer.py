@@ -974,3 +974,107 @@ async def test_sweep_excludes_a_stuck_escalated_approval(engine: Engine):
 
     assert n == 0  # excluded from the candidate set
     assert runner.calls == []  # not re-driven, so not re-escalated
+
+
+# ── integration_queue endpoint / candidate selection (ADR-0119) — alan ─────────
+
+
+async def _queue(engine_unused=None):
+    from treadmill_api.coordination.integration_queue import approved_integration_candidates
+    async with _async_maker()() as session:
+        return await approved_integration_candidates(session)
+
+
+def _seed_pr(conn, task_id, head, pr_number) -> None:
+    conn.execute(
+        sa.text(
+            "INSERT INTO task_prs (repo, pr_number, task_id, head_sha) VALUES (:r,:n,:t,:h)"
+        ),
+        {"r": REPO, "n": pr_number, "t": task_id, "h": head},
+    )
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_returns_ready_candidate_with_derived_branch(engine: Engine):
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])  # merge_target defaults to feature-branch
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md", integration_base="main")
+        task = _seed_task(conn, plan)
+        _seed_pr(conn, task, "HEADSHA", 42)
+        _seed_approval(conn, task, "HEADSHA")
+
+    cands = await _queue()
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.task_id == str(task) and c.repo == REPO
+    assert c.head_sha == "HEADSHA" and c.pr_number == 42
+    assert c.integration_base == "main"
+    assert c.slug_valid is True
+    assert c.integration_branch == "joes-agents/2026-09-13-demo"
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_latest_head_only(engine: Engine):
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval_at(conn, task, "H1", "2020-01-01 00:00:00+00", gen=1)
+        _seed_approval_at(conn, task, "H2", "2020-06-01 00:00:00+00", gen=2)
+
+    cands = await _queue()
+    assert len(cands) == 1 and cands[0].head_sha == "H2"  # newest only
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_excludes_merged_stuck_and_main_mode(engine: Engine):
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        merged = _seed_task(conn, plan)
+        _seed_approval(conn, merged, "M"); _mark_pr_merged(conn, merged)  # already integrated
+        stuck = _seed_task(conn, plan)
+        _seed_approval(conn, stuck, "S"); _seed_escalation(conn, stuck, "integration_conflict")
+
+    cands = await _queue()
+    assert cands == []  # merged excluded, stuck excluded
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_main_mode_excluded(engine: Engine):
+    with engine.begin() as conn:
+        _truncate(conn)
+        conn.execute(
+            sa.text(
+                "INSERT INTO team_configs (repo, coordinator_label, worker_labels, merge_target) "
+                "VALUES (:r,'c',:w,'main')"
+            ),
+            {"r": REPO, "w": ["worker-tm-1"]},
+        )
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval(conn, task, "HEADSHA")
+
+    assert await _queue() == []  # main-mode is not host-integrated (gh pr merge follow-on)
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_invalid_slug_flagged_not_dropped(engine: Engine):
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13 has space.md")  # invalid ref
+        task = _seed_task(conn, plan)
+        _seed_approval(conn, task, "HEADSHA")
+
+    cands = await _queue()
+    assert len(cands) == 1  # returned so the host can escalate, not silently dropped
+    assert cands[0].slug_valid is False and cands[0].integration_branch is None

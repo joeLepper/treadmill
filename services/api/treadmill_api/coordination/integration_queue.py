@@ -1,0 +1,97 @@
+"""The approved-integration work-list — ADR-0119, the api→host-integrator contract.
+
+ADR-0119 splits approve→integration: the api container DECIDES (records approvals to
+``verdict_applications``) and a host-side integrator, running as the operator, EXECUTES the git
+merge. This module is the SINGLE source of the candidate SELECTION both sides trust — exposed to
+the host integrator over the API (``GET /api/v1/integration_queue``) so the host never
+re-implements the query and cannot silently drift from the ADR-0118/#420 rules:
+
+* LATEST approved head per task (``DISTINCT ON (task) ORDER BY created_at DESC``) — a re-approval
+  integrates only the newest head, never a superseded one.
+* NOT already integrated — no ``github.pr_merged`` for the task.
+* NOT stuck — no unresolved ``integration_conflict`` / ``integration_blocked`` escalation (a
+  human clears those via a fresh verdict; the integrator must not re-drive them every poll).
+* feature-branch mode only (``team_configs.merge_target == 'feature-branch'``); ``main`` mode
+  (``gh pr merge``) is a follow-on.
+
+Slug/branch derivation (``integration_slug`` + ``is_valid_ref_component``, ADR-0118) is applied
+here so the host receives a ready ``integration_branch`` — or ``slug_valid=False`` when the plan
+doc basename is not a legal git ref, which the host escalates (``integration_blocked``) rather
+than attempting an unpushable branch.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy import text
+
+from treadmill_api.coordination.dispatch_consumer import (
+    integration_slug,
+    is_valid_ref_component,
+)
+from treadmill_api.coordination.integration_merger import integration_branch_for
+
+
+@dataclass(frozen=True)
+class IntegrationCandidate:
+    """One approved task ready for the host integrator to merge. ``integration_branch`` is the
+    derived ``joes-agents/<slug>`` when ``slug_valid``, else ``None`` (the host escalates)."""
+
+    task_id: str
+    repo: str
+    pr_number: int | None
+    head_sha: str
+    integration_base: str
+    slug_valid: bool
+    integration_branch: str | None
+
+
+# The candidate SELECTION — the single source of truth for "approved but not yet integrated"
+# (ADR-0119). The host reads this via the API; keep the ADR-0118/#420 rules here and nowhere else.
+_CANDIDATES_SQL = text(
+    "SELECT DISTINCT ON (va.task_id) "
+    "  va.task_id, t.repo, p.doc_path, COALESCE(p.integration_base, 'main') AS base, "
+    "  va.head_sha, "
+    "  (SELECT pr.pr_number FROM task_prs pr "
+    "     WHERE pr.task_id = va.task_id AND pr.head_sha = va.head_sha "
+    "     ORDER BY pr.created_at DESC LIMIT 1) AS pr_number "
+    "FROM verdict_applications va "
+    "JOIN tasks t ON t.id = va.task_id "
+    "JOIN plans p ON p.id = t.plan_id "
+    "JOIN team_configs tc ON tc.repo = t.repo "
+    "WHERE va.decision = 'approve' AND p.substrate = 'router' "
+    "  AND tc.merge_target = 'feature-branch' "
+    "  AND NOT EXISTS ("
+    "    SELECT 1 FROM events e WHERE e.task_id = t.id AND e.action = 'pr_merged'"
+    "  ) "
+    "  AND NOT EXISTS ("
+    "    SELECT 1 FROM events e2 WHERE e2.task_id = t.id "
+    "      AND e2.action = 'escalated_to_operator' "
+    "      AND e2.payload->>'reason' IN ('integration_conflict','integration_blocked')"
+    "  ) "
+    "ORDER BY va.task_id, va.created_at DESC"
+)
+
+
+async def approved_integration_candidates(session: Any) -> list[IntegrationCandidate]:
+    """The current approved-not-integrated feature-branch work-list, latest head per task, with
+    the derived integration branch. Pure read; no side effects (escalation is the host's job)."""
+    rows = (await session.execute(_CANDIDATES_SQL)).all()
+    candidates: list[IntegrationCandidate] = []
+    for task_id, repo, doc_path, base, head_sha, pr_number in rows:
+        slug = integration_slug(doc_path)
+        valid = slug is not None and is_valid_ref_component(slug)
+        candidates.append(
+            IntegrationCandidate(
+                task_id=str(task_id),
+                repo=str(repo),
+                pr_number=int(pr_number) if pr_number is not None else None,
+                head_sha=str(head_sha),
+                integration_base=str(base),
+                slug_valid=valid,
+                integration_branch=integration_branch_for(slug) if valid else None,
+            )
+        )
+    return candidates
