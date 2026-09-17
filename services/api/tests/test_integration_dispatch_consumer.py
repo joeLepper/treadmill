@@ -1121,3 +1121,21 @@ async def test_integration_queue_excludes_a_head_still_escalated(engine: Engine)
         _seed_escalation(conn, task, "integration_stale_head", head="H1")
 
     assert await _queue() == []  # H1 excluded; nothing else approved → empty, no re-drive
+
+
+@pytest.mark.asyncio
+async def test_integration_queue_escalated_latest_does_not_resurface_superseded(engine: Engine):
+    """Bert #423: the head-exclusion is POST-collapse. If the LATEST head H2 is escalated, the
+    task is EMPTY — it must NOT resurface the superseded earlier head H1 (an un-escalated older
+    approval). A per-row exclusion would wrongly return H1; the CTE collapses to H2 first."""
+    with engine.begin() as conn:
+        _truncate(conn)
+        _seed_team_config(conn, REPO, ["worker-tm-1"])
+        plan = _seed_plan(conn, substrate="router")
+        _set_plan_doc(conn, plan, "docs/plans/2026-09-13-demo.md")
+        task = _seed_task(conn, plan)
+        _seed_approval_at(conn, task, "H1", "2020-01-01 00:00:00+00", gen=1)  # older, NOT escalated
+        _seed_approval_at(conn, task, "H2", "2020-06-01 00:00:00+00", gen=2)  # latest
+        _seed_escalation(conn, task, "integration_stale_head", head="H2")     # latest escalated
+
+    assert await _queue() == []  # latest H2 excluded; superseded H1 must NOT resurface

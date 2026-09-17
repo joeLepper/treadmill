@@ -54,30 +54,41 @@ class IntegrationCandidate:
 
 # The candidate SELECTION — the single source of truth for "approved but not yet integrated"
 # (ADR-0119). The host reads this via the API; keep the ADR-0118/#420 rules here and nowhere else.
+#
+# The head-keyed stuck-exclusion is applied POST-collapse (Bert #423): pick the LATEST approved
+# head per task FIRST (the CTE's DISTINCT ON), THEN exclude the task iff THAT head is escalated.
+# Applying it per-va-row instead would filter out an escalated LATEST head and resurface a
+# SUPERSEDED earlier one — violating "integrate only the newest head." (A pre-#423 escalation
+# event has no payload.head_sha, so `->>'head_sha'` is NULL and it stops excluding; harmless —
+# the integrator never ran in prod before this.)
 _CANDIDATES_SQL = text(
-    "SELECT DISTINCT ON (va.task_id) "
-    "  va.task_id, t.repo, p.doc_path, COALESCE(p.integration_base, 'main') AS base, "
-    "  va.head_sha, "
-    "  (SELECT pr.pr_number FROM task_prs pr "
-    "     WHERE pr.task_id = va.task_id AND pr.head_sha = va.head_sha "
-    "     ORDER BY pr.created_at DESC LIMIT 1) AS pr_number "
-    "FROM verdict_applications va "
-    "JOIN tasks t ON t.id = va.task_id "
-    "JOIN plans p ON p.id = t.plan_id "
-    "JOIN team_configs tc ON tc.repo = t.repo "
-    "WHERE va.decision = 'approve' AND p.substrate = 'router' "
-    "  AND tc.merge_target = 'feature-branch' "
-    "  AND NOT EXISTS ("
-    "    SELECT 1 FROM events e WHERE e.task_id = t.id AND e.action = 'pr_merged'"
-    "  ) "
-    "  AND NOT EXISTS ("
-    "    SELECT 1 FROM events e2 WHERE e2.task_id = t.id "
-    "      AND e2.action = 'escalated_to_operator' "
-    "      AND e2.payload->>'reason' IN "
-    "          ('integration_conflict','integration_blocked','integration_stale_head') "
-    "      AND e2.payload->>'head_sha' = va.head_sha"
-    "  ) "
-    "ORDER BY va.task_id, va.created_at DESC"
+    "WITH latest AS ("
+    "  SELECT DISTINCT ON (va.task_id) "
+    "    va.task_id, t.repo, p.doc_path, COALESCE(p.integration_base, 'main') AS base, "
+    "    va.head_sha, "
+    "    (SELECT pr.pr_number FROM task_prs pr "
+    "       WHERE pr.task_id = va.task_id AND pr.head_sha = va.head_sha "
+    "       ORDER BY pr.created_at DESC LIMIT 1) AS pr_number "
+    "  FROM verdict_applications va "
+    "  JOIN tasks t ON t.id = va.task_id "
+    "  JOIN plans p ON p.id = t.plan_id "
+    "  JOIN team_configs tc ON tc.repo = t.repo "
+    "  WHERE va.decision = 'approve' AND p.substrate = 'router' "
+    "    AND tc.merge_target = 'feature-branch' "
+    "    AND NOT EXISTS ("
+    "      SELECT 1 FROM events e WHERE e.task_id = va.task_id AND e.action = 'pr_merged'"
+    "    ) "
+    "  ORDER BY va.task_id, va.created_at DESC"
+    ") "
+    "SELECT l.task_id, l.repo, l.doc_path, l.base, l.head_sha, l.pr_number "
+    "FROM latest l "
+    "WHERE NOT EXISTS ("
+    "  SELECT 1 FROM events e2 WHERE e2.task_id = l.task_id "
+    "    AND e2.action = 'escalated_to_operator' "
+    "    AND e2.payload->>'reason' IN "
+    "        ('integration_conflict','integration_blocked','integration_stale_head') "
+    "    AND e2.payload->>'head_sha' = l.head_sha"
+    ")"
 )
 
 
