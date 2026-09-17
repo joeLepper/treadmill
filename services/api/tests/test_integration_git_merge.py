@@ -75,3 +75,22 @@ async def test_real_git_integrate_then_idempotent(repo):
 
     # Second integrate of the same head: idempotent no-op (ancestry check on real refs).
     assert await integrate_task(runner, op) == "already-integrated"
+
+
+@pytest.mark.asyncio
+async def test_merge_commit_uses_the_injected_operator_identity(repo):
+    """ADR-0119 identity fix (verified in a live treadmill spin): the merge commit's author +
+    committer come from the SubprocessGitRunner's injected identity, NOT the treadmill-router
+    fallback — so integration attributes to the operator. Real git, real merge commit."""
+    from treadmill_api.coordination.git_runner import identity_env
+
+    work, branch, task_head = repo
+    runner = SubprocessGitRunner(str(work), identity=identity_env("Alice Op", "alice@example.com"))
+    op = MergeOp(repo="o/r", task_head=task_head, integration_branch=branch, base="main")
+    assert await integrate_task(runner, op) == "merged"
+    # read the merge commit (HEAD of the integration branch) author from the working clone
+    await runner.run("git", "fetch", "origin", branch)
+    author = _git(work, "log", "-1", "--format=%an <%ae>", f"origin/{branch}").strip()
+    committer = _git(work, "log", "-1", "--format=%cn <%ce>", f"origin/{branch}").strip()
+    assert author == "Alice Op <alice@example.com>", author
+    assert committer == "Alice Op <alice@example.com>", committer

@@ -16,6 +16,11 @@ Type=simple
 WorkingDirectory=%h/treadmill/services/api
 Environment=TREADMILL_API_URL=http://localhost:8088
 Environment=ROUTER_INTEGRATOR_STATE_DIR=%h/.treadmill/router-clones
+# The OPERATOR git identity for integration commits (ADR-0119). MUST match a verified email on
+# the operator's GitHub account so merge commits ATTRIBUTE to the operator (not the
+# treadmill-router fallback). Set these to the operator's gh identity before enabling.
+Environment=ROUTER_INTEGRATOR_GIT_NAME=Joe Lepper
+Environment=ROUTER_INTEGRATOR_GIT_EMAIL=josephlepper@gmail.com
 # The operator's NON-INTERACTIVE git push credential must be reachable by this unit
 # (a git credential helper / gh token or an ssh key) -- an interactive gh keychain is NOT
 # available to a systemd unit. See AGENT.md "Credential".
