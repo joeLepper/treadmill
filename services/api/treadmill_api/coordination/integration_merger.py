@@ -79,13 +79,14 @@ async def integrate_task(runner: GitRunner, op: MergeOp, *, max_retries: int = 3
     """
     for _ in range(max_retries + 1):
         if op.pr_number is not None:
-            # Fetch the PR ref (a server may not have the bare sha reachable) THEN verify its tip
-            # still equals the approved head. A worker force-push between the host's queue read
-            # and this fetch would move refs/pull/<n>/head; merging its current tip blind would
-            # integrate NEVER-APPROVED code as the operator — so we verify and refuse (Bert #421).
+            # Fetch the PR ref ALONE, so `rev-parse FETCH_HEAD` unambiguously names the PR tip —
+            # a multi-ref fetch writes several FETCH_HEAD lines and rev-parse would resolve the
+            # FIRST (the branch), verifying the wrong ref. Then verify the tip still equals the
+            # approved head: a worker force-push between the host's queue read and this fetch
+            # moves refs/pull/<n>/head, and merging its current tip blind would integrate
+            # NEVER-APPROVED code as the operator — so we verify and refuse (Bert #421).
             frc, _ = await runner.run(
-                "git", "fetch", "origin", op.integration_branch,
-                f"refs/pull/{op.pr_number}/head",
+                "git", "fetch", "origin", f"refs/pull/{op.pr_number}/head"
             )
             if frc != 0:
                 return "fetch-failed"
@@ -98,6 +99,10 @@ async def integrate_task(runner: GitRunner, op: MergeOp, *, max_retries: int = 3
                     op.pr_number, tip.strip()[:12], op.task_head[:12],
                 )
                 return "head-moved"
+            # The approved sha is now local (via the PR ref); fetch the branch for the ancestry.
+            frc, _ = await runner.run("git", "fetch", "origin", op.integration_branch)
+            if frc != 0:
+                return "fetch-failed"
         else:
             frc, _ = await runner.run(
                 "git", "fetch", "origin", op.integration_branch, op.task_head

@@ -174,7 +174,11 @@ async def test_pr_ref_verified_tip_matches_then_merges():
         {"merge-base --is-ancestor": (1, ""), "rev-parse FETCH_HEAD": (0, OP_PR.task_head)}
     )
     assert await integrate_task(r, OP_PR) == "merged"
-    assert r.ran("git fetch origin joes-agents/my-plan refs/pull/7/head")
+    # the PR ref is fetched ALONE (so rev-parse FETCH_HEAD names the PR tip, not the branch),
+    # then the branch is fetched separately.
+    assert r.ran("git fetch origin refs/pull/7/head")
+    assert r.ran("git fetch origin joes-agents/my-plan")
+    assert not r.ran("git fetch origin joes-agents/my-plan refs/pull/7/head")  # never combined
     assert r.ran("git rev-parse FETCH_HEAD")
     assert r.ran("git merge --no-ff --no-edit " + OP_PR.task_head)
 
