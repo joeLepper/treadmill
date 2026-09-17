@@ -80,6 +80,11 @@ class TaskEscalatedToOperator(EventPayload):
         # not a legal git ref, so the branch is unpushable and integration would infra-fail
         # forever. The router escalates instead of looping.
         "integration_blocked",
+        # ADR-0119 host integrator: the PR head moved since approval (task_prs.head_sha no longer
+        # equals the approved head, or the fetched PR-ref tip differs), so there is no approved
+        # head to integrate. The integrator refuses (never merges unapproved content as the
+        # operator) and escalates for re-evaluation of the new head.
+        "integration_stale_head",
     ] | None = None
     # ADR-0058: populated for ``reason='gate-broken'`` with the failing
     # deterministic gate's stderr. The architect role copies it from
