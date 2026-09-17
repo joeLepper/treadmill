@@ -46,6 +46,18 @@ non-interactive credential the unit's user can read, one of:
 This is a long-lived operator credential on rainbow — a security surface. Scope it to the repos
 the router integrates, and store it readable only by the unit's user.
 
+## Commit identity (ADR-0119 — attribution)
+
+Distinct from the PUSH credential: the merge COMMIT's author/committer. Set
+`ROUTER_INTEGRATOR_GIT_NAME` + `ROUTER_INTEGRATOR_GIT_EMAIL` (in the unit) to the operator's gh
+identity, with an **email verified on the operator's GitHub account**, so GitHub attributes the
+integration merge commits to the operator. If unset, the integrator warns and falls back to the
+`treadmill-router` bot identity — commits then do NOT attribute to the operator (the ADR-0119
+falsifier). The push credential and the commit identity are independent: a push as the operator
+with a bot commit-author still mis-attributes the commit. Verified in a live spin on treadmill
+(2026-09-16): unset → commit authored by `treadmill-router`; set → authored by the operator and
+attributed to their gh user.
+
 ## Enable runbook
 
 1. Confirm the api is up and reachable at `TREADMILL_API_URL` and at least one plan is

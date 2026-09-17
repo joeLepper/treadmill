@@ -161,3 +161,26 @@ async def test_poll_once_contains_a_poison_candidate_and_continues():
     # the poison one was contained; the second (invalid slug) still escalated.
     assert any(p["task_id"] == "good" and p["payload"]["reason"] == "integration_blocked"
                for p in http.posts)
+
+
+# ── operator commit identity (ADR-0119 identity fix) ───────────────────────────
+
+
+def test_operator_identity_resolved_from_name_and_email():
+    from treadmill_api.coordination.git_runner import identity_env
+
+    ri = RouterIntegrator(api_url="http://x", state_dir="/tmp/x",
+                          operator_name="Joe Lepper", operator_email="joe@example.com")
+    assert ri._identity == identity_env("Joe Lepper", "joe@example.com")
+    assert ri._identity["GIT_AUTHOR_EMAIL"] == "joe@example.com"
+    assert ri._identity["GIT_COMMITTER_NAME"] == "Joe Lepper"
+
+
+def test_missing_operator_identity_is_none_so_runner_falls_back_with_a_warning():
+    # unset → None → SubprocessGitRunner uses its treadmill-router fallback; the integrator warns
+    # at construction (operating without it mis-attributes commits, ADR-0119).
+    ri = RouterIntegrator(api_url="http://x", state_dir="/tmp/x")
+    assert ri._identity is None
+    # a name without an email (or vice versa) is treated as unset — both are required.
+    ri2 = RouterIntegrator(api_url="http://x", state_dir="/tmp/x", operator_name="Joe Lepper")
+    assert ri2._identity is None

@@ -35,7 +35,11 @@ from typing import Any
 
 import httpx
 
-from treadmill_api.coordination.git_runner import SubprocessGitRunner, ensure_working_clone
+from treadmill_api.coordination.git_runner import (
+    SubprocessGitRunner,
+    ensure_working_clone,
+    identity_env,
+)
 from treadmill_api.coordination.integration_merger import GitRunner, MergeOp, integrate_task
 
 logger = logging.getLogger("treadmill.router_integrator")
@@ -126,18 +130,35 @@ class RouterIntegrator:
         remote_url_template: str = "https://github.com/{repo}.git",
         poll_interval: float = 30.0,
         http: httpx.AsyncClient | None = None,
+        operator_name: str | None = None,
+        operator_email: str | None = None,
     ) -> None:
         self._api_url = api_url.rstrip("/")
         self._state_dir = state_dir
         self._remote_url_template = remote_url_template
         self._poll_interval = poll_interval
         self._http = http or httpx.AsyncClient(timeout=30.0)
+        # The OPERATOR git identity for integration commits (ADR-0119): commits must attribute to
+        # the operator's gh user, NOT the treadmill-router fallback. Resolved here so a merge is
+        # authored by the operator. If unset, we WARN and fall back — commits would then NOT
+        # attribute to the operator (the ADR-0119 falsifier), so operating requires setting it.
+        self._identity = (
+            identity_env(operator_name, operator_email)
+            if operator_name and operator_email
+            else None
+        )
+        if self._identity is None:
+            logger.warning(
+                "router integrator: no operator git identity (ROUTER_INTEGRATOR_GIT_NAME/EMAIL) — "
+                "integration commits will use the treadmill-router fallback and will NOT attribute "
+                "to the operator's gh user (ADR-0119). Set them before integrating real work."
+            )
         self._stopped = False
 
     async def _runner_factory(self, repo: str) -> GitRunner:
         remote_url = self._remote_url_template.format(repo=repo)
         path = await ensure_working_clone(repo, self._state_dir, remote_url)
-        return SubprocessGitRunner(path)
+        return SubprocessGitRunner(path, identity=self._identity)
 
     async def _escalate(self, c: Candidate, reason: str) -> None:
         """POST the operator escalation as an event (the dashboard escalation bucket reads it).
@@ -197,12 +218,15 @@ def main() -> None:
         ),
     )
     parser.add_argument("--poll-interval", type=float, default=30.0)
+    parser.add_argument("--operator-name", default=os.environ.get("ROUTER_INTEGRATOR_GIT_NAME"))
+    parser.add_argument("--operator-email", default=os.environ.get("ROUTER_INTEGRATOR_GIT_EMAIL"))
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     integrator = RouterIntegrator(
-        api_url=args.api_url, state_dir=args.state_dir, poll_interval=args.poll_interval
+        api_url=args.api_url, state_dir=args.state_dir, poll_interval=args.poll_interval,
+        operator_name=args.operator_name, operator_email=args.operator_email,
     )
     asyncio.run(integrator.run())
 
