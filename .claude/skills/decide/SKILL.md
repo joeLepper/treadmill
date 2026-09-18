@@ -120,6 +120,21 @@ sequenceDiagram
 
 ## Authoring conventions
 
+### Audience and agent attribution
+
+Write ADRs, plans, PR descriptions, and review summaries for coworkers who do not
+know the agent fleet. Do not mention agents by personal name, nickname, or session
+label, including in author/reviewer metadata. Describe roles, findings, evidence,
+and outcomes instead (for example, "independent cross-model review approved the
+revision"). Include model-family provenance only when it explains a material
+review or technical constraint. Preserve human ownership/accountability and
+machine-required routing identifiers; this rule does not anonymize operational
+records or remove technically relevant product/model names. Use a specific agent
+identity only when the user explicitly requests it or that identity is itself the
+subject of the document.
+
+### Style
+
 - **Voice is collective first-person plural.** Use "we" throughout the body. Avoid personal names and individualized framings ("X needs," "the team will") — the ADR records a shared decision, not an individual's preference. Quote individuals only when citing a constraint they imposed; even then, the surrounding analysis is "we."
 - **Write in past-completed tense for the decision itself.** "We decided to..." not "We will...". The ADR is the record of a moment.
 - **Use absolute dates.** "Today" is meaningless when the ADR is read in two years.
