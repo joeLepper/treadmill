@@ -32,26 +32,24 @@ POST /api/v1/task_executions/reconcile-coordinator-restart
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
-
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.models import Task, TaskExecution
 from treadmill_api.routers.task_executions import router
 
-
 # ── Stub helpers ────────────────────────────────────────────────────────
 
 
-def _stub_task(task_id: uuid.UUID) -> MagicMock:
+def _stub_task(task_id: uuid.UUID, generation: int = 1) -> MagicMock:
     t = MagicMock(spec=Task)
     t.id = task_id
     t.workflow_version_id = uuid.uuid4()
+    t.generation = generation
     return t
 
 
@@ -72,7 +70,7 @@ def _stub_execution(
     ex.trigger = trigger
     ex.status = status
     ex.failure_reason = failure_reason
-    ex.started_at = started_at or datetime.now(timezone.utc)
+    ex.started_at = started_at or datetime.now(UTC)
     ex.completed_at = completed_at
     return ex
 
@@ -108,9 +106,9 @@ class _StubSession:
             if not hasattr(obj, "id") or obj.id is None:
                 object.__setattr__(obj, "id", uuid.uuid4())
             if not hasattr(obj, "started_at") or obj.started_at is None:
-                object.__setattr__(obj, "started_at", datetime.now(timezone.utc))
+                object.__setattr__(obj, "started_at", datetime.now(UTC))
             if not hasattr(obj, "created_at") or obj.created_at is None:
-                object.__setattr__(obj, "created_at", datetime.now(timezone.utc))
+                object.__setattr__(obj, "created_at", datetime.now(UTC))
 
     async def refresh(self, obj: object) -> None:
         pass
@@ -191,8 +189,7 @@ class TestCreateTaskExecution:
         """
         task_id = uuid.uuid4()
         integrity_err = IntegrityError(
-            "duplicate key value violates unique constraint "
-            '"uq_task_executions_spawn"',
+            'duplicate key value violates unique constraint "uq_task_executions_spawn"',
             params=None,
             orig=Exception("unique violation"),
         )
@@ -212,6 +209,58 @@ class TestCreateTaskExecution:
         )
         assert resp.status_code == 409, resp.text
         assert "already exists" in resp.json()["detail"]
+
+    def test_creates_at_the_task_current_generation(self) -> None:
+        # ADR-0118 SC3: the execution records the task's CURRENT generation, not the
+        # column default of 1 — so a rework dispatched after tasks.generation was bumped
+        # lands at the new generation and does not collide with the initial dispatch.
+        task_id = uuid.uuid4()
+        session = _StubSession(get_returns=_stub_task(task_id, generation=2))
+        client = TestClient(_app(session))
+
+        resp = client.post(
+            "/api/v1/task_executions",
+            json={
+                "task_id": str(task_id),
+                "worker_label": "worker-treadmill-1",
+                "trigger": "evaluator-rework",
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["generation"] == 2
+
+    def test_409_author_generation_names_the_real_constraint(self) -> None:
+        """The author-generation index (task_id, generation) fires → 409 that names
+        THAT constraint and points at the generation bump, not the spawn constraint —
+        the common surprise when a rework is POSTed without bumping tasks.generation."""
+        task_id = uuid.uuid4()
+        orig = Exception("unique violation")
+        orig.constraint_name = "uq_task_executions_author_generation"
+        integrity_err = IntegrityError(
+            'duplicate key value violates unique constraint "uq_task_executions_author_generation"',
+            params=None,
+            orig=orig,
+        )
+        session = _StubSession(
+            get_returns=_stub_task(task_id, generation=1),
+            flush_raises=integrity_err,
+        )
+        client = TestClient(_app(session))
+
+        resp = client.post(
+            "/api/v1/task_executions",
+            json={
+                "task_id": str(task_id),
+                "worker_label": "worker-treadmill-1",
+                "trigger": "evaluator-rework",
+            },
+        )
+
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert "generation" in detail
+        assert "uq_task_executions_spawn" not in detail
 
     def test_422_invalid_trigger(self) -> None:
         task_id = uuid.uuid4()
@@ -391,9 +440,7 @@ class TestListTaskExecutions:
         session = _StubSession(scalars_returns=[])
         client = TestClient(_app(session))
 
-        resp = client.get(
-            f"/api/v1/task_executions?task_id={task_id}&status=not-a-real-status"
-        )
+        resp = client.get(f"/api/v1/task_executions?task_id={task_id}&status=not-a-real-status")
 
         assert resp.status_code == 422
 
@@ -432,9 +479,7 @@ class TestReconcileCoordinatorRestart:
         session = _StubSession(rowcount=40)
         client = TestClient(_app(session))
 
-        resp = client.post(
-            "/api/v1/task_executions/reconcile-coordinator-restart"
-        )
+        resp = client.post("/api/v1/task_executions/reconcile-coordinator-restart")
 
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"reconciled": 40}
@@ -444,9 +489,7 @@ class TestReconcileCoordinatorRestart:
         session = _StubSession(rowcount=0)
         client = TestClient(_app(session))
 
-        resp = client.post(
-            "/api/v1/task_executions/reconcile-coordinator-restart"
-        )
+        resp = client.post("/api/v1/task_executions/reconcile-coordinator-restart")
 
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"reconciled": 0}
