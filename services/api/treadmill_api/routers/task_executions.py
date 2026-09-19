@@ -43,12 +43,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from treadmill_api.dependencies_db import get_session
 from treadmill_api.models import Task, TaskExecution
 
-
 router = APIRouter(prefix="/api/v1", tags=["task_executions"])
 
-_VALID_TRIGGERS = frozenset(
-    {"initial", "coordinator-rework", "evaluator-rework", "peer-review"}
-)
+_VALID_TRIGGERS = frozenset({"initial", "coordinator-rework", "evaluator-rework", "peer-review"})
 _VALID_STATUSES = frozenset({"running", "completed", "failed"})
 
 
@@ -64,9 +61,7 @@ class TaskExecutionCreate(BaseModel):
     @classmethod
     def validate_trigger(cls, v: str) -> str:
         if v not in _VALID_TRIGGERS:
-            raise ValueError(
-                f"trigger must be one of {sorted(_VALID_TRIGGERS)!r}; got {v!r}"
-            )
+            raise ValueError(f"trigger must be one of {sorted(_VALID_TRIGGERS)!r}; got {v!r}")
         return v
 
 
@@ -79,9 +74,7 @@ class TaskExecutionUpdate(BaseModel):
     @classmethod
     def validate_status(cls, v: str | None) -> str | None:
         if v is not None and v not in _VALID_STATUSES:
-            raise ValueError(
-                f"status must be one of {sorted(_VALID_STATUSES)!r}; got {v!r}"
-            )
+            raise ValueError(f"status must be one of {sorted(_VALID_STATUSES)!r}; got {v!r}")
         return v
 
 
@@ -90,6 +83,7 @@ class TaskExecutionRow(BaseModel):
     task_id: uuid.UUID
     worker_label: str
     trigger: str
+    generation: int
     status: str
     failure_reason: str | None
     started_at: datetime
@@ -116,10 +110,17 @@ async def create_task_execution(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"task {body.task_id!s} not found",
         )
+    # The execution records the task's CURRENT rework cycle. ``tasks.generation`` is
+    # the source of truth (ADR-0118 SC3): a rework verdict bumps it BEFORE re-dispatch,
+    # so the next author execution lands at a new generation. Reading it here (rather
+    # than the column's server_default of 1) is what lets an evaluator-rework coexist
+    # with the initial dispatch instead of colliding with it on the author-generation
+    # index. The internal dispatch consumer already does this; the HTTP endpoint must too.
     execution = TaskExecution(
         task_id=body.task_id,
         worker_label=body.worker_label,
         trigger=body.trigger,
+        generation=task.generation,
         status="running",
     )
     session.add(execution)
@@ -127,16 +128,26 @@ async def create_task_execution(
         await session.flush()
         await session.refresh(execution)
         await session.commit()
-    except IntegrityError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
+    except IntegrityError as exc:
+        # Name the constraint that actually fired rather than assume the spawn one —
+        # the author-generation index (task_id, generation) is the common surprise for
+        # a rework dispatched at a generation that was not bumped first.
+        constraint = getattr(getattr(exc, "orig", None), "constraint_name", None)
+        if constraint == "uq_task_executions_author_generation":
+            detail = (
+                f"an author execution already exists for (task_id={body.task_id!s}, "
+                f"generation={task.generation}); at most one author dispatch per "
+                "(task_id, generation) (ADR-0118 SC3) — bump tasks.generation on the "
+                "rework verdict before re-dispatching a rework."
+            )
+        else:
+            detail = (
                 f"task_execution already exists for "
                 f"(task_id={body.task_id!s}, trigger={body.trigger!r}, "
                 f"worker_label={body.worker_label!r}, started_at=<server-assigned>); "
                 "coordinator may have restarted mid-spawn"
-            ),
-        )
+            )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
     return TaskExecutionRow.model_validate(execution, from_attributes=True)
 
 
@@ -228,10 +239,7 @@ async def list_task_executions(
     if execution_status is not None and execution_status not in _VALID_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"status must be one of {sorted(_VALID_STATUSES)!r}; "
-                f"got {execution_status!r}"
-            ),
+            detail=(f"status must be one of {sorted(_VALID_STATUSES)!r}; got {execution_status!r}"),
         )
     query = select(TaskExecution).order_by(TaskExecution.started_at)
     if task_id is not None:
