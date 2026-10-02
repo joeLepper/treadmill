@@ -4,15 +4,26 @@ Every Claude Code session operating in this repo has one of four roles. Keep
 these distinct; confusing them leads to wrong routing, wrong API calls, and
 wrong escalation paths.
 
-## Messaging — no active auto path (fabric retired)
+## Messaging — the harness peer channel (fabric retired)
 
-Inter-session messaging has **no active automated transport**. The **exec_otp
-fabric** (`send <agent> "…"`) is RETIRED (operator directive 2026-10-01). The
-earlier **cc-relay** file-drop and the **treadmill-events** channel were already
-retired. Do NOT use any of them. Until a replacement is defined, coordinate
-through the operator (Joe) or through durable GitHub artifacts (PRs, issues,
-comments). Describe roles and who-talks-to-whom below as intent; do not assume a
-live message bus delivers between sessions.
+Inter-session messaging runs on the **Claude Code harness peer channel**, NOT the
+exec_otp fabric. The **exec_otp fabric** (`send <agent>` / `agentctl`) is RETIRED
+(operator directive 2026-10-01); do not use it.
+
+- **Claude ↔ Claude siblings** (alan, bert, carla, donna, ernie, the coordinator /
+  workers): use the **`SendMessage`** tool; discover live peers with **`ListAgents`**
+  (transport is local cc-socks sockets). A send reaches the session, not necessarily
+  its operator — a peer in a stricter permission mode may hold the message for approval.
+- **Claude ↔ Fran** (the **Codex** sibling): Fran runs `codex` and is OFF the harness
+  peer bus (she does NOT appear in `ListAgents` as `fran`, and there is no stable `fran`
+  address). Reach her through the **Codex bridge session** — the `cxbridge` /
+  `bridge-session-*` sender. Its address **rotates on restart**, so resolve it fresh via
+  `ListAgents` each session, then **`SendMessage`** to it with a **`For Fran:`** prefix in
+  the body; the bridge relays to Fran and her reply returns through that session's
+  transcript. (Verified by the Codex passes on 2026-10-01.)
+- **cc-relay** (`tools/cc-channels/cc-relay.py`, skill retained): a legacy file-drop
+  transport. It is NOT the current Fran bridge path (tonight's passes used `SendMessage`
+  to the bridge). Keep the tool; prefer the paths above.
 
 ## Roles
 
