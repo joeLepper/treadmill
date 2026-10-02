@@ -51,8 +51,16 @@ python3 ~/treadmill/tools/model-review-panel/panel.py review --artifact PATH \
 
 Use `adr`/`plan`/`design` for an ADR-0105 cross-model pass, so the panel stops over-blocking
 an ADR for leaving implementation detail to the plan. If you omit `--kind`, the panel infers
-it from the artifact path (an `adrs/`/`adr/` path → `adr`, a `plans/`/`plan/` path → `plan`,
-else `code`) and prints the inferred kind to stderr. `review-pr.sh` sets it for you.
+it from the artifact path — but **only a Markdown doc (`.md`) under an `adrs/` or `plans/`
+directory** infers a decision kind. A CODE file under such a directory (e.g. `src/plan/x.py`)
+stays `code`, so its implementation bugs still block; the relaxation never fails open on real
+code. The panel prints the inferred kind to stderr. `review-pr.sh` sets it for you.
+
+Inference lives in ONE place (`panel.py infer_kind`). `review-pr.sh` copies the artifact to a
+`.diff` temp, so it passes the original path via `--infer-from` and lets `panel.py` decide —
+the helper never does its own inference. Note: a PR/branch artifact is reviewed as a `diff`
+(the code rubric). If a PR changes ONLY decision docs and you want the decision rubric, pass
+`--kind adr` (or `plan`/`design`) to the helper explicitly, or review the file directly.
 
 ## Run it — on a PR or a branch (the helper)
 

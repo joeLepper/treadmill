@@ -57,20 +57,25 @@ MIN_QUORUM_FAMILIES = 2
 # (finish_reason=length), so give the ceiling headroom for reasoning AND the review.
 MAX_TOKENS = 8000
 
-RUBRIC = """You are one reviewer on an adversarial cross-model panel. Review the ARTIFACT below.
+RUBRIC_RULES = """You are one reviewer on an adversarial cross-model panel. Review the ARTIFACT below.
 
 Rules:
 - A finding is a claim you can demonstrate. State the trigger (inputs/state) and the wrong outcome.
 - Cite the exact section or line the artifact contradicts. If no invariant is at risk, it is a preference; label it.
 - Rank each finding BLOCKING (an invariant an adversary or an ordinary accident can walk through) or NON-BLOCKING.
-- Do not pad. Fewer, harder findings beat many speculative ones.
+- Do not pad. Fewer, harder findings beat many speculative ones."""
 
-Output EXACTLY this shape and nothing before it:
+RUBRIC_FORMAT = """Output EXACTLY this shape and nothing before it:
 VERDICT: block | approve-with-notes | approve
 1. [BLOCKING|NON-BLOCKING] <one-line claim> - <trigger> - <where in the artifact>
 2. ...
 (If there are no findings, write "No findings." after the VERDICT line.)
 """
+
+# Full rubric for code/diff artifacts. Decision kinds splice the addendum BETWEEN the
+# rules and the output-format block (build_prompt), so it never trails the format
+# instruction and cannot break the required output shape.
+RUBRIC = RUBRIC_RULES + "\n\n" + RUBRIC_FORMAT
 
 # Decision records are judged on the DECISION, not implementation completeness. Without this,
 # the generic (code) rubric treats every unspecified mechanism as a walk-through-able BLOCKING
@@ -97,9 +102,15 @@ VERDICT_RANK = {"block": 2, "approve-with-notes": 1, "approve": 0}
 
 
 def infer_kind(path):
-    """Guess the artifact kind from its path so an ADR/plan file is not judged as code by
-    accident. An explicit --kind always overrides this."""
+    """Guess the artifact kind from its path so an ADR/plan DOC is not judged as code by
+    accident. Only a Markdown doc (`.md`) under an `adrs/`/`plans/` dir infers a decision
+    kind; a CODE file under such a dir (e.g. `src/plan/x.py`, `services/adr/render.py`)
+    MUST stay `code` so its implementation bugs still block — otherwise the relaxation
+    fails open on real code. Matches root-relative (`adrs/x.md`) and nested paths alike.
+    An explicit --kind always overrides this."""
     p = path.replace("\\", "/").lower()
+    if not p.endswith(".md"):
+        return "code"
     if re.search(r"(^|/)(docs/)?adrs?/", p):
         return "adr"
     if re.search(r"(^|/)(docs/)?plans?/", p):
@@ -154,7 +165,13 @@ def parse_verdict(text):
 
 
 def build_prompt(artifact_path, artifact_text, kind="code"):
-    rubric = RUBRIC + DECISION_ADDENDUM if kind in DECISION_KINDS else RUBRIC
+    if kind in DECISION_KINDS:
+        # Splice the addendum BETWEEN the rules and the output-format block, never after
+        # it, so the "Output EXACTLY this shape" instruction stays last and the leg's
+        # output shape is not broken.
+        rubric = RUBRIC_RULES + "\n" + DECISION_ADDENDUM + "\n" + RUBRIC_FORMAT
+    else:
+        rubric = RUBRIC
     return f"{rubric}\n\nARTIFACT ({artifact_path}):\n\n{artifact_text}\n"
 
 
@@ -478,7 +495,11 @@ def main():
     rv.add_argument("--kind", choices=sorted(VALID_KINDS), default=None,
                     help="artifact kind: adr|plan|design judge the DECISION (mechanism gaps are "
                          "NON-BLOCKING); code|diff use the generic rubric. Default: infer from the "
-                         "path (docs/adrs->adr, docs/plans->plan) else code.")
+                         "path (a .md under adrs/->adr, under plans/->plan) else code.")
+    rv.add_argument("--infer-from", default=None, metavar="PATH",
+                    help="original artifact path used ONLY to infer --kind when --artifact is a "
+                         "copied temp (e.g. review-pr.sh writes the artifact to a .diff temp, so "
+                         "the real path is passed here). Ignored when --kind is given.")
     rv.add_argument("--models", default=",".join(DEFAULT_OPEN_WEIGHT),
                     help="comma-separated open-weight models")
     rv.add_argument("--families", default=",".join(DEFAULT_FAMILIES),
@@ -504,9 +525,10 @@ def main():
         print(f"cannot read artifact: {e}", file=sys.stderr)
         return 2
 
-    kind = args.kind or infer_kind(args.artifact)
+    infer_src = args.infer_from or args.artifact
+    kind = args.kind or infer_kind(infer_src)
     if args.kind is None and kind in DECISION_KINDS:
-        print(f"panel: inferred --kind {kind} from the path (judging the decision, not the "
+        print(f"panel: inferred --kind {kind} from {infer_src} (judging the decision, not the "
               f"mechanism); pass --kind to override", file=sys.stderr)
     prompt = build_prompt(args.artifact, artifact_text, kind)
     families = [f.strip() for f in args.families.split(",") if f.strip()]

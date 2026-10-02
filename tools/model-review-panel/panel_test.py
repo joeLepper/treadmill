@@ -148,6 +148,16 @@ check("infer plan from docs path", panel.infer_kind("docs/plans/2026-10-01-x.md"
 check("infer adr from bare adrs dir", panel.infer_kind("/tmp/adrs/0001-x.md") == "adr")
 check("infer code for source file", panel.infer_kind("src/loop/runner.ts") == "code")
 check("infer code for a diff tmp", panel.infer_kind("/tmp/review-artifact.XXaa.diff") == "code")
+# FAIL-OPEN GUARD: a CODE file under a plans/ or adrs/ dir must stay 'code', so its
+# implementation bugs still BLOCK (a .md requirement, not just the dir name).
+check("code under plans/ stays code", panel.infer_kind("src/plan/planner.py") == "code")
+check("code under plans/ (plural) stays code", panel.infer_kind("services/plans/run.ts") == "code")
+check("code under adrs/ stays code", panel.infer_kind("services/adr/render.py") == "code")
+check("non-md under adrs/ stays code", panel.infer_kind("docs/adrs/diagram.svg") == "code")
+check("a .diff under plans/ stays code", panel.infer_kind("repo/plans/x.diff") == "code")
+# root-relative decision docs infer correctly (consistent with the helper's --infer-from path)
+check("root-relative adrs/*.md -> adr", panel.infer_kind("adrs/0001.md") == "adr")
+check("root-relative plans/*.md -> plan", panel.infer_kind("plans/2026-x.md") == "plan")
 
 # build_prompt: decision kinds get the DECISION addendum (mechanism gaps NON-BLOCKING); code/diff do not.
 _MARK = "implementation MECHANISM is NON-BLOCKING"
@@ -158,5 +168,12 @@ check("code prompt has NO decision addendum", _MARK not in panel.build_prompt("a
 check("diff prompt has NO decision addendum", _MARK not in panel.build_prompt("a.diff", "body", "diff"))
 check("default kind is code (no addendum)", _MARK not in panel.build_prompt("a.py", "body"))
 check("every decision kind is a valid kind", panel.DECISION_KINDS <= panel.VALID_KINDS)
+# The addendum must sit BEFORE the output-format block so it cannot break the output shape.
+_adr_prompt = panel.build_prompt("docs/adrs/0010.md", "body", "adr")
+check("addendum precedes the output-format block",
+      _adr_prompt.index(_MARK) < _adr_prompt.index("Output EXACTLY this shape"))
+check("decision prompt still ends with the format block (shape intact)",
+      "Output EXACTLY this shape" in _adr_prompt
+      and _adr_prompt.index("Output EXACTLY this shape") > _adr_prompt.index("Rules:"))
 
 print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate, artifact-kind rubric")
