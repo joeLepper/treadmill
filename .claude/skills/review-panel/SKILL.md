@@ -32,10 +32,27 @@ second layer, not the first. A green panel on code you never ran is still unveri
 ```
 python3 ~/treadmill/tools/model-review-panel/panel.py review --artifact PATH \
   [--families open-weight,gpt,claude] [--author-family claude] \
+  [--kind code|diff|adr|plan|design] \
   [--format human|json] [--timeout 240]
 ```
 
 `--artifact` is any single file: an ADR, a plan, a design note, or a `.diff`.
+
+## Pick the artifact kind (`--kind`)
+
+`--kind` tells the panel WHAT it reviews, so a decision record is not judged as code.
+
+- `code` / `diff` (default) — judge the implementation. The full rubric applies.
+- `adr` / `plan` / `design` — judge the DECISION, not the implementation. The panel adds a
+  rubric addendum: a missing or under-specified mechanism is NON-BLOCKING for the document.
+  The panel blocks only on a decision defect — a contradiction, an unfalsifiable claim, a
+  false factual claim, a violation of a cited ADR invariant, or a wrong decision. A sound
+  decision with open mechanism questions earns `approve` or `approve-with-notes`, not `block`.
+
+Use `adr`/`plan`/`design` for an ADR-0105 cross-model pass, so the panel stops over-blocking
+an ADR for leaving implementation detail to the plan. If you omit `--kind`, the panel infers
+it from the artifact path (an `adrs/`/`adr/` path → `adr`, a `plans/`/`plan/` path → `plan`,
+else `code`) and prints the inferred kind to stderr. `review-pr.sh` sets it for you.
 
 ## Run it — on a PR or a branch (the helper)
 
@@ -47,6 +64,8 @@ repo's working tree:
 <skill-dir>/scripts/review-pr.sh <PR-number | branch | file> \
   [--base <ref>]            # merge-base ref; default origin/main
   [--author-family <fam>]   # your own family, excluded from coverage (e.g. claude)
+  [--kind <kind>]           # code|diff|adr|plan|design; default diff for a PR/branch,
+                            #   inferred from the path for a file (see "Pick the artifact kind")
   [--json]                  # machine-readable panel output
   [--exclude <glob>]        # extra pathspec exclude; repeatable
 ```

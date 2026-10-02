@@ -22,6 +22,7 @@ FORMAT="human"
 AUTHOR_FAMILY=""
 TIMEOUT=""
 TARGET=""
+KIND=""   # code|diff|adr|plan|design; default: diff for a PR/branch, inferred-from-path for a file
 # Generated / vendored paths that only pad a review. Conservative defaults; add
 # more with --exclude. Kept as pathspec exclusions for the git-diff paths.
 EXCLUDES=(
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --author-family) AUTHOR_FAMILY="$2"; shift 2 ;;
     --json)          FORMAT="json"; shift ;;
     --timeout)       TIMEOUT="$2"; shift 2 ;;
+    --kind)          KIND="$2"; shift 2 ;;
     --exclude)       EXCLUDES+=( ":!$2" ); shift 2 ;;
     -h|--help)       sed -n '2,20p' "$0"; exit 0 ;;
     -*)              err "unknown option: $1"; exit 2 ;;
@@ -60,9 +62,18 @@ ART="$(mktemp -t review-artifact.XXXXXX.diff)"
 trap 'rm -f "$ART"' EXIT
 
 if [[ -f "$TARGET" ]]; then
-  # A file (an existing diff, ADR, plan, design note): review it as-is.
+  # A file (an existing diff, ADR, plan, design note): review it as-is. The artifact is copied to
+  # a .diff temp, so panel.py cannot infer the kind from the path — infer it from the ORIGINAL
+  # file here (a decision record is judged on the decision, not implementation mechanism).
   cp "$TARGET" "$ART"
-  err "artifact: file $TARGET"
+  if [[ -z "$KIND" ]]; then
+    case "$TARGET" in
+      */adrs/*|*/adr/*) KIND=adr ;;
+      */plans/*|*/plan/*) KIND=plan ;;
+      *) KIND=code ;;
+    esac
+  fi
+  err "artifact: file $TARGET (kind=$KIND)"
 elif [[ "$TARGET" =~ ^[0-9]+$ ]]; then
   # A PR number: resolve its head branch via gh, fetch it, diff with excludes.
   command -v gh >/dev/null || { err "gh not found; needed to resolve PR #$TARGET"; exit 2; }
@@ -92,7 +103,10 @@ if [[ ! -s "$ART" ]]; then
 fi
 err "artifact size: $(wc -l < "$ART") lines"
 
-CMD=( python3 "$PANEL" review --artifact "$ART" --format "$FORMAT" )
+# A PR/branch artifact is a real diff; default it accordingly if not already set by the file case.
+[[ -z "$KIND" ]] && KIND=diff
+
+CMD=( python3 "$PANEL" review --artifact "$ART" --format "$FORMAT" --kind "$KIND" )
 [[ -n "$AUTHOR_FAMILY" ]] && CMD+=( --author-family "$AUTHOR_FAMILY" )
 [[ -n "$TIMEOUT" ]] && CMD+=( --timeout "$TIMEOUT" )
 

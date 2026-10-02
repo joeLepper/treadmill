@@ -72,7 +72,39 @@ VERDICT: block | approve-with-notes | approve
 (If there are no findings, write "No findings." after the VERDICT line.)
 """
 
+# Decision records are judged on the DECISION, not implementation completeness. Without this,
+# the generic (code) rubric treats every unspecified mechanism as a walk-through-able BLOCKING
+# invariant, so each fix spawns a new prose-edge and the review never converges (observed:
+# 4 rounds on an API-contract ADR where both families approved the decision but kept blocking
+# on mechanism that belongs in the plan).
+DECISION_KINDS = {"adr", "plan", "design"}
+VALID_KINDS = {"code", "diff"} | DECISION_KINDS
+
+DECISION_ADDENDUM = """
+IMPORTANT — this ARTIFACT is a DECISION record (ADR / plan / design), NOT an implementation spec.
+Judge the DECISION, not the implementation:
+- BLOCK only if the decision is internally contradictory, unfalsifiable, rests on a false claim
+  about the incumbent or an existing system, violates a cited invariant of an existing ADR, or is
+  the wrong decision.
+- Unspecified or incomplete implementation MECHANISM is NON-BLOCKING. Note it "for the plan";
+  do not block on it. Do not demand specification whose addition would only invite more
+  specification. Distinguish "the decision is wrong" from "the design is incomplete".
+- A sound decision with named open implementation questions is approve or approve-with-notes,
+  NOT block.
+"""
+
 VERDICT_RANK = {"block": 2, "approve-with-notes": 1, "approve": 0}
+
+
+def infer_kind(path):
+    """Guess the artifact kind from its path so an ADR/plan file is not judged as code by
+    accident. An explicit --kind always overrides this."""
+    p = path.replace("\\", "/").lower()
+    if re.search(r"(^|/)(docs/)?adrs?/", p):
+        return "adr"
+    if re.search(r"(^|/)(docs/)?plans?/", p):
+        return "plan"
+    return "code"
 
 
 # --- helpers -----------------------------------------------------------------
@@ -121,8 +153,9 @@ def parse_verdict(text):
     return max((m.lower() for m in matches), key=lambda v: VERDICT_RANK.get(v, 0))
 
 
-def build_prompt(artifact_path, artifact_text):
-    return f"{RUBRIC}\n\nARTIFACT ({artifact_path}):\n\n{artifact_text}\n"
+def build_prompt(artifact_path, artifact_text, kind="code"):
+    rubric = RUBRIC + DECISION_ADDENDUM if kind in DECISION_KINDS else RUBRIC
+    return f"{rubric}\n\nARTIFACT ({artifact_path}):\n\n{artifact_text}\n"
 
 
 # --- provider legs -----------------------------------------------------------
@@ -442,6 +475,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     rv = sub.add_parser("review", help="review an artifact with the panel")
     rv.add_argument("--artifact", required=True, help="path to the file to review")
+    rv.add_argument("--kind", choices=sorted(VALID_KINDS), default=None,
+                    help="artifact kind: adr|plan|design judge the DECISION (mechanism gaps are "
+                         "NON-BLOCKING); code|diff use the generic rubric. Default: infer from the "
+                         "path (docs/adrs->adr, docs/plans->plan) else code.")
     rv.add_argument("--models", default=",".join(DEFAULT_OPEN_WEIGHT),
                     help="comma-separated open-weight models")
     rv.add_argument("--families", default=",".join(DEFAULT_FAMILIES),
@@ -467,7 +504,11 @@ def main():
         print(f"cannot read artifact: {e}", file=sys.stderr)
         return 2
 
-    prompt = build_prompt(args.artifact, artifact_text)
+    kind = args.kind or infer_kind(args.artifact)
+    if args.kind is None and kind in DECISION_KINDS:
+        print(f"panel: inferred --kind {kind} from the path (judging the decision, not the "
+              f"mechanism); pass --kind to override", file=sys.stderr)
+    prompt = build_prompt(args.artifact, artifact_text, kind)
     families = [f.strip() for f in args.families.split(",") if f.strip()]
     open_weight_models = [m.strip() for m in args.models.split(",") if m.strip()]
     if "open-weight" in families:
