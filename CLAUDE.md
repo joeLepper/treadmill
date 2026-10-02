@@ -4,15 +4,15 @@ Every Claude Code session operating in this repo has one of four roles. Keep
 these distinct; confusing them leads to wrong routing, wrong API calls, and
 wrong escalation paths.
 
-## Messaging — the fabric is the only path
+## Messaging — no active auto path (fabric retired)
 
-All inter-session messaging runs on the **exec_otp fabric**: `send <agent> "…"`
-— one durable, location-transparent inbox per agent (see the `fabric-messaging`
-skill). The legacy **cc-relay** file-drop and the **treadmill-events** channel
-are RETIRED — do NOT use them. A cc-relay message writes to
-`~/.cc-channels/<recipient>/relay/`, which no fabric agent watches, so it is
-delivered nowhere and silently lost (this caused real message loss — #165). To
-reach any agent — coordinator, worker, orchestrator — use `send`.
+Inter-session messaging has **no active automated transport**. The **exec_otp
+fabric** (`send <agent> "…"`) is RETIRED (operator directive 2026-10-01). The
+earlier **cc-relay** file-drop and the **treadmill-events** channel were already
+retired. Do NOT use any of them. Until a replacement is defined, coordinate
+through the operator (Joe) or through durable GitHub artifacts (PRs, issues,
+comments). Describe roles and who-talks-to-whom below as intent; do not assume a
+live message bus delivers between sessions.
 
 ## Roles
 
@@ -35,10 +35,8 @@ engage directly for parallel work.
 Long-lived named Claude Code sessions that act as PM for a specific repo's
 plans. One coordinator per repo. A coordinator:
 - Receives `plan.submitted` events (identified by `coordinator_label` in the
-  event payload) via its durable fabric inbox — external Treadmill/GitHub
-  events are POSTed to the core's `ExecOtp.Ingress`, which routes each into the
-  target coordinator's `:global` inbox
-- Routes tasks to workers over the fabric: `send <worker> "…"`
+  event payload)
+- Routes tasks to its workers
 - **Owns all Treadmill lifecycle bookkeeping** on behalf of its workers:
   registers step start, registers PR opens (`POST /api/v1/task_prs`), marks
   steps completed, and publishes lifecycle events
@@ -49,9 +47,9 @@ plans. One coordinator per repo. A coordinator:
 ### Workers
 Long-lived named Claude Code sessions that are the frontline implementers.
 Workers write code, open PRs, author docs, run tests. They communicate
-laterally with peer workers and upward to their coordinator — all over the
-fabric (`send <agent> "…"`). Workers receive task briefs from the coordinator
-and report outcomes back the same way. Workers have NO direct responsibility for Treadmill API bookkeeping
+laterally with peer workers and upward to their coordinator. Workers receive
+task briefs from the coordinator and report outcomes back. Workers have NO
+direct responsibility for Treadmill API bookkeeping
 — they execute the task and report; the coordinator handles state.
 
 ## Quick reference
