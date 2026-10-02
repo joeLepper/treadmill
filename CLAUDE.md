@@ -15,12 +15,14 @@ exec_otp fabric. The **exec_otp fabric** (`send <agent>` / `agentctl`) is RETIRE
   (transport is local cc-socks sockets). A send reaches the session, not necessarily
   its operator — a peer in a stricter permission mode may hold the message for approval.
 - **Claude ↔ Fran** (the **Codex** sibling): Fran runs `codex` and is OFF the harness
-  peer bus (she does NOT appear in `ListAgents` as `fran`, and there is no stable `fran`
-  address). Reach her through the **Codex bridge session** — the `cxbridge` /
-  `bridge-session-*` sender. Its address **rotates on restart**, so resolve it fresh via
-  `ListAgents` each session, then **`SendMessage`** to it with a **`For Fran:`** prefix in
-  the body; the bridge relays to Fran and her reply returns through that session's
-  transcript. (Verified by the Codex passes on 2026-10-01.)
+  peer bus (no stable `fran` address). Reach her through the **Codex bridge session** — the
+  `cxbridge` / `bridge-session-*` sender, which registers in `ListAgents` as "Fran-bridge
+  online". Its address **rotates on restart**, so resolve the current `cxbridge` row via
+  `ListAgents` each session, then **`SendMessage`** to it (a `For Fran:` routing prefix is
+  the convention). The bridge relays to Fran; her reply comes back as a cross-session message
+  from the bridge, body prefixed **`[from Fran]`**. Caveat: the bridge relays only what Fran
+  emits to its outbox — it does NOT scrape her terminal, so if no reply comes back, re-send.
+  (Verified by the Codex passes on 2026-10-01, Carla + Donna.)
 - **cc-relay** (`tools/cc-channels/cc-relay.py`, skill retained): a legacy file-drop
   transport. It is NOT the current Fran bridge path (tonight's passes used `SendMessage`
   to the bridge). Keep the tool; prefer the paths above.
