@@ -158,6 +158,12 @@ check("a .diff under plans/ stays code", panel.infer_kind("repo/plans/x.diff") =
 # root-relative decision docs infer correctly (consistent with the helper's --infer-from path)
 check("root-relative adrs/*.md -> adr", panel.infer_kind("adrs/0001.md") == "adr")
 check("root-relative plans/*.md -> plan", panel.infer_kind("plans/2026-x.md") == "plan")
+# PLURAL-dir only: a singular adr/ or plan/ dir, or an instruction/skill .md under one, is
+# NOT relaxed (it is agent-executable markdown, not a decision doc).
+check("singular plan/ dir stays code", panel.infer_kind("docs/plan/checklist.md") == "code")
+check("singular adr/ dir stays code", panel.infer_kind("docs/adr/notes.md") == "code")
+check("skill markdown under plan/ stays code", panel.infer_kind(".claude/skills/plan/SKILL.md") == "code")
+check("skill markdown under adr/ stays code", panel.infer_kind(".claude/skills/adr/SKILL.md") == "code")
 
 # build_prompt: decision kinds get the DECISION addendum (mechanism gaps NON-BLOCKING); code/diff do not.
 _MARK = "implementation MECHANISM is NON-BLOCKING"
@@ -172,8 +178,11 @@ check("every decision kind is a valid kind", panel.DECISION_KINDS <= panel.VALID
 _adr_prompt = panel.build_prompt("docs/adrs/0010.md", "body", "adr")
 check("addendum precedes the output-format block",
       _adr_prompt.index(_MARK) < _adr_prompt.index("Output EXACTLY this shape"))
-check("decision prompt still ends with the format block (shape intact)",
-      "Output EXACTLY this shape" in _adr_prompt
-      and _adr_prompt.index("Output EXACTLY this shape") > _adr_prompt.index("Rules:"))
+# The addendum must NOT reappear after the format block, and the format block must be the
+# LAST rubric element before the ARTIFACT — so the output-shape instruction stays last.
+check("addendum never trails the format block",
+      _adr_prompt.rindex(_MARK) < _adr_prompt.index("Output EXACTLY this shape"))
+check("format block is the last rubric element (ARTIFACT follows it)",
+      _adr_prompt.index("ARTIFACT (") > _adr_prompt.index("Output EXACTLY this shape"))
 
 print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate, artifact-kind rubric")

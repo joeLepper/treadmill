@@ -111,9 +111,12 @@ def infer_kind(path):
     p = path.replace("\\", "/").lower()
     if not p.endswith(".md"):
         return "code"
-    if re.search(r"(^|/)(docs/)?adrs?/", p):
+    # Only the PLURAL convention dirs (`adrs/`, `plans/` — what /decide and /author write),
+    # so a singular `adr/`/`plan/` dir or an instruction/skill markdown like
+    # `.claude/skills/plan/SKILL.md` is NOT relaxed. Matches the documented allowlist.
+    if re.search(r"(^|/)(docs/)?adrs/", p):
         return "adr"
-    if re.search(r"(^|/)(docs/)?plans?/", p):
+    if re.search(r"(^|/)(docs/)?plans/", p):
         return "plan"
     return "code"
 
@@ -555,14 +558,21 @@ def main():
 
     reduced = reduced_coverage(results, args.author_family, args.min_cross_model)
     xmf = sorted(cross_model_families(results, args.author_family))
+    # Record the kind so a gate (or a human) can tell a relaxed adr/plan/design pass from a
+    # strict code pass — the two are otherwise indistinguishable from the verdict alone.
+    relaxed = kind in DECISION_KINDS
     if args.format == "json":
         print(json.dumps({"artifact": args.artifact,
+                          "kind": kind,
+                          "decision_rubric": relaxed,
                           "panel_verdict": panel_verdict(results),
                           "cross_model_families": xmf,
                           "reduced_coverage": reduced,
                           "reviewers": results}, indent=2))
     else:
         print(render_human(args.artifact, results))
+        rubric_label = "DECISION rubric (mechanism gaps non-blocking)" if relaxed else "code rubric"
+        print(f"Artifact kind: {kind} — {rubric_label}")
         if args.min_cross_model:
             note = "OK" if not reduced else f"REDUCED-COVERAGE (need {args.min_cross_model})"
             print(f"Cross-model coverage: {len(xmf)} non-author families "

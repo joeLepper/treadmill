@@ -56,9 +56,13 @@ directory** infers a decision kind. A CODE file under such a directory (e.g. `sr
 stays `code`, so its implementation bugs still block; the relaxation never fails open on real
 code. The panel prints the inferred kind to stderr. `review-pr.sh` sets it for you.
 
-Inference lives in ONE place (`panel.py infer_kind`). `review-pr.sh` copies the artifact to a
-`.diff` temp, so it passes the original path via `--infer-from` and lets `panel.py` decide —
-the helper never does its own inference. Note: a PR/branch artifact is reviewed as a `diff`
+Inference lives in ONE place (`panel.py infer_kind`), and only the PLURAL convention dirs
+(`adrs/`, `plans/` — what `/decide` and `/author` write) relax; a singular `adr/`/`plan/`
+dir or an instruction/skill markdown such as `.claude/skills/plan/SKILL.md` stays `code`.
+`review-pr.sh` copies the artifact to a `.diff` temp, so it passes the original path via
+`--infer-from` and lets `panel.py` decide — the helper never does its own inference. The panel
+records the kind it used: the human output prints `Artifact kind: …` and the JSON carries
+`kind` + `decision_rubric`, so a gate can tell a relaxed decision pass from a strict code pass. Note: a PR/branch artifact is reviewed as a `diff`
 (the code rubric). If a PR changes ONLY decision docs and you want the decision rubric, pass
 `--kind adr` (or `plan`/`design`) to the helper explicitly, or review the file directly.
 
