@@ -32,10 +32,39 @@ second layer, not the first. A green panel on code you never ran is still unveri
 ```
 python3 ~/treadmill/tools/model-review-panel/panel.py review --artifact PATH \
   [--families open-weight,gpt,claude] [--author-family claude] \
+  [--kind code|diff|adr|plan|design] \
   [--format human|json] [--timeout 240]
 ```
 
 `--artifact` is any single file: an ADR, a plan, a design note, or a `.diff`.
+
+## Pick the artifact kind (`--kind`)
+
+`--kind` tells the panel WHAT it reviews, so a decision record is not judged as code.
+
+- `code` / `diff` (default) — judge the implementation. The full rubric applies.
+- `adr` / `plan` / `design` — judge the DECISION, not the implementation. The panel adds a
+  rubric addendum: a missing or under-specified mechanism is NON-BLOCKING for the document.
+  The panel blocks only on a decision defect — a contradiction, an unfalsifiable claim, a
+  false factual claim, a violation of a cited ADR invariant, or a wrong decision. A sound
+  decision with open mechanism questions earns `approve` or `approve-with-notes`, not `block`.
+
+Use `adr`/`plan`/`design` for an ADR-0105 cross-model pass, so the panel stops over-blocking
+an ADR for leaving implementation detail to the plan. If you omit `--kind`, the panel infers
+it from the artifact path — but **only a Markdown doc (`.md`) under an `adrs/` or `plans/`
+directory** infers a decision kind. A CODE file under such a directory (e.g. `src/plan/x.py`)
+stays `code`, so its implementation bugs still block; the relaxation never fails open on real
+code. The panel prints the inferred kind to stderr. `review-pr.sh` sets it for you.
+
+Inference lives in ONE place (`panel.py infer_kind`), and only the PLURAL convention dirs
+(`adrs/`, `plans/` — what `/decide` and `/author` write) relax; a singular `adr/`/`plan/`
+dir or an instruction/skill markdown such as `.claude/skills/plan/SKILL.md` stays `code`.
+`review-pr.sh` copies the artifact to a `.diff` temp, so it passes the original path via
+`--infer-from` and lets `panel.py` decide — the helper never does its own inference. The panel
+records the kind it used: the human output prints `Artifact kind: …` and the JSON carries
+`kind` + `decision_rubric`, so a gate can tell a relaxed decision pass from a strict code pass. Note: a PR/branch artifact is reviewed as a `diff`
+(the code rubric). If a PR changes ONLY decision docs and you want the decision rubric, pass
+`--kind adr` (or `plan`/`design`) to the helper explicitly, or review the file directly.
 
 ## Run it — on a PR or a branch (the helper)
 
@@ -47,6 +76,8 @@ repo's working tree:
 <skill-dir>/scripts/review-pr.sh <PR-number | branch | file> \
   [--base <ref>]            # merge-base ref; default origin/main
   [--author-family <fam>]   # your own family, excluded from coverage (e.g. claude)
+  [--kind <kind>]           # code|diff|adr|plan|design; default diff for a PR/branch,
+                            #   inferred from the path for a file (see "Pick the artifact kind")
   [--json]                  # machine-readable panel output
   [--exclude <glob>]        # extra pathspec exclude; repeatable
 ```
