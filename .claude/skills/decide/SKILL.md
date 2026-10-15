@@ -125,6 +125,7 @@ sequenceDiagram
 - **Use absolute dates.** "Today" is meaningless when the ADR is read in two years.
 - **Quote, don't paraphrase, when citing constraints.** If a stakeholder said "X is a hard requirement," put it in quotes with attribution.
 - **No emojis, no marketing language.** ADRs are evidence, not pitch decks.
+- **No real names, no provenance, no process trail.** Do not name people (colleagues, requesters, the operator) or agents/sessions in the committed ADR, and do not record where it was drafted (an Obsidian vault, a chat), who raised it, or how it was reviewed (cross-model passes, finding-code origins). The ADR records the decision and its rationale by **substance** — not who asked or where it came from. Cite a constraint by what it requires, not by its author; name a product, service, or model only when it is technically load-bearing.
 - **Default to under 800 words.** Long ADRs hide the decision. If a single ADR seems to need more, it's probably two ADRs.
 - **One decision per ADR.** If you find yourself writing "we also decided" — that's a separate ADR.
 - **Avoid forward references to future ADRs that don't exist yet.** Instead, list the open questions in a `## Follow-ups` section so a reader sees what's still undecided.
