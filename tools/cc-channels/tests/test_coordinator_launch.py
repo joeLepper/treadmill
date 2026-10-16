@@ -370,7 +370,7 @@ def test_orchestrator_label_carries_opus_model_fallback(tmp_path: Path) -> None:
     """task 5d14fbcc regression: orchestrator sessions (treadmill-alan
     etc.) carry no per-label .env, so they have no ANTHROPIC_MODEL unless
     the launcher provides a fallback. The launcher must export
-    ANTHROPIC_MODEL=claude-opus-4-8 for orchestrators so --resume cannot
+    ANTHROPIC_MODEL=claude-opus-5-5 for orchestrators so --resume cannot
     fall back to the account-default (claude-fable-5, unavailable on this
     account — INCIDENT 2026-06-12: model-less sessions silently died)."""
     home = tmp_path / "home"
@@ -386,7 +386,7 @@ def test_orchestrator_label_carries_opus_model_fallback(tmp_path: Path) -> None:
 
     assert recorder.exists(), "fake claude did not run"
     recorded = recorder.read_text()
-    assert "ANTHROPIC_MODEL=claude-opus-4-8" in recorded
+    assert "ANTHROPIC_MODEL=claude-opus-5-5" in recorded
 
 
 def test_team_role_env_model_not_overridden_by_launcher(tmp_path: Path) -> None:
@@ -418,4 +418,4 @@ def test_team_role_env_model_not_overridden_by_launcher(tmp_path: Path) -> None:
     recorded = recorder.read_text()
     # Worker .env's sonnet pin must survive; opus fallback must not override.
     assert "ANTHROPIC_MODEL=claude-sonnet-4-6" in recorded
-    assert "ANTHROPIC_MODEL=claude-opus-4-8" not in recorded
+    assert "ANTHROPIC_MODEL=claude-opus-5-5" not in recorded

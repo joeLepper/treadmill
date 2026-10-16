@@ -203,7 +203,7 @@ export TREADMILL_RELAY_LEVEL="${TREADMILL_RELAY_LEVEL:-quiet}"
 # Orchestrators carry no per-label .env, so this fallback is their pin.
 # The ${...:-} form never overrides an already-set value, so re-rendered
 # team .env files (e.g. worker=sonnet) are respected without conflict.
-export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-8}"
+export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-5-5}"
 
 # ── telegram channel (ADR-0067), only when this label has a bot ─────────────
 # ADR-0106 cutover gate: if the per-label marker ~/.cc-channels/<label>/telegram-bridged
