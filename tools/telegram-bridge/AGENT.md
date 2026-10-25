@@ -26,6 +26,10 @@ per bot, each bound to its session. See `bridge/README.md` for the full design.
   be off before the daemon polls that bot; a persistent 409 logs as contention.
   Cutover is sequenced + Alan-signed. Disabling a session's MCP kills its
   outbound half too — the session must switch outbound to direct `sendMessage`.
+  Use `tools/telegram-bridge/tg-send.sh <label> "<text>" [chat_id]`: it reads the
+  token from `~/.cc-channels/<label>/telegram.env`, never prints it, and POSTs to
+  the Bot API (`chat_id` defaults to Joe's chat). Do NOT re-enable the per-session
+  MCP while the daemon polls that bot — a second poller on the token logs a 409.
 - **Target must run the watcher.** The relay-dir inject only reaches a launcher
   session (has a `session-id` record). A pure-fabric label is refused at startup
   — the "cc-relay retired" case in the treadmill CLAUDE.md.
