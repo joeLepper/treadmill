@@ -29,9 +29,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -306,8 +308,9 @@ def call_codex(prompt, timeout, model=None):
 
 
 AR_API = "https://api.netlify.com/api/v1"
-# The review site has no repository, no env vars and no functions, so an agent
-# that ignores the read-only brief has nothing to push to and no secret to read.
+# The runner sandbox still carries platform tokens (a Netlify API token, the AI
+# Gateway key), so the brief alone is not the guard: every leg runs in Ask mode,
+# where the runner gives the agent read-only permissions and no deploy.
 AR_SITE_ID = os.environ.get("PANEL_AR_SITE_ID", "5e03f1f3-2cdb-4e81-9c45-c25f7866fa2a")
 NETLIFY_CLI_CONFIG = os.path.expanduser("~/.config/netlify/config.json")
 AR_POLL_S = 10
@@ -318,6 +321,7 @@ AR_TERMINAL = {"done", "error", "cancelled", "timed_out"}
 # A reviewer that asks a question has stopped reviewing; nobody will answer it.
 AR_STOPPED = AR_TERMINAL | {"await_input"}
 AR_POLL_RETRIES = 3
+AR_MODE = "ask"
 # leg -> (family, agent, model, effort). The family is the quorum label, so a
 # gpt-ar verdict counts as the gpt family, never as an extra one.
 AR_LEGS = {
@@ -363,15 +367,36 @@ def ar_request(method, path, token, body=None, timeout=60):
         return json.load(resp)
 
 
+_active_runners = {}
+_active_lock = threading.Lock()
+
+
+def cancel_active_runners():
+    """Cancel every runner a leg is still waiting on. Called when the panel itself
+    is interrupted: the legs run in worker threads, which never see the signal."""
+    with _active_lock:
+        live = list(_active_runners.items())
+    for rid, (token, request) in live:
+        try:
+            request("DELETE", f"/agent_runners/{rid}", token)
+        except Exception as e:  # noqa: BLE001 - try every runner, report each failure
+            print(f"panel: could not cancel agent runner {rid} ({e}). "
+                  f"Stop it: netlify agents:stop {rid}", file=sys.stderr)
+
+
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
 def call_ar(prompt, timeout, agent, model=None, effort=None, site_id=None,
             request=ar_request, sleep=time.sleep, clock=time.monotonic):
-    """AR leg: one bare Netlify Agent Runner on the review site, read-only by brief.
+    """AR leg: one bare Netlify Agent Runner on the review site, in Ask mode.
     Returns the newest session's final message. A run that ends in any state but
     done, or is still running at the deadline, raises and is cancelled: a leg failure
     degrades, never approves. A run seen done on the first poll after the deadline
     keeps its verdict, since it is a complete review."""
     token = netlify_token()
-    body = {"prompt": AR_PREAMBLE + prompt, "agent": agent}
+    body = {"prompt": AR_PREAMBLE + prompt, "agent": agent, "mode": AR_MODE}
     if model:
         body["model"] = model
     if effort:
@@ -380,6 +405,8 @@ def call_ar(prompt, timeout, agent, model=None, effort=None, site_id=None,
     rid = runner.get("id")
     if not rid:
         raise RuntimeError(f"agent runner not created: {str(runner)[:200]}")
+    with _active_lock:
+        _active_runners[rid] = (token, request)
     deadline = clock() + max(timeout, AR_MIN_TIMEOUT_S)
     state = runner.get("state")
     failures = 0
@@ -406,6 +433,9 @@ def call_ar(prompt, timeout, agent, model=None, effort=None, site_id=None,
                 print(f"panel: could not cancel agent runner {rid}; it may still spend "
                       f"credits ({e}). Stop it: netlify agents:stop {rid}", file=sys.stderr)
         raise
+    finally:
+        with _active_lock:
+            _active_runners.pop(rid, None)
     sessions = request("GET", f"/agent_runners/{rid}/sessions?page=1&per_page=1&order_by=desc", token)
     result = (sessions[0] if sessions else {}).get("result") or ""
     if not result.strip():
@@ -672,10 +702,16 @@ def main():
     roster = build_roster(families, open_weight_models, prompt, args.timeout, master_key)
 
     results = []
+    # SIGTERM (a CI timeout) must unwind like Ctrl-C so the runners get cancelled.
+    signal.signal(signal.SIGTERM, _raise_interrupt)
     with futures.ThreadPoolExecutor(max_workers=len(roster) or 1) as ex:
         fut = {ex.submit(run_reviewer, n, fam, fn, args.timeout): n for n, fam, fn in roster}
-        for f in futures.as_completed(fut):
-            results.append(f.result())
+        try:
+            for f in futures.as_completed(fut):
+                results.append(f.result())
+        except BaseException:
+            cancel_active_runners()
+            raise
 
     reduced = reduced_coverage(results, args.author_family, args.min_cross_model)
     xmf = sorted(cross_model_families(results, args.author_family))
@@ -703,4 +739,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("panel: interrupted; Agent Runner legs were cancelled", file=sys.stderr)
+        sys.exit(130)

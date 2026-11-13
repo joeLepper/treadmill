@@ -213,6 +213,8 @@ _post = _calls[0]
 check("AR leg posts to the review site", _post[0] == "POST" and _post[1] == "/agent_runners?site_id=site-1")
 check("AR leg sends agent, model and effort",
       (_post[2]["agent"], _post[2]["model"], _post[2]["effort"]) == ("codex", "gpt-6.1-sol", "high"))
+check("AR leg runs in Ask mode", _post[2]["mode"] == "ask")
+check("a finished AR leg leaves no live runner behind", not panel._active_runners)
 check("AR leg prompt is read-only preamble then the panel prompt",
       _post[2]["prompt"].startswith(panel.AR_PREAMBLE) and _post[2]["prompt"].endswith("body"))
 
@@ -296,6 +298,13 @@ check("netlify token with no current user raises", raises(lambda: _real_token(_f
 _os.unlink(_fh.name)
 if _env is not None:
     _os.environ["NETLIFY_AUTH_TOKEN"] = _env
+
+# An interrupted panel cancels the runners its legs are still waiting on.
+_seen = []
+panel._active_runners.update({"r7": ("t", lambda m, p, t, b=None: _seen.append((m, p)))})
+panel.cancel_active_runners()
+panel._active_runners.clear()
+check("interrupt cancels every live runner", _seen == [("DELETE", "/agent_runners/r7")])
 
 # The AR legs carry their model family, so quorum counts gpt-ar as gpt, not as a new family.
 _roster = panel.build_roster(["gpt-ar", "gemini-ar", "claude-ar"], [], "p", 60, None)
