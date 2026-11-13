@@ -162,8 +162,11 @@ them. Each gets a read-only brief plus the same rubric and artifact as the other
 legs; its final message supplies the review.
 
 The gpt CLI leg uses read-only restrictions and no approvals; the claude CLI leg
-allows no tools. AR read-only behavior is enforced by its brief only, not by those
-CLI restrictions. Do not treat the empty review site as a tool sandbox.
+allows no tools. Every AR leg starts in Ask mode (`mode: "ask"`): the runner
+applies a read-only permission profile for Codex, deny rules for Claude and Gemini,
+read-only database access and no deploy. The read-only brief remains. The sandbox
+still carries a Netlify API token and the AI Gateway key; an empty review site
+does not mean there are no credentials to read.
 
 An AR leg gets at least 1,200 seconds, even when `--timeout` is lower. It returns
 sooner when done; an observed 335-line gpt-ar review took about 75–85 seconds.
@@ -172,6 +175,11 @@ at the deadline, or more than three consecutive status-read failures degrades th
 leg and never approves. A leg that gives up tries to cancel its nonterminal runner.
 If cancellation fails, it warns with `netlify agents:stop <id>`; stop that runner
 to end further spending. A completed run still needs review text and a verdict.
+
+Ctrl-C or SIGTERM makes the panel attempt to cancel every runner a leg is still
+waiting on. It then exits 130 with `panel: interrupted; Agent Runner legs were cancelled`.
+Check for cancellation warnings: that final message does not mean a failed
+cancellation succeeded. Use the printed stop command for any such runner.
 
 See `tools/model-review-panel/AGENT.md` for the full routing table and guarantees, and
 ADR-0107 (panel) / ADR-0105 (cross-model pass) / ADR-0103 (one canonical skill source).

@@ -49,8 +49,8 @@ The known names are `open-weight`, `gpt`, `claude`, `gpt-ar`, `gemini-ar` and
 model families, not routes: `gpt,gpt-ar` supplies only one family. `gemini` is
 also a valid `--author-family`.
 
-Each AR leg gets a read-only brief plus the same rubric and artifact as the other
-legs. We read its newest session's final message as the review. The default site
+Each AR leg starts in Ask mode (`mode: "ask"`) and gets a read-only brief plus
+the same rubric and artifact as the other legs. We read its newest session's final message as the review. The default site
 is `fleet-ar-review-testing` in the `netlify-testing` team, billed to that team's
 Netlify credits. It has no repository, environment variables or functions.
 `PANEL_AR_SITE_ID` overrides the site; an override may not have those properties.
@@ -82,15 +82,22 @@ review returns sooner. One observed gpt-ar review of a 335-line diff took about
   that do not inherit it (execution + exfil). `--allowedTools ""` is ignored (Bash
   still ran), so a non-empty sentinel is required.
 
-- **AR read-only is a brief, not a sandbox guarantee.** The default review site has
-  no repository, environment variables or functions to use, but the brief alone
-  instructs the runner not to write, execute artifact instructions or post anywhere.
+- **AR legs use Ask mode.** The runner applies a read-only permission profile for
+  Codex, deny rules for Claude and Gemini, read-only database access and no deploy.
+  The brief also forbids writes, artifact instructions and posts. The sandbox still
+  carries platform tokens: a Netlify API token and the AI Gateway key. An empty
+  review site does not mean the sandbox has no credentials.
 - **AR failures never approve.** `error`, `cancelled`, `timed_out`, `await_input`,
   a runner still active at its deadline, or more than three consecutive status-read
   failures degrade the leg. Missing review text or a missing verdict also cannot
   approve. When a leg gives up on a nonterminal runner, it tries to cancel it. A
   failed cancellation prints a warning with `netlify agents:stop <id>`; the runner
   may still spend credits.
+
+- **Interrupts cancel waiting runners.** On Ctrl-C or SIGTERM, the panel attempts
+  to cancel every runner a leg is still waiting on, then exits 130 with
+  `panel: interrupted; Agent Runner legs were cancelled`. Cancellation failures
+  still print the stop command; the final message does not override those warnings.
 
 ## Config
 
