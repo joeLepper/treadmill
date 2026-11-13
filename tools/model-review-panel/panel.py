@@ -367,7 +367,9 @@ def call_ar(prompt, timeout, agent, model=None, effort=None, site_id=None,
             request=ar_request, sleep=time.sleep, clock=time.monotonic):
     """AR leg: one bare Netlify Agent Runner on the review site, read-only by brief.
     Returns the newest session's final message. A run that ends in any state but
-    done, or outlasts the timeout, raises: a leg failure degrades, never approves."""
+    done, or is still running at the deadline, raises and is cancelled: a leg failure
+    degrades, never approves. A run seen done on the first poll after the deadline
+    keeps its verdict, since it is a complete review."""
     token = netlify_token()
     body = {"prompt": AR_PREAMBLE + prompt, "agent": agent}
     if model:
@@ -400,8 +402,9 @@ def call_ar(prompt, timeout, agent, model=None, effort=None, site_id=None,
         if state not in AR_TERMINAL:
             try:
                 request("DELETE", f"/agent_runners/{rid}", token)
-            except Exception:  # noqa: BLE001 - the original failure is the one to report
-                pass
+            except Exception as e:  # noqa: BLE001 - the original failure is the one to raise
+                print(f"panel: could not cancel agent runner {rid}; it may still spend "
+                      f"credits ({e}). Stop it: netlify agents:stop {rid}", file=sys.stderr)
         raise
     sessions = request("GET", f"/agent_runners/{rid}/sessions?page=1&per_page=1&order_by=desc", token)
     result = (sessions[0] if sessions else {}).get("result") or ""
