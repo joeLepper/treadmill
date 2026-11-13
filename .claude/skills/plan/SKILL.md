@@ -142,8 +142,8 @@ After writing the plan doc and before calling `treadmill plan submit`:
    and `depends_on` syntax errors. Fix all findings before proceeding.
 
 2. **Get an adversarial review — not a read-through.** Run the cross-model review panel on the
-   plan file. It convenes independent cross-family reviewers (open-weight via the gateway + GPT
-   + Claude) in one command and fails closed. This IS the adversarial-review mechanism; it
+   plan file. By default it convenes GPT and Gemini on Agent Runners plus local Claude
+   in one command and fails closed. This IS the adversarial-review mechanism; it
    REPLACES the Tapestry evaluators and the retired gerald-bridge/fran-bridge relay
    (ADR-0105, ADR-0107):
    ```bash
@@ -152,7 +152,7 @@ After writing the plan doc and before calling `treadmill plan submit`:
    ```
    ALSO relay the plan to at least one sibling for a context-rich same-family pass
    (`send <sibling> "review <plan_path>: attack the load-bearing invariants, do not summarize"`) —
-   the panel reviewers are single-shot and context-light, while a sibling has independent
+   the panel reviewers get only the artifact and rubric, while a sibling has independent
    repo/infra context (the layer that caught the errors described below).
    Direct every reviewer to attack the plan's **load-bearing invariants**, not to summarize it. For
    EACH invariant the plan claims: does a `validation` entry actually red-then-green **foil** it —
@@ -179,8 +179,8 @@ After writing the plan doc and before calling `treadmill plan submit`:
    make a reviewer pass a `validation` entry.
 
    **The cross-model passes are the review panel, not Tapestry evaluators** (ADR-0105, ADR-0107).
-   `panel.py review --artifact <plan>` convenes multiple non-Anthropic voices (open-weight
-   families via the gateway + GPT) alongside Claude in one command, satisfying the
+   `panel.py review --artifact <plan>` convenes GPT and Gemini on Agent Runners plus
+   local Claude by default, satisfying the
    TWO-independent-cross-model-passes requirement — its fail-closed gate needs a cross-family
    quorum, so a single surviving reviewer never passes. This REPLACES the retired
    gerald-bridge/fran-bridge relay. That is in ADDITION to a same-family sibling review. The
@@ -189,10 +189,12 @@ After writing the plan doc and before calling `treadmill plan submit`:
    (a plan submission) additionally gets the sibling pass.
    **Coverage is enforced, not just hoped for.** Passing `--author-family claude
    --min-cross-model 2` makes the panel FAIL CLOSED (non-zero, `reduced-coverage` marker)
-   when fewer than two genuinely non-Anthropic families vote — e.g. during an OpenCode Go
-   cap, when only GPT survives (Claude is the author's own family). So a one-voice pass
-   cannot slip through silently: on reduced coverage, wait for the open-weight leg (top up
-   / cap reset) or obtain a second non-Anthropic voice before treating the plan as reviewed.
+   when fewer than two non-Anthropic families vote, such as when an AR runner fails,
+   times out or asks a question. Claude is the author's own family. On reduced coverage,
+   inspect the failed leg and re-run; do not treat the plan as cross-model-reviewed until
+   both non-Anthropic families return verdicts. The default panel takes about four minutes:
+   Gemini about four minutes, GPT about one minute and local Claude under thirty seconds.
+   These are observed times, not deadlines.
 
 4. **Address review findings** — for CRITICAL items, fix before submitting. For scope gaps and
    minor items, either fix them or explicitly defer with a note in the Risks section.

@@ -2,9 +2,9 @@
 
 Fan a review artifact (an ADR, a plan, a diff, a design note) out to a panel of
 models from distinct provider families, collect an adversarial review from each,
-and print ranked verdicts plus a synthesis. We use single-shot calls for the default
-legs; optional AR legs each start one bare Netlify Agent Runner. We use the panel
-while authoring or gating work.
+and print ranked verdicts plus a synthesis. By default, we use GPT and Gemini on
+Agent Runners plus local Claude. Each AR leg starts one bare runner. We use the
+panel while authoring or gating work.
 
 ## Routing
 
@@ -28,7 +28,7 @@ no Go budget is spent on them.
 ```
 panel.py review --artifact PATH
                 [--models qwen3.8-max,glm-5.3,kimi-k3,minimax-m3]   # open-weight set
-                [--families open-weight,gpt,claude]
+                [--families gpt-ar,gemini-ar,claude]
                 [--format human|json] [--timeout 240]
 ```
 
@@ -40,6 +40,16 @@ quorum (e.g. one lone surviving reviewer) all exit non-zero, so a gate FAILS CLO
 approval. Output
 lists each reviewer's VERDICT (block > approve-with-notes > approve) and findings,
 then a synthesis. The panel verdict is the WORST reviewer verdict.
+
+The default is `--families gpt-ar,gemini-ar,claude`. The gateway `open-weight`
+leg and local Codex `gpt` leg still work when named, but are not selected by default.
+GPT and Gemini supply two non-Anthropic families, so the default can satisfy
+`--author-family claude --min-cross-model 2` when both return verdicts.
+
+A default panel takes about four minutes: Gemini AR about four minutes, GPT AR
+about one minute and local Claude under thirty seconds. These are observed times,
+not deadlines. If an AR leg fails, times out or asks a question, inspect the failure
+and re-run to restore coverage.
 
 ## Agent Runner legs
 

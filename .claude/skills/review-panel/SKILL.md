@@ -6,8 +6,8 @@ description: Run the cross-model review panel over an artifact — an ADR, a pla
 # /review-panel — cross-model review panel
 
 We send one artifact to models from distinct provider families and collect an
-adversarial review from each. Default legs use single-shot calls; optional AR legs
-each start one bare Netlify Agent Runner. The panel verdict
+adversarial review from each. The default is GPT and Gemini on Agent Runners plus
+local Claude. Each AR leg starts one bare Netlify Agent Runner. The panel verdict
 is the WORST reviewer verdict (`block` > `approve-with-notes` > `approve`). It **fails
 closed**: exit 0 only on a non-block verdict backed by a real cross-family quorum. Silence,
 total failure, or a lone surviving reviewer all exit non-zero. This is ADR-0107's primitive
@@ -32,7 +32,7 @@ second layer, not the first. A green panel on code you never ran is still unveri
 
 ```
 python3 ~/treadmill/tools/model-review-panel/panel.py review --artifact PATH \
-  [--families open-weight,gpt,claude] [--author-family claude] \
+  [--families gpt-ar,gemini-ar,claude] [--author-family claude] \
   [--kind code|diff|adr|plan|design] \
   [--format human|json] [--timeout 240]
 ```
@@ -100,9 +100,10 @@ drops straight into a gate.
   Safe to treat as a panel pass.
 - **Exit non-zero** — one of: a `block` verdict (some family found a blocking defect), a
   `no-verdict` degraded panel (legs errored/timed out — never read as approval), or an
-  approve that lacked the quorum (`reduced_coverage`, e.g. only one family survived — often
-  the open-weight leg hit the OpenCode Go 5-hour cap and returned HTTP 401; that is a rate
-  cap that resets, not a dead key). Read the per-reviewer `review` bodies for the findings;
+  approve that lacked the required coverage (`reduced_coverage`). With the default panel
+  and `--author-family claude --min-cross-model 2`, an AR leg that fails, times out or
+  asks a question leaves too few non-Anthropic verdicts. Inspect the failed leg and
+  re-run the panel. Read the per-reviewer `review` bodies for the findings;
   a blocking finding names the invariant and the line.
 
 A block is a signal to inspect, not an order to obey — verify the finding against the code
@@ -136,6 +137,15 @@ cannot be resolved, the helper falls back to `gh pr diff`, which applies NO excl
 this on stderr) — so that path reviews a different, wider scope than the branch/PR-fetch path.
 
 ## Routing, auth, and safety (inherited from the panel)
+
+The default is `--families gpt-ar,gemini-ar,claude`. GPT and Gemini supply two
+non-Anthropic families, so a Claude-authored artifact can meet
+`--author-family claude --min-cross-model 2` when both return verdicts. The gateway
+`open-weight` leg and local Codex `gpt` leg remain available when named.
+
+A default panel takes about four minutes: Gemini AR about four minutes, GPT AR
+about one minute and local Claude under thirty seconds. These are observed times,
+not deadlines.
 
 We select legs with `--families`: `open-weight`, `gpt`, `claude`, `gpt-ar`,
 `gemini-ar` or `claude-ar`. An unknown name exits 2 and lists the known names.
