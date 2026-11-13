@@ -324,6 +324,8 @@ panel._stopping.clear()
 _roster = panel.build_roster(["gpt-ar", "gemini-ar", "claude-ar"], [], "p", 60, None)
 check("AR legs join the roster under their family",
       [(n, f) for n, f, _ in _roster] == [("gpt-ar", "gpt"), ("gemini-ar", "gemini"), ("claude-ar", "claude")])
+check("default legs give two non-Anthropic families",
+      {panel.AR_LEGS[f][0] for f in panel.DEFAULT_FAMILIES if f in panel.AR_LEGS} == {"gpt", "gemini"})
 check("gemini is a known family for --author-family", "gemini" in panel.KNOWN_FAMILIES)
 
 print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate, artifact-kind rubric, AR legs")

@@ -20,7 +20,7 @@ as such and never counted as a silent approval; the panel still returns the rest
 
 Usage:
   panel.py review --artifact PATH [--models qwen3.8-max,glm-5.3,...]
-                  [--families open-weight,gpt,claude]
+                  [--families gpt-ar,gemini-ar,claude]
                   [--format human|json] [--timeout SECONDS]
 """
 import argparse
@@ -52,7 +52,9 @@ DEFAULT_OPEN_WEIGHT = ["qwen3.8-max", "glm-5.3", "kimi-k3", "minimax-m3"]
 # routed to the gateway (the gateway also 404s it, but fail early and clearly).
 OPEN_WEIGHT_ALLOWED = {"qwen3.8-max", "glm-5.2", "glm-5.3",
                        "kimi-k2.7-code", "kimi-k3", "minimax-m3"}
-DEFAULT_FAMILIES = ["open-weight", "gpt", "claude"]
+# Two non-Anthropic families on Agent Runners plus the local Claude leg, so a
+# Claude-authored artifact can meet --min-cross-model 2 without the gateway.
+DEFAULT_FAMILIES = ["gpt-ar", "gemini-ar", "claude"]
 # A PASS (exit 0) requires verdicts from at least this many distinct families, so a
 # gate never passes on one surviving reviewer as if the full cross-family panel ran.
 MIN_QUORUM_FAMILIES = 2
