@@ -185,4 +185,122 @@ check("addendum never trails the format block",
 check("format block is the last rubric element (ARTIFACT follows it)",
       _adr_prompt.index("ARTIFACT (") > _adr_prompt.index("Output EXACTLY this shape"))
 
-print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate, artifact-kind rubric")
+
+# AR legs: a fake Agent Runners API and clock, no network.
+_real_token = panel.netlify_token
+panel.netlify_token = lambda: "test-token"
+
+
+def fake_ar(states, result="VERDICT: approve\nNo findings.", created=None):
+    calls = []
+    queue = list(states)
+
+    def request(method, path, token, body=None):
+        calls.append((method, path, body))
+        if method == "POST":
+            return created if created is not None else {"id": "r1", "state": "new"}
+        if path.endswith("order_by=desc"):
+            return [{"result": result}]
+        return {"state": queue.pop(0)}
+    return request, calls
+
+
+_req, _calls = fake_ar(["running", "done"])
+_out = panel.call_ar("RUBRIC\nARTIFACT (x):\nbody", 60, "codex", "gpt-6-astra", "high",
+                     site_id="site-1", request=_req, sleep=lambda s: None, clock=lambda: 0)
+check("AR leg returns the session result", _out.startswith("VERDICT: approve"))
+_post = _calls[0]
+check("AR leg posts to the review site", _post[0] == "POST" and _post[1] == "/agent_runners?site_id=site-1")
+check("AR leg sends agent, model and effort",
+      (_post[2]["agent"], _post[2]["model"], _post[2]["effort"]) == ("codex", "gpt-6-astra", "high"))
+check("AR leg prompt is read-only preamble then the panel prompt",
+      _post[2]["prompt"].startswith(panel.AR_PREAMBLE) and _post[2]["prompt"].endswith("body"))
+
+
+def raises(fn, exc=Exception):
+    try:
+        fn()
+    except exc:
+        return True
+    return False
+
+
+for _bad in ("error", "cancelled", "timed_out"):
+    _req, _ = fake_ar([_bad])
+    check(f"AR run ending {_bad} raises (never approves)",
+          raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0)))
+_req, _ = fake_ar(["done"], result="  ")
+check("AR run with an empty result raises",
+      raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0)))
+_req, _ = fake_ar(["done"], created={"message": "rate limited"})
+check("AR runner not created raises",
+      raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0)))
+_t = iter([0, panel.AR_MIN_TIMEOUT_S + 1])
+_req, _ = fake_ar(["running"] * 5)
+check("AR run past the deadline raises TimeoutError",
+      raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: next(_t)),
+             TimeoutError))
+_t = iter([0, 300, 600])
+_req, _ = fake_ar(["running", "done"])
+check("AR deadline is at least AR_MIN_TIMEOUT_S even with a short --timeout",
+      not raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: next(_t))))
+
+_req, _calls = fake_ar(["running", "await_input"] + ["running"] * 5)
+try:
+    panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0)
+    _err = ""
+except Exception as e:  # noqa: BLE001
+    _err = str(e)
+check("AR run waiting for input stops at once and is cancelled",
+      "ended await_input" in _err and _calls[-1][:2] == ("DELETE", "/agent_runners/r1"))
+_t = iter([0, panel.AR_MIN_TIMEOUT_S + 1])
+_req, _calls = fake_ar(["running"] * 5)
+raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: next(_t)))
+check("AR run past the deadline is cancelled", _calls[-1][:2] == ("DELETE", "/agent_runners/r1"))
+_req, _calls = fake_ar(["error"])
+raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0))
+check("AR run that already ended is not cancelled", all(c[0] != "DELETE" for c in _calls))
+
+
+def flaky_ar(failures):
+    request, calls = fake_ar(["running", "done"])
+    left = [failures]
+
+    def wrapped(method, path, token, body=None):
+        if method == "GET" and not path.endswith("order_by=desc") and left[0] > 0:
+            left[0] -= 1
+            raise panel.urllib.error.URLError("reset")
+        return request(method, path, token, body)
+    return wrapped, calls
+
+
+_req, _ = flaky_ar(panel.AR_POLL_RETRIES)
+check("AR poll survives transient errors up to the retry limit",
+      not raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0)))
+_req, _calls = flaky_ar(panel.AR_POLL_RETRIES + 1)
+check("AR poll gives up past the retry limit and cancels",
+      raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0))
+      and _calls[-1][:2] == ("DELETE", "/agent_runners/r1"))
+
+import json as _json  # noqa: E402
+import os as _os  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+
+_env = _os.environ.pop("NETLIFY_AUTH_TOKEN", None)
+with _tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as _fh:
+    _json.dump({"userId": "b", "users": {"a": {"auth": {"token": "tok-a"}}, "b": {"auth": {"token": "tok-b"}}}}, _fh)
+check("netlify token is the CLI's current user, not the first one", _real_token(_fh.name) == "tok-b")
+with open(_fh.name, "w") as _f:
+    _json.dump({"userId": "c", "users": {"a": {"auth": {"token": "tok-a"}}}}, _f)
+check("netlify token with no current user raises", raises(lambda: _real_token(_fh.name)))
+_os.unlink(_fh.name)
+if _env is not None:
+    _os.environ["NETLIFY_AUTH_TOKEN"] = _env
+
+# The AR legs carry their model family, so quorum counts gpt-ar as gpt, not as a new family.
+_roster = panel.build_roster(["gpt-ar", "gemini-ar", "claude-ar"], [], "p", 60, None)
+check("AR legs join the roster under their family",
+      [(n, f) for n, f, _ in _roster] == [("gpt-ar", "gpt"), ("gemini-ar", "gemini"), ("claude-ar", "claude")])
+check("gemini is a known family for --author-family", "gemini" in panel.KNOWN_FAMILIES)
+
+print("PASS: strip, verdict parse, worst-verdict rank, degradation, fail-closed quorum gate, artifact-kind rubric, AR legs")
