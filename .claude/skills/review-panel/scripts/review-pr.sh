@@ -11,6 +11,7 @@
 #   --json                  machine-readable panel output
 #   --exclude <glob>        extra git pathspec exclude (repeatable)
 #   --timeout <sec>         per-leg timeout passed to the panel
+#   --families <list>       panel legs, e.g. gpt-ar,claude (default: the panel's own)
 #
 # Exit code is the panel's own: 0 ONLY on a non-block verdict with a cross-family
 # quorum; block / degraded / one-model-pass all exit non-zero (fail closed).
@@ -21,6 +22,7 @@ BASE="origin/main"
 FORMAT="human"
 AUTHOR_FAMILY=""
 TIMEOUT=""
+FAMILIES=""
 TARGET=""
 KIND=""         # code|diff|adr|plan|design; empty => default below
 INFER_FROM=""   # when set, panel.py infers the kind from THIS original path (single authority)
@@ -48,9 +50,10 @@ while [[ $# -gt 0 ]]; do
     --author-family) AUTHOR_FAMILY="$2"; shift 2 ;;
     --json)          FORMAT="json"; shift ;;
     --timeout)       TIMEOUT="$2"; shift 2 ;;
+    --families)      FAMILIES="$2"; shift 2 ;;
     --kind)          KIND="$2"; shift 2 ;;
     --exclude)       EXCLUDES+=( ":!$2" ); shift 2 ;;
-    -h|--help)       sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help)       sed -n '2,21p' "$0"; exit 0 ;;
     -*)              err "unknown option: $1"; exit 2 ;;
     *)               if [[ -n "$TARGET" ]]; then err "one target only"; exit 2; fi; TARGET="$1"; shift ;;
   esac
@@ -108,5 +111,6 @@ CMD=( python3 "$PANEL" review --artifact "$ART" --format "$FORMAT" )
 [[ -n "$INFER_FROM" ]] && CMD+=( --infer-from "$INFER_FROM" )
 [[ -n "$AUTHOR_FAMILY" ]] && CMD+=( --author-family "$AUTHOR_FAMILY" )
 [[ -n "$TIMEOUT" ]] && CMD+=( --timeout "$TIMEOUT" )
+[[ -n "$FAMILIES" ]] && CMD+=( --families "$FAMILIES" )
 
 exec "${CMD[@]}"

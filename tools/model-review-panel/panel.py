@@ -321,7 +321,7 @@ AR_POLL_RETRIES = 3
 # leg -> (family, agent, model, effort). The family is the quorum label, so a
 # gpt-ar verdict counts as the gpt family, never as an extra one.
 AR_LEGS = {
-    "gpt-ar": ("gpt", "codex", "gpt-6-astra", "high"),
+    "gpt-ar": ("gpt", "codex", "gpt-6.1-sol", "high"),
     "gemini-ar": ("gemini", "gemini", "gemini-3.1-pro-preview", "high"),
     "claude-ar": ("claude", "claude", None, "high"),
 }

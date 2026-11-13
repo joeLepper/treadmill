@@ -206,13 +206,13 @@ def fake_ar(states, result="VERDICT: approve\nNo findings.", created=None):
 
 
 _req, _calls = fake_ar(["running", "done"])
-_out = panel.call_ar("RUBRIC\nARTIFACT (x):\nbody", 60, "codex", "gpt-6-astra", "high",
+_out = panel.call_ar("RUBRIC\nARTIFACT (x):\nbody", 60, "codex", "gpt-6.1-sol", "high",
                      site_id="site-1", request=_req, sleep=lambda s: None, clock=lambda: 0)
 check("AR leg returns the session result", _out.startswith("VERDICT: approve"))
 _post = _calls[0]
 check("AR leg posts to the review site", _post[0] == "POST" and _post[1] == "/agent_runners?site_id=site-1")
 check("AR leg sends agent, model and effort",
-      (_post[2]["agent"], _post[2]["model"], _post[2]["effort"]) == ("codex", "gpt-6-astra", "high"))
+      (_post[2]["agent"], _post[2]["model"], _post[2]["effort"]) == ("codex", "gpt-6.1-sol", "high"))
 check("AR leg prompt is read-only preamble then the panel prompt",
       _post[2]["prompt"].startswith(panel.AR_PREAMBLE) and _post[2]["prompt"].endswith("body"))
 
