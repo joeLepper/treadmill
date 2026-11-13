@@ -1,12 +1,13 @@
 ---
 name: review-panel
-description: Run the cross-model review panel over an artifact — an ADR, a plan, a design note, a diff, or a whole PR — to get an adversarial verdict from models spanning three provider families (open-weight, gpt, claude) in one shot. Use before merging a PR, before an ADR/plan settles, when asked to "run the panel", "cross-model review this", "gate this", or whenever you want an independent read from models outside your own family. Fails closed: a block, a degraded panel, or a one-model pass never reads as approval. Runs from Claude Code and Codex alike.
+description: Run the cross-model review panel over an artifact — an ADR, a plan, a design note, a diff, or a whole PR — to get an adversarial verdict from models from distinct provider families, through CLI, gateway or Netlify Agent Runner legs. Use before merging a PR, before an ADR/plan settles, when asked to "run the panel", "cross-model review this", "gate this", or whenever you want an independent read from models outside your own family. Fails closed: a block, a degraded panel, or a one-model pass never reads as approval. Runs from Claude Code and Codex alike.
 ---
 
 # /review-panel — cross-model review panel
 
-Fan one artifact out to a panel of models across THREE provider families and collect an
-adversarial review from each — single-shot calls, not agentic sessions. The panel verdict
+We send one artifact to models from distinct provider families and collect an
+adversarial review from each. Default legs use single-shot calls; optional AR legs
+each start one bare Netlify Agent Runner. The panel verdict
 is the WORST reviewer verdict (`block` > `approve-with-notes` > `approve`). It **fails
 closed**: exit 0 only on a non-block verdict backed by a real cross-family quorum. Silence,
 total failure, or a lone surviving reviewer all exit non-zero. This is ADR-0107's primitive
@@ -76,6 +77,8 @@ repo's working tree:
 <skill-dir>/scripts/review-pr.sh <PR-number | branch | file> \
   [--base <ref>]            # merge-base ref; default origin/main
   [--author-family <fam>]   # your own family, excluded from coverage (e.g. claude)
+  [--families <list>]       # panel legs, e.g. gpt-ar,claude
+  [--timeout <seconds>]     # AR legs have a minimum timeout budget of 1200 seconds
   [--kind <kind>]           # code|diff|adr|plan|design; default diff for a PR/branch,
                             #   inferred from the path for a file (see "Pick the artifact kind")
   [--json]                  # machine-readable panel output
@@ -86,6 +89,7 @@ Examples:
 - `scripts/review-pr.sh 9189 --author-family claude` — review PR #9189 (via `gh`).
 - `scripts/review-pr.sh joe/forecast-precompute` — review a local/remote branch vs origin/main.
 - `scripts/review-pr.sh /tmp/my.diff` — review a diff file directly.
+- `scripts/review-pr.sh /tmp/my.diff --families gpt-ar,claude` — combine an AR leg with a CLI leg.
 
 The helper prints the panel's human output and exits with the panel's own exit code, so it
 drops straight into a gate.
@@ -133,15 +137,41 @@ this on stderr) — so that path reviews a different, wider scope than the branc
 
 ## Routing, auth, and safety (inherited from the panel)
 
-- **No API keys.** open-weight → fleet gateway (OpenCode Go budget); gpt → `codex exec`
-  OAuth in an isolated `CODEX_HOME`; claude → `claude -p` on the subscription (the panel
-  unsets `ANTHROPIC_API_KEY` so it never bills the API).
-- **The artifact is untrusted input.** Both paid legs are fail-closed — the codex leg runs
-  read-only with no approval, the claude leg grants NO tools via a positive allowlist. You
-  can safely panel a diff you did not write.
-- **Prerequisite:** `model-gateway.service` must be active for the open-weight leg. If it is
-  down, that family degrades; gpt and claude still return, and the quorum rule decides
-  whether that is enough coverage.
+We select legs with `--families`: `open-weight`, `gpt`, `claude`, `gpt-ar`,
+`gemini-ar` or `claude-ar`. An unknown name exits 2 and lists the known names.
+The helper passes this option to the panel. AR legs count as their model family,
+not an extra family: `gpt,gpt-ar` still counts as one. `gemini` is a valid
+`--author-family`.
+
+| Leg | Route and model | Credentials and billing |
+| --- | --- | --- |
+| open-weight | Fleet gateway | OpenCode Go budget; requires `model-gateway.service` |
+| gpt | `codex exec` in an isolated `CODEX_HOME` | Codex OAuth |
+| claude | `claude -p` | Subscription; `ANTHROPIC_API_KEY` is unset |
+| gpt-ar | Agent Runner codex, gpt-6.1-sol, high effort | Netlify token and credits |
+| gemini-ar | Agent Runner gemini, gemini-3.1-pro-preview, high effort | Netlify token and credits |
+| claude-ar | Agent Runner claude, runner default model, high effort | Netlify token and credits |
+
+AR authentication uses `NETLIFY_AUTH_TOKEN`, else the Netlify CLI's current login
+(`netlify login`). The token is never printed. The default site is
+`fleet-ar-review-testing` in `netlify-testing`, which pays the Netlify credits.
+It has no repository, environment variables or functions. `PANEL_AR_SITE_ID`
+selects another site; check that site's contents and billing before using it.
+Artifact text goes to Netlify Agent Runners, and `gemini-ar` reaches Google through
+them. Each gets a read-only brief plus the same rubric and artifact as the other
+legs; its final message supplies the review.
+
+The gpt CLI leg uses read-only restrictions and no approvals; the claude CLI leg
+allows no tools. AR read-only behavior is enforced by its brief only, not by those
+CLI restrictions. Do not treat the empty review site as a tool sandbox.
+
+An AR leg gets at least 1,200 seconds, even when `--timeout` is lower. It returns
+sooner when done; an observed 335-line gpt-ar review took about 75–85 seconds.
+An error, cancellation, timeout, input request (`await_input`), still-active run
+at the deadline, or more than three consecutive status-read failures degrades the
+leg and never approves. A leg that gives up tries to cancel its nonterminal runner.
+If cancellation fails, it warns with `netlify agents:stop <id>`; stop that runner
+to end further spending. A completed run still needs review text and a verdict.
 
 See `tools/model-review-panel/AGENT.md` for the full routing table and guarantees, and
 ADR-0107 (panel) / ADR-0105 (cross-model pass) / ADR-0103 (one canonical skill source).
