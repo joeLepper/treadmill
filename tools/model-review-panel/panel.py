@@ -369,12 +369,14 @@ def ar_request(method, path, token, body=None, timeout=60):
 
 _active_runners = {}
 _active_lock = threading.Lock()
+_stopping = threading.Event()
 
 
 def cancel_active_runners():
     """Cancel every runner a leg is still waiting on. Called when the panel itself
     is interrupted: the legs run in worker threads, which never see the signal."""
     with _active_lock:
+        _stopping.set()
         live = list(_active_runners.items())
     for rid, (token, request) in live:
         try:
@@ -406,7 +408,13 @@ def call_ar(prompt, timeout, agent, model=None, effort=None, site_id=None,
     if not rid:
         raise RuntimeError(f"agent runner not created: {str(runner)[:200]}")
     with _active_lock:
-        _active_runners[rid] = (token, request)
+        late = _stopping.is_set()
+        if not late:
+            _active_runners[rid] = (token, request)
+    if late:
+        # Created after the panel was interrupted, so the sweep never saw it.
+        request("DELETE", f"/agent_runners/{rid}", token)
+        raise RuntimeError(f"agent runner {rid} cancelled: the panel was interrupted")
     deadline = clock() + max(timeout, AR_MIN_TIMEOUT_S)
     state = runner.get("state")
     failures = 0

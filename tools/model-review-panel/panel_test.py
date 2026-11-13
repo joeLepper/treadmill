@@ -306,6 +306,20 @@ panel.cancel_active_runners()
 panel._active_runners.clear()
 check("interrupt cancels every live runner", _seen == [("DELETE", "/agent_runners/r7")])
 
+# A runner created after the interrupt sweep is cancelled at once, not left running.
+panel._stopping.set()
+_req, _calls = fake_ar(["running", "done"])
+check("runner created after an interrupt is cancelled",
+      raises(lambda: panel.call_ar("p", 60, "codex", request=_req, sleep=lambda s: None, clock=lambda: 0))
+      and _calls[-1][:2] == ("DELETE", "/agent_runners/r1") and not panel._active_runners)
+panel._stopping.clear()
+_seen = []
+panel._active_runners.update({"r8": ("t", lambda m, p, t, b=None: _seen.append(p))})
+panel.cancel_active_runners()
+check("the interrupt sweep marks the panel as stopping", panel._stopping.is_set())
+panel._active_runners.clear()
+panel._stopping.clear()
+
 # The AR legs carry their model family, so quorum counts gpt-ar as gpt, not as a new family.
 _roster = panel.build_roster(["gpt-ar", "gemini-ar", "claude-ar"], [], "p", 60, None)
 check("AR legs join the roster under their family",
