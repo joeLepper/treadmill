@@ -13,6 +13,10 @@ per bot, each bound to its session. See `bridge/README.md` for the full design.
   `~/.cc-channels/<label>/relay/`, injected by the target's `treadmill-events`
   channel server (`tools/cc-channel-treadmill/relay-inbox.ts`). Also
   `isWatcherEligible` (the launcher `session-id` gate).
+- `bridge/media.mjs` — downloads an inbound photo/document (`getFile`, 20 MB
+  cap) to `~/.cc-channels/<label>/media/` (mode 0600). The relay text then
+  carries the local path; a failed download still delivers a stub with the
+  reason. Error messages never contain a URL (the token is in every URL).
 - `bridge/config.mjs` — bot list `{label, allowedChats}`, token load from
   `telegram.env`, startup eligibility gate.
 - `bridge/ledger.mjs` — per-bot durable offset + `update_id` dedup

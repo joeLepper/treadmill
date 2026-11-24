@@ -11,6 +11,8 @@
 // All I/O is injected (fetchFn, inject, ledger, quarantine, sleep, log) so
 // `node --test` drives every branch with a scripted fetch and no network.
 
+import { mediaRef } from './media.mjs'
+
 const TELEGRAM_API = 'https://api.telegram.org'
 
 // A Bot-API 409 means another poller holds this token's slot — with the daemon
@@ -40,6 +42,9 @@ export function displayText(m) {
 export async function pollOnce({
   token, label, allowedChats, longPollSeconds = 25,
   fetchFn, inject, ledger,
+  // Optional. When set, a photo/document is downloaded and the relay text
+  // carries its local path. A failed download still delivers the stub.
+  fetchMedia,
   // Default THROWS, not a no-op: a caller that supplies no durable quarantine
   // must not silently ack (advance past) a failed inject and lose it.
   quarantine = () => { throw new Error('no quarantine handler configured — refusing to drop a failed inject') },
@@ -83,7 +88,19 @@ export async function pollOnce({
     // Content: plain text, or a stub for media so an operator's non-text message
     // (a screenshot, a voice note) SURFACES rather than being silently dropped
     // (Gerald B1). Only an update with no renderable content at all is dropped.
-    const text = displayText(msg)
+    let text = displayText(msg)
+    const media = fetchMedia ? mediaRef(msg) : null
+    if (media) {
+      const caption = typeof msg.caption === 'string' && msg.caption.length > 0 ? ` caption: ${msg.caption}` : ''
+      try {
+        const path = await fetchMedia({ ...media, updateId })
+        text = `[${media.kind} received via Telegram — saved to ${path}]${caption}`
+        log(`media: ${label} update ${updateId} ${media.kind} saved`)
+      } catch (err) {
+        text = `[${media.kind} received via Telegram — download failed: ${err.message}]${caption}`
+        log(`media: ${label} update ${updateId} ${media.kind} download failed: ${err.message}`)
+      }
+    }
     if (text == null) {
       log(`drop: ${label} update ${updateId} has no renderable content (reason=undisplayable)`)
       ledger.advance(updateId); dropped++; continue

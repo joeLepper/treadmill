@@ -27,12 +27,14 @@ decoupled from session restarts, replaces N fragile per-session connections.
   them. Duplicates are visible and rare; loss is what we refuse.
 - **Fail-closed allowlist:** each bot injects only messages from its configured
   `allowedChats`; any other chat is dropped and logged.
-- **Content:** plain text passes through. A media message (photo, voice,
-  document, …) from an allowed chat is delivered as a text **stub** with its
-  caption (`[photo received via Telegram — this channel relays text only]
-  caption: …`), so an operator's non-text message surfaces instead of being
-  silently dropped — the channel injects text, so the image itself is not
-  viewable in-session. **Every** drop is logged with a reason (`allowlist-miss`,
+- **Content:** plain text passes through. A photo or document from an allowed
+  chat is downloaded (`media.mjs`, 20 MB Bot API cap) to
+  `~/.cc-channels/<label>/media/`, and the relay text carries its path
+  (`[photo received via Telegram — saved to <path>] caption: …`) so the
+  session can open the file. A failed download delivers the stub with the
+  reason instead. Other media (voice, video, sticker, …) is delivered as a
+  text **stub** with its caption, so an operator's non-text message surfaces
+  instead of being silently dropped. **Every** drop is logged with a reason (`allowlist-miss`,
   `no-chat`, `undisplayable`), and per-bot counters (`injected/dropped/
   quarantined/malformed`) are logged periodically so drops are visible in
   aggregate. Sessions run with

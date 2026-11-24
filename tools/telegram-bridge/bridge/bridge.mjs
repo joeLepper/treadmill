@@ -23,6 +23,7 @@ import { injectToRelay } from './inject.mjs'
 import { loadBots } from './config.mjs'
 import { Ledger } from './ledger.mjs'
 import { runDaemon } from './poller.mjs'
+import { makeMediaFetcher } from './media.mjs'
 import { mkdirpDurable } from './durable.mjs'
 
 // Single-instance lock via a Linux ABSTRACT-namespace unix socket (Fran + Bert
@@ -100,7 +101,8 @@ async function main() {
       const ledger = new Ledger(join(stateDir, `ledger-bot-${bot.botId}.json`))
       const qdir = join(stateDir, 'quarantine', bot.label)
       const quarantine = (update, err) => durableQuarantine(qdir, stateDir, update, err)
-      bots.push({ label: bot.label, token: bot.token, allowedChats: bot.allowedChats, ledger, quarantine })
+      const fetchMedia = makeMediaFetcher({ token: bot.token, dir: join(ccRoot, bot.label, 'media'), anchor: ccRoot, fetchFn: fetch })
+      bots.push({ label: bot.label, token: bot.token, allowedChats: bot.allowedChats, ledger, quarantine, fetchMedia })
     } catch (err) {
       log(`SKIP bot ${bot.label} (bot ${bot.botId}): ledger unusable — ${err.message}`)
     }

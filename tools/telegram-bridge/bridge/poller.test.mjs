@@ -80,6 +80,38 @@ test('a photo from an allowed chat is forwarded as a text stub (Gerald B1 — no
   assert.match(injects[0].text, /caption: the chart/)
 })
 
+test('a photo is downloaded when fetchMedia is set; the text carries the path and caption', async () => {
+  const calls = []
+  const { injects, deps } = harness({ ok: true, result: [
+    { update_id: 11, message: { chat: { id: 42 }, photo: [{ file_id: 'small' }, { file_id: 'big' }], caption: 'fence', date: 0 } },
+  ] })
+  deps.fetchMedia = async ref => { calls.push(ref); return '/m/tg-11-photo.jpg' }
+  const r = await pollOnce(deps)
+  assert.equal(r.injected, 1)
+  assert.equal(calls[0].fileId, 'big', 'the largest photo size must be fetched')
+  assert.equal(calls[0].updateId, 11)
+  assert.equal(injects[0].text, '[photo received via Telegram — saved to /m/tg-11-photo.jpg] caption: fence')
+})
+
+test('a failed media download still delivers the message, with the reason', async () => {
+  const { injects, ledger, logs, deps } = harness({ ok: true, result: [
+    { update_id: 12, message: { chat: { id: 42 }, document: { file_id: 'd', file_name: 'a.pdf' }, date: 0 } },
+  ] })
+  deps.fetchMedia = async () => { throw new Error('getFile HTTP 400') }
+  const r = await pollOnce(deps)
+  assert.equal(r.injected, 1)
+  assert.match(injects[0].text, /document received via Telegram — download failed: getFile HTTP 400/)
+  assert.deepEqual(ledger.injected, [12])
+  assert.ok(logs.some(l => /download failed/.test(l)))
+})
+
+test('a text message never calls fetchMedia', async () => {
+  const { injects, deps } = harness({ ok: true, result: [msg(13, 42, 'plain')] })
+  deps.fetchMedia = async () => { throw new Error('must not be called') }
+  await pollOnce(deps)
+  assert.equal(injects[0].text, 'plain')
+})
+
 test('an update with a message but no renderable content is dropped WITH a logged reason', async () => {
   const { injects, logs, ledger, deps } = harness({ ok: true, result: [
     { update_id: 10, message: { chat: { id: 42 }, date: 0 } }, // no text, no media
