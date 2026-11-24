@@ -57,6 +57,27 @@ test('refuses a file over the cap before and after download', async () => {
   await assert.rejects(a.fetchMedia({ fileId: 'x', updateId: 2 }), /too large/)
 })
 
+test('a fetch error that echoes the URL is redacted', async () => {
+  const anchor = mkdtempSync(join(tmpdir(), 'tg-media-'))
+  const fetchFn = async url => { throw new TypeError(`Failed to parse URL from ${url}`) }
+  const fetchMedia = makeMediaFetcher({ token: TOKEN, dir: join(anchor, 'm'), anchor, fetchFn })
+  const err = await fetchMedia({ fileId: 'x', updateId: 4 }).then(() => null, e => e)
+  assert.ok(err)
+  assert.ok(!err.message.includes('SECRET'), `token leaked: ${err.message}`)
+  assert.match(err.message, /bot<token>\/getFile/)
+})
+
+test('a declared content-length over the cap is refused before the body is read', async () => {
+  const anchor = mkdtempSync(join(tmpdir(), 'tg-media-'))
+  let bodyRead = false
+  const fetchFn = async url => url.includes('/getFile?')
+    ? { ok: true, status: 200, json: async () => ({ ok: true, result: { file_path: 'a.jpg' } }) }
+    : { ok: true, status: 200, headers: new Headers({ 'content-length': '99' }), arrayBuffer: async () => { bodyRead = true; return Buffer.alloc(1) } }
+  const fetchMedia = makeMediaFetcher({ token: TOKEN, dir: join(anchor, 'm'), anchor, fetchFn, maxBytes: 10 })
+  await assert.rejects(fetchMedia({ fileId: 'x', updateId: 5 }), /too large \(99 bytes\)/)
+  assert.equal(bodyRead, false)
+})
+
 test('errors never include the token', async () => {
   for (const opts of [{ metaStatus: 401 }, { meta: { ok: false, description: 'bad file_id' } }, { fileStatus: 404 }]) {
     const { fetchMedia } = setup(opts)

@@ -33,7 +33,23 @@ function safeName(name) {
 }
 
 // Returns async ({ kind, fileId, fileSize, fileName, updateId }) => absolute path.
-export function makeMediaFetcher({ token, dir, anchor, fetchFn, maxBytes = MAX_MEDIA_BYTES, timeoutMs = 60000 }) {
+// The poll loop waits on this, so the timeout bounds how long a media message
+// can delay the rest of its batch.
+export function makeMediaFetcher({ token, dir, anchor, fetchFn, maxBytes = MAX_MEDIA_BYTES, timeoutMs = 30000 }) {
+  const download = downloader({ token, dir, anchor, fetchFn, maxBytes, timeoutMs })
+  return async ref => {
+    try {
+      return await download(ref)
+    } catch (err) {
+      // fetch can echo the URL (e.g. "Failed to parse URL from …"), and the
+      // caller logs and injects this message.
+      const msg = String(err?.message ?? err)
+      throw new Error(token ? msg.split(token).join('<token>') : msg)
+    }
+  }
+}
+
+function downloader({ token, dir, anchor, fetchFn, maxBytes, timeoutMs }) {
   return async ({ fileId, fileSize, fileName, updateId }) => {
     if (fileSize != null && fileSize > maxBytes) throw new Error(`file too large (${fileSize} bytes)`)
     const meta = await fetchFn(`${TELEGRAM_API}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`,
@@ -44,6 +60,8 @@ export function makeMediaFetcher({ token, dir, anchor, fetchFn, maxBytes = MAX_M
     if (!body?.ok || typeof filePath !== 'string') throw new Error(`getFile not ok: ${body?.description ?? 'no file_path'}`)
     const res = await fetchFn(`${TELEGRAM_API}/file/bot${token}/${filePath}`, { signal: AbortSignal.timeout(timeoutMs) })
     if (!res.ok) throw new Error(`file download HTTP ${res.status}`)
+    const declared = Number(res.headers?.get?.('content-length'))
+    if (declared > maxBytes) throw new Error(`file too large (${declared} bytes)`)
     const buf = Buffer.from(await res.arrayBuffer())
     if (buf.length > maxBytes) throw new Error(`file too large (${buf.length} bytes)`)
 
